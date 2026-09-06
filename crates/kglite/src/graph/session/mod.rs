@@ -51,6 +51,9 @@
 //!   See [`durable`] for the orderings that are correctness.
 
 pub use self::execute::{execute_mut, execute_read, ExecuteOptions, ExecuteOutcome};
+pub(crate) use self::noderefs::{
+    property_value_needs_snapshot, snapshot_dataframe_properties, snapshot_property_values,
+};
 pub use self::noderefs::{resolve_noderef_value, resolve_noderefs};
 pub use self::transaction::{CommitOutcome, Session, Transaction};
 
@@ -71,6 +74,8 @@ mod plan_cache_cost_tests;
 mod query_warnings_tests;
 #[cfg(test)]
 mod row_limit_tests;
+#[cfg(test)]
+mod stored_property_admission_tests;
 #[cfg(test)]
 mod strict_reads_tests;
 pub(crate) mod transaction;

@@ -55,15 +55,19 @@ pub(crate) fn execute_table_procedure(
     let mut rows = read_rows(graph, node_idx, &property)?;
     let (action, removed) = match proc_name {
         "table.upsert" => {
-            let row = match params.get("row") {
-                Some(Value::Map(map)) => Value::Map(map.clone()),
-                Some(other) => {
-                    return Err(format!(
-                        "CALL table.upsert: 'row' must be a map, got {}",
-                        other.type_name()
-                    ));
-                }
-                None => return Err("CALL table.upsert: missing parameter 'row'".to_string()),
+            let mut row = params
+                .get("row")
+                .cloned()
+                .ok_or_else(|| "CALL table.upsert: missing parameter 'row'".to_string())?;
+            crate::graph::session::snapshot_property_values(
+                &graph.graph,
+                std::iter::once(&mut row),
+            );
+            if !matches!(row, Value::Map(_)) {
+                return Err(format!(
+                    "CALL table.upsert: 'row' must be a map, got {}",
+                    row.type_name()
+                ));
             };
             let Value::Map(ref row_map) = row else {
                 unreachable!()
@@ -88,10 +92,14 @@ pub(crate) fn execute_table_procedure(
             }
         }
         "table.delete" => {
-            let value = params
+            let mut value = params
                 .get("value")
                 .cloned()
                 .ok_or_else(|| "CALL table.delete: missing parameter 'value'".to_string())?;
+            crate::graph::session::snapshot_property_values(
+                &graph.graph,
+                std::iter::once(&mut value),
+            );
             let before = rows.len();
             rows.retain(|r| !matches!(r, Value::Map(m) if m.get(&key) == Some(&value)));
             ("deleted", before - rows.len())

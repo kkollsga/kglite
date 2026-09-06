@@ -24,6 +24,51 @@ use petgraph::graph::{EdgeIndex, NodeIndex};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum PendingTitleOwner {
+    Existing(NodeIndex),
+    Deferred(String, Value),
+}
+
+struct PendingTitleUpdate {
+    owner: PendingTitleOwner,
+    node_type: String,
+    node_idx: Option<NodeIndex>,
+    id: Value,
+    value: Value,
+}
+
+struct ConnectionTitleInput<'a> {
+    frame: &'a DataFrame,
+    matched: &'a [(usize, NodeIndex, NodeIndex)],
+    deferred: &'a [(usize, Value, Value)],
+    source_type: &'a str,
+    target_type: &'a str,
+    source_id_idx: usize,
+    target_id_idx: usize,
+    titles: &'a ConnectionTitles,
+}
+
+struct ConnectionTitles {
+    source_idx: Option<usize>,
+    target_idx: Option<usize>,
+    source_derived: Option<Vec<Value>>,
+    target_derived: Option<Vec<Value>>,
+}
+
+impl ConnectionTitles {
+    fn value(&self, frame: &DataFrame, source: bool, row: usize) -> Option<Value> {
+        let (index, derived) = if source {
+            (self.source_idx, self.source_derived.as_deref())
+        } else {
+            (self.target_idx, self.target_derived.as_deref())
+        };
+        derived
+            .and_then(|values| values.get(row).cloned())
+            .or_else(|| index.and_then(|column| frame.get_value_by_index(row, column)))
+    }
+}
+
 /// Report returned by `add_properties()`.
 ///
 /// Lives here rather than beside `add_properties` itself: it is the return type
@@ -193,6 +238,7 @@ fn gate_batch(
     title_idx: usize,
     unique_id_field: &str,
     title_field: &str,
+    derived_titles: Option<&[Value]>,
 ) -> Result<(), String> {
     let has_shapes =
         !graph.property_shapes.is_empty() && !graph.shapes_for_type(node_type).is_empty();
@@ -237,8 +283,9 @@ fn gate_batch(
         let Some(columns) = columns else {
             continue;
         };
-        let title = df_data
-            .get_value_by_index(row_idx, title_idx)
+        let title = derived_titles
+            .and_then(|titles| titles.get(row_idx).cloned())
+            .or_else(|| df_data.get_value_by_index(row_idx, title_idx))
             .unwrap_or(Value::Null);
         let existing_idx = graph.id_indices.lookup(node_type, &id);
         columns.gate_row_parked(
@@ -606,7 +653,7 @@ fn install_type_schema(
 
 pub fn add_nodes(
     graph: &mut DirGraph,
-    df_data: DataFrame,
+    mut df_data: DataFrame,
     node_type: String,
     unique_id_field: String,
     node_title_field: Option<String>,
@@ -627,6 +674,11 @@ pub fn add_nodes(
     let should_update_title = node_title_field.is_some();
     let title_field = node_title_field.unwrap_or_else(|| unique_id_field.clone());
     check_data_validity(&df_data, &unique_id_field)?;
+    crate::graph::session::snapshot_dataframe_properties(
+        &graph.graph,
+        &mut df_data,
+        &[&unique_id_field],
+    );
 
     let mut errors = Vec::new();
 
@@ -645,6 +697,17 @@ pub fn add_nodes(
     let title_idx = df_data
         .get_column_index(&title_field)
         .ok_or_else(|| format!("Column '{}' not found", title_field))?;
+    let derived_titles = (title_field == unique_id_field).then(|| {
+        let mut titles: Vec<Value> = (0..df_data.row_count())
+            .map(|row_idx| {
+                df_data
+                    .get_value_by_index(row_idx, title_idx)
+                    .unwrap_or(Value::Null)
+            })
+            .collect();
+        crate::graph::session::snapshot_property_values(&graph.graph, titles.iter_mut());
+        titles
+    });
 
     // Every refusal happens here, ahead of the first write — see `gate_batch`
     // for why none of the writes below is a safe place for one.
@@ -660,6 +723,7 @@ pub fn add_nodes(
         title_idx,
         &unique_id_field,
         &title_field,
+        derived_titles.as_deref(),
     )?;
 
     install_node_type_metadata(
@@ -735,8 +799,10 @@ pub fn add_nodes(
 
         note_loaded_id(&mut max_loaded_id, &id);
 
-        let title = df_data
-            .get_value_by_index(row_idx, title_idx)
+        let title = derived_titles
+            .as_deref()
+            .and_then(|titles| titles.get(row_idx).cloned())
+            .or_else(|| df_data.get_value_by_index(row_idx, title_idx))
             .unwrap_or(Value::Null);
 
         // Every row here already passed `gate_batch` above.
@@ -997,7 +1063,7 @@ pub fn add_connections(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn add_connections_with_initial_load(
     graph: &mut DirGraph,
-    df_data: DataFrame,
+    mut df_data: DataFrame,
     connection_type: String,
     source_type: String,
     source_id_field: String,
@@ -1058,6 +1124,33 @@ pub(crate) fn add_connections_with_initial_load(
         target_title_field.as_deref(),
     );
 
+    crate::graph::session::snapshot_dataframe_properties(
+        &graph.graph,
+        &mut df_data,
+        &[source_id_field.as_str(), target_id_field.as_str()],
+    );
+    let derive_titles = |column: usize| {
+        let mut values: Vec<Value> = (0..df_data.row_count())
+            .map(|row| {
+                df_data
+                    .get_value_by_index(row, column)
+                    .unwrap_or(Value::Null)
+            })
+            .collect();
+        crate::graph::session::snapshot_property_values(&graph.graph, values.iter_mut());
+        values
+    };
+    let titles = ConnectionTitles {
+        source_idx: source_title_idx,
+        target_idx: target_title_idx,
+        source_derived: source_title_idx
+            .filter(|index| *index == source_id_idx || *index == target_id_idx)
+            .map(derive_titles),
+        target_derived: target_title_idx
+            .filter(|index| *index == source_id_idx || *index == target_id_idx)
+            .map(derive_titles),
+    };
+
     // Endpoint resolution is its own pass over the frame, ahead of every
     // mutation, because the id-index probe borrows `graph.id_indices` while
     // the batch needs `&mut graph`. Splitting it that way is what lets the
@@ -1082,6 +1175,19 @@ pub(crate) fn add_connections_with_initial_load(
         &target_type,
         source_id_idx,
         target_id_idx,
+    )?;
+    gate_connection_title_updates(
+        graph,
+        ConnectionTitleInput {
+            frame: &df_data,
+            matched: &matched,
+            deferred: &deferred,
+            source_type: &source_type,
+            target_type: &target_type,
+            source_id_idx,
+            target_id_idx,
+            titles: &titles,
+        },
     )?;
     let mut batch = ConnectionBatchProcessor::new(df_data.row_count());
     batch.set_conflict_mode(conflict_mode);
@@ -1131,11 +1237,12 @@ pub(crate) fn add_connections_with_initial_load(
     for (row_idx, source_idx, target_idx) in matched {
         update_node_titles(
             graph,
+            &source_type,
+            &target_type,
             source_idx,
             target_idx,
             row_idx,
-            source_title_idx,
-            target_title_idx,
+            &titles,
             &df_data,
         )?;
         if let Err(e) = batch.add_connection(
@@ -1177,11 +1284,12 @@ pub(crate) fn add_connections_with_initial_load(
             };
             update_node_titles(
                 graph,
+                &source_type,
+                &target_type,
                 source_idx,
                 target_idx,
                 row_idx,
-                source_title_idx,
-                target_title_idx,
+                &titles,
                 &df_data,
             )?;
             if let Err(e) = batch.add_connection(
@@ -1195,6 +1303,13 @@ pub(crate) fn add_connections_with_initial_load(
                 errors.push(format!("Failed to add connection: {}", e));
             }
         }
+    }
+
+    if titles.source_idx.is_some() {
+        graph.refresh_indexes_for_type(&source_type);
+    }
+    if titles.target_idx.is_some() && target_type != source_type {
+        graph.refresh_indexes_for_type(&target_type);
     }
 
     report_null_id_skips(
@@ -1818,24 +1933,192 @@ pub fn purge_provisional_nodes(graph: &mut DirGraph) -> (usize, usize) {
 
 fn update_node_titles(
     graph: &mut DirGraph,
+    source_type: &str,
+    target_type: &str,
     source_idx: NodeIndex,
     target_idx: NodeIndex,
     row_idx: usize,
-    source_title_idx: Option<usize>,
-    target_title_idx: Option<usize>,
+    titles: &ConnectionTitles,
     df_data: &DataFrame,
 ) -> Result<(), String> {
-    if let Some(title_idx) = source_title_idx {
-        if let Some(title) = df_data.get_value_by_index(row_idx, title_idx) {
+    if titles.source_idx.is_some() {
+        if let Some(title) = titles.value(df_data, true, row_idx) {
             GraphWrite::set_node_title(&mut graph.graph, source_idx, title);
+            crate::graph::index_freshness::write_hooks::note_property_written(
+                graph,
+                source_idx,
+                source_type,
+                Some("title"),
+            );
         }
     }
-    if let Some(title_idx) = target_title_idx {
-        if let Some(title) = df_data.get_value_by_index(row_idx, title_idx) {
+    if titles.target_idx.is_some() {
+        if let Some(title) = titles.value(df_data, false, row_idx) {
             GraphWrite::set_node_title(&mut graph.graph, target_idx, title);
+            crate::graph::index_freshness::write_hooks::note_property_written(
+                graph,
+                target_idx,
+                target_type,
+                Some("title"),
+            );
         }
     }
     Ok(())
+}
+
+fn gate_connection_title_updates(
+    graph: &mut DirGraph,
+    input: ConnectionTitleInput<'_>,
+) -> Result<(), String> {
+    if input.titles.source_idx.is_none() && input.titles.target_idx.is_none() {
+        return Ok(());
+    }
+
+    let updates = collect_connection_title_updates(&input);
+    let mut batch_claims = HashMap::new();
+    for update in updates {
+        if let Some(shape) = graph.shape_for(&update.node_type, "title") {
+            shape.check("title", &update.value)?;
+        }
+        gate_pending_title_update(graph, &update, &mut batch_claims)?;
+    }
+    Ok(())
+}
+
+fn collect_connection_title_updates(input: &ConnectionTitleInput<'_>) -> Vec<PendingTitleUpdate> {
+    let mut updates = Vec::<PendingTitleUpdate>::new();
+    let mut positions = HashMap::<PendingTitleOwner, usize>::new();
+    let mut remember = |update: PendingTitleUpdate| {
+        if let Some(position) = positions.get(&update.owner).copied() {
+            updates[position] = update;
+        } else {
+            positions.insert(update.owner.clone(), updates.len());
+            updates.push(update);
+        }
+    };
+    let value_at = |row: usize, column: usize| {
+        input
+            .frame
+            .get_value_by_index(row, column)
+            .unwrap_or(Value::Null)
+    };
+
+    for (row, source, target) in input.matched {
+        if input.titles.source_idx.is_some() {
+            remember(PendingTitleUpdate {
+                owner: PendingTitleOwner::Existing(*source),
+                node_type: input.source_type.to_string(),
+                node_idx: Some(*source),
+                id: value_at(*row, input.source_id_idx),
+                value: input
+                    .titles
+                    .value(input.frame, true, *row)
+                    .unwrap_or(Value::Null),
+            });
+        }
+        if input.titles.target_idx.is_some() {
+            remember(PendingTitleUpdate {
+                owner: PendingTitleOwner::Existing(*target),
+                node_type: input.target_type.to_string(),
+                node_idx: Some(*target),
+                id: value_at(*row, input.target_id_idx),
+                value: input
+                    .titles
+                    .value(input.frame, false, *row)
+                    .unwrap_or(Value::Null),
+            });
+        }
+    }
+    for (row, source_id, target_id) in input.deferred {
+        if input.titles.source_idx.is_some() {
+            remember(PendingTitleUpdate {
+                owner: PendingTitleOwner::Deferred(
+                    input.source_type.to_string(),
+                    source_id.clone(),
+                ),
+                node_type: input.source_type.to_string(),
+                node_idx: None,
+                id: source_id.clone(),
+                value: input
+                    .titles
+                    .value(input.frame, true, *row)
+                    .unwrap_or(Value::Null),
+            });
+        }
+        if input.titles.target_idx.is_some() {
+            remember(PendingTitleUpdate {
+                owner: PendingTitleOwner::Deferred(
+                    input.target_type.to_string(),
+                    target_id.clone(),
+                ),
+                node_type: input.target_type.to_string(),
+                node_idx: None,
+                id: target_id.clone(),
+                value: input
+                    .titles
+                    .value(input.frame, false, *row)
+                    .unwrap_or(Value::Null),
+            });
+        }
+    }
+
+    updates
+}
+
+fn gate_pending_title_update(
+    graph: &mut DirGraph,
+    update: &PendingTitleUpdate,
+    batch_claims: &mut HashMap<(UniqueConstraintKey, CompositeValue), PendingTitleOwner>,
+) -> Result<(), String> {
+    let claims = if let Some(node_idx) = update.node_idx {
+        graph
+            .plan_property_write(&update.node_type, node_idx, "title", Some(&update.value))
+            .map(|plan| plan.claim)
+            .map_err(|violation| violation.to_string())?
+    } else {
+        let typed = graph.check_property_types(&update.node_type, |property| {
+            deferred_title_field(graph, update, property)
+        });
+        if let Err(violation) = typed {
+            return Err(graph.record_constraint_violation(*violation));
+        }
+        let required = graph.check_required_fields(&update.node_type, |property| {
+            deferred_title_field(graph, update, property)
+        });
+        if let Err(violation) = required {
+            return Err(graph.record_constraint_violation(*violation));
+        }
+        let claims = graph.unique_claims(&update.node_type, |property| {
+            deferred_title_field(graph, update, property)
+        });
+        graph
+            .check_unique_claims(&claims, None)
+            .map_err(|violation| graph.record_constraint_violation(*violation))?;
+        claims
+    };
+    for claim in claims {
+        let key = (claim.key.clone(), claim.value.clone());
+        if let Some(owner) = batch_claims.insert(key, update.owner.clone()) {
+            if owner != update.owner {
+                let violation = graph.unique_batch_conflict(&claim);
+                return Err(graph.record_constraint_violation(violation));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn deferred_title_field(
+    graph: &DirGraph,
+    update: &PendingTitleUpdate,
+    property: &str,
+) -> Option<Value> {
+    match graph.resolve_alias(&update.node_type, property) {
+        "id" => Some(update.id.clone()),
+        "title" => (!matches!(update.value, Value::Null)).then(|| update.value.clone()),
+        PROVISIONAL_KEY => Some(Value::Boolean(true)),
+        _ => None,
+    }
 }
 
 fn update_schema_node(
@@ -2161,6 +2444,11 @@ pub fn update_node_properties(
     if nodes.is_empty() {
         return Err("No nodes to update".to_string());
     }
+    let mut nodes = nodes.to_vec();
+    crate::graph::session::snapshot_property_values(
+        &graph.graph,
+        nodes.iter_mut().map(|(_, value)| value),
+    );
     graph
         .prepare_mutation()
         .map_err(|e| format!("disk mutation lease failed: {e}"))?;
@@ -2180,9 +2468,9 @@ pub fn update_node_properties(
     let mut validated_nodes = Vec::with_capacity(nodes.len());
     let mut skipped_count = 0;
 
-    for (node_idx_opt, _) in nodes {
-        if let Some(node_idx) = node_idx_opt {
-            if let Some(node_type) = GraphRead::node_type_of(&graph.graph, *node_idx) {
+    for (node_idx_opt, _) in &nodes {
+        if let Some(node_idx) = *node_idx_opt {
+            if let Some(node_type) = GraphRead::node_type_of(&graph.graph, node_idx) {
                 *node_types
                     .entry(graph.interner.resolve(node_type).to_string())
                     .or_insert(0) += 1;
@@ -2198,7 +2486,7 @@ pub fn update_node_properties(
         }
     }
 
-    let type_string = observed_type_string(nodes, &validated_nodes);
+    let type_string = observed_type_string(&nodes, &validated_nodes);
 
     for node_type in node_types.keys() {
         if let Some(existing_meta) = graph.get_node_type_metadata(node_type) {

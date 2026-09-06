@@ -225,7 +225,8 @@ where
     let mut nodes_updated = 0;
     let mut properties_set = 0;
     let mut touched_types: HashSet<String> = HashSet::new();
-    for (node_idx, props) in updates {
+    for (node_idx, mut props) in updates {
+        crate::graph::session::snapshot_property_values(&graph.graph, props.values_mut());
         // Pre-intern keys before getting mutable node reference (split borrow)
         let interned_props: Vec<(InternedKey, Value)> = props
             .into_iter()

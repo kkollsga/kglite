@@ -111,6 +111,22 @@ pub fn extract_subgraph(
             // Add to new graph (single clone instead of double)
             let new_idx = GraphWrite::add_node(&mut new_graph.graph, node_data.clone());
             index_map.insert(old_idx, new_idx);
+            if let Some(node) = source.graph.node_view(old_idx) {
+                let mut title = node.title().into_owned();
+                crate::graph::session::snapshot_property_values(
+                    &source.graph,
+                    std::iter::once(&mut title),
+                );
+                GraphWrite::set_node_title(&mut new_graph.graph, new_idx, title);
+                let mut properties = node.property_pairs();
+                crate::graph::session::snapshot_property_values(
+                    &source.graph,
+                    properties.iter_mut().map(|(_, value)| value),
+                );
+                for (key, value) in properties {
+                    GraphWrite::set_node_property(&mut new_graph.graph, new_idx, key, value);
+                }
+            }
 
             // Update type indices
             new_graph
@@ -132,10 +148,13 @@ pub fn extract_subgraph(
                     index_map.get(&old_target_idx),
                 ) {
                     // Clone edge data (properties are already interned)
-                    let edge_data = EdgeData::new_interned(
-                        edge.weight().connection_type,
-                        edge.weight().properties.clone(),
+                    let mut properties = edge.weight().properties.clone();
+                    crate::graph::session::snapshot_property_values(
+                        &source.graph,
+                        properties.iter_mut().map(|(_, value)| value),
                     );
+                    let edge_data =
+                        EdgeData::new_interned(edge.weight().connection_type, properties);
                     GraphWrite::add_edge(&mut new_graph.graph, new_source, new_target, edge_data);
                 }
             }

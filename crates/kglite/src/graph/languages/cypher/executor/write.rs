@@ -912,6 +912,8 @@ fn create_pattern_edges(
                     edge_props.insert(key.clone(), val);
                 }
             }
+            crate::graph::session::snapshot_property_values(&graph.graph, edge_props.values_mut());
+            edge_props.retain(|_, value| !matches!(value, Value::Null));
             // Freshness provenance: stamp `updated_at` if this edge type
             // opted in (before metadata/EdgeData pick up the props).
             graph.inject_edge_provenance(&edge_pat.connection_type, &mut edge_props);
@@ -1024,6 +1026,13 @@ fn create_node(
     // Identity fields, under whichever spelling this node type declares — see
     // [`IdentityAliases`] and [`create_identity`].
     let aliases = IdentityAliases::for_type(graph, &label);
+    crate::graph::session::snapshot_property_values(
+        &graph.graph,
+        properties
+            .iter_mut()
+            .filter(|(key, _)| aliases.canonical(key.as_str()) != "id")
+            .map(|(_, value)| value),
+    );
     let CreatedIdentity {
         id,
         title,
@@ -2083,10 +2092,22 @@ fn execute_merge(
                     CreateElement::Edge(edge) => &edge.properties,
                 };
                 for (name, expression) in properties {
-                    if matches!(
-                        executor.evaluate_expression(expression, &new_row)?,
-                        Value::Null
-                    ) {
+                    let mut value = executor.evaluate_expression(expression, &new_row)?;
+                    let is_identity = match element {
+                        CreateElement::Node(node) => {
+                            let label = node.label.as_deref().unwrap_or("Node");
+                            let aliases = IdentityAliases::for_type(graph, label);
+                            aliases.canonical(name) == "id"
+                        }
+                        CreateElement::Edge(_) => false,
+                    };
+                    if !is_identity {
+                        crate::graph::session::snapshot_property_values(
+                            &graph.graph,
+                            std::iter::once(&mut value),
+                        );
+                    }
+                    if matches!(value, Value::Null) {
                         return Err(format!("MERGE cannot use null for property '{}'", name));
                     }
                 }

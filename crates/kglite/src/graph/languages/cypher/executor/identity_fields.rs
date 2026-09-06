@@ -272,9 +272,15 @@ pub(super) fn merge_expected_props<'p>(
         .properties
         .iter()
         .map(|(key, expr)| {
-            executor
-                .evaluate_expression(expr, row)
-                .map(|val| (aliases.canonical(key.as_str()), val))
+            let key = aliases.canonical(key.as_str());
+            let mut value = executor.evaluate_expression(expr, row)?;
+            if key != "id" {
+                crate::graph::session::snapshot_property_values(
+                    &graph.graph,
+                    std::iter::once(&mut value),
+                );
+            }
+            Ok((key, value))
         })
         .collect()
 }

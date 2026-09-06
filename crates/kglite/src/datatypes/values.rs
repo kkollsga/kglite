@@ -717,6 +717,53 @@ impl DataFrame {
             .map(|col| col.col_type.clone())
     }
 
+    /// Replace list/map cells selected by `include` without changing the
+    /// frame's scalar columns or shape.
+    pub(crate) fn map_container_cells(
+        &mut self,
+        mut include: impl FnMut(&str) -> bool,
+        mut map: impl FnMut(&Value) -> Option<Value>,
+    ) {
+        for column in &mut self.columns {
+            if !include(&column.name) {
+                continue;
+            }
+            match &mut column.data {
+                ColumnData::List(cells) => {
+                    for items in cells.iter_mut().flatten() {
+                        let current = Value::List(std::mem::take(items));
+                        match map(&current) {
+                            Some(Value::List(resolved)) => *items = resolved,
+                            Some(_) => unreachable!("list cell mapper changed the outer type"),
+                            None => {
+                                let Value::List(original) = current else {
+                                    unreachable!()
+                                };
+                                *items = original;
+                            }
+                        }
+                    }
+                }
+                ColumnData::Map(cells) => {
+                    for entries in cells.iter_mut().flatten() {
+                        let current = Value::Map(std::mem::take(entries));
+                        match map(&current) {
+                            Some(Value::Map(resolved)) => *entries = resolved,
+                            Some(_) => unreachable!("map cell mapper changed the outer type"),
+                            None => {
+                                let Value::Map(original) = current else {
+                                    unreachable!()
+                                };
+                                *entries = original;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     pub fn add_column(
         &mut self,
         name: String,

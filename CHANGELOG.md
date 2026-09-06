@@ -44,6 +44,13 @@ before upgrading.
 - Endpoint values now resolve consistently in eager and lazy query results,
   nested containers and direct Python graph outputs, using the executing graph
   view while preserving structural node and relationship IDs.
+- New stored properties recursively snapshot endpoint references to the
+  referenced node's title at admission, including node titles, lists, maps,
+  repeated `MERGE`, table-backed writes, subsets and graph transfers. Missing
+  or cyclic title references become NULL. Only structural node/relationship
+  IDs remain identity; query-time `startNode()`/`endNode()` identity is
+  unchanged. Low-level Rust graph mutators that accept raw `NodeRef` values
+  retain their explicit view-local caller precondition.
 - Timestamp constructors and text/protocol outputs retain supported fractional
   seconds. Whole-second spelling stays compatible; Python datetime output keeps
   its microsecond precision. Bolt rejects timestamps it cannot represent instead

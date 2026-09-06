@@ -51,10 +51,11 @@ pub(super) fn set_edge_property(
     // on `enforce_edge_write_scope`).
     enforce_edge_write_scope(graph, edge_binding)?;
     let edge_index = edge_binding.edge_index;
-    let value = {
+    let mut value = {
         let executor = CypherExecutor::with_params(graph, params, None);
         executor.evaluate_expression(expression, row)?
     };
+    crate::graph::session::snapshot_property_values(&graph.graph, std::iter::once(&mut value));
 
     // Declared relationship constraints, gated before `edge_weight_mut` rather
     // than around the write inside it: that call publishes an edge-update

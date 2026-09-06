@@ -49,20 +49,29 @@ its local wall time. Neither parsed constructor drops fractional seconds.
 but serve different roles in the executor:
 
 - **`NodeRef(idx)`** — an internal reference carrying the petgraph `NodeIndex`.
-  Endpoint functions `startNode()` and `endNode()` produce it. It can also be
-  stored in a property by `SET`, including inside lists and maps. Public query
-  output and Python graph projections resolve it to the referenced node's title
-  against the executing view. This includes fluent `collect()`/`to_df()`,
-  `sample()`, `node()`, grouped nodes, property values, connection properties and
-  diagnostic value samples. Nested graph-entity properties are resolved too;
-  missing references and cyclic title references become NULL.
-  Resolution changes output values, not stored properties, structural IDs,
-  predicate identity, grouping keys or distinct-value counts. Two distinct
-  references with equal titles can therefore appear as duplicate output titles.
-  Stored references carry physical slots: node deletion/reuse or memory/mapped
-  vacuum can retarget them. Output resolution does not repair this limitation.
-  Store stable scalar properties instead when a value must survive these changes
-  (for example, copy an application ID or title string rather than `startNode(r)`).
+  Endpoint functions `startNode()` and `endNode()` produce it, and it remains a
+  node identity while the query runs. Public query output and Python graph
+  projections resolve it to the referenced node's title against the executing
+  view. This includes fluent `collect()`/`to_df()`, `sample()`, `node()`,
+  grouped nodes, property values, connection properties and diagnostic value
+  samples. Nested graph-entity properties are resolved too.
+
+  When a query or loader admits a value as a stored property, KGLite
+  recursively snapshots every `NodeRef` to the referenced node's ordinary
+  title value first. The rule covers node titles, scalar/list/map properties,
+  `CREATE`/`SET`/repeated `MERGE`, table-backed writes, subsets, and graph
+  transfers such as `extend()`. A transfer resolves against its source view
+  before inserting into the destination. A missing reference or cyclic chain
+  becomes NULL. Constraints, indexes, CDC and WAL therefore observe the same
+  stored ordinary value. Structural node and relationship IDs remain identity;
+  property admission never rewrites them.
+
+  Low-level Rust `GraphWrite` mutators remain a raw escape hatch. A caller that
+  supplies `Value::NodeRef` there must keep it in its originating view and must
+  normalize it before persistence or transfer. New-write admission does not
+  rewrite an existing checkpoint that already contains raw references; such a
+  legacy cell retains its physical-slot behavior when loaded. Rebuild it from
+  source or explicitly rewrite it before deletion, slot reuse, or compaction.
   Raw executor and graph-data consumers use `api::session::resolve_noderefs`
   or the borrowed single-value `resolve_noderef_value` helper themselves.
 - **`Node(Box<NodeValue>)`** — a materialised graph value with the
@@ -88,6 +97,21 @@ The tombstone arm preserves Cypher's "count-of-matched-rows" semantics
 across `MATCH ... DELETE n RETURN count(n)` — the binding survives
 deletion but materialising the node would return `None`; the tombstone
 keeps `count(n)` non-Null without faking data.
+
+For example, a newly admitted endpoint property keeps the title visible when
+the target is renamed later:
+
+```python
+g.cypher("CREATE (a:Item {id: 1}), (b:Item {id: 2, title: 'Beta'}), (a)-[:LINK]->(b)")
+g.cypher("MATCH (a:Item)-[r:LINK]->() SET a.owner = endNode(r)")
+g.cypher("MATCH (b:Item {id: 2}) SET b.title = 'Renamed'")
+assert g.cypher("MATCH (a:Item {id: 1}) RETURN a.owner").scalar() == "Beta"
+```
+
+Before this admission rule, `a.owner` stored a physical slot and the last line
+returned `"Renamed"`. Code that intended a changing relationship should query
+the relationship itself rather than store `startNode()` or `endNode()` in a
+property.
 
 ## The projection flow
 

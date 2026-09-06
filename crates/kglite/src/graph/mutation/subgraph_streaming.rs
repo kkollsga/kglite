@@ -4,6 +4,8 @@
 //! the non-streaming `save_subset` path per CLAUDE.md ("in-memory wins every
 //! time"). All I/O here is sequential — no per-node random edge lookups.
 
+use crate::datatypes::values::BorrowedValue;
+use crate::datatypes::Value;
 use crate::graph::schema::{CowSelection, DirGraph, InternedKey};
 use crate::graph::storage::disk::csr::{PendingEdge, TOMBSTONE_EDGE};
 use crate::graph::storage::disk::graph::DiskGraph;
@@ -433,7 +435,6 @@ pub fn save_subset_streaming_disk(
     edge_filter: Option<&[u64]>,
     out_path: &Path,
 ) -> Result<(), String> {
-    use crate::datatypes::values::Value;
     use crate::graph::schema::{EdgeData, NodeData, PropertyStorage};
     use crate::graph::storage::backend::GraphBackend;
     use crate::graph::storage::column_store::ColumnStore;
@@ -672,7 +673,33 @@ pub fn save_subset_streaming_disk(
                         None
                     };
                     let r = src_store.try_for_each_property_borrowed(slot.row_id, |key, bv| {
-                        row.push_property(key, bv)
+                        let needs_snapshot = match bv {
+                            BorrowedValue::List(items) => items
+                                .iter()
+                                .any(crate::graph::session::property_value_needs_snapshot),
+                            BorrowedValue::Map(entries) => entries
+                                .values()
+                                .any(crate::graph::session::property_value_needs_snapshot),
+                            _ => false,
+                        };
+                        if needs_snapshot {
+                            let mut value = bv.to_value();
+                            crate::graph::session::snapshot_property_values(
+                                &source.graph,
+                                std::iter::once(&mut value),
+                            );
+                            match &value {
+                                Value::List(items) => {
+                                    row.push_property(key, BorrowedValue::List(items))
+                                }
+                                Value::Map(entries) => {
+                                    row.push_property(key, BorrowedValue::Map(entries))
+                                }
+                                _ => unreachable!("container snapshot changed the outer type"),
+                            }
+                        } else {
+                            row.push_property(key, bv)
+                        }
                     });
                     if let Some(t) = t1b {
                         t_read_props += t.elapsed();
@@ -822,10 +849,14 @@ pub fn save_subset_streaming_disk(
                 None => continue,
             };
             let conn_type = InternedKey::from_u64(ep.connection_type);
-            let props = sdg
+            let mut props = sdg
                 .edge_properties_at(edge_idx as u32)
                 .map(|cow| cow.into_owned())
                 .unwrap_or_default();
+            crate::graph::session::snapshot_property_values(
+                &source.graph,
+                props.iter_mut().map(|(_, value)| value),
+            );
             let edge_data = EdgeData::new_interned(conn_type, props);
             let GraphBackend::Disk(ref mut dest_disk) = dest.graph else {
                 unreachable!("streaming subset destination is always disk-backed")
@@ -859,7 +890,12 @@ pub fn save_subset_streaming_disk(
                     Some(x) => NodeIndex::new(x as usize),
                     None => continue,
                 };
-                let edge_data = EdgeData::new_interned(w.connection_type, w.properties.clone());
+                let mut properties = w.properties.clone();
+                crate::graph::session::snapshot_property_values(
+                    &source.graph,
+                    properties.iter_mut().map(|(_, value)| value),
+                );
+                let edge_data = EdgeData::new_interned(w.connection_type, properties);
                 let GraphBackend::Disk(ref mut dest_disk) = dest.graph else {
                     unreachable!("streaming subset destination is always disk-backed")
                 };
@@ -1047,6 +1083,73 @@ mod tests {
             ));
         }
         graph
+    }
+
+    #[test]
+    fn streaming_subset_snapshots_borrowed_nested_references() {
+        use crate::datatypes::PropMap;
+        use crate::graph::io::file::load_file;
+        use crate::graph::session::execute::{execute_mut, ExecuteOptions};
+        use crate::graph::storage::mode::{new_dir_graph_in_mode, StorageMode};
+        use crate::graph::storage::GraphRead;
+        use petgraph::graph::NodeIndex;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let root = tempfile::tempdir().unwrap();
+        let source_path = root.path().join("source");
+        let mut source =
+            new_dir_graph_in_mode(StorageMode::Disk, Some(&source_path)).expect("disk graph");
+        execute_mut(
+            &mut source,
+            "CREATE (a:Item {id:'a',title:'Alpha',payload:[0],ordinary:[1,2]}),\
+                    (b:Item {id:'b',title:'Beta'}) CREATE (a)-[:LINK {payload:[0]}]->(b)",
+            &ExecuteOptions::eager(&HashMap::new()),
+        )
+        .unwrap();
+        let payload_key = source.interner.get_or_intern("payload");
+        let row_id = {
+            let _guard = source.graph.begin_query();
+            source
+                .graph
+                .node_weight(NodeIndex::new(0))
+                .and_then(|node| node.properties.columnar_row_id())
+                .unwrap()
+        };
+        Arc::make_mut(source.column_store_mut("Item").unwrap()).set(
+            row_id,
+            payload_key,
+            &Value::List(vec![Value::Map(PropMap::from_pairs(vec![(
+                "endpoint".into(),
+                Value::NodeRef(1),
+            )]))]),
+            None,
+        );
+        let output = root.path().join("subset");
+        save_subset_streaming_disk(
+            &source,
+            &HashMap::from([("Item".to_string(), vec![0, 1])]),
+            None,
+            &output,
+        )
+        .unwrap();
+        let loaded = load_file(output.to_str().unwrap()).unwrap();
+        assert_eq!(
+            loaded
+                .graph
+                .get_node_property(NodeIndex::new(0), payload_key),
+            Some(Value::List(vec![Value::Map(PropMap::from_pairs(vec![(
+                "endpoint".into(),
+                Value::String("Beta".into()),
+            )]))]))
+        );
+        let ordinary_key = InternedKey::from_str("ordinary");
+        assert_eq!(
+            loaded
+                .graph
+                .get_node_property(NodeIndex::new(0), ordinary_key),
+            Some(Value::List(vec![Value::Int64(1), Value::Int64(2)]))
+        );
     }
 
     fn spec_for(edge_types: &[&str]) -> SubsetSpec {

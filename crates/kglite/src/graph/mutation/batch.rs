@@ -750,6 +750,10 @@ impl ConnectionBatchProcessor {
         graph: &mut DirGraph,
         connection_type: &str,
     ) -> Result<(), String> {
+        crate::graph::session::snapshot_property_values(
+            &graph.graph,
+            properties.iter_mut().map(|(_, value)| value),
+        );
         // Freshness provenance: stamp `updated_at` when this edge type opted in
         // (single chokepoint for every `add_connections` route; registered into
         // `schema_properties` below so the columnar edge store gets a slot).

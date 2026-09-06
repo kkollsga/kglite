@@ -1655,11 +1655,12 @@ impl DirGraph {
     /// reads back in-session but resolves to nothing in enumerations,
     /// panics `StringInterner::resolve`, and is dropped by `save_graph` —
     /// silent data loss. Returns `false` when no node exists at `index`.
-    pub fn set_node_property(&mut self, index: NodeIndex, key: &str, value: Value) -> bool {
+    pub fn set_node_property(&mut self, index: NodeIndex, key: &str, mut value: Value) -> bool {
         use crate::graph::storage::{GraphRead, GraphWrite};
         if self.graph.node_weight(index).is_none() {
             return false;
         }
+        crate::graph::session::snapshot_property_values(&self.graph, std::iter::once(&mut value));
         let interned = self.interner.get_or_intern(key);
         self.graph.set_node_property(index, interned, value);
         true

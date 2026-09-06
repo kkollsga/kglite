@@ -1,4 +1,4 @@
-"""Direct graph projections resolve stored references at the output boundary."""
+"""Direct graph projections preserve admitted endpoint-title snapshots."""
 
 import pytest
 
@@ -52,8 +52,10 @@ def test_direct_full_node_consumers_resolve_stored_endpoints(stored_endpoints, r
     rows = sorted(rows, key=lambda row: row["id"])
     for row, node_id in zip(rows, [1, 2], strict=True):
         assert_item(row, node_id)
-    # Stored references still participate in physical endpoint equality.
-    assert graph.cypher("MATCH (a:Item)-[r:LINK]->() RETURN a.payload[0] = startNode(r) AS same").scalar() is True
+    # The stored property is a title snapshot; the relationship endpoint keeps
+    # query-time identity independently.
+    assert graph.cypher("MATCH (a:Item)-[r:LINK]->() RETURN a.payload[0] = startNode(r) AS same").scalar() is False
+    assert graph.cypher("MATCH ()-[r:LINK]->() RETURN startNode(r) = startNode(r) AS same").scalar() is True
 
 
 def test_direct_property_and_sample_outputs_resolve_after_retrieval(stored_endpoints):
@@ -110,31 +112,31 @@ def test_find_context_and_ambiguity_materialise_whole_nodeinfo(stored_endpoints)
         assert [row["nested"] for row in matches] == [{"pair": ["Alpha", "Beta"]}] * 2
 
 
-def test_materialised_direct_result_keeps_executing_view_titles(stored_endpoints):
+def test_materialised_direct_result_keeps_admission_titles(stored_endpoints):
     graph = stored_endpoints
     earlier = graph.select("Item").collect()
     graph.cypher("MATCH (a:Item {id:1}) SET a.title='Changed'")
     old = sorted(earlier.to_list(), key=lambda row: row["id"])
     assert_item(old[0], 1)
     assert_item(old[1], 2)
-    assert graph.node("Item", 1)["payload"] == ["Changed"]
-    assert graph.node("Item", 2)["nested"] == {"pair": ["Beta", "Changed"]}
+    assert graph.node("Item", 1)["payload"] == ["Alpha"]
+    assert graph.node("Item", 2)["nested"] == {"pair": ["Beta", "Alpha"]}
 
 
-def test_projection_does_not_deduplicate_distinct_references_with_equal_titles():
+def test_projection_deduplicates_equal_stored_title_snapshots():
     graph = kglite.KnowledgeGraph()
     graph.cypher(
         "CREATE (a:Item {id:1,title:'Same',payload:[0]}),(b:Item {id:2,title:'Same',payload:[0]}),(a)-[:LINK]->(b)"
     )
     graph.cypher("MATCH (a:Item)-[r:LINK]->(b:Item) SET a.payload=[startNode(r)],b.payload=[endNode(r)]")
-    assert graph.select("Item").unique_values("payload") == {"Root": [["Same"], ["Same"]]}
+    assert graph.select("Item").unique_values("payload") == {"Root": [["Same"]]}
     stats = graph.properties("Item")["payload"]
-    assert stats["unique"] == 2
-    assert stats["values"] == [["Same"], ["Same"]]
+    assert stats["unique"] == 1
+    assert stats["values"] == [["Same"]]
 
 
 @pytest.mark.parametrize("mode", ["memory", "mapped", "disk"])
-def test_output_resolver_uses_current_saved_backend_titles(tmp_path, mode):
+def test_stored_snapshot_does_not_follow_current_backend_titles(tmp_path, mode):
     graph = kglite.KnowledgeGraph(storage=mode, path=str(tmp_path / "disk") if mode == "disk" else None)
     graph.cypher(
         "CREATE (a:Item {id:1,title:'Alpha',payload:[0]}),(b:Item {id:2,title:'Beta',payload:[0]}),(a)-[:LINK]->(b)"
@@ -144,7 +146,7 @@ def test_output_resolver_uses_current_saved_backend_titles(tmp_path, mode):
     graph.cypher("MATCH (a:Item)-[r:LINK]->() SET a.payload=[endNode(r)]")
     earlier = graph.select("Item").collect()
     graph.cypher("MATCH(b:Item {id:2}) SET b.title='Updated'")
-    assert graph.cypher("MATCH(a:Item {id:1}) RETURN a.payload AS value").scalar() == ["Updated"]
+    assert graph.cypher("MATCH(a:Item {id:1}) RETURN a.payload AS value").scalar() == ["Beta"]
     rows = graph.select("Item").collect().to_list()
-    assert next(row for row in rows if row["id"] == 1)["payload"] == ["Updated"]
+    assert next(row for row in rows if row["id"] == 1)["payload"] == ["Beta"]
     assert next(row for row in earlier.to_list() if row["id"] == 1)["payload"] == ["Beta"]

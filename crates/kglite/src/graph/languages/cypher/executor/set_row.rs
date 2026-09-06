@@ -181,8 +181,10 @@ pub(super) fn apply_node_property_set<'a>(
     let NodePropertySet {
         node_idx,
         property,
-        value,
+        mut value,
     } = write;
+
+    crate::graph::session::snapshot_property_values(&graph.graph, std::iter::once(&mut value));
 
     // The row's node type, and with it every statement-constant fact about
     // this write. Arena guard: the type read materializes on the disk backend

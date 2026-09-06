@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 
 use crate::datatypes::values::{NodeValue, PathValue, RelValue};
-use crate::datatypes::{PropMap, Value};
+use crate::datatypes::{DataFrame, PropMap, Value};
 use crate::graph::schema::GraphBackend;
 use crate::graph::storage::GraphRead;
 
@@ -43,6 +43,73 @@ pub fn resolve_noderef_value<'v>(graph: &GraphBackend, value: &'v Value) -> Cow<
         .value(value)
         .map(Cow::Owned)
         .unwrap_or(Cow::Borrowed(value))
+}
+
+/// Replace endpoint references in values about to become stored properties.
+///
+/// Resolution uses the statement or transfer source view supplied by the
+/// caller. Values without endpoint references retain their allocations;
+/// missing nodes and cyclic title chains become NULL.
+pub(crate) fn snapshot_property_values<'a>(
+    graph: &GraphBackend,
+    values: impl IntoIterator<Item = &'a mut Value>,
+) {
+    let _arena_guard = graph.begin_query();
+    let mut resolver = Resolver {
+        graph,
+        active: Vec::new(),
+    };
+    for value in values {
+        if let Some(resolved) = resolver.value(value) {
+            *value = resolved;
+        }
+    }
+}
+
+pub(crate) fn property_value_needs_snapshot(value: &Value) -> bool {
+    match value {
+        Value::NodeRef(_) => true,
+        Value::List(items) => items.iter().any(property_value_needs_snapshot),
+        Value::Map(properties) => properties.values().any(property_value_needs_snapshot),
+        Value::Node(node) => node
+            .properties
+            .iter()
+            .any(|(_, value)| property_value_needs_snapshot(value)),
+        Value::Relationship(rel) => rel
+            .properties
+            .iter()
+            .any(|(_, value)| property_value_needs_snapshot(value)),
+        Value::Path(path) => {
+            path.nodes.iter().any(|node| {
+                node.properties
+                    .iter()
+                    .any(|(_, value)| property_value_needs_snapshot(value))
+            }) || path.rels.iter().any(|rel| {
+                rel.properties
+                    .iter()
+                    .any(|(_, value)| property_value_needs_snapshot(value))
+            })
+        }
+        _ => false,
+    }
+}
+
+/// Snapshot endpoint references in property-bearing DataFrame cells while
+/// preserving the columns that identify nodes or edge endpoints.
+pub(crate) fn snapshot_dataframe_properties(
+    graph: &GraphBackend,
+    frame: &mut DataFrame,
+    identity_columns: &[&str],
+) {
+    let _arena_guard = graph.begin_query();
+    let mut resolver = Resolver {
+        graph,
+        active: Vec::new(),
+    };
+    frame.map_container_cells(
+        |name| !identity_columns.contains(&name),
+        |value| resolver.value(value),
+    );
 }
 
 struct Resolver<'a> {

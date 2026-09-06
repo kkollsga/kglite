@@ -2306,6 +2306,11 @@ class KnowledgeGraph:
         - **Property schemas** merge: a property present in *other* but not
           here extends this graph's type schema (the same path ``add_nodes``
           uses for new columns).
+        - **Stored values** are recursively materialised against *other* before
+          admission. Endpoint references become their source-view title;
+          missing or cyclic title references become ``None``. This includes
+          node titles and nested list/map properties. Structural node and edge
+          IDs remain identity.
         - **Edges** dedup on ``(connection_type, source, target)``: an edge
           that already exists here is **not** duplicated — its properties merge
           per ``conflict_handling``. Exact-duplicate edges present in both
