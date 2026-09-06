@@ -3,9 +3,11 @@
 //! `tolist()` expansion; repeated acyclic objects in sibling branches are legal.
 
 use super::values::Value;
-use pyo3::exceptions::{PyRecursionError, PyValueError};
+use pyo3::exceptions::{PyOverflowError, PyRecursionError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDate, PyDateTime, PyDict, PyList, PyTuple, PyTzInfo, PyTzInfoAccess};
+use pyo3::types::{
+    PyDate, PyDateTime, PyDict, PyFloat, PyInt, PyList, PyTuple, PyTzInfo, PyTzInfoAccess,
+};
 
 const MAX_CONTAINER_DEPTH: usize = 64;
 
@@ -55,6 +57,17 @@ impl ConversionState {
         self.active.pop();
         result
     }
+
+    fn with_query_container<T>(
+        &mut self,
+        identity: usize,
+        convert: impl FnOnce(&mut Self) -> Result<T, QueryConversionError>,
+    ) -> Result<T, QueryConversionError> {
+        self.enter(identity).map_err(QueryConversionError::Limit)?;
+        let result = convert(self);
+        self.active.pop();
+        result
+    }
 }
 
 /// True for numpy's ndarray without importing numpy when it is absent.
@@ -70,6 +83,172 @@ pub(super) fn is_numpy_ndarray(value: &Bound<'_, PyAny>) -> bool {
 
 pub fn py_value_to_value(value: &Bound<'_, PyAny>) -> PyResult<Value> {
     convert_value(value, &mut ConversionState::default())
+}
+
+enum QueryConversionError {
+    Limit(ConversionLimit),
+    Python(PyErr),
+    IntegerOverflow,
+    Unsupported(String),
+    AtIndex(usize, Box<Self>),
+    AtKey(String, Box<Self>),
+}
+
+impl From<PyErr> for QueryConversionError {
+    fn from(error: PyErr) -> Self {
+        Self::Python(error)
+    }
+}
+
+impl QueryConversionError {
+    fn into_pyerr(self, parameter: &str) -> PyErr {
+        let mut path = format!("${parameter}");
+        let mut error = self;
+        loop {
+            error = match error {
+                Self::AtIndex(index, inner) => {
+                    path.push_str(&format!("[{index}]"));
+                    *inner
+                }
+                Self::AtKey(key, inner) => {
+                    path.push('.');
+                    path.push_str(&key);
+                    *inner
+                }
+                Self::IntegerOverflow => {
+                    return PyOverflowError::new_err(format!(
+                        "Query parameter {path} is outside the signed 64-bit integer range"
+                    ));
+                }
+                Self::Unsupported(type_name) => {
+                    return PyTypeError::new_err(format!(
+                        "Query parameter {path} has unsupported Python type '{type_name}'"
+                    ));
+                }
+                Self::Limit(limit) => return limit.into(),
+                Self::Python(error) => return error,
+            };
+        }
+    }
+}
+
+/// Convert one Python query parameter without silently losing its value.
+pub fn py_query_parameter_to_value(parameter: &str, value: &Bound<'_, PyAny>) -> PyResult<Value> {
+    convert_query_value(value, &mut ConversionState::default())
+        .map_err(|error| error.into_pyerr(parameter))
+}
+
+fn numpy_scalar_type_name(value: &Bound<'_, PyAny>) -> Option<String> {
+    let ty = value.get_type();
+    let is_numpy = ty
+        .getattr("__module__")
+        .ok()
+        .and_then(|module| module.extract::<String>().ok())
+        .is_some_and(|module| module == "numpy" || module.starts_with("numpy."));
+    if !is_numpy {
+        return None;
+    }
+    ty.name().ok()?.extract::<String>().ok()
+}
+
+fn convert_query_value(
+    value: &Bound<'_, PyAny>,
+    state: &mut ConversionState,
+) -> Result<Value, QueryConversionError> {
+    if value.is_none() {
+        return Ok(Value::Null);
+    }
+    if value.is_instance_of::<pyo3::types::PyBool>() {
+        if let Ok(boolean) = value.extract::<bool>() {
+            return Ok(Value::Boolean(boolean));
+        }
+    }
+    if is_numpy_ndarray(value) {
+        return state.with_query_container(value.as_ptr() as usize, |state| {
+            let as_list = value.call_method0("tolist")?;
+            convert_query_value(&as_list, state)
+        });
+    }
+    let numpy_type = numpy_scalar_type_name(value);
+    if value.is_instance_of::<PyInt>()
+        || numpy_type
+            .as_deref()
+            .is_some_and(|name| name.starts_with("int") || name.starts_with("uint"))
+    {
+        return value
+            .extract::<i64>()
+            .map(Value::Int64)
+            .map_err(|_| QueryConversionError::IntegerOverflow);
+    }
+    if value.is_instance_of::<PyFloat>()
+        || matches!(
+            numpy_type.as_deref(),
+            Some("float16" | "float32" | "float64")
+        )
+    {
+        return value
+            .extract::<f64>()
+            .map(Value::Float64)
+            .map_err(QueryConversionError::Python);
+    }
+    if let Ok(string) = value.extract::<String>() {
+        return Ok(Value::String(string));
+    }
+    if let Ok(datetime) = value.cast::<PyDateTime>() {
+        return datetime_to_utc_naive(datetime)
+            .map(Value::Timestamp)
+            .map_err(QueryConversionError::Python);
+    }
+    if value.is_instance_of::<PyDate>() {
+        if let Ok(date) = value.extract::<chrono::NaiveDate>() {
+            return Ok(Value::DateTime(date));
+        }
+    }
+    if let Ok(dict) = value.cast::<PyDict>() {
+        return state.with_query_container(value.as_ptr() as usize, |state| {
+            let mut pairs = Vec::with_capacity(dict.len());
+            for (key, child) in dict.iter() {
+                let key: String = key.extract()?;
+                let converted = convert_query_value(&child, state)
+                    .map_err(|error| QueryConversionError::AtKey(key.clone(), Box::new(error)))?;
+                pairs.push((kglite_core::datatypes::PropKey::from(key), converted));
+            }
+            Ok(Value::Map(kglite_core::datatypes::PropMap::from_pairs(
+                pairs,
+            )))
+        });
+    }
+    if let Ok(list) = value.cast::<PyList>() {
+        return state.with_query_container(value.as_ptr() as usize, |state| {
+            list.iter()
+                .enumerate()
+                .map(|(index, child)| {
+                    convert_query_value(&child, state)
+                        .map_err(|error| QueryConversionError::AtIndex(index, Box::new(error)))
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(Value::List)
+        });
+    }
+    if let Ok(tuple) = value.cast::<PyTuple>() {
+        return state.with_query_container(value.as_ptr() as usize, |state| {
+            tuple
+                .iter()
+                .enumerate()
+                .map(|(index, child)| {
+                    convert_query_value(&child, state)
+                        .map_err(|error| QueryConversionError::AtIndex(index, Box::new(error)))
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(Value::List)
+        });
+    }
+    let type_name = value
+        .get_type()
+        .name()
+        .and_then(|name| name.extract::<String>())
+        .unwrap_or_else(|_| "<unknown>".to_string());
+    Err(QueryConversionError::Unsupported(type_name))
 }
 
 fn convert_value(value: &Bound<'_, PyAny>, state: &mut ConversionState) -> PyResult<Value> {

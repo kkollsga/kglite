@@ -1654,7 +1654,7 @@ impl KnowledgeGraph {
             let mut map = std::collections::HashMap::new();
             for (key, val) in params_dict.iter() {
                 let key_str: String = key.extract()?;
-                let value = py_in::py_value_to_value(&val)?;
+                let value = py_in::py_query_parameter_to_value(&key_str, &val)?;
                 map.insert(key_str, value);
             }
             map

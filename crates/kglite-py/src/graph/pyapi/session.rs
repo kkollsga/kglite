@@ -122,7 +122,8 @@ fn decode_params(params: Option<&Bound<'_, PyDict>>) -> PyResult<HashMap<String,
     if let Some(params_dict) = params {
         for (key, val) in params_dict.iter() {
             let key_str: String = key.extract()?;
-            map.insert(key_str, py_in::py_value_to_value(&val)?);
+            let value = py_in::py_query_parameter_to_value(&key_str, &val)?;
+            map.insert(key_str, value);
         }
     }
     Ok(map)

@@ -1,7 +1,7 @@
 // src/datatypes/py_in.rs
 use super::on_invalid::{self, OnInvalid};
 use super::py_value::is_numpy_ndarray;
-pub use super::py_value::py_value_to_value;
+pub use super::py_value::{py_query_parameter_to_value, py_value_to_value};
 use super::type_conversions::{to_bool, to_datetime, to_f64, to_i64, to_timestamp, to_u32};
 use super::values::{ColumnData, ColumnType, DataFrame, FilterCondition, Value};
 use pyo3::prelude::*;

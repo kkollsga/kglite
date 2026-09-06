@@ -172,7 +172,7 @@ impl Transaction {
                 let mut map = HashMap::new();
                 for (k, v) in d.iter() {
                     let key: String = k.extract()?;
-                    let val = py_in::py_value_to_value(&v)?;
+                    let val = py_in::py_query_parameter_to_value(&key, &v)?;
                     map.insert(key, val);
                 }
                 map

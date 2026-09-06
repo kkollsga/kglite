@@ -187,13 +187,13 @@ fn scalar_values_equal(a: &Value, b: &Value) -> bool {
         (Value::NodeRef(id), Value::Node(node)) | (Value::Node(node), Value::NodeRef(id)) => {
             *id == node.id
         }
-        (Value::Int64(i), Value::Float64(f)) => (*i as f64) == *f,
-        (Value::Float64(f), Value::Int64(i)) => *f == (*i as f64),
+        (Value::Int64(i), Value::Float64(f)) => cmp_i64_f64(*i, *f).is_eq(),
+        (Value::Float64(f), Value::Int64(i)) => cmp_i64_f64(*i, *f).is_eq(),
         // A Python int may arrive as Int64 but be stored as UniqueId.
         (Value::UniqueId(u), Value::Int64(i)) => *i >= 0 && *u as i64 == *i,
         (Value::Int64(i), Value::UniqueId(u)) => *i >= 0 && *i == *u as i64,
-        (Value::UniqueId(u), Value::Float64(f)) => f.fract() == 0.0 && *u as f64 == *f,
-        (Value::Float64(f), Value::UniqueId(u)) => f.fract() == 0.0 && *f == *u as f64,
+        (Value::UniqueId(u), Value::Float64(f)) => cmp_i64_f64(i64::from(*u), *f).is_eq(),
+        (Value::Float64(f), Value::UniqueId(u)) => cmp_i64_f64(i64::from(*u), *f).is_eq(),
         // Single-element JSON list compared to plain string (`["Oslo"]` = 'Oslo').
         // `a == b` above already answered plain byte equality.
         (Value::String(x), Value::String(y)) => str_values_equal(x, y),
@@ -243,13 +243,19 @@ pub fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
         (Value::String(a), Value::String(b)) => Some(a.cmp(b)),
         (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b)),
         (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b),
-        (Value::Int64(a), Value::Float64(b)) => (*a as f64).partial_cmp(b),
-        (Value::Float64(a), Value::Int64(b)) => a.partial_cmp(&(*b as f64)),
+        (Value::Int64(a), Value::Float64(b)) => (!b.is_nan()).then(|| cmp_i64_f64(*a, *b)),
+        (Value::Float64(a), Value::Int64(b)) => {
+            (!a.is_nan()).then(|| cmp_i64_f64(*b, *a).reverse())
+        }
         (Value::UniqueId(a), Value::UniqueId(b)) => Some(a.cmp(b)),
         (Value::UniqueId(u), Value::Int64(i)) => (*u as i64).partial_cmp(i),
         (Value::Int64(i), Value::UniqueId(u)) => i.partial_cmp(&(*u as i64)),
-        (Value::UniqueId(u), Value::Float64(f)) => (*u as f64).partial_cmp(f),
-        (Value::Float64(f), Value::UniqueId(u)) => f.partial_cmp(&(*u as f64)),
+        (Value::UniqueId(u), Value::Float64(f)) => {
+            (!f.is_nan()).then(|| cmp_i64_f64(i64::from(*u), *f))
+        }
+        (Value::Float64(f), Value::UniqueId(u)) => {
+            (!f.is_nan()).then(|| cmp_i64_f64(i64::from(*u), *f).reverse())
+        }
         (Value::DateTime(a), Value::DateTime(b)) => Some(a.cmp(b)),
         (Value::Boolean(a), Value::Boolean(b)) => Some(a.cmp(b)),
         (Value::DateTime(date), Value::String(s)) => {
@@ -1478,6 +1484,30 @@ mod tests {
         assert_eq!(
             compare_values(&Value::Float64(3.0), &Value::Int64(2)),
             Some(std::cmp::Ordering::Greater)
+        );
+    }
+
+    #[test]
+    fn test_compare_values_cross_type_numeric_is_exact_past_f64_integer_precision() {
+        let boundary = 1i64 << 53;
+        for (integer, float, expected) in [
+            (boundary, boundary as f64, std::cmp::Ordering::Equal),
+            (boundary + 1, boundary as f64, std::cmp::Ordering::Greater),
+            (-boundary, -(boundary as f64), std::cmp::Ordering::Equal),
+            (-boundary - 1, -(boundary as f64), std::cmp::Ordering::Less),
+        ] {
+            assert_eq!(
+                compare_values(&Value::Int64(integer), &Value::Float64(float)),
+                Some(expected)
+            );
+            assert_eq!(
+                compare_values(&Value::Float64(float), &Value::Int64(integer)),
+                Some(expected.reverse())
+            );
+        }
+        assert_eq!(
+            compare_values(&Value::Int64(0), &Value::Float64(f64::NAN)),
+            None
         );
     }
 

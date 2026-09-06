@@ -39,13 +39,10 @@
 //!
 //! ## The 2^53 residual
 //!
-//! `values_equal` compares `Int64` with `Float64` as `(i as f64) == f`, which
-//! is **not injective** past 2^53: `Int64(2^53 + 1)` equals
-//! `Float64(2^53 as f64)` even though the integers differ. Keys cannot
-//! express a non-injective relation, so any integer or integral float of
-//! magnitude beyond 2^53 is *also* pushed to the residual list and compared
-//! with `values_equal` on a key miss. Realistic lists never populate it, so
-//! the cost is one `is_empty()` check.
+//! Integral floats below 2^53 share an integer key. At and beyond 2^53, an
+//! `Int64` and its exactly equal `Float64` have different representation keys,
+//! so both also enter the residual list. A key miss then uses exact predicate
+//! equality without rounding adjacent integers together.
 //!
 //! ## Small lists stay linear
 //!
@@ -69,8 +66,8 @@ use std::sync::Arc;
 /// a two-element `IN` list is pure overhead.
 const LINEAR_MAX: usize = 8;
 
-/// `Int64` ↔ `Float64` equality (`(i as f64) == f`) stops being injective
-/// past this magnitude; such values fall back to `values_equal`.
+/// At this magnitude, integral floats use their representation key and exact
+/// cross-type hits are recovered from the residual list.
 const EXACT_INT_LIMIT: i64 = 1i64 << 53;
 
 /// A scalar membership key. Two values share a key exactly when
@@ -320,8 +317,8 @@ fn scalar_key(value: &Value) -> Option<ScalarKey> {
     }
 }
 
-/// True for integers big enough that `Int64` ↔ `Float64` equality is no
-/// longer injective, so a key alone cannot decide membership.
+/// True when exact cross-type equality may need the residual list because
+/// integer and floating representations use different keys.
 #[inline]
 fn beyond_exact_int_range(value: &Value) -> bool {
     match value {
@@ -422,17 +419,25 @@ mod tests {
     }
 
     #[test]
-    fn huge_integers_fall_back_to_values_equal() {
-        let big = EXACT_INT_LIMIT + 1;
-        let list = [Value::Int64(big), Value::Float64(EXACT_INT_LIMIT as f64)];
-        let probes = [
-            Value::Int64(big),
-            Value::Float64(big as f64),
-            Value::Int64(EXACT_INT_LIMIT),
-            Value::Float64(EXACT_INT_LIMIT as f64),
-        ];
-        assert_agrees(&list, &probes);
-        assert_agrees(&padded(&list), &probes);
+    fn boundary_membership_is_exact_on_both_sides_of_index_threshold() {
+        let boundary = EXACT_INT_LIMIT;
+        let adjacent = boundary + 1;
+        for list in [
+            vec![Value::Int64(adjacent)],
+            padded(&[Value::Int64(adjacent)]),
+        ] {
+            let set = MembershipSet::new(list);
+            assert!(set.matches(&Value::Int64(adjacent)));
+            assert!(!set.matches(&Value::Float64(boundary as f64)));
+        }
+        for list in [
+            vec![Value::Float64(boundary as f64)],
+            padded(&[Value::Float64(boundary as f64)]),
+        ] {
+            let set = MembershipSet::new(list);
+            assert!(set.matches(&Value::Int64(boundary)));
+            assert!(!set.matches(&Value::Int64(adjacent)));
+        }
     }
 
     #[test]

@@ -6366,7 +6366,10 @@ class KnowledgeGraph:
                 containers raise ``ValueError``; exceeding this depth raises
                 ``RecursionError``. Shared acyclic values are allowed. These
                 conversion rules also apply to Session, FrozenGraph and
-                Transaction query parameters.
+                Transaction query parameters. Integers must fit the signed
+                64-bit range; an out-of-range integer raises ``OverflowError``.
+                An unsupported object raises ``TypeError`` instead of becoming
+                NULL. Both errors identify the nested parameter path.
                 A parameter can supply a **value** or a **name**: labels and
                 relationship types accept ``$label`` / ``$(label)`` too
                 (``MATCH (n:$label)``, ``-[:$type]->``, ``CREATE (n:$label)``,

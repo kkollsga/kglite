@@ -20,7 +20,14 @@ pub fn value_to_f64(val: &Value) -> Option<f64> {
 pub fn to_integer(val: &Value) -> Value {
     match val {
         Value::Int64(_) => val.clone(),
-        Value::Float64(f) => Value::Int64(*f as i64),
+        Value::Float64(f) => {
+            const I64_EXCLUSIVE_UPPER: f64 = 9_223_372_036_854_775_808.0;
+            if f.is_finite() && *f >= i64::MIN as f64 && *f < I64_EXCLUSIVE_UPPER {
+                Value::Int64(f.trunc() as i64)
+            } else {
+                Value::Null
+            }
+        }
         Value::UniqueId(u) => Value::Int64(*u as i64),
         Value::String(s) => s.parse::<i64>().map(Value::Int64).unwrap_or(Value::Null),
         Value::Boolean(b) => Value::Int64(if *b { 1 } else { 0 }),
@@ -731,6 +738,24 @@ mod tests {
         assert_eq!(to_integer(&Value::Boolean(true)), Value::Int64(1));
         assert_eq!(to_integer(&Value::Boolean(false)), Value::Int64(0));
         assert_eq!(to_integer(&Value::Null), Value::Null);
+        let below_lower = f64::from_bits((i64::MIN as f64).to_bits() + 1);
+        for invalid in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            2f64.powi(63),
+            below_lower,
+        ] {
+            assert_eq!(to_integer(&Value::Float64(invalid)), Value::Null);
+        }
+        assert_eq!(
+            to_integer(&Value::Float64(i64::MIN as f64)),
+            Value::Int64(i64::MIN)
+        );
+        assert_eq!(
+            to_integer(&Value::Float64(f64::from_bits(2f64.powi(63).to_bits() - 1))),
+            Value::Int64(9_223_372_036_854_774_784)
+        );
     }
 
     #[test]

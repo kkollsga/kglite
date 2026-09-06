@@ -29,6 +29,10 @@ before upgrading.
 - Aware Python datetime inputs normalize to UTC consistently across scalar
   properties and nested query parameters; explicit date inputs keep their local
   calendar date.
+- Python query parameters reject integers outside the signed 64-bit range and
+  unsupported objects at any nesting depth instead of rounding or replacing
+  them with NULL. Mixed integer/float Cypher predicates compare exactly beyond
+  2^53, and `toInteger()` returns NULL for non-finite or out-of-range floats.
 
 - Endpoint values now resolve consistently in eager and lazy query results,
   nested containers and direct Python graph outputs, using the executing graph

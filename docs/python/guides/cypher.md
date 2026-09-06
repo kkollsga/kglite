@@ -93,6 +93,25 @@ graph.cypher(
 )
 ```
 
+Parameter lists, tuples, dictionaries and NumPy arrays convert recursively.
+Every integer must fit the signed 64-bit range; otherwise the call raises
+`OverflowError`. An object with no Cypher value representation raises
+`TypeError`. Both errors name the nested path, and a write is unchanged when
+parameter admission fails. These strict rules apply only to query parameters;
+declared DataFrame and blueprint ingestion retains its documented coercion and
+NULL policies.
+
+### Numeric boundaries
+
+Cypher compares mixed integers and floats by their exact numeric values, even
+past 2^53 where converting the integer to `float` would merge adjacent values.
+This applies to scans, indexed predicates, pattern properties and `IN`.
+Structural value identity remains type-sensitive for operations such as
+`DISTINCT` and grouping.
+
+`toInteger(float)` truncates a finite in-range value toward zero. NaN, either
+infinity, and values outside the signed 64-bit interval return NULL.
+
 ## Tuning and diagnostics
 
 Every query carries lightweight diagnostics, and you can profile,

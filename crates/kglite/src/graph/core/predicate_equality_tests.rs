@@ -239,3 +239,23 @@ fn node_reference_predicates_match_materialized_entity_slots() {
         .collect::<HashSet<_>>();
     assert_eq!(values.len(), 2);
 }
+
+#[test]
+fn mixed_numeric_predicates_are_exact_without_changing_structural_identity() {
+    let boundary = 1i64 << 53;
+    for (integer, float, expected) in [
+        (boundary, boundary as f64, Some(true)),
+        (boundary + 1, boundary as f64, Some(false)),
+        (-boundary, -(boundary as f64), Some(true)),
+        (-boundary - 1, -(boundary as f64), Some(false)),
+    ] {
+        let integer = Value::Int64(integer);
+        let float = Value::Float64(float);
+        assert_eq!(predicate_values_equal(&integer, &float), expected);
+        assert_eq!(predicate_values_equal(&float, &integer), expected);
+    }
+    let structurally_distinct = [Value::Int64(boundary), Value::Float64(boundary as f64)]
+        .into_iter()
+        .collect::<HashSet<_>>();
+    assert_eq!(structurally_distinct.len(), 2);
+}
