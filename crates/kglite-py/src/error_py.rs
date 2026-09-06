@@ -217,7 +217,7 @@ pyo3::create_exception!(
     kglite,
     LoadMemoryLimitError,
     KgError,
-    "A .kgl load was refused before decoding: its estimated memory exceeded max_load_mb / KGLITE_MAX_LOAD_MB. The file is valid."
+    "A .kgl load exceeded max_load_mb / KGLITE_MAX_LOAD_MB at the metadata precheck or the pre-publication legacy portable-normalization check. The file is valid."
 );
 
 // ── Argument validation ──────────────────────────────────────────────

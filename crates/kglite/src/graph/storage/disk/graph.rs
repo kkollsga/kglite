@@ -19,6 +19,7 @@ use petgraph::Direction;
 use std::borrow::Cow;
 use std::cell::UnsafeCell;
 use std::collections::{HashMap, HashSet};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use super::csr::{CsrEdge, DiskNodeSlot, EdgeEndpoints, PendingEdge, TOMBSTONE_EDGE};
@@ -204,6 +205,10 @@ pub struct DiskGraph {
     /// excludes their base-generation bundles instead of mutating the
     /// immutable snapshot in place.
     pub(super) removed_property_indexes: HashSet<(String, String)>,
+    /// Persisted typed/global indexes whose values predate legacy NodeRef
+    /// normalization. They stay masked until explicitly rebuilt.
+    pub(super) legacy_invalidated_property_indexes: HashSet<(String, String)>,
+    pub(super) legacy_invalidated_global_indexes: HashSet<String>,
     // ── Persistent cross-type global property indexes (lazy-loaded).
     //
     // Keyed by property name only. Built by `build_global_property_index(prop)`
@@ -1271,6 +1276,20 @@ impl DiskGraph {
         self.edge_properties.get(edge_idx)
     }
 
+    /// Load-admission lookup that surfaces malformed persisted properties.
+    pub(crate) fn edge_properties_at_checked(
+        &self,
+        edge_idx: u32,
+    ) -> io::Result<Option<Cow<'_, [(InternedKey, Value)]>>> {
+        self.edge_properties.get_checked(edge_idx)
+    }
+
+    /// A cheap proof for an unchanged columnar edge-property slot. `None`
+    /// means an overlay or uncommon value shape requires the normal decoder.
+    pub(crate) fn edge_property_base_node_ref_state(&self, edge_idx: u32) -> Option<bool> {
+        self.edge_properties.base_slot_contains_node_ref(edge_idx)
+    }
+
     /// Edge-centric sweep: scan `edge_endpoints` linearly, invoking `f` for
     /// every match. Return `false` from the callback to stop early.
     ///
@@ -1310,6 +1329,26 @@ impl DiskGraph {
             ) {
                 return;
             }
+        }
+    }
+
+    /// Load-time sweep over every live edge and at most one lazy property blob
+    /// at a time. The callback must not retain the borrowed slice.
+    pub(crate) fn scan_all_edge_properties_linear<F>(&self, mut f: F)
+    where
+        F: FnMut(EdgeIndex, InternedKey, &[(InternedKey, Value)]),
+    {
+        for edge_idx in 0..self.next_edge_idx as usize {
+            let endpoints = self.edge_endpoint(edge_idx);
+            if endpoints.source == TOMBSTONE_EDGE {
+                continue;
+            }
+            let properties = self.edge_properties_at(edge_idx as u32);
+            f(
+                EdgeIndex::new(edge_idx),
+                InternedKey::from_u64(endpoints.connection_type),
+                properties.as_deref().unwrap_or(&[]),
+            );
         }
     }
 
@@ -2093,6 +2132,8 @@ impl Clone for DiskGraph {
             has_tombstones: self.has_tombstones,
             property_indexes: std::sync::RwLock::new(HashMap::new()),
             removed_property_indexes: self.removed_property_indexes.clone(),
+            legacy_invalidated_property_indexes: self.legacy_invalidated_property_indexes.clone(),
+            legacy_invalidated_global_indexes: self.legacy_invalidated_global_indexes.clone(),
             segment_manifest: self.segment_manifest.clone(),
             sealed_nodes_bound: self.sealed_nodes_bound,
         }

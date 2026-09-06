@@ -273,6 +273,8 @@ impl DiskGraph {
             has_tombstones: false,
             property_indexes: std::sync::RwLock::new(HashMap::new()),
             removed_property_indexes: HashSet::new(),
+            legacy_invalidated_property_indexes: HashSet::new(),
+            legacy_invalidated_global_indexes: HashSet::new(),
             global_indexes: std::sync::RwLock::new(HashMap::new()),
             segment_manifest: super::segment_summary::SegmentManifest::new(),
             // Freshly-created graph has no sealed segments yet; the
@@ -469,6 +471,8 @@ impl DiskGraph {
             global_indexes: std::sync::RwLock::new(HashMap::new()),
             property_indexes: std::sync::RwLock::new(HashMap::new()),
             removed_property_indexes: HashSet::new(),
+            legacy_invalidated_property_indexes: HashSet::new(),
+            legacy_invalidated_global_indexes: HashSet::new(),
             segment_manifest: super::segment_summary::SegmentManifest::new(),
             // Fresh build from a petgraph: no sealed segments yet.
             // First save seals the whole graph into seg_000.

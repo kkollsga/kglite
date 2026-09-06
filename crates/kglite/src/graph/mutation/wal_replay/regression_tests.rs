@@ -55,6 +55,80 @@ fn edge(source: i64, target: i64) -> MutationOp {
 fn apply(graph: &mut DirGraph, ops: Vec<MutationOp>) -> Result<u64, String> {
     apply_frames(graph, &[WalFrame { lsn: 1, ops }], 0)
 }
+
+#[test]
+fn uncheckpointed_reference_payloads_are_refused_before_caller_or_cdc_mutation() {
+    let nested = Value::Map(
+        [("items", Value::List(vec![Value::NodeRef(0)]))]
+            .into_iter()
+            .collect(),
+    );
+    let operations = vec![
+        node(Value::Int64(2), Value::NodeRef(0), &[]),
+        node(
+            Value::Int64(2),
+            Value::String("two".into()),
+            &[("p", nested.clone())],
+        ),
+        MutationOp::UpsertEdge {
+            conn_type: "LINK".into(),
+            src_type: "Item".into(),
+            src_id: Value::Int64(1),
+            tgt_type: "Item".into(),
+            tgt_id: Value::Int64(1),
+            properties: vec![("p".into(), nested.clone())],
+        },
+        MutationOp::ReplaceEdgeGroup {
+            conn_type: "LINK".into(),
+            src_type: "Item".into(),
+            src_id: Value::Int64(1),
+            tgt_type: "Item".into(),
+            tgt_id: Value::Int64(1),
+            edges: vec![vec![("p".into(), nested)]],
+        },
+    ];
+    for operation in operations {
+        let mut graph = DirGraph::new();
+        apply(&mut graph, vec![row(1, 10)]).unwrap();
+        graph.graph.wrap_for_capture();
+        let idx = index(&mut graph, 1);
+        graph
+            .graph
+            .set_node_title(idx, Value::String("pending CDC".into()));
+        let cdc_len = graph.graph.recording_mut().unwrap().ops_len();
+        let before = stored(&graph);
+        let version = graph.version;
+        let error = apply_frames(
+            &mut graph,
+            &[WalFrame {
+                lsn: 7,
+                ops: vec![operation],
+            }],
+            0,
+        )
+        .unwrap_err();
+        assert!(error.contains("WAL frame 7 contains a legacy endpoint reference"));
+        assert_eq!(stored(&graph), before);
+        assert_eq!(graph.version, version);
+        assert_eq!(graph.graph.recording_mut().unwrap().ops_len(), cdc_len);
+    }
+}
+
+#[test]
+fn checkpointed_reference_payload_is_ignored_by_the_replay_gate() {
+    let mut graph = DirGraph::new();
+    let lsn = apply_frames(
+        &mut graph,
+        &[WalFrame {
+            lsn: 7,
+            ops: vec![node(Value::Int64(1), Value::NodeRef(0), &[])],
+        }],
+        7,
+    )
+    .unwrap();
+    assert_eq!(lsn, 7);
+    assert_eq!(graph.graph.node_count(), 0);
+}
 fn index(graph: &mut DirGraph, id: i64) -> petgraph::graph::NodeIndex {
     graph.lookup_by_id("Item", &Value::Int64(id)).unwrap()
 }

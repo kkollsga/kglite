@@ -233,7 +233,9 @@ fn load_options_from_args(
 }
 
 /// Estimate what loading the `.kgl` at `path` would cost, reading only its
-/// metadata head — no section is decompressed.
+/// metadata head — no section is decompressed. A legacy portable file's
+/// stored-reference normalization overlay can be known only after decoding and
+/// is not included.
 ///
 /// Returns a dict of named terms rather than one number, because they have
 /// different accuracies and different remedies. See the type stub for the
@@ -275,10 +277,11 @@ fn estimate_load_memory(py: Python<'_>, path: String) -> PyResult<Py<PyAny>> {
 /// process default in charge, which is off unless `KGLITE_DEFER_INDEX_REBUILD`
 /// says otherwise.
 ///
-/// `max_load_mb` is a ceiling **in megabytes** — not bytes: refuse the load,
-/// before decoding anything, if `estimate_load_memory` puts its peak above it.
-/// Raises `kglite.LoadMemoryLimitError` naming the estimate, the ceiling and
-/// the ways out. `KGLITE_MAX_LOAD_MB` sets a process-wide default this
+/// `max_load_mb` is a ceiling **in megabytes** — not bytes. Metadata-known
+/// terms refuse before decoding. A legacy portable stored-reference
+/// normalization term is checked after decoding but before the private graph
+/// is changed or published. Raises `kglite.LoadMemoryLimitError` naming the
+/// estimate and ceiling. `KGLITE_MAX_LOAD_MB` sets a process-wide default this
 /// outranks.
 #[pyfunction]
 #[pyo3(signature = (path, *, storage=None, defer_index_rebuild=None, max_load_mb=None))]

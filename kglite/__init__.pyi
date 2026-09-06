@@ -106,13 +106,15 @@ class FileIoError(KgError):
     """Generic I/O failure (permission denied, mid-read EOF, mmap failure)."""
 
 class LoadMemoryLimitError(KgError):
-    """A ``.kgl`` load was refused before decoding: its estimated memory exceeded
-    the ceiling set by ``max_load_mb`` or ``KGLITE_MAX_LOAD_MB``.
+    """A ``.kgl`` load exceeded the estimated-memory ceiling set by
+    ``max_load_mb`` or ``KGLITE_MAX_LOAD_MB``.
 
-    The file is valid and nothing was decompressed — this is a statement about
-    the process's budget, not about the data, which is why it is not
-    :class:`FileFormatError`. The message names the estimate, the ceiling, the
-    terms it is made of, and the ways out. See :func:`estimate_load_memory`.
+    Metadata-known terms refuse before decoding. A legacy portable file
+    containing stored endpoint references can instead refuse after decoding its
+    additional normalization overlay, but before the private graph is changed
+    or published. The file is valid — this is a statement about the process's
+    budget, not the data — and the message identifies the estimate and
+    ceiling. See :func:`estimate_load_memory`.
     """
 
 class ArgumentError(KgError):
@@ -679,8 +681,10 @@ def estimate_load_memory(path: str) -> dict[str, int]:
 
     Reads only the metadata block at the head of the file — 0.01%-0.35% of it on
     the measured corpora — so the answer costs one short read and decompresses
-    nothing. This is the same estimate ``max_load_mb`` refuses on, so a caller
-    can decide for itself instead of setting a ceiling.
+    nothing. This is the metadata estimate ``max_load_mb`` checks first. A
+    legacy portable file containing stored endpoint references can add a
+    conservative normalization-overlay term only after those values are
+    decoded; that term is not included here.
 
     Args:
         path: Path to a portable ``.kgl`` file. A disk-mode graph *directory*
@@ -746,10 +750,13 @@ def load(
             default in charge — off, unless ``KGLITE_DEFER_INDEX_REBUILD`` is
             set; ``True``/``False`` decide for this call.
         max_load_mb: Refuse the load if it is estimated to peak above this many
-            **megabytes** — not bytes. Checked from the file's metadata head,
-            before anything is decompressed. ``None`` (default) leaves the
-            process default in charge — no ceiling, unless
-            ``KGLITE_MAX_LOAD_MB`` sets one, which this outranks.
+            **megabytes** — not bytes. Metadata-known terms are checked before
+            anything is decompressed. A legacy portable stored-reference
+            normalization term is checked after decoding but before graph
+            publication.
+            ``None`` (default) leaves the process default in charge — no
+            ceiling, unless ``KGLITE_MAX_LOAD_MB`` sets one, which this
+            outranks.
 
     Returns:
         A new KnowledgeGraph with the loaded data.
@@ -758,7 +765,8 @@ def load(
         FileError: ``path`` does not exist.
         FileFormatError: ``path`` is not a readable ``.kgl``.
         LoadMemoryLimitError: The estimated load exceeds ``max_load_mb`` (or
-            ``KGLITE_MAX_LOAD_MB``). Nothing was decompressed.
+            ``KGLITE_MAX_LOAD_MB``), either at the metadata precheck or at the
+            pre-publication legacy normalization check.
         ArgumentError: ``storage`` is an unknown mode, or ``"disk"``.
 
     **``storage`` is not a memory lever.** For a loaded ``.kgl``, mapped and

@@ -48,6 +48,7 @@ pub(super) fn load_portable_optional_sections(
     dir_graph: &mut DirGraph,
     sections: &mut SectionCursor<'_>,
     plan: &PortableSectionPlan,
+    normalization_effects: &legacy_references::NormalizationEffects,
 ) -> io::Result<()> {
     if plan.embeddings > 0 {
         if core_version < EMBED_PROVENANCE_MIN_VERSION {
@@ -85,10 +86,11 @@ pub(super) fn load_portable_optional_sections(
     if plan.text_index > 0 {
         // Same split as the vector section above: framing failures are file
         // damage and propagate; the payload itself is a rebuildable cache and
-        // an unreadable one is skipped silently (see `decode_text_indexes`).
+        // an unreadable one is skipped silently (see
+        // `decode_text_indexes_after_normalization`).
         let compressed = sections.take(plan.text_index, TEXT_INDEX_SECTION)?;
         if let Ok(raw) = zstd_decompress(compressed) {
-            decode_text_indexes(&raw, dir_graph);
+            decode_text_indexes_after_normalization(&raw, dir_graph, normalization_effects);
         }
     }
     Ok(())

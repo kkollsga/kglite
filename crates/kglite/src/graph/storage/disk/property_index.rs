@@ -178,6 +178,14 @@ pub fn global_file_paths(data_dir: &Path, property: &str) -> (PathBuf, PathBuf, 
     paths_for_stem(data_dir, &digest_stem(V2_GLOBAL_PREFIX, identity))
 }
 
+pub(crate) fn global_removal_paths(data_dir: &Path, property: &str) -> Vec<PathBuf> {
+    let current = global_file_paths(data_dir, property);
+    let legacy = legacy_global_file_paths(data_dir, property);
+    vec![
+        current.0, current.1, current.2, current.3, legacy.0, legacy.1, legacy.2, legacy.3,
+    ]
+}
+
 fn legacy_global_file_paths(
     data_dir: &Path,
     property: &str,

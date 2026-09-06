@@ -208,6 +208,16 @@ Durable adoption also refuses duplicate exact `(primary type, id)` identities
 before taking ownership or changing the WAL. This admission check does not
 change the existing Cypher CREATE identity policy.
 
+A surviving uncheckpointed frame that stores a raw legacy endpoint reference
+is also refused before replay, graph mutation, torn-tail repair, or WAL
+truncation. Unlike a complete checkpoint, a WAL frame has no originating graph
+view from which a physical slot can be resolved safely. Frames at or below the
+checkpoint LSN are already represented by the complete snapshot and are
+skipped as residue. Move the refused sidecar aside only when deliberately
+discarding those uncheckpointed commits; otherwise recover with a compatible
+older build and write a clean checkpoint first. KGLite does not guess the
+former target.
+
 ### Crash recovery in practice
 
 ```python

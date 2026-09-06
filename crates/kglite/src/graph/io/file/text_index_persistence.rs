@@ -167,13 +167,31 @@ pub(super) fn encode_text_indexes(graph: &DirGraph) -> io::Result<Option<Vec<u8>
     Ok(Some(payload))
 }
 
-/// Decode the text-index section and attach each index to the loaded graph.
+#[cfg(test)]
+fn decode_text_indexes(payload: &[u8], graph: &mut DirGraph) {
+    decode_text_indexes_impl(payload, graph, None);
+}
+
+/// Decode the text-index section and attach indexes whose source fields were
+/// unchanged by legacy-reference normalization.
 ///
 /// Best-effort: an unrecognised magic, an unknown format version, a codec
-/// error, a payload whose corpus does not describe a coherent index, or a type
-/// this file no longer carries all result in that index being silently
-/// skipped — never a load failure.
-pub(super) fn decode_text_indexes(payload: &[u8], graph: &mut DirGraph) {
+/// error, a payload whose corpus does not describe a coherent index, a type
+/// this file no longer carries, or a normalized source field all cause that
+/// index to be skipped — never a load failure.
+pub(super) fn decode_text_indexes_after_normalization(
+    payload: &[u8],
+    graph: &mut DirGraph,
+    effects: &super::legacy_references::NormalizationEffects,
+) {
+    decode_text_indexes_impl(payload, graph, Some(effects));
+}
+
+fn decode_text_indexes_impl(
+    payload: &[u8],
+    graph: &mut DirGraph,
+    effects: Option<&super::legacy_references::NormalizationEffects>,
+) {
     if payload.len() < 12 || &payload[..8] != TEXT_INDEX_MAGIC {
         return;
     }
@@ -188,6 +206,11 @@ pub(super) fn decode_text_indexes(payload: &[u8], graph: &mut DirGraph) {
             Err(_) => return,
         };
     for entry in entries {
+        if effects.is_some_and(|effects| {
+            effects.invalidates_text_index(&entry.node_type, &entry.property, &entry.resolved_field)
+        }) {
+            continue;
+        }
         // A dirty slot at or above the watermark is not a state this tracker
         // can produce (`note_changed` ignores those — the gap already walks
         // them), and a refresh would then walk it twice.

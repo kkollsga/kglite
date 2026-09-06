@@ -72,10 +72,14 @@ but serve different roles in the executor:
 
   Low-level Rust `GraphWrite` mutators remain a raw escape hatch. A caller that
   supplies `Value::NodeRef` there must keep it in its originating view and must
-  normalize it before persistence or transfer. New-write admission does not
-  rewrite an existing checkpoint that already contains raw references; such a
-  legacy cell retains its physical-slot behavior when loaded. Rebuild it from
-  source or explicitly rewrite it before deletion, slot reuse, or compaction.
+  normalize it before persistence or transfer. When a complete portable or
+  disk checkpoint contains a recoverable raw reference from an older build,
+  loading resolves it against the unchanged complete snapshot before
+  constraints, indexes, or the returned graph can observe it. The source file
+  or disk generation stays unchanged; call `save()` explicitly to persist the
+  ordinary value. This can recover only the title the stored physical slot
+  names now. It cannot reconstruct an intended target already changed by an
+  older deletion, slot reuse, load, or compaction.
   Raw executor and graph-data consumers use `api::session::resolve_noderefs`
   or the borrowed single-value `resolve_noderef_value` helper themselves.
 - **`Node(Box<NodeValue>)`** — a materialised graph value with the
@@ -116,6 +120,24 @@ Before this admission rule, `a.owner` stored a physical slot and the last line
 returned `"Renamed"`. Code that intended a changing relationship should query
 the relationship itself rather than store `startNode()` or `endNode()` in a
 property.
+
+To migrate a checkpoint created by an affected older build, load it before any
+mutation that can change physical slots, check the semantic values, and save a
+new checkpoint explicitly:
+
+```python
+legacy = kglite.load("legacy.kgl")
+owner = legacy.cypher("MATCH (a:Item {id: 1}) RETURN a.owner").scalar()
+assert owner == "Beta"  # validate against your source-of-truth expectation
+
+legacy.cypher("MATCH (b:Item {id: 2}) SET b.title = 'Renamed'")
+assert legacy.cypher("MATCH (a:Item {id: 1}) RETURN a.owner").scalar() == "Beta"
+legacy.save("normalized.kgl")
+```
+
+The explicit assertion matters: if an older graph had already retargeted the
+slot, loading cannot infer the former identity. Restore that property from the
+application's source of truth before saving.
 
 ## The projection flow
 

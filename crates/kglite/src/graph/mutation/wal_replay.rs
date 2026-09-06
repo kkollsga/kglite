@@ -12,7 +12,7 @@
 
 use crate::datatypes::Value;
 use crate::graph::schema::DirGraph;
-use crate::graph::wal::WalFrame;
+use crate::graph::wal::{MutationOp, WalFrame};
 
 #[path = "wal_replay/install.rs"]
 mod install;
@@ -20,6 +20,24 @@ mod install;
 mod plan;
 #[path = "wal_replay/validate.rs"]
 mod validate;
+
+/// Constraint state for a complete loaded snapshot, captured independently of
+/// derived indexes that have not been rebuilt yet.
+pub(crate) struct CompleteConstraintState(validate::ConstraintState);
+
+pub(crate) fn capture_complete_constraints(graph: &DirGraph) -> CompleteConstraintState {
+    CompleteConstraintState(validate::ConstraintState::capture_all(graph))
+}
+
+pub(crate) fn validate_complete_constraint_successor(
+    before: &CompleteConstraintState,
+    graph: &DirGraph,
+) -> Result<(), String> {
+    before.0.validate_successor_for(
+        &validate::ConstraintState::capture_all(graph),
+        "legacy endpoint-reference normalization",
+    )
+}
 
 /// Fold every frame with `lsn > after_lsn`, publishing only a fully validated
 /// recovered state. Returns the highest eligible LSN, or `after_lsn`.
@@ -42,6 +60,7 @@ pub(crate) fn prepare_replay(
     frames: &[WalFrame],
     after_lsn: u64,
 ) -> Result<(Option<DirGraph>, u64), String> {
+    refuse_ambiguous_legacy_references(frames, after_lsn)?;
     let plan = plan::ReplayPlan::fold(frames, after_lsn);
     if plan.is_empty() {
         return Ok((None, plan.max_lsn));
@@ -62,6 +81,50 @@ pub(crate) fn prepare_replay(
     }
     working.bump_version();
     Ok((Some(working), plan.max_lsn))
+}
+
+/// A property NodeRef in an old WAL records only a physical u32 slot, without
+/// the checkpoint's slot-to-identity map. Refuse it before folding, cloning,
+/// replay mutation, or opening/truncating the sidecar. Identity fields and
+/// relationship endpoints remain logical WAL keys and are not stored payloads.
+fn refuse_ambiguous_legacy_references(frames: &[WalFrame], after_lsn: u64) -> Result<(), String> {
+    if let Some(frame) = frames
+        .iter()
+        .filter(|frame| frame.lsn > after_lsn)
+        .find(|frame| frame.ops.iter().any(mutation_op_has_legacy_reference))
+    {
+        return Err(format!(
+            "WAL frame {} contains a legacy endpoint reference in stored node or relationship state. Its physical node slot has no originating identity map, so replay is refused before graph mutation or WAL repair",
+            frame.lsn
+        ));
+    }
+    Ok(())
+}
+
+fn mutation_op_has_legacy_reference(op: &MutationOp) -> bool {
+    let values_contain_reference = |values: &[(String, Value)]| {
+        values
+            .iter()
+            .any(|(_, value)| crate::graph::session::noderefs::property_value_needs_snapshot(value))
+    };
+    match op {
+        MutationOp::UpsertNode {
+            title, properties, ..
+        }
+        | MutationOp::ReplaceNodeState {
+            title, properties, ..
+        } => {
+            crate::graph::session::noderefs::property_value_needs_snapshot(title)
+                || values_contain_reference(properties)
+        }
+        MutationOp::UpsertEdge { properties, .. } => values_contain_reference(properties),
+        MutationOp::ReplaceEdgeGroup { edges, .. } => edges
+            .iter()
+            .any(|properties| values_contain_reference(properties)),
+        MutationOp::RemoveNode { .. }
+        | MutationOp::RemoveEdge { .. }
+        | MutationOp::SetNodeLabels { .. } => false,
+    }
 }
 
 fn declared_type_name<'a>(values: impl Iterator<Item = &'a Value>) -> String {

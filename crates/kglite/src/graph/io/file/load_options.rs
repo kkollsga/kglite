@@ -18,9 +18,10 @@
 //! same results). The price is paid elsewhere and is documented on the field.
 //!
 //! **`max_load_bytes` is neither** — it is a refusal, not a size. It compares
-//! the load's estimated peak footprint against a ceiling *before* the first
-//! section is decompressed, and fails the load rather than letting a process
-//! that cannot afford the graph find that out from the OOM killer. See
+//! the metadata-known peak footprint against a ceiling *before* the first
+//! section is decompressed. A legacy file containing stored endpoint references
+//! needs one additional conservative check after those values are decoded and
+//! resolved, but still before the private load workspace is published. See
 //! [`estimate_load_memory`](super::estimate_load_memory) for what the estimate
 //! models and how accurate it is.
 //!
@@ -119,12 +120,12 @@ pub struct LoadOptions {
     /// physical footprint. `None` (the default, unless `KGLITE_MAX_LOAD_MB`
     /// says otherwise) is no ceiling — today's behaviour.
     ///
-    /// Checked from the metadata head, *before* a single section is
-    /// decompressed, so a refused load costs one short read. The refusal is
-    /// `io::ErrorKind::OutOfMemory` — a statement about this process's budget,
-    /// not about the file, which is why it is not the corrupt-file kind — and
-    /// carries the estimate, the ceiling, the term breakdown, and the two ways
-    /// out (raise the ceiling, or defer the index rebuild).
+    /// The metadata-known terms are checked *before* a single section is
+    /// decompressed. A legacy file containing stored endpoint references needs
+    /// a second conservative normalization-overlay check after those values
+    /// are decoded, but before the private graph is changed or published. Both
+    /// refusals use `io::ErrorKind::OutOfMemory` — a statement about this
+    /// process's budget, not about the file — and name the estimate and ceiling.
     ///
     /// **What it compares is an estimate, not a measurement**, and the estimate
     /// is deliberately conservative: it read 0.56×–1.30× of measured settled

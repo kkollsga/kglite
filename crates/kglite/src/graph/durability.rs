@@ -386,6 +386,47 @@ fn unreplayed(frames: &[WalFrame], checkpoint_lsn: u64) -> bool {
     frames.iter().any(|f| f.lsn > checkpoint_lsn)
 }
 
+#[cfg(test)]
+mod legacy_reference_refusal_tests {
+    use super::*;
+    use crate::datatypes::Value;
+    use crate::graph::storage::GraphRead;
+    use crate::graph::wal::{MutationOp, SyncMode};
+
+    #[test]
+    fn refusal_preserves_wal_bytes_and_caller_before_tail_repair_or_wrap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let checkpoint = tmp.path().join("legacy.kgl");
+        let sidecar = wal_path(&checkpoint);
+        let frame = WalFrame {
+            lsn: 1,
+            ops: vec![MutationOp::UpsertNode {
+                node_type: "Item".into(),
+                id: Value::Int64(1),
+                title: Value::String("one".into()),
+                properties: vec![("endpoint".into(), Value::NodeRef(7))],
+            }],
+        };
+        let mut wal = Wal::open(sidecar.clone(), SyncMode::PageCache).unwrap();
+        wal.append(&frame).unwrap();
+        wal.sync().unwrap();
+        drop(wal);
+        let bytes = std::fs::read(&sidecar).unwrap();
+
+        let mut graph = Arc::new(DirGraph::new());
+        let held = Arc::clone(&graph);
+        let error = open_log(&mut graph, &checkpoint, DurabilityLevel::Full).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("WAL frame 1 contains a legacy endpoint reference"));
+        assert_eq!(graph.version, 0);
+        assert_eq!(graph.graph.node_count(), 0);
+        assert_eq!(held.graph.node_count(), 0);
+        assert!(!graph.graph.is_recording());
+        assert_eq!(std::fs::read(&sidecar).unwrap(), bytes);
+    }
+}
+
 /// The `Recording(Forked)` composition — a durable owner opened while a lazy
 /// view is outstanding.
 ///

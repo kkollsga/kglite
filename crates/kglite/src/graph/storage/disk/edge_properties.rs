@@ -99,18 +99,132 @@ fn decode_props(
     codec: crate::serde_codec::CodecVersion,
     bytes: &[u8],
 ) -> Option<Vec<(InternedKey, Value)>> {
+    decode_props_checked(codec, bytes).ok()
+}
+
+fn decode_props_checked(
+    codec: crate::serde_codec::CodecVersion,
+    bytes: &[u8],
+) -> io::Result<Vec<(InternedKey, Value)>> {
     let raw: Vec<(u64, Value)> = crate::serde_codec::decode_exact_with(
         codec,
         bytes,
         bytes.len() as u64,
         crate::serde_codec::DecodeLimits::new(bytes.len() as u64, bytes.len() as u64),
     )
-    .ok()?;
-    Some(
-        raw.into_iter()
-            .map(|(k, v)| (InternedKey::from_u64(k), v))
-            .collect(),
-    )
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    Ok(raw
+        .into_iter()
+        .map(|(k, v)| (InternedKey::from_u64(k), v))
+        .collect())
+}
+
+fn read_varint_bounded(bytes: &mut &[u8], max_bytes: usize, last_max: u8) -> Option<u64> {
+    let mut value = 0u64;
+    for index in 0..max_bytes {
+        let (&byte, rest) = bytes.split_first()?;
+        *bytes = rest;
+        if index + 1 == max_bytes && byte > last_max {
+            return None;
+        }
+        let shift = u32::try_from(index.checked_mul(7)?).ok()?;
+        value |= u64::from(byte & 0x7f).checked_shl(shift)?;
+        if byte & 0x80 == 0 {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn read_varint(bytes: &mut &[u8]) -> Option<u64> {
+    read_varint_bounded(bytes, 10, 1)
+}
+
+fn read_varint_u32(bytes: &mut &[u8]) -> Option<u32> {
+    u32::try_from(read_varint_bounded(bytes, 5, 15)?).ok()
+}
+
+fn take_bytes<'a>(bytes: &mut &'a [u8], len: usize) -> Option<&'a [u8]> {
+    let (taken, rest) = bytes.split_at_checked(len)?;
+    *bytes = rest;
+    Some(taken)
+}
+
+/// Parse the common Postcard `Value` shapes without allocating. Unsupported
+/// graph-entity/date shapes return `None` so the caller uses the full decoder.
+fn probe_value_node_ref(bytes: &mut &[u8], depth: usize) -> Option<bool> {
+    if depth > 128 {
+        return None;
+    }
+    match read_varint_u32(bytes)? {
+        0 => {
+            read_varint_u32(bytes)?;
+            Some(false)
+        }
+        1 => {
+            read_varint(bytes)?;
+            Some(false)
+        }
+        2 => {
+            take_bytes(bytes, 8)?;
+            Some(false)
+        }
+        3 => {
+            let len = usize::try_from(read_varint(bytes)?).ok()?;
+            std::str::from_utf8(take_bytes(bytes, len)?).ok()?;
+            Some(false)
+        }
+        4 => {
+            if !matches!(take_bytes(bytes, 1)?, [0 | 1]) {
+                return None;
+            }
+            Some(false)
+        }
+        6 => {
+            take_bytes(bytes, 16)?;
+            Some(false)
+        }
+        7 => Some(false),
+        8 => {
+            read_varint_u32(bytes)?;
+            Some(true)
+        }
+        9 => {
+            read_varint_u32(bytes)?;
+            read_varint_u32(bytes)?;
+            read_varint(bytes)?;
+            Some(false)
+        }
+        13 => {
+            let len = usize::try_from(read_varint(bytes)?).ok()?;
+            let mut found = false;
+            for _ in 0..len {
+                found |= probe_value_node_ref(bytes, depth + 1)?;
+            }
+            Some(found)
+        }
+        14 => {
+            let len = usize::try_from(read_varint(bytes)?).ok()?;
+            let mut found = false;
+            for _ in 0..len {
+                let key_len = usize::try_from(read_varint(bytes)?).ok()?;
+                std::str::from_utf8(take_bytes(bytes, key_len)?).ok()?;
+                found |= probe_value_node_ref(bytes, depth + 1)?;
+            }
+            Some(found)
+        }
+        _ => None,
+    }
+}
+
+fn probe_properties_node_ref(mut bytes: &[u8]) -> Option<bool> {
+    let len = usize::try_from(read_varint(&mut bytes)?).ok()?;
+    let mut found = false;
+    for _ in 0..len {
+        read_varint(&mut bytes)?;
+        found |= probe_value_node_ref(&mut bytes, 0)?;
+    }
+    bytes.is_empty().then_some(found)
 }
 
 /// `path` with a `.tmp` suffix — the staging name used when a save has to
@@ -171,6 +285,45 @@ impl EdgePropertyStore {
         } else {
             Some(Cow::Owned(decoded))
         }
+    }
+
+    /// Lookup used while admitting a complete disk snapshot. Unlike ordinary
+    /// query lookup, malformed persisted bytes are a load error rather than an
+    /// absent property row.
+    pub(crate) fn get_checked(
+        &self,
+        edge_idx: u32,
+    ) -> io::Result<Option<Cow<'_, [(InternedKey, Value)]>>> {
+        if let Some(entry) = self.overlay.get(&edge_idx) {
+            return Ok(entry
+                .as_ref()
+                .map(|values| Cow::Borrowed(values.as_slice())));
+        }
+        let Some(base) = self.base.as_ref() else {
+            return Ok(None);
+        };
+        let Some(bytes) = base.slot(edge_idx) else {
+            return Ok(None);
+        };
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        let decoded = decode_props_checked(base.codec, bytes)?;
+        Ok((!decoded.is_empty()).then_some(Cow::Owned(decoded)))
+    }
+
+    /// Prove whether an unchanged columnar slot contains a `NodeRef` without
+    /// allocating decoded strings and containers. Overlay and uncommon value
+    /// shapes return `None` and must use [`Self::get`].
+    pub(crate) fn base_slot_contains_node_ref(&self, edge_idx: u32) -> Option<bool> {
+        if self.overlay.contains_key(&edge_idx) {
+            return None;
+        }
+        let bytes = self.base.as_ref()?.slot(edge_idx)?;
+        if bytes.is_empty() {
+            return Some(false);
+        }
+        probe_properties_node_ref(bytes)
     }
 
     /// Replace an edge's properties in the overlay.
@@ -548,12 +701,216 @@ impl EdgePropertyWriter {
 #[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
-    use crate::datatypes::values::Value;
+    use crate::datatypes::values::{NodeValue, PathValue, RelValue, Value};
     use crate::graph::schema::StringInterner;
+    use crate::graph::session::noderefs::property_value_needs_snapshot;
+    use chrono::NaiveDate;
     use tempfile::TempDir;
 
     fn k(s: &str, interner: &mut StringInterner) -> InternedKey {
         interner.get_or_intern(s)
+    }
+
+    fn canonical_reference_state(bytes: &[u8]) -> Option<bool> {
+        decode_props(crate::serde_codec::CURRENT_CODEC, bytes).map(|properties| {
+            properties
+                .iter()
+                .any(|(_, value)| property_value_needs_snapshot(value))
+        })
+    }
+
+    fn sample_node() -> NodeValue {
+        NodeValue {
+            id: 7,
+            labels: vec!["Item".into()],
+            properties: [("endpoint", Value::NodeRef(3))].into_iter().collect(),
+        }
+    }
+
+    fn sample_relationship() -> RelValue {
+        RelValue {
+            id: 9,
+            start_id: 7,
+            end_id: 8,
+            rel_type: "LINKS".into(),
+            properties: [("endpoint", Value::NodeRef(4))].into_iter().collect(),
+        }
+    }
+
+    fn assert_encoded_probe(value: Value, supported: bool) {
+        let key = InternedKey::from_u64(1);
+        let mut bytes = Vec::new();
+        encode_props_into(&[(key, value)], &mut bytes).unwrap();
+        let canonical = canonical_reference_state(&bytes).unwrap();
+        let probed = probe_properties_node_ref(&bytes);
+        if supported {
+            assert_eq!(probed, Some(canonical));
+        } else {
+            assert_eq!(probed, None);
+        }
+    }
+
+    #[test]
+    fn postcard_reference_probe_matches_canonical_value_corpus() {
+        let date = NaiveDate::from_ymd_opt(2026, 9, 7).unwrap();
+        let node = sample_node();
+        let relationship = sample_relationship();
+        for (value, supported) in [
+            (Value::UniqueId(u32::MAX), true),
+            (Value::Int64(i64::MIN), true),
+            (Value::Float64(1.25), true),
+            (Value::String("ordinary".into()), true),
+            (Value::Boolean(true), true),
+            (Value::DateTime(date), false),
+            (Value::Point { lat: 1.0, lon: 2.0 }, true),
+            (Value::Null, true),
+            (Value::NodeRef(u32::MAX), true),
+            (
+                Value::Duration {
+                    months: i32::MIN,
+                    days: i32::MAX,
+                    seconds: i64::MIN,
+                },
+                true,
+            ),
+            (Value::Node(Box::new(node.clone())), false),
+            (Value::Relationship(Box::new(relationship.clone())), false),
+            (
+                Value::Path(Box::new(PathValue {
+                    nodes: vec![node],
+                    rels: vec![relationship],
+                })),
+                false,
+            ),
+            (
+                Value::List(vec![Value::String("ordinary".into()), Value::NodeRef(5)]),
+                true,
+            ),
+            (
+                Value::Map(
+                    [
+                        ("alpha", Value::Int64(1)),
+                        ("endpoint", Value::List(vec![Value::NodeRef(6)])),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                true,
+            ),
+            (
+                Value::Timestamp(date.and_hms_opt(12, 34, 56).unwrap()),
+                false,
+            ),
+        ] {
+            assert_encoded_probe(value, supported);
+        }
+    }
+
+    #[test]
+    fn postcard_reference_probe_matches_multi_property_and_depth_boundaries() {
+        let properties = [
+            (InternedKey::from_u64(1), Value::String("first".into())),
+            (
+                InternedKey::from_u64(u64::MAX),
+                Value::Map([("nested", Value::NodeRef(7))].into_iter().collect()),
+            ),
+            (InternedKey::from_u64(3), Value::Boolean(false)),
+        ];
+        let mut bytes = Vec::new();
+        encode_props_into(&properties, &mut bytes).unwrap();
+        assert_eq!(canonical_reference_state(&bytes), Some(true));
+        assert_eq!(probe_properties_node_ref(&bytes), Some(true));
+
+        let mut deep = Value::NodeRef(8);
+        for _ in 0..130 {
+            deep = Value::List(vec![deep]);
+        }
+        bytes.clear();
+        encode_props_into(&[(InternedKey::from_u64(1), deep)], &mut bytes).unwrap();
+        assert_eq!(canonical_reference_state(&bytes), Some(true));
+        assert_eq!(probe_properties_node_ref(&bytes), None);
+    }
+
+    #[test]
+    fn postcard_reference_probe_falls_back_for_malformed_payloads() {
+        fn assert_fallback(bytes: &[u8]) {
+            assert_eq!(canonical_reference_state(bytes), None);
+            assert_eq!(
+                decode_props_checked(crate::serde_codec::CURRENT_CODEC, bytes)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidData
+            );
+            assert_eq!(probe_properties_node_ref(bytes), None);
+        }
+
+        // One property, key 1, Boolean discriminant, invalid Postcard bool.
+        assert_fallback(&[1, 1, 4, 2]);
+        // One property, key 1, String discriminant, one invalid UTF-8 byte.
+        assert_fallback(&[1, 1, 3, 1, 0xff]);
+        // One property with an Int64 payload beyond Postcard's u64 varint.
+        let mut overflowing_varint = vec![1, 1, 1];
+        overflowing_varint.extend([0xff; 9]);
+        overflowing_varint.push(2);
+        assert_fallback(&overflowing_varint);
+        // A six-byte u32 variant discriminant that the u64 decoder could
+        // otherwise accept as the in-range Null discriminant.
+        assert_fallback(&[1, 1, 0x87, 0x80, 0x80, 0x80, 0x80, 0]);
+        // Ten continued bytes never terminate the u64 property-key varint.
+        let mut unterminated_key = vec![1];
+        unterminated_key.extend([0x80; 10]);
+        assert_fallback(&unterminated_key);
+        // Unknown Value discriminant.
+        assert_fallback(&[1, 1, 16]);
+
+        let mut valid = Vec::new();
+        encode_props_into(
+            &[
+                (InternedKey::from_u64(1), Value::NodeRef(7)),
+                (InternedKey::from_u64(2), Value::String("tail".into())),
+            ],
+            &mut valid,
+        )
+        .unwrap();
+        for end in 0..valid.len() {
+            if canonical_reference_state(&valid[..end]).is_none() {
+                assert_eq!(probe_properties_node_ref(&valid[..end]), None);
+            }
+        }
+        valid.push(0);
+        assert_fallback(&valid);
+    }
+
+    #[test]
+    fn checked_edge_property_lookup_surfaces_malformed_payload() {
+        let tmp = TempDir::new().unwrap();
+        let malformed = [1, 1, 4, 2];
+        MmapOrVec::from_vec(vec![0, malformed.len() as u64])
+            .save_to_file(&tmp.path().join(OFFSETS_FILE))
+            .unwrap();
+        std::fs::write(tmp.path().join(HEAP_FILE), malformed).unwrap();
+        let meta = EdgePropertyStore::meta_for(tmp.path());
+        let mut interner = StringInterner::new();
+        let store = EdgePropertyStore::load_from(tmp.path(), 2, meta, &mut interner).unwrap();
+
+        assert_eq!(store.base_slot_contains_node_ref(0), None);
+        assert_eq!(
+            store.get_checked(0).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn postcard_reference_probe_covers_common_scalar_and_nested_shapes() {
+        for (value, expected) in [
+            (Value::Int64(-17), false),
+            (Value::List(vec![Value::String("ordinary".into())]), false),
+            (Value::List(vec![Value::NodeRef(7)]), true),
+        ] {
+            let mut bytes = Vec::new();
+            encode_props_into(&[(InternedKey::from_u64(1), value)], &mut bytes).unwrap();
+            assert_eq!(probe_properties_node_ref(&bytes), Some(expected));
+        }
     }
 
     #[test]

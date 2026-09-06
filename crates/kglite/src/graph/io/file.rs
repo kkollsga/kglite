@@ -1726,6 +1726,8 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
 
     load_disk_column_stores(dir, &mut graph)?;
 
+    legacy_references::normalize_disk_snapshot(&mut graph)?;
+
     // No sync: the stores were installed straight onto the backend, which is
     // their only owner — there is no DirGraph↔DiskGraph mirror.
 
@@ -2247,7 +2249,6 @@ fn load_portable_columns(
     dir_graph: &mut DirGraph,
     sections: &mut SectionCursor<'_>,
     columns: &[PortableColumnSection],
-    defer_index_rebuild: bool,
 ) -> io::Result<()> {
     let temp_dir = portable_temp_dir();
     if let Ok(mut dirs) = dir_graph.temp_dirs.lock() {
@@ -2256,7 +2257,7 @@ fn load_portable_columns(
     for (index, metadata) in columns.iter().enumerate() {
         load_portable_column_section(codec, dir_graph, sections, metadata, index, &temp_dir)?;
     }
-    attach_portable_column_stores(dir_graph, defer_index_rebuild);
+    attach_portable_column_stores(dir_graph);
     Ok(())
 }
 
@@ -2379,12 +2380,19 @@ fn load_portable_columnar(
     // The ceiling is checked here, on the metadata side of the decode: a load
     // refused for memory must not first allocate the memory. See
     // `LoadOptions::max_load_bytes`.
-    if let Some(limit) = options.max_load_bytes {
+    let normalization_budget = if let Some(limit) = options.max_load_bytes {
         let estimate = load_estimate::estimate_from_metadata(&metadata);
-        if estimate.projected_peak_bytes(options.defer_index_rebuild) > limit {
+        let base_estimated_peak = estimate.projected_peak_bytes(options.defer_index_rebuild);
+        if base_estimated_peak > limit {
             return Err(load_memory_refusal(&estimate, limit, options));
         }
-    }
+        Some(legacy_references::NormalizationBudget {
+            base_estimated_peak,
+            limit,
+        })
+    } else {
+        None
+    };
     // Resolved before a section is decompressed, so an unplaceable mode fails
     // before the expensive part.
     let recorded_mode = metadata.portable_storage_mode()?;
@@ -2407,14 +2415,24 @@ fn load_portable_columnar(
         None => recorded_mode,
     };
     let (mut dir_graph, plan) = decode_portable_topology(codec, &mut sections, metadata)?;
-    load_portable_columns(
+    load_portable_columns(codec, &mut dir_graph, &mut sections, &plan.columns)?;
+    // Keep declarations visible to complete-state validation while derived
+    // lookup structures are deliberately absent. Normalization must precede
+    // every index that would otherwise retain raw NodeRef equality.
+    dir_graph.defer_index_rebuild_from_keys();
+    let normalization_effects =
+        legacy_references::normalize_complete_snapshot(&mut dir_graph, normalization_budget)?;
+    if !options.defer_index_rebuild {
+        dir_graph.materialize_indexes();
+    }
+    load_portable_optional_sections(
         codec,
+        core_version,
         &mut dir_graph,
         &mut sections,
-        &plan.columns,
-        options.defer_index_rebuild,
+        &plan,
+        &normalization_effects,
     )?;
-    load_portable_optional_sections(codec, core_version, &mut dir_graph, &mut sections, &plan)?;
     // Place the graph in its mode. The payload always deserializes into a
     // memory backend (`GraphBackend`'s Deserialize), so a mapped target is
     // swapped onto the mapped backend here — after the graph is complete, and
@@ -2428,6 +2446,8 @@ fn load_portable_columnar(
 
 mod columns;
 use columns::{attach_portable_column_stores, load_column_sidecars};
+
+mod legacy_references;
 
 mod load_estimate;
 pub use load_estimate::{estimate_load_memory, estimate_load_memory_bytes, LoadMemoryEstimate};
@@ -2448,7 +2468,7 @@ mod save_guard;
 pub use save_guard::SaveError;
 
 mod text_index_persistence;
-use text_index_persistence::{decode_text_indexes, encode_text_indexes};
+use text_index_persistence::{decode_text_indexes_after_normalization, encode_text_indexes};
 
 mod vector_persistence;
 

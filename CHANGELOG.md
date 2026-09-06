@@ -54,6 +54,14 @@ before upgrading.
   IDs remain identity; query-time `startNode()`/`endNode()` identity is
   unchanged. Low-level Rust graph mutators that accept raw `NodeRef` values
   retain their explicit view-local caller precondition.
+- Complete portable and disk snapshots normalize recoverable legacy stored
+  endpoint references against the unchanged snapshot before constraints,
+  indexes or a public graph can observe them. Loading does not rewrite the
+  source; only an explicit save persists normalized values. Uncheckpointed WAL
+  frames containing raw stored references are refused before replay, tail
+  repair or truncation because their physical slots have no recoverable source
+  view. Checkpointed residue is skipped. Neither path claims to recover values
+  already retargeted by an older deletion, slot reuse or compaction.
 - Timestamp constructors and text/protocol outputs retain supported fractional
   seconds. Whole-second spelling stays compatible; Python datetime output keeps
   its microsecond precision. Bolt rejects timestamps it cannot represent instead
@@ -94,6 +102,14 @@ before upgrading.
   primary-type bucket (about 0.09–0.11 ms at 10,000 nodes in the release probe).
 
 ### Changed
+
+- `LoadOptions::max_load_bytes` and Python `max_load_mb` retain the metadata
+  precheck before decompression. A legacy portable file with stored endpoint
+  references gets a second conservative normalization-overlay check after the
+  affected values are decoded but before the private graph is changed or
+  published. `estimate_load_memory()` continues to report the metadata-known
+  terms; an affected file can therefore pass that estimate and still be
+  refused on the additional decoded term.
 
 - Rust `load_rdf` now requires a fresh empty in-memory destination without
   schema, indexes, constraints, identity aliases or mutation capture. Load into

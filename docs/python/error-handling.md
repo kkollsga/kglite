@@ -157,14 +157,20 @@ Load failures are classifiable: a missing engine-managed path raises
 `FileFormatError`; other I/O failures raise `FileIoError`.
 
 A fourth case is not a failure of the file at all. `kglite.load(path,
-max_load_mb=N)` — and the process-wide `KGLITE_MAX_LOAD_MB` — refuse a load
-whose estimated peak memory is over the ceiling, *before* decompressing
-anything, and raise `LoadMemoryLimitError`. The graph is valid; this process
-cannot afford it. Rebuilding would not help, which is exactly why it is its own
-class: raise the ceiling, pass `defer_index_rebuild=True` (usually the largest
-term), or load it somewhere with more memory. `kglite.estimate_load_memory(path)`
-returns the same estimate as a dict of named terms, so a caller can decide for
-itself rather than setting a ceiling.
+max_load_mb=N)` — and the process-wide `KGLITE_MAX_LOAD_MB` — raise
+`LoadMemoryLimitError` when the estimated peak is over the ceiling. Metadata-
+known terms refuse *before* decompression. An older portable file containing
+stored endpoint references needs a second conservative normalization-overlay
+check after the affected values are decoded, but before the private graph is
+changed or published. The graph is valid; this process cannot afford it.
+Rebuilding would not help, which is exactly why it is its own class: raise the
+ceiling, pass `defer_index_rebuild=True` (usually the largest metadata term), or
+load it somewhere with more memory.
+
+`kglite.estimate_load_memory(path)` reports the metadata-known terms as a dict.
+It cannot see legacy reference values without decoding them, so an affected
+file can pass that public estimate and still be refused on the additional
+normalization term. The refusal message says which check fired.
 
 ```python
 budget_mb = 512

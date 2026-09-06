@@ -13,6 +13,38 @@ use std::sync::Arc;
 use super::graph::DiskGraph;
 use super::property_index;
 
+#[cfg(test)]
+thread_local! {
+    static BUILD_FAILPOINT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct PropertyIndexBuildFailpoint;
+
+#[cfg(test)]
+impl Drop for PropertyIndexBuildFailpoint {
+    fn drop(&mut self) {
+        BUILD_FAILPOINT.with(|point| point.set(None));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn fail_property_index_build(stage: &'static str) -> PropertyIndexBuildFailpoint {
+    BUILD_FAILPOINT.with(|point| point.set(Some(stage)));
+    PropertyIndexBuildFailpoint
+}
+
+fn property_index_build_failpoint(stage: &'static str) -> std::io::Result<()> {
+    #[cfg(test)]
+    if BUILD_FAILPOINT.with(|point| point.get() == Some(stage)) {
+        return Err(std::io::Error::other(format!(
+            "injected {stage} property-index build failure"
+        )));
+    }
+    let _ = stage;
+    Ok(())
+}
+
 impl DiskGraph {
     /// Build (or rebuild) a persistent string property index for
     /// `(node_type, property)`. Writes four files to `data_dir` and
@@ -30,8 +62,7 @@ impl DiskGraph {
         property: &str,
     ) -> std::io::Result<usize> {
         self.prepare_mutation()?;
-        self.removed_property_indexes
-            .remove(&(node_type.to_string(), property.to_string()));
+        let index_key = (node_type.to_string(), property.to_string());
         let type_key = InternedKey::from_str(node_type);
         let type_u64 = type_key.as_u64();
         let prop_key = InternedKey::from_str(property);
@@ -98,21 +129,22 @@ impl DiskGraph {
         // still has memory-mapped, and Windows refuses to re-create a mapped
         // file (`ERROR_USER_MAPPED_FILE`). Removing the key (rather than
         // storing `None`, which means "no such index") lets a concurrent
-        // lookup fall back to opening the bundle from disk.
-        self.property_indexes
-            .write()
-            .unwrap()
-            .remove(&(node_type.to_string(), property.to_string()));
+        // lookup fall back to opening the bundle from disk. A legacy-value
+        // mask remains authoritative until the replacement is published.
+        self.property_indexes.write().unwrap().remove(&index_key);
+        property_index_build_failpoint("typed")?;
         let idx = property_index::PropertyIndex::build(
             self.active_write_dir(),
             node_type,
             property,
             entries,
         )?;
-        self.property_indexes.write().unwrap().insert(
-            (node_type.to_string(), property.to_string()),
-            Some(Arc::new(idx)),
-        );
+        self.property_indexes
+            .write()
+            .unwrap()
+            .insert(index_key.clone(), Some(Arc::new(idx)));
+        self.removed_property_indexes.remove(&index_key);
+        self.legacy_invalidated_property_indexes.remove(&index_key);
         Ok(count)
     }
 
@@ -149,6 +181,9 @@ impl DiskGraph {
         value: &str,
     ) -> Option<Vec<NodeIndex>> {
         let key = (node_type.to_string(), property.to_string());
+        if self.legacy_invalidated_property_indexes.contains(&key) {
+            return None;
+        }
         // Fast path: cached handle.
         {
             let read = self.property_indexes.read().unwrap();
@@ -178,6 +213,9 @@ impl DiskGraph {
         limit: usize,
     ) -> Option<Vec<NodeIndex>> {
         let key = (node_type.to_string(), property.to_string());
+        if self.legacy_invalidated_property_indexes.contains(&key) {
+            return None;
+        }
         {
             let read = self.property_indexes.read().unwrap();
             if let Some(slot) = read.get(&key) {
@@ -203,6 +241,9 @@ impl DiskGraph {
     /// Checks the cache first, then the filesystem.
     pub fn has_property_index(&self, node_type: &str, property: &str) -> bool {
         let key = (node_type.to_string(), property.to_string());
+        if self.legacy_invalidated_property_indexes.contains(&key) {
+            return false;
+        }
         if let Some(slot) = self.property_indexes.read().unwrap().get(&key) {
             return slot.is_some();
         }
@@ -275,8 +316,10 @@ impl DiskGraph {
         // release the cached bundle before `build_global` truncates the files
         // it maps. `save_disk` rebuilds the `title` and `nid` global indexes on
         // every save, so on Windows the second save of a graph would otherwise
-        // fail here.
+        // fail here. A legacy-value mask remains authoritative until the
+        // replacement is published.
         self.global_indexes.write().unwrap().remove(property);
+        property_index_build_failpoint("global")?;
         let idx = property_index::PropertyIndex::build_global(
             self.active_write_dir(),
             property,
@@ -286,6 +329,7 @@ impl DiskGraph {
             .write()
             .unwrap()
             .insert(property.to_string(), Some(Arc::new(idx)));
+        self.legacy_invalidated_global_indexes.remove(property);
         Ok(count)
     }
 
@@ -293,6 +337,9 @@ impl DiskGraph {
     /// global index. Returns `None` when no index has been built for
     /// `property`; returns `Some(Vec)` (possibly empty) otherwise.
     pub fn lookup_global_eq(&self, property: &str, value: &str) -> Option<Vec<NodeIndex>> {
+        if self.legacy_invalidated_global_indexes.contains(property) {
+            return None;
+        }
         {
             let read = self.global_indexes.read().unwrap();
             if let Some(slot) = read.get(property) {
@@ -318,6 +365,9 @@ impl DiskGraph {
         prefix: &str,
         limit: usize,
     ) -> Option<Vec<NodeIndex>> {
+        if self.legacy_invalidated_global_indexes.contains(property) {
+            return None;
+        }
         {
             let read = self.global_indexes.read().unwrap();
             if let Some(slot) = read.get(property) {
@@ -337,5 +387,29 @@ impl DiskGraph {
             .unwrap()
             .insert(property.to_string(), idx_opt.map(Arc::new));
         result
+    }
+
+    /// Mask persisted lookup bundles that were built from raw legacy values.
+    /// The immutable selected generation is untouched; a later explicit index
+    /// build clears the matching mask after rebuilding against normalized data.
+    pub(crate) fn invalidate_legacy_value_indexes(
+        &mut self,
+        typed: impl IntoIterator<Item = (String, String)>,
+        global: impl IntoIterator<Item = String>,
+    ) {
+        for key in typed {
+            self.property_indexes
+                .write()
+                .unwrap()
+                .insert(key.clone(), None);
+            self.legacy_invalidated_property_indexes.insert(key);
+        }
+        for property in global {
+            self.global_indexes
+                .write()
+                .unwrap()
+                .insert(property.clone(), None);
+            self.legacy_invalidated_global_indexes.insert(property);
+        }
     }
 }

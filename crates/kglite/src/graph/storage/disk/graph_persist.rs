@@ -266,7 +266,7 @@ impl DiskGraph {
     }
 
     fn copy_persisted_indexes(&self, target: &Path) -> std::io::Result<()> {
-        let excluded_names: HashSet<_> = self
+        let mut excluded_names: HashSet<_> = self
             .removed_property_indexes
             .iter()
             .flat_map(|(node_type, property)| {
@@ -275,6 +275,22 @@ impl DiskGraph {
                     .filter_map(|path| path.file_name().map(|name| name.to_owned()))
             })
             .collect();
+        excluded_names.extend(self.legacy_invalidated_property_indexes.iter().flat_map(
+            |(node_type, property)| {
+                property_index::removal_paths(target, node_type, property)
+                    .into_iter()
+                    .filter_map(|path| path.file_name().map(|name| name.to_owned()))
+            },
+        ));
+        excluded_names.extend(
+            self.legacy_invalidated_global_indexes
+                .iter()
+                .flat_map(|property| {
+                    property_index::global_removal_paths(target, property)
+                        .into_iter()
+                        .filter_map(|path| path.file_name().map(|name| name.to_owned()))
+                }),
+        );
         let mut sources = vec![self.data_dir.as_path()];
         sources.extend(
             self.parent_workspaces
@@ -923,8 +939,7 @@ impl DiskGraph {
         // Auxiliary per-segment data is handled unevenly in the N>1 branch
         // — see the limitation documented on `SegmentCsr`.
 
-        // Staging dir for legacy .zst decompression, inside the graph dir so
-        // no external temp space is required.
+        // Keep legacy .zst decompression staging inside the graph directory.
         let temp_dir = dir.join("_zst_cache");
 
         let t = stage_timer();
@@ -1132,9 +1147,10 @@ impl DiskGraph {
                 has_tombstones: meta.has_tombstones,
                 property_indexes: std::sync::RwLock::new(HashMap::new()),
                 removed_property_indexes: HashSet::new(),
+                legacy_invalidated_property_indexes: HashSet::new(),
+                legacy_invalidated_global_indexes: HashSet::new(),
                 global_indexes: std::sync::RwLock::new(HashMap::new()),
-                // Legacy .kgl directories have no seg_manifest.json; the
-                // resulting empty manifest means "pre-segmented, don't prune".
+                // An empty legacy manifest means "pre-segmented, don't prune".
                 segment_manifest,
                 sealed_nodes_bound,
             },
