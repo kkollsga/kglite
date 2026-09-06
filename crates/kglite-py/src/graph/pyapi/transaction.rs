@@ -243,17 +243,23 @@ impl Transaction {
 
         // A Python-backed embedder needs to reacquire the GIL; keep the
         // existing no-service execution path and cancellation policy intact.
-        let mut execute = || -> Result<cypher::CypherResult, crate::error::KgError> {
+        let mut execute = || -> Result<cypher::CypherResult, Box<crate::error::KgError>> {
             if is_mut {
-                let working = tx.working_mut()?;
-                Ok(kglite_core::api::session::execute_mut(working, query, &opts)?.result)
+                let working = tx.working_mut().map_err(Box::new)?;
+                Ok(
+                    kglite_core::api::session::execute_mut(working, query, &opts)
+                        .map_err(Box::new)?
+                        .result,
+                )
             } else {
                 let graph = tx.current().ok_or_else(|| {
-                    crate::error::KgError::Argument(
+                    Box::new(crate::error::KgError::Argument(
                         "Transaction already committed or rolled back".to_string(),
-                    )
+                    ))
                 })?;
-                Ok(kglite_core::api::session::execute_read(graph, query, &opts)?.result)
+                Ok(kglite_core::api::session::execute_read(graph, query, &opts)
+                    .map_err(Box::new)?
+                    .result)
             }
         };
         let result = if opts.embedder.is_some() {
@@ -261,7 +267,7 @@ impl Transaction {
         } else {
             execute()
         }
-        .map_err(crate::error_py::kg_to_pyerr)?;
+        .map_err(|error| crate::error_py::kg_to_pyerr(*error))?;
 
         crate::warning_policy::announce(py, result.diagnostics.as_ref())?;
         if pre_parsed.explain {

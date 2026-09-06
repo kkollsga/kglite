@@ -2173,11 +2173,12 @@ fn execute_mut_with_embedder(
     query: &str,
     opts: &kglite_core::api::session::ExecuteOptions<'_>,
 ) -> PyResult<kglite_core::api::session::ExecuteOutcome> {
-    let mut execute = || kglite_core::api::session::execute_mut(graph, query, opts);
+    let mut execute =
+        || kglite_core::api::session::execute_mut(graph, query, opts).map_err(Box::new);
     if opts.embedder.is_some() {
         py.detach(execute)
     } else {
         execute()
     }
-    .map_err(crate::error_py::kg_to_pyerr)
+    .map_err(|error| crate::error_py::kg_to_pyerr(*error))
 }
