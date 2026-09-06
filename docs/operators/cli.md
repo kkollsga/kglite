@@ -129,6 +129,12 @@ Example request stream:
 Responses echo `id` when provided. In JSON mode, `query` and `write`
 return typed `rows`; table and CSV modes return rendered `output`.
 
+CSV is a machine format: integers, floats, timestamps, and values nested in
+lists or maps retain their available text precision, and RFC quoting preserves
+commas, quotes, CR, and LF. Table mode remains compact for people. As in normal
+CSV, an empty string and NULL are both empty fields; use JSON when that
+distinction matters.
+
 `{"op":"help"}` answers with the op table — every op and its request
 shape — so a driver that only has the pipe can discover the protocol from
 inside it; an unknown op names the valid ops in its error.

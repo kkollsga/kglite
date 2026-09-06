@@ -66,6 +66,15 @@ before upgrading.
   seconds. Whole-second spelling stays compatible; Python datetime output keeps
   its microsecond precision. Bolt rejects timestamps it cannot represent instead
   of emitting an invalid nanosecond field.
+- CLI CSV output preserves numeric, timestamp, and nested-value precision. MCP
+  inline CSV limits count complete RFC records, so quoted multiline fields are
+  never split and CSV HTTP acknowledgements report logical data rows.
+- Positive Java query timeouts below one millisecond round up to one millisecond
+  instead of becoming unlimited; larger fractional milliseconds round up and
+  overflow saturates at the ABI maximum.
+- Bolt rejects unsupported nonzero `tx_timeout` values before RUN or BEGIN can
+  change state, and its checkpoint help now distinguishes process-local writes
+  at durability `off` from WAL-backed `normal` and `full` modes.
 
 - Align exception handling, read-only transaction failures and C status names
   with runtime behavior. Add an executable statement-rollback example and clarify

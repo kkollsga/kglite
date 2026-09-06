@@ -625,6 +625,58 @@ fn a_csv_within_the_cap_is_untouched() {
     assert_eq!(count_csv_rows(&body), INLINE_CSV_ROW_LIMIT);
 }
 
+#[test]
+fn csv_count_and_cap_follow_logical_rfc_records() {
+    let multiline = "value\r\n\"line1\nline2\rline3\r\nquote \"\"kept\"\"\"\r\n";
+    assert_eq!(count_csv_rows(multiline), 1);
+    assert_eq!(cap_inline_csv(multiline, CSV_OFF), multiline);
+
+    let mut csv = String::from("value\r\n");
+    let mut expected_prefix = csv.clone();
+    for row in 0..=INLINE_CSV_ROW_LIMIT {
+        let record = format!("\"row {row}\ncontinued\"\r\n");
+        csv.push_str(&record);
+        if row < INLINE_CSV_ROW_LIMIT {
+            expected_prefix.push_str(&record);
+        }
+    }
+    let capped = cap_inline_csv(&csv, CSV_OFF);
+    let (prefix, notice) = capped.split_once("\nFORMAT CSV truncated:").unwrap();
+    assert_eq!(prefix, expected_prefix);
+    assert!(notice.contains("first 200 of 201 row(s)"), "{notice}");
+}
+
+#[test]
+fn csv_http_acknowledgement_counts_a_multiline_record_once() {
+    let dir = tempfile::tempdir().expect("CSV scratch directory");
+    let up = crate::csv_http::CsvHttpState::Up(Arc::new(crate::csv_http::CsvHttpConfig {
+        port: 8765,
+        dir: dir.path().to_path_buf(),
+        cors_origin: None,
+    }));
+    let state = state_with_active(fresh_active());
+    let mut args = serde_json::Map::new();
+    args.insert(
+        "value".into(),
+        serde_json::json!("line1\nline2\rline3\r\nend"),
+    );
+
+    let acknowledgement = state
+        .run_cypher_template("RETURN $value AS value FORMAT CSV", &args, &up)
+        .expect("CSV HTTP acknowledgement");
+    assert!(
+        acknowledgement.starts_with("FORMAT CSV: 1 row(s) written to "),
+        "{acknowledgement}"
+    );
+    let files = std::fs::read_dir(dir.path())
+        .expect("CSV directory")
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .expect("CSV directory entries");
+    assert_eq!(files.len(), 1);
+    let csv = std::fs::read_to_string(files[0].path()).expect("written CSV");
+    assert_eq!(count_csv_rows(&csv), 1);
+}
+
 /// The second uncapped path: when `csv_http` is configured but its write
 /// FAILS, the renderer falls back to the inline body. That fallback used to
 /// hand back the raw blob — the failure mode turned the opt-in escape hatch

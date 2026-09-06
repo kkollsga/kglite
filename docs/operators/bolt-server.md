@@ -110,6 +110,11 @@ per-language equivalents) retry the unit of work by themselves; hand-rolled
 Neo4j status codes for syntax, schema, timeout, access-mode, conflict, and
 execution failures.
 
+KGLite does not yet implement Bolt transaction timeouts. A top-level
+`tx_timeout` of zero, NULL, or absent means no timeout; any nonzero value is
+rejected before RUN or BEGIN changes state. A `tx_timeout` key nested inside
+`tx_metadata` remains ordinary user metadata.
+
 The supported behavior is locked by the standing Bolt correctness and
 differential suites. Avoid relying on an exact test/query count or a particular
 driver patch version; CI exercises the complete current corpus.

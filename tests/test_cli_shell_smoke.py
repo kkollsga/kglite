@@ -392,6 +392,20 @@ def test_mode_csv_and_json():
     assert parsed[0]["age"] == 30  # number, not "30"
 
 
+def test_mode_csv_preserves_scalar_and_nested_precision():
+    out = _run(
+        ".mode csv\n"
+        "RETURN 1.23456789 AS f, "
+        "[1.23456789, datetime('2024-01-15T10:30:00.123456789')] AS nested, "
+        "datetime('2024-01-15T10:30:00.123456789') AS stamp;\n"
+        ".quit\n"
+    )
+    assert "f,nested,stamp" in out
+    assert "1.23456789" in out
+    assert '[1.23456789, ""2024-01-15T10:30:00.123456789""]' in out
+    assert out.count("2024-01-15T10:30:00.123456789") == 2
+
+
 def test_schema_dotcommand():
     out = _run("CREATE (:Person {name: 'A', city: 'Oslo'});\n.schema\n.quit\n")
     assert "Person" in out

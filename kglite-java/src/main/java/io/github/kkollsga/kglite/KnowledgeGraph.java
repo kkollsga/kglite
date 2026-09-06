@@ -663,14 +663,23 @@ public final class KnowledgeGraph implements AutoCloseable {
      * {@code 0} means "no deadline". A {@code null} timeout, and a zero or
      * negative {@code Duration}, all map to {@code 0} (unlimited) — the ABI has
      * no "expire immediately" spelling, and a non-positive budget is read as
-     * "do not impose one".
+     * "do not impose one". A positive fractional millisecond rounds up so it
+     * cannot become unlimited; values above the ABI range saturate at
+     * {@link Long#MAX_VALUE}.
      */
-    private static long timeoutMillis(Duration timeout) {
-        if (timeout == null) {
+    static long timeoutMillis(Duration timeout) {
+        if (timeout == null || timeout.isZero() || timeout.isNegative()) {
             return 0L;
         }
-        long millis = timeout.toMillis();
-        return millis <= 0 ? 0L : millis;
+        long seconds = timeout.getSeconds();
+        int nanos = timeout.getNano();
+        try {
+            long millis = Math.addExact(
+                    Math.multiplyExact(seconds, 1_000L), nanos / 1_000_000L);
+            return nanos % 1_000_000 == 0 ? millis : Math.addExact(millis, 1L);
+        } catch (ArithmeticException overflow) {
+            return Long.MAX_VALUE;
+        }
     }
 
     /**

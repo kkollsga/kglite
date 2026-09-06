@@ -367,22 +367,24 @@ def test_multi_statement_in_one_run_pinned_behavior(bolt_server):
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# 17: Tx-level timeout (no driver-side surface today; pin no-op)
+# 17: Unsupported tx-level timeout is rejected visibly
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def test_tx_timeout_extra_metadata_accepted_but_no_op(bolt_server):
+def test_tx_timeout_extra_metadata_is_rejected(bolt_server):
     """The neo4j driver supports `session.begin_transaction(timeout=...)`
-    which sends `tx_timeout` in the BEGIN extra dict. bolt-server
-    currently ignores this; pin the no-op behavior."""
+    which sends `tx_timeout` in the BEGIN extra dict. The server must
+    reject the unsupported deadline instead of silently running without it."""
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with driver.session() as session:
-            # Tiny timeout — bolt-server doesn't honor it, so the query runs.
-            tx = session.begin_transaction(timeout=0.001)
-            result = tx.run("MATCH (n:Person) RETURN count(n) AS c")
-            count = result.single()["c"]
-            tx.commit()
-            assert count == 4
+            with pytest.raises(neo4j.exceptions.ClientError, match="tx_timeout"):
+                session.begin_transaction(timeout=0.001)
+
+            # Refusal happens before transaction state is created; the session
+            # remains usable for an ordinary transaction afterwards.
+            with session.begin_transaction() as tx:
+                assert tx.run("RETURN 1 AS n").single()["n"] == 1
+                tx.commit()
 
 
 # ────────────────────────────────────────────────────────────────────────────

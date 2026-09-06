@@ -263,6 +263,9 @@ def test_server_binary_help_flag(bolt_binary_path):
     assert "--save-on-exit" in result.stdout
     assert "--durability" in result.stdout
     assert "--auth" in result.stdout
+    assert "process-local" in result.stdout
+    assert "WAL" in result.stdout
+    assert "checkpointing bounds WAL replay length" in result.stdout
 
 
 def test_server_missing_graph_file_clean_error(bolt_binary_path, tmp_path):

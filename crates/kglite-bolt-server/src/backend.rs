@@ -286,6 +286,20 @@ impl TxMeta {
     }
 }
 
+/// Reject Bolt's execution-time transaction timeout until the backend can
+/// enforce it. This is a protocol extra, not user `tx_metadata`.
+fn reject_unsupported_tx_timeout(extra: &BoltDict) -> Result<(), BoltError> {
+    match extra.get("tx_timeout") {
+        None | Some(BoltValue::Null) | Some(BoltValue::Integer(0)) => Ok(()),
+        Some(BoltValue::Integer(value)) => Err(BoltError::Protocol(format!(
+            "tx_timeout={value} is not supported; omit it or send 0 for no timeout"
+        ))),
+        Some(other) => Err(BoltError::Protocol(format!(
+            "tx_timeout must be integer milliseconds, null, or absent, got {other:?}"
+        ))),
+    }
+}
+
 impl KgliteBackend {
     /// Construct a backend around an already-opened session.
     ///
@@ -517,6 +531,7 @@ impl BoltBackend for KgliteBackend {
                     .into(),
             ));
         }
+        reject_unsupported_tx_timeout(extra)?;
 
         // `CALL db.checkpoint()` is a *bolt-layer verb*, not an engine
         // procedure: the Cypher executor has no session, no `&mut` graph and
@@ -636,6 +651,7 @@ impl BoltBackend for KgliteBackend {
         session: &SessionHandle,
         extra: &BoltDict,
     ) -> Result<TransactionHandle, BoltError> {
+        reject_unsupported_tx_timeout(extra)?;
         if self.readonly {
             return Err(BoltError::Forbidden(
                 "server is read-only — explicit transactions rejected (--readonly flag)".into(),
@@ -1685,6 +1701,83 @@ mod tests {
         assert!(TxMeta::from_extra(&extra).is_err());
         let extra = BoltDict::from([("tx_metadata".to_string(), BoltValue::Integer(1))]);
         assert!(TxMeta::from_extra(&extra).is_err());
+    }
+
+    #[test]
+    fn transaction_timeout_admission_is_explicit_and_top_level_only() {
+        for extra in [
+            BoltDict::new(),
+            BoltDict::from([("tx_timeout".into(), BoltValue::Null)]),
+            BoltDict::from([("tx_timeout".into(), BoltValue::Integer(0))]),
+            BoltDict::from([(
+                "tx_metadata".into(),
+                BoltValue::Dict(BoltDict::from([(
+                    "tx_timeout".into(),
+                    BoltValue::Integer(10),
+                )])),
+            )]),
+        ] {
+            reject_unsupported_tx_timeout(&extra).expect("unlimited or user metadata");
+        }
+        for value in [BoltValue::Integer(1), BoltValue::Integer(-1)] {
+            let error =
+                reject_unsupported_tx_timeout(&BoltDict::from([("tx_timeout".into(), value)]))
+                    .expect_err("a nonzero unsupported timeout must be refused");
+            assert!(error.to_string().contains("not supported"), "{error}");
+        }
+        let error = reject_unsupported_tx_timeout(&BoltDict::from([(
+            "tx_timeout".into(),
+            BoltValue::String("10".into()),
+        )]))
+        .expect_err("a mistyped timeout must be refused");
+        assert!(
+            error.to_string().contains("integer milliseconds"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_timeout_is_refused_before_begin_intercepts_and_tx_run() {
+        let backend = memory_backend();
+        let session = SessionHandle("timeout".into());
+        let unsupported = BoltDict::from([("tx_timeout".into(), BoltValue::Integer(1))]);
+
+        let checkpoint = backend
+            .execute(
+                &session,
+                "CALL db.checkpoint()",
+                &HashMap::new(),
+                &unsupported,
+                None,
+            )
+            .await
+            .expect_err("the checkpoint intercept must not bypass timeout admission");
+        assert!(
+            checkpoint.to_string().contains("tx_timeout"),
+            "{checkpoint}"
+        );
+
+        backend
+            .begin_transaction(&session, &unsupported)
+            .await
+            .expect_err("BEGIN must refuse before creating state");
+        assert!(backend.transactions.lock().unwrap().is_empty());
+
+        let tx = backend
+            .begin_transaction(&session, &BoltDict::new())
+            .await
+            .expect("ordinary BEGIN");
+        backend
+            .execute(
+                &session,
+                "RETURN 1",
+                &HashMap::new(),
+                &unsupported,
+                Some(&tx),
+            )
+            .await
+            .expect_err("RUN inside a transaction must use the shared admission check");
+        backend.rollback(&session, &tx).await.expect("rollback");
     }
 
     // ---- Handshake identity -------------------------------------------------

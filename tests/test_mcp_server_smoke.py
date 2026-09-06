@@ -802,6 +802,21 @@ class TestGraphMode:
         finally:
             client.shutdown()
 
+    def test_cypher_query_multiline_csv_is_one_complete_record(self, graph_fixture: Path):
+        client = _spawn(["--graph", str(graph_fixture)])
+        try:
+            value = 'line1\nline2\rline3\r\nquote "kept"'
+            result = client.call_tool(
+                "cypher_query",
+                {"query": "RETURN $value AS value FORMAT CSV", "params": {"value": value}},
+            )
+            text = _text_content(result)
+            assert not _is_error(result)
+            assert '"line1\nline2\rline3\r\nquote ""kept"""' in text
+            assert "FORMAT CSV truncated" not in text
+        finally:
+            client.shutdown()
+
     def test_graph_overview_inventory(self, graph_fixture: Path):
         client = _spawn(["--graph", str(graph_fixture)])
         try:

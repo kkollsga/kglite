@@ -1196,8 +1196,8 @@ across patch releases — they're tagged below per stability. Manifest
 |---|---|---|
 | `ping` | `<message>` (default `pong`) | Stable. |
 | `cypher_query` (inline) | `<N> row(s)[ (showing first 15)]:\n<TAB-joined column names>\n<TAB-joined repr'd values per row>\n` | Stable post-0.9.22 (the 0.9.21 row-formatter regression is the canonical "this is now a contract" event). |
-| `cypher_query FORMAT CSV` with `csv_http_server` | `FORMAT CSV: <N> row(s) written to <url>\nFetch with: curl <url>` | Stable. |
-| `cypher_query FORMAT CSV` without `csv_http_server` | Inline CSV body. | Stable. |
+| `cypher_query FORMAT CSV` with `csv_http_server` | `FORMAT CSV: <N> row(s) written to <url>\nFetch with: curl <url>`; `<N>` counts logical RFC CSV records, excluding the header. | Stable. |
+| `cypher_query FORMAT CSV` without `csv_http_server` | Inline CSV body, capped at 200 complete logical RFC CSV records. Quoted fields containing CR or LF stay intact; a capped response names the full record count and byte size. | Stable. |
 | `cypher_query` errors | `Cypher error: <engine message>` | Stable. |
 | `list_recipe_queries` / `run_recipe_query` | Structured JSON success/error envelope in MCP `structuredContent`; text fallback is the same serialized JSON. | Stable v1 contract. |
 | `graph_overview` | XML schema (see `describe()` output) — types / connections / cypher panes depending on args. | Stable; the XML shape is the canonical agent-facing format. |

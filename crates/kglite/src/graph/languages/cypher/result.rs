@@ -530,9 +530,9 @@ impl CypherResult {
     }
 }
 
-/// Write a CSV field, quoting if it contains comma, quote, or newline.
+/// Write a CSV field, quoting if it contains comma, quote, CR, or LF.
 fn csv_field(buf: &mut String, s: &str) {
-    if s.contains(',') || s.contains('"') || s.contains('\n') {
+    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
         buf.push('"');
         for c in s.chars() {
             if c == '"' {
@@ -548,52 +548,7 @@ fn csv_field(buf: &mut String, s: &str) {
 
 /// Write a Value as a CSV field.
 fn csv_value(buf: &mut String, val: &Value) {
-    match val {
-        Value::Null => {} // empty cell
-        Value::String(s) => csv_field(buf, s),
-        Value::Int64(n) => {
-            use std::fmt::Write;
-            let _ = write!(buf, "{}", n);
-        }
-        Value::Float64(f) => {
-            use std::fmt::Write;
-            let _ = write!(buf, "{}", f);
-        }
-        Value::Boolean(b) => buf.push_str(if *b { "true" } else { "false" }),
-        Value::UniqueId(u) => {
-            use std::fmt::Write;
-            let _ = write!(buf, "{}", u);
-        }
-        Value::DateTime(d) => buf.push_str(&d.format("%Y-%m-%d").to_string()),
-        Value::Timestamp(d) => buf.push_str(&d.format("%Y-%m-%dT%H:%M:%S%.f").to_string()),
-        Value::Point { lat, lon } => {
-            use std::fmt::Write;
-            let _ = write!(buf, "POINT({} {})", lon, lat);
-        }
-        Value::Duration {
-            months,
-            days,
-            seconds,
-        } => {
-            use std::fmt::Write;
-            let _ = write!(buf, "duration(M={}, D={}, S={})", months, days, seconds);
-        }
-        Value::NodeRef(idx) => {
-            use std::fmt::Write;
-            let _ = write!(buf, "{}", idx);
-        }
-        // Collection / graph-entity variants are CSV-
-        // serialised as JSON-ish strings (retain nested timestamp fractions
-        // and quote-escape via csv_field).
-        Value::List(_)
-        | Value::Map(_)
-        | Value::Node(_)
-        | Value::Relationship(_)
-        | Value::Path(_) => {
-            let s = crate::datatypes::values::format_value_precise_timestamps(val);
-            csv_field(buf, &s);
-        }
-    }
+    csv_field(buf, &crate::param::kglite_value_to_csv_text(val));
 }
 
 #[cfg(test)]
@@ -822,5 +777,15 @@ mod nested_timestamp_csv_tests {
         let mut actual = String::new();
         csv_value(&mut actual, &Value::List(vec![stamp]));
         assert_eq!(actual, "\"[\"\"2025-01-02T03:04:05.123456789\"\"]\"");
+    }
+
+    #[test]
+    fn nested_csv_retains_float_precision() {
+        let mut actual = String::new();
+        csv_value(
+            &mut actual,
+            &Value::List(vec![Value::Float64(1.234_567_89)]),
+        );
+        assert_eq!(actual, "[1.23456789]");
     }
 }

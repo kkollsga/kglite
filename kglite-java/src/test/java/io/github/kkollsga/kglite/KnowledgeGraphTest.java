@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
@@ -15,6 +16,20 @@ import org.junit.jupiter.api.io.TempDir;
 
 /** The open / mutate / save / reopen cycle across the C ABI. */
 class KnowledgeGraphTest {
+
+    @Test
+    void positiveTimeoutsRoundUpWithoutOverflow() {
+        assertEquals(0L, KnowledgeGraph.timeoutMillis(null));
+        assertEquals(0L, KnowledgeGraph.timeoutMillis(Duration.ZERO));
+        assertEquals(0L, KnowledgeGraph.timeoutMillis(Duration.ofNanos(-1)));
+        assertEquals(1L, KnowledgeGraph.timeoutMillis(Duration.ofNanos(1)));
+        assertEquals(1L, KnowledgeGraph.timeoutMillis(Duration.ofNanos(999_999)));
+        assertEquals(1L, KnowledgeGraph.timeoutMillis(Duration.ofMillis(1)));
+        assertEquals(2L, KnowledgeGraph.timeoutMillis(Duration.ofNanos(1_000_001)));
+        assertEquals(
+                Long.MAX_VALUE,
+                KnowledgeGraph.timeoutMillis(Duration.ofSeconds(Long.MAX_VALUE, 999_999_999)));
+    }
 
     @Test
     @DisplayName("create, write, save under lease, reopen, read back the same rows")

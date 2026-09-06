@@ -208,12 +208,13 @@ pub mod api {
     /// must fit finite `f64`, and errors retain their nested path.
     /// `json_value_to_kglite_value` remains the tolerant property/ingestion
     /// converter. `kglite_value_to_json` renders outbound result cells in
-    /// natural untagged JSON.
+    /// natural untagged JSON; `kglite_value_to_csv_text` retains machine-value
+    /// precision before the caller applies RFC CSV quoting.
     pub mod param {
         pub use crate::param::{
             json_object_to_query_value_map, json_object_to_value_map, json_value_to_kglite_value,
-            kglite_value_to_json, validate_json_query_numbers_at, JsonQueryParameterError,
-            JsonQueryParameterErrorKind,
+            kglite_value_to_csv_text, kglite_value_to_json, validate_json_query_numbers_at,
+            JsonQueryParameterError, JsonQueryParameterErrorKind,
         };
     }
 

@@ -2109,6 +2109,7 @@ impl core::marker::StructuralPartialEq for kglite::param::JsonQueryParameterErro
 pub fn kglite::api::param::json_object_to_query_value_map(map: &serde_json::map::Map<alloc::string::String, serde_json::value::Value>) -> core::result::Result<std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>, kglite::param::JsonQueryParameterError>
 pub fn kglite::api::param::json_object_to_value_map(map: &serde_json::map::Map<alloc::string::String, serde_json::value::Value>) -> std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>
 pub fn kglite::api::param::json_value_to_kglite_value(v: &serde_json::value::Value) -> kglite::datatypes::values::Value
+pub fn kglite::api::param::kglite_value_to_csv_text(v: &kglite::datatypes::values::Value) -> alloc::string::String
 pub fn kglite::api::param::kglite_value_to_json(v: &kglite::datatypes::values::Value) -> serde_json::value::Value
 pub fn kglite::api::param::validate_json_query_numbers_at(source: &str, pointer: &[&str]) -> core::result::Result<(), kglite::param::JsonQueryParameterError>
 pub mod kglite::api::session
@@ -5008,5 +5009,6 @@ impl core::marker::StructuralPartialEq for kglite::param::JsonQueryParameterErro
 pub fn kglite::param::json_object_to_query_value_map(map: &serde_json::map::Map<alloc::string::String, serde_json::value::Value>) -> core::result::Result<std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>, kglite::param::JsonQueryParameterError>
 pub fn kglite::param::json_object_to_value_map(map: &serde_json::map::Map<alloc::string::String, serde_json::value::Value>) -> std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>
 pub fn kglite::param::json_value_to_kglite_value(v: &serde_json::value::Value) -> kglite::datatypes::values::Value
+pub fn kglite::param::kglite_value_to_csv_text(v: &kglite::datatypes::values::Value) -> alloc::string::String
 pub fn kglite::param::kglite_value_to_json(v: &kglite::datatypes::values::Value) -> serde_json::value::Value
 pub fn kglite::param::validate_json_query_numbers_at(source: &str, pointer: &[&str]) -> core::result::Result<(), kglite::param::JsonQueryParameterError>

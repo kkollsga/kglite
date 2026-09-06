@@ -80,17 +80,19 @@ struct Cli {
 
     /// Write the served graph back to `--graph` when the server shuts down.
     ///
-    /// Off by default: this server's writes are process-local until something
-    /// checkpoints them, and an unasked-for write to the operator's file at
-    /// exit is not a default worth having. With the flag, `SIGINT` and
+    /// Off by default: an unasked-for rewrite of the operator's graph file at
+    /// exit is not a default worth having. With `--durability normal` or
+    /// `full`, acknowledged writes are already in the WAL; only durability
+    /// `off` leaves them process-local until a checkpoint. With the flag, `SIGINT` and
     /// `SIGTERM` run a final save (fsync'd, atomic temp+rename) before the
     /// process exits; a failed save is logged as an error AND exits non-zero,
     /// so a supervisor sees the failure instead of a clean stop.
     ///
-    /// Not a durability guarantee: `SIGKILL`, a power loss, or a crash lose
-    /// everything since the last checkpoint, and because connections are not
-    /// drained a commit racing shutdown can land *after* the save — the saved
-    /// graph version is logged so that case is diagnosable.
+    /// At durability `off`, `SIGKILL`, a power loss, or a crash loses everything
+    /// since the last checkpoint. At `normal`/`full`, the WAL provides the
+    /// guarantees described by `--durability`. Connections are not drained, so
+    /// a commit racing shutdown can land *after* the save; the saved graph
+    /// version is logged so that case is diagnosable.
     ///
     /// Refused for `--readonly` (nothing to save) and for disk-mode graphs
     /// (every disk save publishes a new generation and nothing prunes them).
@@ -100,18 +102,20 @@ struct Cli {
 
     /// Checkpoint the served graph back to `--graph` every SECS seconds.
     ///
-    /// Off by default, for the same reason `--save-on-exit` is: writes are
-    /// process-local until something checkpoints them, and periodically
-    /// overwriting the operator's file is a decision they should make. With
+    /// Off by default because periodically overwriting the operator's graph
+    /// file is a decision they should make. A `normal`/`full` WAL still records
+    /// acknowledged writes between checkpoints; at durability `off` they are
+    /// process-local. With
     /// the flag, a background task saves the graph (fsync'd, atomic
     /// temp+rename) on each tick and logs the version it wrote; a tick whose
     /// graph is unchanged since the last checkpoint — by this task or by
     /// `CALL db.checkpoint()` — writes nothing.
     ///
-    /// Bounds the loss window rather than removing it: a crash loses at most
-    /// the writes since the last tick. A failed checkpoint is logged as an
-    /// error and the server keeps serving — degraded durability is worth
-    /// saying loudly, not worth dropping every connected client over.
+    /// At durability `off`, this bounds the loss window: a crash loses at most
+    /// the writes since the last tick. At `normal`/`full`, checkpointing bounds
+    /// WAL replay length instead. A failed checkpoint is logged as an error and
+    /// the server keeps serving — degraded durability is worth saying loudly,
+    /// not worth dropping every connected client over.
     ///
     /// Refused for `--readonly` and for disk-mode graphs, exactly as
     /// `--save-on-exit` is, and combinable with it (the interval bounds the

@@ -2,7 +2,7 @@
 
 use std::io::IsTerminal;
 
-use kglite::api::param::kglite_value_to_json;
+use kglite::api::param::{kglite_value_to_csv_text, kglite_value_to_json};
 use kglite::api::Value;
 
 /// Output format, switched via `.mode`.
@@ -74,16 +74,6 @@ pub fn render(mode: Mode, columns: &[String], rows: &[Vec<Value>], cap: CellCap)
     }
 }
 
-/// Unquoted scalar for CSV/JSON-ish text: a bare string (no kglite quotes),
-/// empty for NULL, else the canonical `Display`.
-fn scalar(value: &Value) -> String {
-    match value {
-        Value::Null => String::new(),
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
-    }
-}
-
 /// One CSV field, RFC-4180-escaped (quote when it contains a comma, quote,
 /// CR or LF; embedded quotes doubled).
 fn csv_field(s: &str) -> String {
@@ -108,7 +98,7 @@ pub fn render_csv(columns: &[String], rows: &[Vec<Value>]) -> String {
     for row in rows {
         let line = row
             .iter()
-            .map(|v| csv_field(&scalar(v)))
+            .map(|v| csv_field(&kglite_value_to_csv_text(v)))
             .collect::<Vec<_>>()
             .join(",");
         out.push_str(&line);
@@ -270,6 +260,23 @@ mod tests {
         assert_eq!(lines[0], "name,note");
         // string is unquoted (no kglite quotes); comma+quote field is escaped
         assert_eq!(lines[1], "Alice,\"a,b\"\"c\"");
+    }
+
+    #[test]
+    fn csv_preserves_scalar_and_nested_machine_precision() {
+        let rows = vec![vec![
+            Value::Float64(1.23456789),
+            Value::List(vec![Value::Float64(1.23456789)]),
+            Value::String(String::new()),
+            Value::Null,
+        ]];
+        assert_eq!(
+            render_csv(
+                &["f".into(), "nested".into(), "empty".into(), "null".into()],
+                &rows,
+            ),
+            "f,nested,empty,null\n1.23456789,[1.23456789],,"
+        );
     }
 
     #[test]

@@ -228,8 +228,9 @@ fn render_cypher_body(
                     // the lazy descriptor (or streaming pipeline) — the
                     // CSV is correct but `rows.len()` reads 0 and the
                     // operator-facing status says "0 row(s) written".
-                    // Counting newlines in the CSV agrees with what the
-                    // file actually contains.
+                    // Counting logical RFC records in the CSV agrees with
+                    // what the file actually contains, including multiline
+                    // quoted fields.
                     let row_count = count_csv_rows(&csv);
                     Ok(format!(
                         "FORMAT CSV: {row_count} row(s) written to {url}\n\
@@ -274,7 +275,8 @@ pub(crate) const INLINE_CSV_ROW_LIMIT: usize = crate::recipe_queries::RECIPE_RES
 /// opt-in — it binds a port and writes files, which no query should be able
 /// to turn on — so the notice names it as an operator action.
 pub(crate) fn cap_inline_csv(csv: &str, csv_http: &crate::csv_http::CsvHttpState) -> String {
-    let total_rows = count_csv_rows(csv);
+    let records = csv_record_summary(csv);
+    let total_rows = records.data_rows;
     if total_rows <= INLINE_CSV_ROW_LIMIT {
         return match inline_csv_reason(csv_http) {
             // A body that fits carries no truncation notice, so this is the
@@ -284,11 +286,11 @@ pub(crate) fn cap_inline_csv(csv: &str, csv_http: &crate::csv_http::CsvHttpState
             None => csv.to_string(),
         };
     }
-    // Header plus the first N data rows, re-joined with the newline
-    // terminator `lines()` strips.
+    // Header plus the first N complete RFC CSV records, byte-for-byte.
+    let prefix_end = records.capped_prefix_end;
     let mut out = String::with_capacity(csv.len().min(64 * 1024));
-    for line in csv.lines().take(INLINE_CSV_ROW_LIMIT + 1) {
-        out.push_str(line);
+    out.push_str(&csv[..prefix_end]);
+    if !out.ends_with('\n') && !out.ends_with('\r') {
         out.push('\n');
     }
     let escape_hatch = match inline_csv_reason(csv_http) {
@@ -357,15 +359,56 @@ pub(crate) fn format_cypher_inline(result: &cypher::CypherResult) -> String {
     out
 }
 
-/// Count data rows in a CSV string, defined as (newline-terminated lines) - 1
-/// for the header. Trailing newlines after the last row don't add to the
-/// count. Handles the edge cases: empty string → 0, header-only → 0,
-/// header + N rows → N. Quoted newlines inside cells aren't recognised
-/// here — kglite's `csv_value` doesn't emit Value variants that contain
-/// embedded newlines, so a plain `lines()` count agrees with row count.
+/// Count logical RFC CSV data records, excluding the header.
 pub(crate) fn count_csv_rows(csv: &str) -> usize {
-    let line_count = csv.lines().count();
-    line_count.saturating_sub(1)
+    csv_record_summary(csv).data_rows
+}
+
+struct CsvRecordSummary {
+    data_rows: usize,
+    capped_prefix_end: usize,
+}
+
+/// Count logical records and retain the byte boundary after the header and
+/// first [`INLINE_CSV_ROW_LIMIT`] data records without allocating per row.
+fn csv_record_summary(csv: &str) -> CsvRecordSummary {
+    let bytes = csv.as_bytes();
+    let mut in_quotes = false;
+    let mut index = 0;
+    let mut record_start = 0;
+    let mut records = 0usize;
+    let mut capped_prefix_end = None;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' if in_quotes && bytes.get(index + 1) == Some(&b'"') => index += 2,
+            b'"' => {
+                in_quotes = !in_quotes;
+                index += 1;
+            }
+            b'\r' | b'\n' if !in_quotes => {
+                index += 1;
+                if bytes[index - 1] == b'\r' && bytes.get(index) == Some(&b'\n') {
+                    index += 1;
+                }
+                records += 1;
+                if records == INLINE_CSV_ROW_LIMIT + 1 {
+                    capped_prefix_end = Some(index);
+                }
+                record_start = index;
+            }
+            _ => index += 1,
+        }
+    }
+    if record_start < bytes.len() {
+        records += 1;
+        if records == INLINE_CSV_ROW_LIMIT + 1 {
+            capped_prefix_end = Some(bytes.len());
+        }
+    }
+    CsvRecordSummary {
+        data_rows: records.saturating_sub(1),
+        capped_prefix_end: capped_prefix_end.unwrap_or(bytes.len()),
+    }
 }
 
 pub(crate) fn push_value_repr(out: &mut String, val: &Value) {

@@ -337,6 +337,62 @@ pub fn kglite_value_to_json(v: &Value) -> serde_json::Value {
     }
 }
 
+/// Render one result value as unquoted machine text for a CSV field.
+///
+/// Strings stay bare and null stays empty; numeric and timestamp precision is
+/// retained recursively. The CSV writer remains responsible for RFC quoting.
+pub fn kglite_value_to_csv_text(v: &Value) -> String {
+    match v {
+        Value::Null => String::new(),
+        Value::String(s) => s.clone(),
+        Value::Int64(n) => n.to_string(),
+        Value::Float64(f) => f.to_string(),
+        Value::Boolean(b) => b.to_string(),
+        Value::UniqueId(n) | Value::NodeRef(n) => n.to_string(),
+        Value::DateTime(d) => d.format("%Y-%m-%d").to_string(),
+        Value::Timestamp(d) => d.format("%Y-%m-%dT%H:%M:%S%.f").to_string(),
+        Value::Point { lat, lon } => format!("POINT({lon} {lat})"),
+        Value::Duration {
+            months,
+            days,
+            seconds,
+        } => format!("duration(M={months}, D={days}, S={seconds})"),
+        Value::List(items) => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(kglite_nested_value_to_csv_text)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::Map(entries) => format!(
+            "{{{}}}",
+            entries
+                .iter()
+                .map(|(key, value)| format!("{key}: {}", kglite_nested_value_to_csv_text(value)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::Node(node) => format!("(:{} {{id: {}}})", node.labels.join(":"), node.id),
+        Value::Relationship(rel) => format!(
+            "[:{} {{id: {}, start: {}, end: {}}}]",
+            rel.rel_type, rel.id, rel.start_id, rel.end_id
+        ),
+        Value::Path(path) => format!("path(nodes={}, rels={})", path.nodes.len(), path.rels.len()),
+    }
+}
+
+fn kglite_nested_value_to_csv_text(v: &Value) -> String {
+    match v {
+        Value::String(s) => format!("\"{s}\""),
+        Value::DateTime(d) => format!("\"{}\"", d.format("%Y-%m-%d")),
+        Value::Timestamp(d) => format!("\"{}\"", d.format("%Y-%m-%dT%H:%M:%S%.f")),
+        Value::Null => "NULL".to_string(),
+        Value::NodeRef(index) => format!("node#{index}"),
+        other => kglite_value_to_csv_text(other),
+    }
+}
+
 /// A finite `f64` as a JSON number; `null` otherwise (JSON has no NaN /
 /// infinity, the same tradeoff `Value::Float64` already makes above).
 fn json_number(f: f64) -> serde_json::Value {
@@ -579,6 +635,40 @@ mod tests {
         assert_eq!(json["nodes"][0]["id"], serde_json::json!(7));
         assert_eq!(json["relationships"][0]["type"], serde_json::json!("KNOWS"));
         assert_eq!(json["nodes"][0]["properties"]["name"], "Ada");
+    }
+
+    #[test]
+    fn csv_text_preserves_fractional_values_recursively() {
+        use chrono::{NaiveDate, NaiveTime};
+        use std::collections::BTreeMap;
+
+        let stamp = NaiveDate::from_ymd_opt(2024, 1, 15)
+            .unwrap()
+            .and_time(NaiveTime::from_hms_nano_opt(10, 30, 0, 123_456_789).unwrap());
+        assert_eq!(
+            kglite_value_to_csv_text(&Value::Timestamp(stamp)),
+            "2024-01-15T10:30:00.123456789"
+        );
+        assert_eq!(
+            kglite_value_to_csv_text(&Value::List(vec![
+                Value::Float64(1.23456789),
+                Value::Timestamp(stamp),
+            ])),
+            "[1.23456789, \"2024-01-15T10:30:00.123456789\"]"
+        );
+        assert_eq!(
+            kglite_value_to_csv_text(&Value::Map(
+                BTreeMap::from([
+                    ("integer".to_string(), Value::Int64(i64::MAX)),
+                    (
+                        "nested".to_string(),
+                        Value::List(vec![Value::Float64(1.23456789)]),
+                    ),
+                ])
+                .into(),
+            )),
+            "{integer: 9223372036854775807, nested: [1.23456789]}"
+        );
     }
 
     #[test]
