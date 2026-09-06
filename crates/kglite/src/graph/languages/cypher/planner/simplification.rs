@@ -656,9 +656,7 @@ pub fn rewrite_text_score(
         texts_to_embed: Vec::new(),
     };
 
-    for clause in &mut query.clauses {
-        collector.rewrite_clause(clause, params)?;
-    }
+    collector.rewrite_query(query, params)?;
 
     Ok(TextScoreRewrite {
         texts_to_embed: collector.texts_to_embed,
@@ -699,6 +697,17 @@ fn text_score_query_arg(
 }
 
 impl TextScoreCollector {
+    fn rewrite_query(
+        &mut self,
+        query: &mut CypherQuery,
+        params: &HashMap<String, Value>,
+    ) -> Result<(), String> {
+        for clause in &mut query.clauses {
+            self.rewrite_clause(clause, params)?;
+        }
+        Ok(())
+    }
+
     /// Rewrite every expression a clause can carry. One arm per clause kind;
     /// the write-side property maps and SET-item lists are shared helpers
     /// because CREATE and MERGE spell them identically.
@@ -711,6 +720,9 @@ impl TextScoreCollector {
             Clause::Return(r) => {
                 for item in &mut r.items {
                     self.rewrite_expr(&mut item.expression, params)?;
+                }
+                if let Some(having) = &mut r.having {
+                    self.rewrite_pred(having, params)?;
                 }
             }
             Clause::Where(w) => {
@@ -763,6 +775,20 @@ impl TextScoreCollector {
             Clause::Limit(l) => {
                 self.rewrite_expr(&mut l.count, params)?;
             }
+            Clause::LoadCsv(load) => self.rewrite_expr(&mut load.source, params)?,
+            Clause::Foreach { list, body, .. } => {
+                self.rewrite_expr(list, params)?;
+                for clause in body {
+                    self.rewrite_clause(clause, params)?;
+                }
+            }
+            Clause::Call(call) => {
+                for (_, expression) in &mut call.parameters {
+                    self.rewrite_expr(expression, params)?;
+                }
+            }
+            Clause::CallSubquery { body, .. } => self.rewrite_query(body, params)?,
+            Clause::Union(union) => self.rewrite_query(&mut union.query, params)?,
             // Remove: no expressions
             // Fused clauses: don't exist yet (created by optimize, which runs after rewrite)
             _ => {}
@@ -1035,7 +1061,12 @@ impl TextScoreCollector {
                 self.rewrite_expr(pattern, params)?;
                 Ok(())
             }
-            Predicate::Exists { .. } => Ok(()),
+            Predicate::Exists { where_clause, .. } => {
+                if let Some(pred) = where_clause.as_deref_mut() {
+                    self.rewrite_pred(pred, params)?;
+                }
+                Ok(())
+            }
             Predicate::InExpression { expr, list_expr } => {
                 self.rewrite_expr(expr, params)?;
                 self.rewrite_expr(list_expr, params)?;

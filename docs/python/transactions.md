@@ -99,15 +99,17 @@ deep copy of its mutable weights or callback state, so mutations inside that
 same object remain visible. Model bindings are runtime services and are not
 stored in `.kgl` files; register them again after loading.
 
-The captured model powers `text_score()` in read queries and in expressions
-within mutation queries. A Session write that invokes a Python model uses an
-isolated working copy, allowing its callback to read the same Session's
-committed snapshot. Re-entering a write on that Session from the callback
-raises `kglite.ArgumentError` with code `InvalidArgument` before waiting for the
-writer lock. A callback error rolls back the current statement while leaving
-the handle usable. Python exposes no value-codec registration on these handles;
-native callers pass codecs per execution, and configured protocol servers
-forward their own runtime service.
+The captured model powers `text_score()` in read queries and mutation
+expressions, including supported nested `CALL` subqueries, `UNION` arms,
+`EXISTS` predicates and `FOREACH` bodies. Only a mutation whose prepared query
+can invoke that model uses an isolated working copy; other mutations use the
+direct serialized path. Its callback may read the same Session's committed
+snapshot. A synchronous same-thread write re-entering that Session from the
+callback raises `kglite.ArgumentError` with code `InvalidArgument` before
+waiting for the writer lock. A callback error rolls back the current statement
+while leaving the handle usable. Python exposes no value-codec registration on
+these handles; native callers pass codecs per execution, and configured
+protocol servers forward their own runtime service.
 
 ## Storage and protocol bindings
 

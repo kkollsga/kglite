@@ -7869,12 +7869,15 @@ class Session:
         ``execute()`` safely. Returns the query result (rows for
         ``... RETURN``, otherwise mutation stats).
 
-        ``text_score()`` can be used in reads and mutation expressions. A write
-        that invokes the captured Python model runs against an isolated working
-        copy; a callback may read this Session's committed snapshot. Re-entering
-        a write on the same Session from that callback raises
-        :class:`ArgumentError` (code ``InvalidArgument``) before waiting for the
-        writer lock. Callback failures preserve the pre-statement state.
+        ``text_score()`` can be used in reads and mutation expressions,
+        including supported nested ``CALL`` subqueries, ``UNION`` arms,
+        ``EXISTS`` predicates and ``FOREACH`` bodies. Only a mutation whose
+        prepared query can invoke the captured Python model runs against an
+        isolated working copy; other mutations use the direct serialized path.
+        A callback may read this Session's committed snapshot. A synchronous
+        same-thread write re-entering this Session from that callback raises
+        :class:`ArgumentError` (code ``InvalidArgument``) before waiting for
+        the writer lock. Callback failures preserve the pre-statement state.
 
         ``row_limit`` caps the rows the call **retains** — the query still runs
         in full and only retention stops at the cap, so the rows kept are the

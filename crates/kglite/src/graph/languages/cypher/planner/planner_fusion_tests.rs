@@ -218,18 +218,30 @@ fn test_text_score_json_shaped_string_stays_text() {
     assert_eq!(texts[0].1, "[1.0, 0.0]");
 }
 
-/// Every `text_score(...)` call in the RETURN items, in order.
-fn return_calls(query: &CypherQuery) -> Vec<(&String, &Vec<Expression>)> {
-    let mut calls = Vec::new();
+/// Every `text_score(...)` call in RETURN items, including nested queries.
+fn collect_return_calls<'a>(
+    query: &'a CypherQuery,
+    calls: &mut Vec<(&'a String, &'a Vec<Expression>)>,
+) {
     for clause in &query.clauses {
-        if let Clause::Return(r) = clause {
-            for item in &r.items {
-                if let Expression::FunctionCall { name, args, .. } = &item.expression {
-                    calls.push((name, args));
+        match clause {
+            Clause::Return(r) => {
+                for item in &r.items {
+                    if let Expression::FunctionCall { name, args, .. } = &item.expression {
+                        calls.push((name, args));
+                    }
                 }
             }
+            Clause::CallSubquery { body, .. } => collect_return_calls(body, calls),
+            Clause::Union(union) => collect_return_calls(&union.query, calls),
+            _ => {}
         }
     }
+}
+
+fn return_calls(query: &CypherQuery) -> Vec<(&String, &Vec<Expression>)> {
+    let mut calls = Vec::new();
+    collect_return_calls(query, &mut calls);
     calls
 }
 
@@ -266,6 +278,69 @@ fn test_two_text_queries_rewrite_to_two_parameters() {
         })
         .collect();
     assert_eq!(names, vec!["__ts_0", "__ts_1", "__ts_0"]);
+}
+
+#[test]
+fn test_text_score_rewrite_recurses_through_nested_query_forms() {
+    let params = HashMap::new();
+    let (query, texts) = rewrite_ts(
+        "CALL { MATCH(d:Doc) RETURN text_score(d, 'body', 'query') AS score } \
+         WITH score AS doc_score MATCH(n:Note) \
+         RETURN text_score(n, 'body', 'query') AS score, doc_score",
+        &params,
+    )
+    .unwrap();
+
+    assert_eq!(texts, vec![("__ts_0".to_string(), "query".to_string())]);
+    let calls = return_calls(&query);
+    assert_eq!(calls.len(), 2);
+    for (name, args) in calls {
+        assert_eq!(name, "vector_score");
+        assert!(matches!(
+            &args[1],
+            Expression::Literal(Value::String(store)) if store == "body_emb"
+        ));
+        assert!(matches!(&args[2], Expression::Parameter(p) if p == "__ts_0"));
+    }
+
+    let (union, texts) = rewrite_ts(
+        "MATCH(d:Doc) RETURN text_score(d, 'body', 'alpha') AS score \
+         UNION MATCH(n:Note) RETURN text_score(n, 'body', 'beta') AS score",
+        &params,
+    )
+    .unwrap();
+    assert_eq!(
+        texts,
+        vec![
+            ("__ts_0".to_string(), "alpha".to_string()),
+            ("__ts_1".to_string(), "beta".to_string()),
+        ]
+    );
+    assert!(return_calls(&union)
+        .iter()
+        .all(|(name, _)| name.as_str() == "vector_score"));
+
+    let (_, exists_texts) = rewrite_ts(
+        "MATCH(d:Doc) WHERE EXISTS { MATCH(n:Note) \
+         WHERE text_score(n, 'body', 'exists') > 0 } RETURN d",
+        &params,
+    )
+    .unwrap();
+    assert_eq!(
+        exists_texts,
+        vec![("__ts_0".to_string(), "exists".to_string())]
+    );
+
+    let (_, foreach_texts) = rewrite_ts(
+        "FOREACH (d IN [1] | \
+         CREATE (:Log {score:text_score(d, 'body', 'foreach')}))",
+        &params,
+    )
+    .unwrap();
+    assert_eq!(
+        foreach_texts,
+        vec![("__ts_0".to_string(), "foreach".to_string())]
+    );
 }
 
 #[test]

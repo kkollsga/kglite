@@ -6,6 +6,8 @@ import textwrap
 
 import pytest
 
+import kglite
+
 CHILD = textwrap.dedent(
     r"""
     import json
@@ -116,6 +118,111 @@ def test_callback_reads_committed_session_without_lock_cycle(mode, reader):
 
 def test_callback_reentrant_write_refuses_before_lock_and_leaves_outer_write_usable():
     run_child("reentrant_write", "cypher")
+
+
+class TrackingModel:
+    def __init__(self):
+        self.dimension_reads = 0
+        self.loads = 0
+        self.embeds = 0
+        self.unloads = 0
+
+    @property
+    def dimension(self):
+        self.dimension_reads += 1
+        return 2
+
+    def load(self):
+        self.loads += 1
+
+    def embed(self, texts):
+        self.embeds += 1
+        return [[0.0, 1.0] if text == "beta" else [1.0, 0.0] for text in texts]
+
+    def unload(self):
+        self.unloads += 1
+
+    def reset(self):
+        self.dimension_reads = 0
+        self.loads = 0
+        self.embeds = 0
+        self.unloads = 0
+
+    def counts(self):
+        return (self.dimension_reads, self.loads, self.embeds, self.unloads)
+
+
+def test_callback_routing_matches_canonical_text_score_rewrite():
+    graph = kglite.KnowledgeGraph()
+    graph.cypher("CREATE (:Doc {id:1,body:'alpha',marker:0}),(:Note {id:2,body:'beta'})")
+    model = TrackingModel()
+    graph.set_embedder(model)
+    graph.embed_texts("Doc", "body", show_progress=False)
+    graph.embed_texts("Note", "body", show_progress=False)
+    model.reset()
+    session = graph.session()
+
+    def execute(query, params=None):
+        before = model.counts()
+        options = {} if params is None else {"params": params}
+        result = session.execute(query, **options)
+        after = model.counts()
+        return result, tuple(end - start for start, end in zip(before, after, strict=True))
+
+    ordinary, callbacks = execute("MATCH(d:Doc) SET d.marker=1 RETURN d.id AS id")
+    assert ordinary.scalar() == 1
+    assert callbacks == (0, 0, 0, 0)
+
+    literal, callbacks = execute("MATCH(d:Doc) SET d.marker=text_score(d,'body','query') RETURN d.marker AS score")
+    assert literal.scalar() == 1.0
+    assert callbacks == (0, 1, 1, 1)
+
+    param_query = "MATCH(d:Doc) SET d.marker=text_score(d,'body',$query) RETURN d.marker AS score"
+    for _ in range(2):
+        repeated, callbacks = execute(param_query, {"query": "query"})
+        assert repeated.scalar() == 1.0
+        assert callbacks == (0, 1, 1, 1)
+
+    for query, params in [
+        ("MATCH(d:Doc) SET d.marker=text_score(d,'body',[1.0,0.0]) RETURN d.marker", None),
+        (param_query, {"query": [1.0, 0.0]}),
+    ]:
+        _, callbacks = execute(query, params)
+        assert callbacks == (0, 0, 0, 0)
+
+    explained, callbacks = execute("EXPLAIN MATCH(d:Doc) SET d.marker=text_score(d,'body','query') RETURN d.marker")
+    assert explained.to_list()[1]["operation"] == "Set"
+    assert callbacks == (0, 0, 0, 0)
+
+    before_version = session.version()
+    before_callbacks = model.counts()
+    with pytest.raises(kglite.CypherExecutionError, match="must be a string or a list"):
+        session.execute(param_query, params={"query": 3})
+    assert session.version() == before_version
+    assert model.counts() == before_callbacks
+
+    nested = (
+        "CALL { MATCH(d:Doc) RETURN text_score(d,'body','query') AS score } "
+        "WITH score AS doc_score MATCH(n:Note) "
+        "WITH doc_score,text_score(n,'body','query') AS score "
+        "CREATE (:Log {doc_score:doc_score,note_score:score}) RETURN doc_score,score"
+    )
+    nested_result, callbacks = execute(nested)
+    assert nested_result.to_list() == [{"doc_score": 1.0, "score": 0.0}]
+    assert callbacks == (0, 1, 1, 1)
+    assert session.version() == before_version + 1
+    assert session.node_count() == 3
+
+    after_nested_version = session.version()
+    after_nested_callbacks = model.counts()
+    unsupported = (
+        "CALL { MATCH(d:Doc) SET d.marker=text_score(d,'body','query') RETURN d.marker AS score } RETURN score"
+    )
+    with pytest.raises(kglite.CypherSyntaxError, match="write clauses.*inside a CALL"):
+        session.execute(unsupported)
+    assert session.version() == after_nested_version
+    assert session.node_count() == 3
+    assert model.counts() == after_nested_callbacks
 
 
 def run_child(mode, reader):

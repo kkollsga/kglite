@@ -48,9 +48,13 @@ before upgrading.
 
 - Python transactions now retain the embedding-model binding captured at
   `begin()`/`begin_read()`, and `text_score()` works in mutation expressions on
-  graphs, sessions and transactions. Session embedding callbacks may read the
-  committed Session snapshot; same-Session callback writes fail explicitly
-  instead of deadlocking, and callback errors preserve statement state.
+  graphs, sessions and transactions, including supported nested `CALL`,
+  `UNION`, `EXISTS` and `FOREACH` query scopes. Only Session mutations whose
+  prepared query can invoke the model use an isolated working copy; other
+  mutations retain the direct serialized path. Session embedding callbacks may
+  read the committed Session snapshot; synchronous same-thread writes that
+  re-enter that Session fail explicitly instead of deadlocking, and callback
+  errors preserve statement state.
 
 ### Changed
 

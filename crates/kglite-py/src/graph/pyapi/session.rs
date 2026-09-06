@@ -18,9 +18,10 @@
 //!   (`Arc::clone`), drop the lock, and run GIL-free. Any number of threads
 //!   read the same `Session` in parallel, lock-free during execution.
 //! - **Writes** (`execute`) serialise behind a writer lock held across the
-//!   whole mutation. Without an embedder, the core Session mutates its Arc in
-//!   place when uniquely owned. Callback-capable writes use a transaction fork
-//!   outside the core graph lock so callbacks can read committed state. Concurrent writes
+//!   whole mutation. Mutations whose prepared query cannot invoke the captured
+//!   embedder use the core Session directly. Callback-capable mutations use a
+//!   transaction fork outside the core graph lock so callbacks can read
+//!   committed state. Concurrent writes
 //!   *compose* — writer B's `begin()` snapshots writer A's committed state, so
 //!   B builds on A's changes rather than racing and silently overwriting them
 //!   (the lost-update failure mode of a naive shared mutable handle). Readers
@@ -87,17 +88,24 @@ thread_local! {
 struct CallbackWriteGuard(usize);
 
 impl CallbackWriteGuard {
-    fn enter(session: &Session) -> PyResult<Self> {
+    fn enter(session: &Session, callback_capable: bool) -> PyResult<Option<Self>> {
         let key = std::ptr::from_ref(session) as usize;
-        if CALLBACK_WRITES.with(|active| active.borrow_mut().insert(key)) {
-            Ok(Self(key))
-        } else {
-            Err(crate::error_py::kg_to_pyerr(KgError::Argument(
-                "An embedding callback cannot re-enter writes on the same Session; \
-                 read its committed snapshot instead."
-                    .to_string(),
-            )))
-        }
+        CALLBACK_WRITES.with(|active| {
+            let mut active = active.borrow_mut();
+            if active.contains(&key) {
+                return Err(crate::error_py::kg_to_pyerr(KgError::Argument(
+                    "An embedding callback cannot re-enter writes on the same Session; \
+                     read its committed snapshot instead."
+                        .to_string(),
+                )));
+            }
+            if callback_capable {
+                active.insert(key);
+                Ok(Some(Self(key)))
+            } else {
+                Ok(None)
+            }
+        })
     }
 }
 
@@ -118,6 +126,21 @@ fn decode_params(params: Option<&Bound<'_, PyDict>>) -> PyResult<HashMap<String,
         }
     }
     Ok(map)
+}
+
+/// Whether canonical query preparation can call the captured embedder.
+///
+/// Reuse the engine's AST rewrite rather than inspecting query text. An
+/// invalid rewrite is conservatively callback-capable; `execute_mut` then
+/// returns the canonical error without risking a callback under the graph
+/// mutex.
+fn may_invoke_embedder(parsed: &mut cypher::CypherQuery, params: &HashMap<String, Value>) -> bool {
+    if parsed.explain {
+        return false;
+    }
+    cypher::rewrite_text_score(parsed, params)
+        .map(|rewrite| !rewrite.texts_to_embed.is_empty())
+        .unwrap_or(true)
 }
 
 /// Decoded per-call query options shared by the read and write paths.
@@ -245,12 +268,13 @@ impl Session {
         query: &str,
         param_map: HashMap<String, Value>,
         qopts: QueryOpts,
+        callback_capable: bool,
     ) -> PyResult<Py<PyAny>> {
-        let _callback_write = self
-            .embedder
-            .as_ref()
-            .map(|_| CallbackWriteGuard::enter(self))
-            .transpose()?;
+        let _callback_write = if self.embedder.is_some() {
+            CallbackWriteGuard::enter(self, callback_capable)?
+        } else {
+            None
+        };
         let core = &self.inner;
         let source_authority = self.source_authority.clone();
         let write_lock = &self.write_lock;
@@ -315,7 +339,7 @@ impl Session {
                 modified_by: modified_by.as_deref(),
                 csv_import: CsvImportPolicy::LocalFilesystem,
             };
-            if opts.embedder.is_none() {
+            if !callback_capable {
                 return Ok(execute_mut(&mut graph, &query_owned, &opts)?.result);
             }
             // Python callbacks see the committed graph. Retain only the
@@ -435,8 +459,14 @@ impl Session {
     /// A read-only query passed to `execute()` is fast-pathed to the read
     /// path (no working-copy materialisation), so it is always safe to route
     /// mixed traffic through `execute()`.
-    /// Callback-bearing writes use an isolated working copy: callbacks may
-    /// read committed Session state, while same-Session writes are refused.
+    /// `text_score()` works in mutation expressions, including supported
+    /// nested `CALL` subqueries, `UNION` arms, `EXISTS` predicates, and
+    /// `FOREACH` bodies.
+    /// Only mutations whose prepared query can invoke the captured embedder
+    /// use an isolated working copy; other mutations use the direct serialized
+    /// path. Embedder callbacks may read committed Session state. A synchronous
+    /// same-thread write re-entering this Session from such a callback is
+    /// refused before it waits for the writer lock.
     ///
     /// Args:
     ///     query: A Cypher query string (read or write).
@@ -476,9 +506,13 @@ impl Session {
         git_sha: Option<String>,
         modified_by: Option<String>,
     ) -> PyResult<Py<PyAny>> {
-        let pre_parsed = cypher::parse_cypher(query).map_err(crate::error_py::kg_to_pyerr)?;
+        let mut pre_parsed = cypher::parse_cypher(query).map_err(crate::error_py::kg_to_pyerr)?;
         let param_map = decode_params(params)?;
         let output_csv = pre_parsed.output_format == cypher::OutputFormat::Csv;
+        let is_mutation = cypher::is_mutation_query(&pre_parsed);
+        let callback_capable = is_mutation
+            && self.embedder.is_some()
+            && may_invoke_embedder(&mut pre_parsed, &param_map);
         let scope_set = write_scope.map(|v| v.into_iter().collect());
         let qopts = QueryOpts::from_parts(
             self.defaults,
@@ -491,8 +525,8 @@ impl Session {
             git_sha,
             modified_by,
         );
-        if cypher::is_mutation_query(&pre_parsed) {
-            self.run_write(py, query, param_map, qopts)
+        if is_mutation {
+            self.run_write(py, query, param_map, qopts, callback_capable)
         } else {
             self.run_read(py, query, param_map, qopts)
         }
