@@ -35,6 +35,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+pub(crate) type CheckedEdgeProperties<'a> = io::Result<Option<Cow<'a, [(InternedKey, Value)]>>>;
+
 /// Columnar base filenames, written into the graph's data directory
 /// alongside the CSR/column files.
 pub const OFFSETS_FILE: &str = "edge_prop_offsets.bin";
@@ -290,10 +292,7 @@ impl EdgePropertyStore {
     /// Lookup used while admitting a complete disk snapshot. Unlike ordinary
     /// query lookup, malformed persisted bytes are a load error rather than an
     /// absent property row.
-    pub(crate) fn get_checked(
-        &self,
-        edge_idx: u32,
-    ) -> io::Result<Option<Cow<'_, [(InternedKey, Value)]>>> {
+    pub(crate) fn get_checked(&self, edge_idx: u32) -> CheckedEdgeProperties<'_> {
         if let Some(entry) = self.overlay.get(&edge_idx) {
             return Ok(entry
                 .as_ref()

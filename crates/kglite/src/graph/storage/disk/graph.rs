@@ -19,11 +19,10 @@ use petgraph::Direction;
 use std::borrow::Cow;
 use std::cell::UnsafeCell;
 use std::collections::{HashMap, HashSet};
-use std::io;
 use std::path::{Path, PathBuf};
 
 use super::csr::{CsrEdge, DiskNodeSlot, EdgeEndpoints, PendingEdge, TOMBSTONE_EDGE};
-use super::edge_properties::EdgePropertyStore;
+use super::edge_properties::{CheckedEdgeProperties, EdgePropertyStore};
 use super::property_index;
 
 /// CSR + column binaries live in a per-segment subdirectory of the graph
@@ -1277,10 +1276,7 @@ impl DiskGraph {
     }
 
     /// Load-admission lookup that surfaces malformed persisted properties.
-    pub(crate) fn edge_properties_at_checked(
-        &self,
-        edge_idx: u32,
-    ) -> io::Result<Option<Cow<'_, [(InternedKey, Value)]>>> {
+    pub(crate) fn edge_properties_at_checked(&self, edge_idx: u32) -> CheckedEdgeProperties<'_> {
         self.edge_properties.get_checked(edge_idx)
     }
 
