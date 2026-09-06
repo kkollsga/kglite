@@ -129,8 +129,8 @@
     {
       "path": "crates/kglite/src/graph/io/export.rs",
       "qualified_name": "crate::to_csv_dir",
-      "lines": 283,
-      "branches": 32,
+      "lines": 267,
+      "branches": 31,
       "nesting": 5
     },
     {

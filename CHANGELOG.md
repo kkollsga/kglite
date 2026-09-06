@@ -52,6 +52,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- JSON, CSV and XML exports preserve escaped controls, carriage returns and
+  timestamp fractions. D3 structural edge fields keep precedence over conflicting
+  properties; XML formats reject characters they cannot represent.
+- CSV exports use distinct sibling filenames without rewriting parent paths.
+  Directory exports allocate portable collision-free names and keep generated
+  blueprint references aligned with the actual files.
 - Blueprint derive and aggregate columns reconcile every computed value before
   loading, preserving null neutrality and fractional results. Declared integer
   cells parse decimal/scientific whole values exactly; fractional or out-of-range

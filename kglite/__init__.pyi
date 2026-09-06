@@ -5743,6 +5743,14 @@ class KnowledgeGraph:
         ``sqlite``. Format is inferred from the file extension if not
         specified (``.sql`` → ``sqlite``).
 
+        D3/JSON field precedence and XML text handling follow the same rules
+        as :meth:`export_string`.
+
+        Explicit ``format='csv'`` writes two sibling files using the final
+        filename stem: ``graph``, ``graph.csv``, ``graph.CSV`` and ``graph.data``
+        all produce ``graph_nodes.csv`` and ``graph_edges.csv``. The parent
+        directory is preserved, including any ``.csv`` text in its name.
+
         ``sqlite`` writes a SQLite-dialect SQL script — node types become
         tables, connection types become link tables — which you ingest with the
         stock CLI::
@@ -5788,6 +5796,13 @@ class KnowledgeGraph:
             │   ├── WORKS_AT.csv
             │   └── KNOWS.csv
             └── blueprint.json
+
+        Portable, unambiguous filenames are retained. Other logical type names
+        receive deterministic export-local filenames, bounded to 120 ASCII
+        bytes per component and unique without regard to case. Parent folders
+        use the same allocation. Follow the generated blueprint's paths rather
+        than constructing filenames from type names; logical node and connection
+        names remain unchanged in data and blueprint keys.
 
         Node CSVs have columns: ``id``, ``title``, then all properties.
         Connection CSVs: ``source_id``, ``source_type``, ``target_id``,
@@ -5840,6 +5855,13 @@ class KnowledgeGraph:
         ``csv`` is **file-only** — it writes two files (nodes and edges), which
         one string cannot carry — so it is rejected here; use
         ``export(path, format='csv')``.
+
+        D3/JSON preserves canonical node ``id``, ``title``, ``type`` and link
+        ``source``, ``target``, ``type`` fields. Properties with these reserved
+        names are omitted from the respective flat object; other properties
+        retain their names and values. GraphML/GEXF reject text characters XML
+        cannot represent, and preserve tabs and line endings via character
+        references.
 
         Args:
             format: Export format. Default: ``'json'``. (:meth:`export` infers

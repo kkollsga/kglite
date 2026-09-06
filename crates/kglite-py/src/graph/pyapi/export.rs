@@ -1,6 +1,7 @@
 // Export #[pymethods] — extracted from mod.rs
 
 use pyo3::prelude::*;
+use std::path::{Path, PathBuf};
 
 use crate::graph::KnowledgeGraph;
 use kglite_core::api::CurrentSelection;
@@ -11,35 +12,7 @@ impl KnowledgeGraph {
     // Export Methods
     // ========================================================================
 
-    /// Export the graph or current selection to a file in the specified format.
-    ///
-    /// Supported formats:
-    /// - "graphml" - GraphML XML format (Gephi, yEd, Cytoscape)
-    /// - "gexf" - GEXF XML format (Gephi native)
-    /// - "d3" or "json" - D3.js compatible JSON format
-    /// - "csv" - CSV format (creates two files: path_nodes.csv and path_edges.csv)
-    /// - "sqlite" - SQLite-dialect SQL script; ingest with `sqlite3 out.db < path`
-    ///
-    /// Args:
-    ///     path: Output file path
-    ///     format: Export format. Default: inferred from the file extension
-    ///         (`.graphml` / `.gexf` / `.json` / `.csv` / `.sql`), falling back
-    ///         to graphml for an unrecognised one. `export_string()` has no
-    ///         path to infer from and defaults to "json" instead.
-    ///     selection_only: If True, export only selected nodes. Default: use the
-    ///         selection when it actually holds nodes, otherwise the whole graph.
-    ///
-    /// Example:
-    ///     ```python
-    ///         # Export entire graph to GraphML
-    ///         graph.export('output.graphml')
-    ///
-    ///     # Export selection to D3 format
-    ///     graph.select('Field').expand(hops=2).export('fields.json', format='d3')
-    ///
-    ///     # Export to GEXF for Gephi
-    ///     graph.export('network.gexf', format='gexf')
-    ///     ```
+    /// Export the graph or current selection to files in the specified format.
     #[pyo3(signature = (path, format=None, selection_only=None))]
     fn export(
         &self,
@@ -87,17 +60,14 @@ impl KnowledgeGraph {
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
             }
             "csv" => {
+                let (nodes_path, edges_path) = paired_csv_paths(Path::new(path))?;
                 let (nodes_csv, edges_csv) =
                     kglite_core::api::io::to_csv(&self.inner, selection)
                         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
-                // Write nodes file
-                let nodes_path = path.replace(".csv", "_nodes.csv");
                 std::fs::write(&nodes_path, nodes_csv)
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
 
-                // Write edges file
-                let edges_path = path.replace(".csv", "_edges.csv");
                 std::fs::write(&edges_path, edges_csv)
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
             }
@@ -118,40 +88,7 @@ impl KnowledgeGraph {
         Ok(())
     }
 
-    /// Export graph data to an organized CSV directory tree.
-    ///
-    /// Creates a directory with:
-    /// - `nodes/<Type>.csv` for each node type (with all properties as columns)
-    /// - `connections/<Type>.csv` for each connection type
-    /// - `blueprint.json` for round-trip re-import via `from_blueprint()`
-    ///
-    /// Sub-nodes (types registered with `set_parent_type()`) are nested
-    /// under their parent type's folder: `nodes/<Parent>/<Child>.csv`.
-    ///
-    /// Args:
-    ///     path: Output directory path (created if it doesn't exist)
-    ///     selection_only: If True, export only selected nodes and their connections.
-    ///         Default: True if a selection exists, False otherwise.
-    ///     verbose: If True, print progress information during export.
-    ///
-    /// Returns:
-    ///     A dict with export summary:
-    ///     - "output_dir": str — the output directory path
-    ///     - "nodes": dict[str, int] — node counts per type
-    ///     - "connections": dict[str, int] — connection counts per type
-    ///     - "files_written": int — total files written
-    ///
-    /// Example:
-    ///     ```python
-    ///         # Export entire graph
-    ///         result = graph.export_csv('output/')
-    ///
-    ///     # Export only selected nodes
-    ///     result = graph.select('Person').export_csv('output/')
-    ///
-    ///     # With progress output
-    ///     result = graph.export_csv('output/', verbose=True)
-    ///     ```
+    /// Export graph data to a CSV directory tree with a re-import blueprint.
     #[pyo3(signature = (path, selection_only=None, verbose=false))]
     fn export_csv(
         &self,
@@ -266,6 +203,41 @@ impl KnowledgeGraph {
                 "Unknown export format: '{}'. Supported: graphml, gexf, d3, json, sqlite",
                 format
             ))),
+        }
+    }
+}
+
+/// Resolve both sibling destinations before serializing or writing either file.
+fn paired_csv_paths(path: &Path) -> PyResult<(PathBuf, PathBuf)> {
+    let stem = path
+        .file_stem()
+        .filter(|stem| !stem.is_empty())
+        .ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err("CSV export requires a file basename")
+        })?;
+    let mut nodes = stem.to_os_string();
+    nodes.push("_nodes.csv");
+    let mut edges = stem.to_os_string();
+    edges.push("_edges.csv");
+    Ok((path.with_file_name(nodes), path.with_file_name(edges)))
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn csv_sibling_paths_use_only_the_final_basename() {
+        for input in [
+            "folder.csv/graph",
+            "folder.csv/graph.csv",
+            "folder.csv/graph.CSV",
+            "folder.csv/graph.data",
+        ] {
+            let (nodes, edges) = paired_csv_paths(Path::new(input)).unwrap();
+            assert_eq!(nodes, Path::new("folder.csv/graph_nodes.csv"));
+            assert_eq!(edges, Path::new("folder.csv/graph_edges.csv"));
+            assert_ne!(nodes, edges);
         }
     }
 }

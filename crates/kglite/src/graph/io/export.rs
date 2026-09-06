@@ -6,6 +6,11 @@ use crate::graph::storage::GraphRead;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
+mod encoding;
+mod paths;
+use encoding::{escape_csv, escape_xml, json_string};
+use paths::ExportPaths;
+
 /// Export the graph (or selection) to GraphML format.
 ///
 /// GraphML is an XML-based format supported by many graph visualization tools
@@ -62,14 +67,14 @@ pub fn to_graphml(
             xml.push_str(&format!("    <node id=\"n{}\">\n", idx.index()));
             xml.push_str(&format!(
                 "      <data key=\"node_type\">{}</data>\n",
-                escape_xml(node.node_type_str(&graph.interner))
+                escape_xml(node.node_type_str(&graph.interner))?
             ));
-            let title = escape_xml(&crate::datatypes::values::raw_string(&node.title()));
+            let title = escape_xml(&crate::datatypes::values::raw_string(&node.title()))?;
             xml.push_str(&format!("      <data key=\"node_title\">{title}</data>\n"));
             xml.push_str(&format!("      <data key=\"node_label\">{title}</data>\n"));
             xml.push_str(&format!(
                 "      <data key=\"node_id\">{}</data>\n",
-                escape_xml(&crate::datatypes::values::raw_string(&node.id()))
+                escape_xml(&crate::datatypes::values::raw_string(&node.id()))?
             ));
 
             // Serialize properties as JSON
@@ -83,7 +88,7 @@ pub fn to_graphml(
                     properties_to_json_owned(node.property_pairs_named(&graph.interner));
                 xml.push_str(&format!(
                     "      <data key=\"node_properties\">{}</data>\n",
-                    escape_xml(&props_json)
+                    escape_xml(&props_json)?
                 ));
             }
 
@@ -108,7 +113,7 @@ pub fn to_graphml(
                     source_idx.index(),
                     target_idx.index()
                 ));
-                let conn_type = escape_xml(edge.weight().connection_type_str(&graph.interner));
+                let conn_type = escape_xml(edge.weight().connection_type_str(&graph.interner))?;
                 xml.push_str(&format!(
                     "      <data key=\"edge_type\">{conn_type}</data>\n"
                 ));
@@ -121,7 +126,7 @@ pub fn to_graphml(
                         properties_to_json(edge.weight().property_iter(&graph.interner));
                     xml.push_str(&format!(
                         "      <data key=\"edge_properties\">{}</data>\n",
-                        escape_xml(&props_json)
+                        escape_xml(&props_json)?
                     ));
                 }
 
@@ -170,7 +175,7 @@ pub fn to_d3_json(
             ));
             obj.push_str(&format!("\"title\":{}", json_value(&node.title())));
 
-            // Add select properties (not all to keep output clean).
+            // Canonical node fields take precedence over conflicting properties.
             // `property_iter` yielded nothing for columnar (saved) graphs,
             // silently dropping every property here.
             for (key, value) in node.property_pairs_named(&graph.interner) {
@@ -208,7 +213,9 @@ pub fn to_d3_json(
 
                     // Add edge properties
                     for (key, value) in edge.weight().property_iter(&graph.interner) {
-                        link.push_str(&format!(",{}:{}", json_string(key), json_value(value)));
+                        if !matches!(key, "source" | "target" | "type") {
+                            link.push_str(&format!(",{}:{}", json_string(key), json_value(value)));
+                        }
                     }
 
                     link.push('}');
@@ -274,16 +281,16 @@ pub fn to_gexf(graph: &DirGraph, selection: Option<&CurrentSelection>) -> Result
             xml.push_str(&format!(
                 "      <node id=\"{}\" label=\"{}\">\n",
                 idx.index(),
-                escape_xml(&title_str)
+                escape_xml(&title_str)?
             ));
             xml.push_str("        <attvalues>\n");
             xml.push_str(&format!(
                 "          <attvalue for=\"0\" value=\"{}\"/>\n",
-                escape_xml(node.node_type_str(&graph.interner))
+                escape_xml(node.node_type_str(&graph.interner))?
             ));
             xml.push_str(&format!(
                 "          <attvalue for=\"1\" value=\"{}\"/>\n",
-                escape_xml(&title_str)
+                escape_xml(&title_str)?
             ));
             xml.push_str("        </attvalues>\n");
             xml.push_str("      </node>\n");
@@ -311,7 +318,7 @@ pub fn to_gexf(graph: &DirGraph, selection: Option<&CurrentSelection>) -> Result
                 xml.push_str("        <attvalues>\n");
                 xml.push_str(&format!(
                     "          <attvalue for=\"0\" value=\"{}\"/>\n",
-                    escape_xml(edge.weight().connection_type_str(&graph.interner))
+                    escape_xml(edge.weight().connection_type_str(&graph.interner))?
                 ));
                 xml.push_str("        </attvalues>\n");
                 xml.push_str("      </edge>\n");
@@ -615,6 +622,8 @@ pub fn to_csv_dir(
         }
     }
 
+    let paths = ExportPaths::new(nodes_by_type.keys(), edges_by_type.keys(), parent_types)?;
+
     // ── 4. Create directories ────────────────────────────────────
     let nodes_dir = output.join("nodes");
     let connections_dir = output.join("connections");
@@ -625,13 +634,9 @@ pub fn to_csv_dir(
             .map_err(|e| format!("Failed to create connections directory: {}", e))?;
     }
 
-    // Create sub-node directories
-    for parent in parent_types.values() {
-        if nodes_by_type.contains_key(parent) {
-            let sub_dir = nodes_dir.join(parent);
-            std::fs::create_dir_all(&sub_dir)
-                .map_err(|e| format!("Failed to create sub-node directory: {}", e))?;
-        }
+    for relative_directory in paths.node_directories() {
+        std::fs::create_dir_all(output.join(relative_directory))
+            .map_err(|e| format!("Failed to create sub-node directory: {}", e))?;
     }
 
     let mut summary = ExportSummary {
@@ -680,18 +685,8 @@ pub fn to_csv_dir(
             }
         }
 
-        // Determine file path (nested under parent if sub-node)
-        let csv_path = if let Some(parent) = parent_types.get(node_type) {
-            nodes_dir.join(parent).join(format!("{}.csv", node_type))
-        } else {
-            nodes_dir.join(format!("{}.csv", node_type))
-        };
-
-        let relative_path = csv_path
-            .strip_prefix(output)
-            .unwrap_or(&csv_path)
-            .to_string_lossy()
-            .to_string();
+        let relative_path = paths.node(node_type);
+        let csv_path = output.join(relative_path);
 
         std::fs::write(&csv_path, &csv)
             .map_err(|e| format!("Failed to write {}: {}", relative_path, e))?;
@@ -795,12 +790,8 @@ pub fn to_csv_dir(
             csv.push('\n');
         }
 
-        let csv_path = connections_dir.join(format!("{}.csv", conn_type));
-        let relative_path = csv_path
-            .strip_prefix(output)
-            .unwrap_or(&csv_path)
-            .to_string_lossy()
-            .to_string();
+        let relative_path = paths.connection(conn_type);
+        let csv_path = output.join(relative_path);
 
         std::fs::write(&csv_path, &csv)
             .map_err(|e| format!("Failed to write {}: {}", relative_path, e))?;
@@ -822,7 +813,7 @@ pub fn to_csv_dir(
         &node_type_prop_types,
         parent_types,
         &conn_meta,
-        output,
+        &paths,
     );
     let blueprint_path = output.join("blueprint.json");
     std::fs::write(&blueprint_path, &blueprint)
@@ -894,7 +885,7 @@ fn build_blueprint(
     node_type_prop_types: &BTreeMap<String, BTreeMap<String, String>>,
     parent_types: &HashMap<String, String>,
     conn_meta: &BTreeMap<String, ConnMeta>,
-    _output_dir: &Path,
+    paths: &ExportPaths,
 ) -> String {
     let mut json = String::with_capacity(4096);
     json.push_str("{\n  \"settings\": {\n    \"root\": \".\"\n  },\n  \"nodes\": {");
@@ -906,15 +897,10 @@ fn build_blueprint(
         }
         first_node = false;
 
-        // Determine CSV path relative to output_dir
-        let csv_rel = if let Some(parent) = parent_types.get(node_type) {
-            format!("nodes/{}/{}.csv", parent, node_type)
-        } else {
-            format!("nodes/{}.csv", node_type)
-        };
+        let csv_rel = paths.node(node_type);
 
         json.push_str(&format!("\n    {}: {{\n", json_string(node_type)));
-        json.push_str(&format!("      \"csv\": {},\n", json_string(&csv_rel)));
+        json.push_str(&format!("      \"csv\": {},\n", json_string(csv_rel)));
         json.push_str("      \"pk\": \"id\",\n");
         json.push_str("      \"title\": \"title\"");
 
@@ -957,11 +943,11 @@ fn build_blueprint(
                     json.push(',');
                 }
                 first_conn = false;
-                let conn_csv = format!("connections/{}.csv", conn_type);
+                let conn_csv = paths.connection(conn_type);
                 json.push_str(&format!(
                     "\n          {}: {{\n            \"csv\": {},\n            \"source_fk\": \"source_id\",\n            \"target\": {},\n            \"target_fk\": \"target_id\"",
                     json_string(conn_type),
-                    json_string(&conn_csv),
+                    json_string(conn_csv),
                     json_string(target_type)
                 ));
                 // Edge properties (exclude the 4 standard columns)
@@ -996,33 +982,6 @@ fn build_blueprint(
     json
 }
 
-// Helper functions
-
-fn escape_xml(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
-
-fn escape_csv(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_string()
-    }
-}
-
-fn json_string(s: &str) -> String {
-    format!(
-        "\"{}\"",
-        s.replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', "\\n")
-    )
-}
-
 fn json_value(value: &Value) -> String {
     match value {
         Value::String(s) => json_string(s),
@@ -1036,9 +995,13 @@ fn json_value(value: &Value) -> String {
         }
         Value::Boolean(b) => b.to_string(),
         Value::DateTime(dt) => json_string(&dt.to_string()),
-        Value::Timestamp(dt) => json_string(&dt.format("%Y-%m-%dT%H:%M:%S").to_string()),
+        Value::Timestamp(dt) => json_string(&dt.format("%Y-%m-%dT%H:%M:%S%.f").to_string()),
         Value::UniqueId(id) => id.to_string(),
-        Value::Point { lat, lon } => format!("{{\"lat\":{},\"lon\":{}}}", lat, lon),
+        Value::Point { lat, lon } => format!(
+            "{{\"lat\":{},\"lon\":{}}}",
+            json_value(&Value::Float64(*lat)),
+            json_value(&Value::Float64(*lon))
+        ),
         Value::Duration {
             months,
             days,
