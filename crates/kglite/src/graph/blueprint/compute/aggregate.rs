@@ -16,6 +16,7 @@
 //! Outputs:
 //! - An allocated CSV under `computed/` — one row per group with
 //!   pk = `group:` followed by the JSON string tuple of group_by values
+//!
 //! Declared FK edges reference group-key columns in this same summary CSV.
 //!
 //! Plus a synthesised `NodeSpec[into]` registered in the
