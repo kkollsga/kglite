@@ -50,13 +50,6 @@
       "nesting": 5
     },
     {
-      "path": "crates/kglite-py/src/datatypes/py_out.rs",
-      "qualified_name": "crate::level_connections_to_pydict",
-      "lines": 154,
-      "branches": 79,
-      "nesting": 5
-    },
-    {
       "path": "crates/kglite/src/graph/algorithms/centrality.rs",
       "qualified_name": "crate::betweenness_centrality",
       "lines": 270,

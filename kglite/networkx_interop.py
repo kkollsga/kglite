@@ -9,6 +9,7 @@ import side — pure Python, bulk-loading via the DataFrame fast paths
 from __future__ import annotations
 
 from collections import defaultdict
+import math
 import numbers
 import typing
 
@@ -293,6 +294,57 @@ def _collect_edges(
     return edges_by_key
 
 
+def _ingestion_frame(rows, identity_columns):
+    """Preserve properties before inference without changing identity coercion."""
+    import pandas as pd
+
+    from ._pandas import dataframe
+
+    # Whole-float and integer IDs intentionally share the existing pandas
+    # ingestion family. Applying object preservation to IDs would stringify
+    # them and disconnect endpoints; property precision is a separate policy.
+    identities = [{name: row[name] for name in identity_columns} for row in rows]
+    properties = [{name: value for name, value in row.items() if name not in identity_columns} for row in rows]
+    frame = pd.DataFrame(identities)
+    property_frame = dataframe(properties)
+    for name, values in property_frame.items():
+        original = [row.get(name) for row in properties]
+        nullable_integers = _nullable_integer_properties(original, pd)
+        frame[name] = nullable_integers if nullable_integers is not None else values
+    return frame
+
+
+def _nullable_integer_properties(values, pd):
+    """Return exact nullable Int64 values, or leave other columns unchanged."""
+    normalized = []
+    saw_integer = False
+    saw_missing = False
+    for value in values:
+        if value is None or value is pd.NA or _is_nan(value):
+            normalized.append(None)
+            saw_missing = True
+            continue
+        if isinstance(value, numbers.Integral) and not isinstance(value, bool):
+            integer = int(value)
+            if -(2**63) <= integer <= 2**63 - 1:
+                normalized.append(integer)
+                saw_integer = True
+                continue
+        return None
+    if not (saw_integer and saw_missing):
+        return None
+    return pd.array(normalized, dtype="Int64")
+
+
+def _is_nan(value):
+    if not isinstance(value, numbers.Real) or isinstance(value, numbers.Integral):
+        return False
+    try:
+        return math.isnan(value)
+    except (OverflowError, TypeError, ValueError):
+        return False
+
+
 def from_networkx(
     nx_graph: typing.Any,
     *,
@@ -330,6 +382,14 @@ def from_networkx(
     endpoints that kept their original type unmatched, so that raises too.
     Different node types may use different id shapes.
 
+    Node and edge property columns preserve exact signed 64-bit integers,
+    including columns with missing values, before DataFrame ingestion. Mixed
+    object columns retain the ordinary ingestion policy: values are stored as
+    text with a warning, using each scalar's original spelling before that
+    conversion. This does not provide a typed round-trip for heterogeneous
+    columns. Same-type parallel edges with identical endpoints retain the
+    existing import deduplication policy.
+
     Requires the ``networkx`` and ``pandas`` packages.
 
     Args:
@@ -359,7 +419,7 @@ def from_networkx(
             "The 'networkx' package is required for from_networkx(). Install with: pip install networkx"
         ) from None
     try:
-        import pandas as pd
+        import pandas  # noqa: F401 — preserve the optional-dependency error before ingestion
     except ImportError:
         raise ImportError(
             "The 'pandas' package is required for from_networkx(). Install with: pip install pandas"
@@ -377,12 +437,12 @@ def from_networkx(
 
     nodes_by_type, type_of_node = _collect_nodes(nx_graph, key_mode, default_node_type)
     for ntype, rows in nodes_by_type.items():
-        df = pd.DataFrame(rows)
+        df = _ingestion_frame(rows, ("id", "title"))
         g.add_nodes(df, ntype, "id", "title")
 
     edges_by_key = _collect_edges(nx_graph, key_mode, type_of_node, default_node_type, default_edge_type)
     for (ctype, stype, ttype), rows in edges_by_key.items():
-        df = pd.DataFrame(rows)
+        df = _ingestion_frame(rows, ("src", "tgt"))
         g.add_connections(
             df,
             ctype,

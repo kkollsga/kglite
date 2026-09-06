@@ -1639,6 +1639,14 @@ def from_networkx(
     unmatched. That mix raises too. Different node types may use different id
     shapes — they never share a column.
 
+    Node and edge property columns preserve exact signed 64-bit integers,
+    including columns with missing values, before DataFrame ingestion. Mixed
+    object columns retain the ordinary ingestion policy: values are stored as
+    text with a warning, using each scalar's original spelling before that
+    conversion. This does not provide a typed round-trip for heterogeneous
+    columns. Same-type parallel edges with identical endpoints retain the
+    existing import deduplication policy.
+
     Requires the ``networkx`` extra: ``pip install "kglite[networkx]"``.
 
     Args:
@@ -2696,6 +2704,9 @@ class KnowledgeGraph:
             ``flatten_single_parent`` is ``True`` and there is only one
             parent, returns a flat list.
 
+            For collision handling and key identity, see
+            :ref:`presentation-dictionary-keys`.
+
         Examples::
 
             # Group wells by their parent field
@@ -3292,6 +3303,9 @@ class KnowledgeGraph:
 
         Returns:
             Nested dict ``{title: {node_id, type, incoming, outgoing}}``.
+
+            For parent, selected-node, and endpoint key behavior, see
+            :ref:`presentation-dictionary-keys`.
         """
         ...
 
@@ -3311,6 +3325,9 @@ class KnowledgeGraph:
 
         Returns:
             ``list[str]`` when flattened, ``dict[str, list[str]]`` when grouped.
+
+            For grouped dictionary key behavior, see
+            :ref:`presentation-dictionary-keys`.
         """
         ...
 
@@ -3357,6 +3374,9 @@ class KnowledgeGraph:
 
         Returns:
             ``list[tuple]`` when flattened, ``dict[str, list[tuple]]`` when grouped.
+
+            For grouped dictionary key behavior, see
+            :ref:`presentation-dictionary-keys`.
         """
         ...
 
@@ -3384,6 +3404,9 @@ class KnowledgeGraph:
         Returns:
             Dict of unique values per parent, or — when ``store_as`` is set —
             this same graph (not a copy), so the call can be chained.
+
+            For parent-group dictionary key behavior, see
+            :ref:`presentation-dictionary-keys`.
 
         Note:
             ``store_as`` writes node properties, so on a graph opened with
@@ -3741,6 +3764,9 @@ class KnowledgeGraph:
         Returns:
             Computation results, or a KnowledgeGraph if ``store_as`` is set.
 
+            For parent-group dictionary key behavior, see
+            :ref:`presentation-dictionary-keys`.
+
         Note:
             ``store_as=`` writes, and the write happens on the derived handle a
             selection produced, which shares the storage but not the write-ahead
@@ -3769,6 +3795,9 @@ class KnowledgeGraph:
 
         Returns:
             An integer count, grouped counts, or a KnowledgeGraph if ``store_as`` is set.
+
+            For parent-group dictionary key behavior, see
+            :ref:`presentation-dictionary-keys`.
 
         Note:
             ``store_as=`` writes, and the write happens on the derived handle a

@@ -396,6 +396,19 @@ strings as strings. Different node *types* may use different id shapes freely
 — int-keyed `Person` nodes beside string-keyed `City` nodes never share a
 column and import exactly as given.
 
+Property columns are constructed without letting pandas convert nullable
+integers through `float64`. A property such as `9007199254740993` beside a
+missing value therefore remains the exact integer; older releases imported it
+as `9007199254740992.0`. This applies to node and edge properties. Canonical
+node ids, titles, and edge endpoints keep their existing coercion rules.
+
+Intentionally heterogeneous object properties keep the usual DataFrame import
+policy: KGLite warns and stores their original scalar spellings as text. For
+example, a mixed integer/float property may now become exact strings rather
+than strings produced after an intermediate float rounded the integer. This is
+not a typed round-trip for heterogeneous columns. Optional `pandas` and
+`networkx` imports remain lazy until `from_networkx()` is called.
+
 ## Neo4j Export
 
 Push a graph (or the active selection) to a live Neo4j database over Bolt,

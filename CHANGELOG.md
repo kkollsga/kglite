@@ -55,6 +55,13 @@ before upgrading.
   read the committed Session snapshot; synchronous same-thread writes that
   re-enter that Session fail explicitly instead of deadlocking, and callback
   errors preserve statement state.
+- NetworkX import preserves exact signed 64-bit node and edge properties in
+  nullable columns before DataFrame inference. Existing ID coercion,
+  heterogeneous-object stringification and same-type parallel-edge
+  deduplication remain unchanged.
+- Fluent grouped, connection and calculation dictionaries retain all entries
+  when parent, selected-node or endpoint presentation labels collide, including
+  labels that already resemble generated suffixes or metadata keys.
 
 ### Changed
 
