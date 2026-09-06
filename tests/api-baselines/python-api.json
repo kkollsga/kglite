@@ -1602,7 +1602,7 @@
     },
     "outline": {
       "kind": "function",
-      "signature": "(graph: 'KnowledgeGraph', root, edge: str, *, max_depth: int | None = None, body: str | None = None) -> str"
+      "signature": "(graph: 'KnowledgeGraph', root, edge: str, *, root_type: str | None = None, max_depth: int | None = None, body: str | None = None) -> str"
     },
     "retry_on_conflict": {
       "kind": "function",
