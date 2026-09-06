@@ -1050,6 +1050,40 @@ impl<'a> CypherExecutor<'a> {
         self.count_simple_pattern_from_bound(pattern, bindings, true)
     }
 
+    /// Requires primary-type peer semantics and no node/edge property filters.
+    /// Count each accepted relationship once, preserving the storage count fast path.
+    fn count_unfiltered_incident_relationships(
+        &self,
+        anchor: NodeIndex,
+        edge: &crate::graph::core::pattern_matching::EdgePattern,
+        conn_filter: &crate::graph::core::pattern_matching::pattern::ConnTypeFilter,
+        peer_type: Option<InternedKey>,
+        directions: &[Direction],
+    ) -> Result<usize, String> {
+        let mut count: usize = 0;
+        for &dir in directions {
+            count = count.saturating_add(conn_filter.try_fold_counts(|conn| {
+                if edge.direction == EdgeDirection::Both && dir == Direction::Incoming {
+                    self.graph.graph.count_incoming_nonself_edges_filtered(
+                        anchor,
+                        conn,
+                        peer_type,
+                        self.deadline,
+                    )
+                } else {
+                    self.graph.graph.count_edges_filtered(
+                        anchor,
+                        dir,
+                        conn,
+                        peer_type,
+                        self.deadline,
+                    )
+                }
+            })?);
+        }
+        Ok(count)
+    }
+
     /// Shared implementation behind [`Self::try_count_simple_pattern`]
     /// (`distinct_peers = false`, raw edge count) and
     /// [`Self::try_count_distinct_peers`] (`distinct_peers = true`, distinct
@@ -1077,9 +1111,8 @@ impl<'a> CypherExecutor<'a> {
             .as_ref()
             .and_then(|v| bindings.get(v).copied());
 
-        // We need exactly one end bound for the fast-path to help.
-        // Undirected `[r]-` patterns count both incoming and outgoing —
-        // both directions are swept and summed (dedup'd for distinct peers).
+        // Exactly one end must be bound. Undirected patterns sweep both directions, but each self-loop
+        // contributes one relationship binding (degree still counts two).
         //
         // Contract: the caller guarantees that the bound NodeIndex satisfies
         // any property filter on the bound side of the pattern (the upstream
@@ -1140,19 +1173,15 @@ impl<'a> CypherExecutor<'a> {
             && other_props.is_none()
             && edge.edge_filter.is_none()
         {
-            let mut count: usize = 0;
-            for &dir in traverse_dirs {
-                count = count.saturating_add(conn_filter.try_fold_counts(|conn| {
-                    self.graph.graph.count_edges_filtered(
-                        bound_idx,
-                        dir,
-                        conn,
-                        interned_other_type,
-                        self.deadline,
-                    )
-                })?);
-            }
-            return Ok(Some(count as i64));
+            return self
+                .count_unfiltered_incident_relationships(
+                    bound_idx,
+                    edge,
+                    &conn_filter,
+                    interned_other_type,
+                    traverse_dirs,
+                )
+                .map(|count| Some(count as i64));
         }
 
         // Slow path: iterate incident edges. This loop can cover millions of
@@ -1211,6 +1240,12 @@ impl<'a> CypherExecutor<'a> {
                 } else {
                     edge_ref.source()
                 };
+                if edge.direction == EdgeDirection::Both
+                    && dir == Direction::Incoming
+                    && other_idx == bound_idx
+                {
+                    continue;
+                }
                 // Distinct peers: a peer that already passed all filters via
                 // another edge is settled — skip the filter work.
                 if distinct_peers && peers.contains(&other_idx) {

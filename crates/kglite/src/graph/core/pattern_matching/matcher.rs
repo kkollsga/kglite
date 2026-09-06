@@ -1826,6 +1826,14 @@ impl<'a> PatternExecutor<'a> {
                 if max_results.is_some_and(|max| results.len() >= max) {
                     break;
                 }
+                // An undirected loop is one relationship binding, despite
+                // appearing in both incident directions. Keep outgoing order.
+                if edge_pattern.direction == EdgeDirection::Both
+                    && dir == Direction::Incoming
+                    && peer_idx == source
+                {
+                    continue;
+                }
                 if target_hint.is_some_and(|hint| peer_idx != hint) {
                     continue;
                 }
@@ -1933,6 +1941,13 @@ impl<'a> PatternExecutor<'a> {
                 .edges_directed_filtered(source, direction, conn_key);
 
             for edge in edges {
+                if edge_pattern.direction == EdgeDirection::Both
+                    && direction == Direction::Incoming
+                    && edge.source() == source
+                    && edge.target() == source
+                {
+                    continue;
+                }
                 // Connection-type check uses the cheap accessor — on disk this
                 // avoids materialising the edge (heap alloc + property clone)
                 // for every edge just to read its type. A single conn_key is

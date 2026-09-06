@@ -15,6 +15,8 @@
 //! every hop whose `needs_path_info` is set. The lowered hops therefore
 //! reject exactly the walks the variable-length expansion rejects, including
 //! the undirected "walk straight back over the same relationship" case.
+//! Each undirected self-loop is emitted once, not once per incident
+//! direction, so `*1..1` and one explicit hop also have equal cardinality.
 //! [`super::annotations::pass_mark_disjoint_fixed_trails`] is the one pass
 //! that turns that bookkeeping *off*, and it does so only when the hops'
 //! relationship-type sets are pairwise disjoint — which `k >= 2` copies of

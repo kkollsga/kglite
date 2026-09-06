@@ -99,7 +99,51 @@ def predicate_soft_alias_index_graph():
     return graph
 
 
+@pytest.fixture
+def self_loop_incidence_graph():
+    """Keep loop incidences local; shared social fixtures must retain their topology."""
+    graph = kglite.KnowledgeGraph()
+    graph.cypher("CREATE(a:N{id:0}),(b:N{id:1}),(a)-[:R{k:0}]->(a),(a)-[:R{k:1}]->(a),(a)-[:R{k:2}]->(b)").to_list()
+    return graph
+
+
 DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
+    (
+        "loop_incidence_bound_count",
+        "self_loop_incidence_graph",
+        "MATCH(a:N{id:0}) WITH a MATCH(a)-[:R]-(b:N) RETURN count(*) AS n",
+        None,
+    ),
+    (
+        "loop_incidence_start_endpoint",
+        "self_loop_incidence_graph",
+        "MATCH(a:N)-[r:R]-(b:N) WHERE startNode(r)=b RETURN a.id AS a,r.k AS k,b.id AS b ORDER BY a,k,b",
+        None,
+    ),
+    (
+        "loop_incidence_end_endpoint",
+        "self_loop_incidence_graph",
+        "MATCH(a:N)-[r:R]-(b:N) WHERE endNode(r)=b RETURN a.id AS a,r.k AS k,b.id AS b ORDER BY a,k,b",
+        None,
+    ),
+    (
+        "loop_incidence_fixed_one",
+        "self_loop_incidence_graph",
+        "MATCH p=(a:N)-[:R*1..1]-(b:N) RETURN a.id AS a,b.id AS b,length(p) AS hops ORDER BY a,b,hops",
+        None,
+    ),
+    (
+        "loop_incidence_trail_two",
+        "self_loop_incidence_graph",
+        "MATCH p=(a:N)-[:R*2..2]-(b:N) RETURN a.id AS a,b.id AS b,count(*) AS n ORDER BY a,b",
+        None,
+    ),
+    (
+        "loop_incidence_trail_three",
+        "self_loop_incidence_graph",
+        "MATCH p=(a:N)-[:R*3..3]-(b:N) RETURN a.id AS a,b.id AS b,count(*) AS n ORDER BY a,b",
+        None,
+    ),
     (
         "predicate_index_equality",
         "predicate_point_index_graph",

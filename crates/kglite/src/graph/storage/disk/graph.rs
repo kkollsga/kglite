@@ -761,6 +761,18 @@ impl DiskGraph {
         other_node_type: Option<InternedKey>,
         deadline: Option<std::time::Instant>,
     ) -> Result<usize, String> {
+        self.count_edges_filtered_impl(node, dir, conn_type, other_node_type, deadline, false)
+    }
+
+    pub(in crate::graph::storage) fn count_edges_filtered_impl(
+        &self,
+        node: NodeIndex,
+        dir: Direction,
+        conn_type: Option<u64>,
+        other_node_type: Option<InternedKey>,
+        deadline: Option<std::time::Instant>,
+        exclude_self: bool,
+    ) -> Result<usize, String> {
         self.ensure_csr();
         let idx = node.index();
         let (offsets, edges) = match dir {
@@ -785,12 +797,13 @@ impl DiskGraph {
             }
         }
 
-        // Fast path: no tombstones and no peer-type filter → the answer is
+        // Fast path including self-loops: no tombstones or peer-type filter → the answer is
         // literally the range length + overflow size, no scan required. This
         // turns Q5-class "count all P31 incoming" queries from 40 M loop
         // iterations (20+ s on USB SSD) into O(log D) binary search + two
         // integer subtractions.
-        let can_shortcut = !self.has_tombstones
+        let can_shortcut = !exclude_self
+            && !self.has_tombstones
             && other_node_type.is_none()
             && (conn_type.is_none() || self.csr_sorted_by_type);
         if can_shortcut {
@@ -824,7 +837,12 @@ impl DiskGraph {
                 }
             }
             let e = edges.get(i);
-            if e.edge_idx == TOMBSTONE_EDGE {
+            if e.edge_idx == TOMBSTONE_EDGE
+                || (self.has_tombstones && !self.edge_is_alive(e.edge_idx))
+            {
+                continue;
+            }
+            if exclude_self && e.peer == idx as u32 {
                 continue;
             }
             if let Some(ct) = conn_type {
@@ -852,8 +870,18 @@ impl DiskGraph {
             Direction::Incoming => self.overflow_in.get(&(idx as u32)),
         };
         if let Some(list) = overflow {
-            for e in list {
-                if e.edge_idx == TOMBSTONE_EDGE {
+            for (ordinal, e) in list.iter().enumerate() {
+                if ordinal.is_multiple_of(1 << 20) {
+                    if let Some(dl) = deadline {
+                        if std::time::Instant::now() > dl {
+                            return Err("Query timed out".to_string());
+                        }
+                    }
+                }
+                if e.edge_idx == TOMBSTONE_EDGE
+                    || (self.has_tombstones && !self.edge_is_alive(e.edge_idx))
+                    || (exclude_self && e.peer == idx as u32)
+                {
                     continue;
                 }
                 if let Some(ct) = conn_type {
@@ -1641,7 +1669,10 @@ impl DiskGraph {
             let end = self.out_offsets.get(src + 1) as usize;
             for i in start..end {
                 let e = self.out_edges.get(i);
-                if e.edge_idx != TOMBSTONE_EDGE && e.peer == tgt {
+                if e.edge_idx != TOMBSTONE_EDGE
+                    && e.peer == tgt
+                    && (!self.has_tombstones || self.edge_is_alive(e.edge_idx))
+                {
                     return Some(EdgeIndex::new(e.edge_idx as usize));
                 }
             }
@@ -1649,7 +1680,10 @@ impl DiskGraph {
 
         if let Some(list) = self.overflow_out.get(&(src as u32)) {
             for e in list {
-                if e.edge_idx != TOMBSTONE_EDGE && e.peer == tgt {
+                if e.edge_idx != TOMBSTONE_EDGE
+                    && e.peer == tgt
+                    && (!self.has_tombstones || self.edge_is_alive(e.edge_idx))
+                {
                     return Some(EdgeIndex::new(e.edge_idx as usize));
                 }
             }

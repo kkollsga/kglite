@@ -192,3 +192,50 @@ fn true_only_dispatch_preserves_entity_identity_with_nullable_properties() {
         }
     }
 }
+
+#[test]
+fn node_reference_predicates_match_materialized_entity_slots() {
+    use crate::datatypes::values::NodeValue;
+    let node = |id| {
+        Value::Node(Box::new(NodeValue {
+            id,
+            labels: vec!["N".into()],
+            properties: PropMap::from_sorted_pairs(vec![("id".into(), Value::Int64(7))]),
+        }))
+    };
+    for (left, right, expected) in [
+        (Value::NodeRef(1), node(1), Some(true)),
+        (Value::NodeRef(1), node(2), Some(false)),
+        (Value::NodeRef(1), Value::Int64(1), Some(false)),
+        (Value::NodeRef(1), Value::Null, None),
+        (
+            list(vec![Value::NodeRef(1)]),
+            list(vec![node(1)]),
+            Some(true),
+        ),
+        (map("n", Value::NodeRef(1)), map("n", node(1)), Some(true)),
+        (
+            list(vec![Value::NodeRef(1), Value::Null]),
+            list(vec![node(1), Value::Null]),
+            None,
+        ),
+    ] {
+        for (a, b) in [(&left, &right), (&right, &left)] {
+            assert_eq!(predicate_values_equal(a, b), expected, "{a:?} = {b:?}");
+            assert_eq!(values_equal(a, b), expected == Some(true));
+        }
+    }
+    for count in [8, 9] {
+        let set = MembershipSet::new((1..=count).map(node).collect());
+        assert_eq!(set.kleene_contains(&Value::NodeRef(1)), Some(true));
+        assert_eq!(set.kleene_contains(&Value::NodeRef(99)), Some(false));
+        let refs = MembershipSet::new((1..=count).map(Value::NodeRef).collect());
+        assert_eq!(refs.kleene_contains(&node(1)), Some(true));
+        assert_eq!(refs.kleene_contains(&node(99)), Some(false));
+    }
+    // Predicate adapters must not change structural DISTINCT/hash identity.
+    let values = [Value::NodeRef(1), node(1)]
+        .into_iter()
+        .collect::<HashSet<_>>();
+    assert_eq!(values.len(), 2);
+}

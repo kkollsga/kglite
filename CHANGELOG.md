@@ -49,6 +49,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Undirected patterns bind each self-loop relationship once, including fused
+  counts and lowered variable-length paths. Endpoint predicates recognize a
+  self-loop's node as both endpoints; degree retains its two-incidence meaning.
+- Endpoint-to-node predicates compare node identity consistently in expressions,
+  filters and nested collections.
+- Disk relationship counts and edge lookup exclude logically deleted adjacency
+  entries while preserving live parallel edges.
+
 - Make disk SET/REMOVE items visible to later reads and index maintenance;
   preserve cleared and newly added saved properties across snapshots and saves,
   and make sparse string predicates follow the same stored-value rules.

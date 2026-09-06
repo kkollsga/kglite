@@ -120,6 +120,52 @@ pub enum GraphBackend {
 }
 
 impl GraphBackend {
+    /// Incoming relationship bindings excluding the second incidence of a self-loop.
+    /// This private count route preserves backend indexes without materializing edges.
+    pub(crate) fn count_incoming_nonself_edges_filtered(
+        &self,
+        node: NodeIndex,
+        conn_type: Option<InternedKey>,
+        other_node_type: Option<InternedKey>,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<usize, String> {
+        match self {
+            Self::Memory(g) => g.count_edges_filtered_impl(
+                node,
+                petgraph::Direction::Incoming,
+                conn_type,
+                other_node_type,
+                deadline,
+                true,
+            ),
+            Self::Mapped(g) => g.count_edges_filtered_impl(
+                node,
+                petgraph::Direction::Incoming,
+                conn_type,
+                other_node_type,
+                deadline,
+                true,
+            ),
+            Self::Forked(g) => {
+                g.count_incoming_nonself_edges_filtered(node, conn_type, other_node_type, deadline)
+            }
+            Self::Disk(g) => g.count_edges_filtered_impl(
+                node,
+                petgraph::Direction::Incoming,
+                conn_type.map(|key| key.as_u64()),
+                other_node_type,
+                deadline,
+                true,
+            ),
+            Self::Recording(g) => g.inner().count_incoming_nonself_edges_filtered(
+                node,
+                conn_type,
+                other_node_type,
+                deadline,
+            ),
+        }
+    }
+
     /// An **owned** node record, for a caller that finishes with it inside its
     /// own frame — scans and filters, which drop each record immediately.
     ///

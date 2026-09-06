@@ -40,6 +40,7 @@ mod lists;
 mod mutations;
 mod parallel;
 mod score_fuse;
+mod self_loops;
 mod semantics;
 mod strings;
 mod text_bm25;

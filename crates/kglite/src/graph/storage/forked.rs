@@ -132,6 +132,23 @@ pub(crate) fn can_fork(base: &MemoryGraph) -> bool {
 }
 
 impl ForkedGraph {
+    pub(super) fn count_incoming_nonself_edges_filtered(
+        &self,
+        node: NodeIndex,
+        conn_type: Option<InternedKey>,
+        other_node_type: Option<InternedKey>,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<usize, String> {
+        self.base.count_edges_filtered_impl(
+            node,
+            petgraph::Direction::Incoming,
+            conn_type,
+            other_node_type,
+            deadline,
+            true,
+        )
+    }
+
     /// Fork `base` — O(types), no node or edge is copied.
     pub(crate) fn new(base: Arc<MemoryGraph>) -> Self {
         let column_stores = base.column_stores.clone();

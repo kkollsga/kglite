@@ -271,38 +271,14 @@ macro_rules! impl_heap_graph_read {
                 other_node_type: Option<InternedKey>,
                 deadline: Option<Instant>,
             ) -> Result<usize, String> {
-                let g = self.inner();
-                let mut count = 0;
-                for (i, edge) in g.edges_directed(node, dir).enumerate() {
-                    if i.is_multiple_of(1 << 20) {
-                        if let Some(dl) = deadline {
-                            if Instant::now() > dl {
-                                return Err("Query timed out".to_string());
-                            }
-                        }
-                    }
-                    if let Some(ct) = conn_type {
-                        if edge.weight().connection_type != ct {
-                            continue;
-                        }
-                    }
-                    let other = if dir == Direction::Outgoing {
-                        edge.target()
-                    } else {
-                        edge.source()
-                    };
-                    if let Some(required_type) = other_node_type {
-                        if let Some(nd) = g.node_weight(other) {
-                            if nd.node_type != required_type {
-                                continue;
-                            }
-                        } else {
-                            continue;
-                        }
-                    }
-                    count += 1;
-                }
-                Ok(count)
+                self.count_edges_filtered_impl(
+                    node,
+                    dir,
+                    conn_type,
+                    other_node_type,
+                    deadline,
+                    false,
+                )
             }
 
             // iter_peers_filtered / reset_arenas — trait defaults.
@@ -326,6 +302,52 @@ impl_heap_graph_read!(MemoryGraph, is_memory = true, is_mapped = false);
 // ──────────────────────────────────────────────────────────────────────────
 
 impl MemoryGraph {
+    pub(super) fn count_edges_filtered_impl(
+        &self,
+        node: NodeIndex,
+        dir: Direction,
+        conn_type: Option<InternedKey>,
+        other_node_type: Option<InternedKey>,
+        deadline: Option<Instant>,
+        exclude_self: bool,
+    ) -> Result<usize, String> {
+        let g = self.inner();
+        let mut count = 0;
+        for (i, edge) in g.edges_directed(node, dir).enumerate() {
+            if i.is_multiple_of(1 << 20) {
+                if let Some(dl) = deadline {
+                    if Instant::now() > dl {
+                        return Err("Query timed out".to_string());
+                    }
+                }
+            }
+            if let Some(ct) = conn_type {
+                if edge.weight().connection_type != ct {
+                    continue;
+                }
+            }
+            let other = if dir == Direction::Outgoing {
+                edge.target()
+            } else {
+                edge.source()
+            };
+            if exclude_self && other == node {
+                continue;
+            }
+            if let Some(required_type) = other_node_type {
+                if let Some(nd) = g.node_weight(other) {
+                    if nd.node_type != required_type {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            }
+            count += 1;
+        }
+        Ok(count)
+    }
+
     /// Clone `idx`'s current weight into the journal as its pre-statement
     /// state, unless this statement already captured it.
     #[cold]
@@ -1005,71 +1027,7 @@ impl GraphRead for MappedGraph {
         other_node_type: Option<InternedKey>,
         deadline: Option<Instant>,
     ) -> Result<usize, String> {
-        // When conn_type is given, use the index to skip non-matching
-        // edges entirely. When absent, fall back to the heap scan used
-        // by the macro impl.
-        let g = self.inner();
-        let mut count = 0usize;
-        if let Some(ct) = conn_type {
-            let block = self.ensure_type_index(ct);
-            let (sources, offsets, edges) = match dir {
-                Direction::Outgoing => (&block.out_sources, &block.out_offsets, &block.out_edges),
-                Direction::Incoming => (&block.in_sources, &block.in_offsets, &block.in_edges),
-            };
-            if let Ok(pos) = sources.binary_search_by_key(&node.index(), |n| n.index()) {
-                let start = offsets[pos] as usize;
-                let end = offsets[pos + 1] as usize;
-                for (i, &ei) in edges[start..end].iter().enumerate() {
-                    if i.is_multiple_of(1 << 20) {
-                        if let Some(dl) = deadline {
-                            if Instant::now() > dl {
-                                return Err("Query timed out".to_string());
-                            }
-                        }
-                    }
-                    if let Some(required_type) = other_node_type {
-                        let Some((src, tgt)) = g.edge_endpoints(ei) else {
-                            continue;
-                        };
-                        let other = if dir == Direction::Outgoing { tgt } else { src };
-                        if let Some(nd) = g.node_weight(other) {
-                            if nd.node_type != required_type {
-                                continue;
-                            }
-                        } else {
-                            continue;
-                        }
-                    }
-                    count += 1;
-                }
-            }
-            return Ok(count);
-        }
-        for (i, edge) in g.edges_directed(node, dir).enumerate() {
-            if i.is_multiple_of(1 << 20) {
-                if let Some(dl) = deadline {
-                    if Instant::now() > dl {
-                        return Err("Query timed out".to_string());
-                    }
-                }
-            }
-            let other = if dir == Direction::Outgoing {
-                edge.target()
-            } else {
-                edge.source()
-            };
-            if let Some(required_type) = other_node_type {
-                if let Some(nd) = g.node_weight(other) {
-                    if nd.node_type != required_type {
-                        continue;
-                    }
-                } else {
-                    continue;
-                }
-            }
-            count += 1;
-        }
-        Ok(count)
+        self.count_edges_filtered_impl(node, dir, conn_type, other_node_type, deadline, false)
     }
 
     // The mapped property indexes build lazily on first hit — the cost model
@@ -1155,6 +1113,90 @@ impl GraphRead for MappedGraph {
 // ──────────────────────────────────────────────────────────────────────────
 
 impl MappedGraph {
+    pub(super) fn count_edges_filtered_impl(
+        &self,
+        node: NodeIndex,
+        dir: Direction,
+        conn_type: Option<InternedKey>,
+        other_node_type: Option<InternedKey>,
+        deadline: Option<Instant>,
+        exclude_self: bool,
+    ) -> Result<usize, String> {
+        // When conn_type is given, use the index to skip non-matching
+        // edges entirely. When absent, fall back to the heap scan used
+        // by the macro impl.
+        let g = self.inner();
+        let mut count = 0usize;
+        if let Some(ct) = conn_type {
+            let block = self.ensure_type_index(ct);
+            let (sources, offsets, edges) = match dir {
+                Direction::Outgoing => (&block.out_sources, &block.out_offsets, &block.out_edges),
+                Direction::Incoming => (&block.in_sources, &block.in_offsets, &block.in_edges),
+            };
+            if let Ok(pos) = sources.binary_search_by_key(&node.index(), |n| n.index()) {
+                let start = offsets[pos] as usize;
+                let end = offsets[pos + 1] as usize;
+                for (i, &ei) in edges[start..end].iter().enumerate() {
+                    if i.is_multiple_of(1 << 20) {
+                        if let Some(dl) = deadline {
+                            if Instant::now() > dl {
+                                return Err("Query timed out".to_string());
+                            }
+                        }
+                    }
+                    if exclude_self || other_node_type.is_some() {
+                        let Some((src, tgt)) = g.edge_endpoints(ei) else {
+                            continue;
+                        };
+                        let other = if dir == Direction::Outgoing { tgt } else { src };
+                        if exclude_self && other == node {
+                            continue;
+                        }
+                        if let Some(required_type) = other_node_type {
+                            if let Some(nd) = g.node_weight(other) {
+                                if nd.node_type != required_type {
+                                    continue;
+                                }
+                            } else {
+                                continue;
+                            }
+                        }
+                    }
+                    count += 1;
+                }
+            }
+            return Ok(count);
+        }
+        for (i, edge) in g.edges_directed(node, dir).enumerate() {
+            if i.is_multiple_of(1 << 20) {
+                if let Some(dl) = deadline {
+                    if Instant::now() > dl {
+                        return Err("Query timed out".to_string());
+                    }
+                }
+            }
+            let other = if dir == Direction::Outgoing {
+                edge.target()
+            } else {
+                edge.source()
+            };
+            if exclude_self && other == node {
+                continue;
+            }
+            if let Some(required_type) = other_node_type {
+                if let Some(nd) = g.node_weight(other) {
+                    if nd.node_type != required_type {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            }
+            count += 1;
+        }
+        Ok(count)
+    }
+
     /// Clone `idx`'s current weight into the journal as its pre-statement
     /// state, unless this statement already captured it.
     #[cold]

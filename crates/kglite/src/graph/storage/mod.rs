@@ -662,6 +662,9 @@ pub mod recording;
 pub use mapped::{MappedGraph, MappedPropertyIndex, MappedTypeIndex};
 
 #[cfg(test)]
+mod incoming_count_tests;
+
+#[cfg(test)]
 #[path = "column_ownership_tests.rs"]
 mod column_ownership_tests;
 

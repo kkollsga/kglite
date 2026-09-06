@@ -413,8 +413,8 @@ impl RelEdgePredicate {
                     ),
                 }),
             },
-            RelEdgePredicate::StartNodeIsPeer => Some(peer_is_start),
-            RelEdgePredicate::EndNodeIsPeer => Some(!peer_is_start),
+            RelEdgePredicate::StartNodeIsPeer => Some(edge_source == edge_target || peer_is_start),
+            RelEdgePredicate::EndNodeIsPeer => Some(edge_source == edge_target || !peer_is_start),
             RelEdgePredicate::StartNodeIs(idx) => Some(edge_source == *idx),
             RelEdgePredicate::EndNodeIs(idx) => Some(edge_target == *idx),
             RelEdgePredicate::And(items) => {
@@ -641,6 +641,27 @@ mod tests {
                 &RelEdgePredicate::Not(Box::new(predicate)),
                 &read
             ));
+        }
+    }
+
+    #[test]
+    fn self_loop_peer_is_both_relationship_endpoints() {
+        for predicate in [
+            RelEdgePredicate::StartNodeIsPeer,
+            RelEdgePredicate::EndNodeIsPeer,
+        ] {
+            for peer_is_start in [false, true] {
+                assert_eq!(
+                    predicate.eval_nullable(
+                        InternedKey::from_str("R"),
+                        peer_is_start,
+                        NodeIndex::new(0),
+                        NodeIndex::new(0),
+                        &|_| None
+                    ),
+                    Some(true)
+                );
+            }
         }
     }
 

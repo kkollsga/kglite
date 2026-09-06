@@ -182,6 +182,11 @@ fn scalar_values_equal(a: &Value, b: &Value) -> bool {
         return !a.contains_nan();
     }
     match (a, b) {
+        // Endpoint handles and materialized node values carry the same graph
+        // slot; this predicate equivalence does not change structural hashing.
+        (Value::NodeRef(id), Value::Node(node)) | (Value::Node(node), Value::NodeRef(id)) => {
+            *id == node.id
+        }
         (Value::Int64(i), Value::Float64(f)) => (*i as f64) == *f,
         (Value::Float64(f), Value::Int64(i)) => *f == (*i as f64),
         // A Python int may arrive as Int64 but be stored as UniqueId.
