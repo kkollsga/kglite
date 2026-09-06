@@ -212,7 +212,8 @@ pub mod api {
     pub mod param {
         pub use crate::param::{
             json_object_to_query_value_map, json_object_to_value_map, json_value_to_kglite_value,
-            kglite_value_to_json, JsonQueryParameterError, JsonQueryParameterErrorKind,
+            kglite_value_to_json, validate_json_query_numbers_at, JsonQueryParameterError,
+            JsonQueryParameterErrorKind,
         };
     }
 

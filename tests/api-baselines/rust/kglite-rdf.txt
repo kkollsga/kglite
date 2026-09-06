@@ -2110,6 +2110,7 @@ pub fn kglite::api::param::json_object_to_query_value_map(map: &serde_json::map:
 pub fn kglite::api::param::json_object_to_value_map(map: &serde_json::map::Map<alloc::string::String, serde_json::value::Value>) -> std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>
 pub fn kglite::api::param::json_value_to_kglite_value(v: &serde_json::value::Value) -> kglite::datatypes::values::Value
 pub fn kglite::api::param::kglite_value_to_json(v: &kglite::datatypes::values::Value) -> serde_json::value::Value
+pub fn kglite::api::param::validate_json_query_numbers_at(source: &str, pointer: &[&str]) -> core::result::Result<(), kglite::param::JsonQueryParameterError>
 pub mod kglite::api::session
 #[non_exhaustive] pub enum kglite::api::session::CommitOutcome
 pub kglite::api::session::CommitOutcome::Committed
@@ -4848,3 +4849,4 @@ pub fn kglite::param::json_object_to_query_value_map(map: &serde_json::map::Map<
 pub fn kglite::param::json_object_to_value_map(map: &serde_json::map::Map<alloc::string::String, serde_json::value::Value>) -> std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>
 pub fn kglite::param::json_value_to_kglite_value(v: &serde_json::value::Value) -> kglite::datatypes::values::Value
 pub fn kglite::param::kglite_value_to_json(v: &kglite::datatypes::values::Value) -> serde_json::value::Value
+pub fn kglite::param::validate_json_query_numbers_at(source: &str, pointer: &[&str]) -> core::result::Result<(), kglite::param::JsonQueryParameterError>

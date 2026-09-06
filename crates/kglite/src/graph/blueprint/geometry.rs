@@ -65,15 +65,7 @@ pub fn convert_geojson(raw: &mut RawCsv, targets: &SpatialTargets) -> Result<(),
             if s.is_empty() {
                 return (None, None, None);
             }
-            // `geojson` deserializes coordinates through `deserialize_any`.
-            // With serde_json's `arbitrary_precision` feature, direct parsing
-            // presents decimal tokens through its private number map instead
-            // of the visitor's `visit_f64`. Materializing `Value` first lets
-            // its number deserializer recover ordinary finite coordinates.
-            let Ok(json) = serde_json::from_str::<serde_json::Value>(s) else {
-                return (None, None, None);
-            };
-            let Ok(gj) = serde_json::from_value::<geojson::GeoJson>(json) else {
+            let Ok(gj): Result<geojson::GeoJson, _> = s.parse() else {
                 return (None, None, None);
             };
             let geom_opt: Option<geo::Geometry<f64>> = match gj {

@@ -76,7 +76,6 @@ pub fn register_cypher_tools(
         return Ok(0);
     }
     let count = cypher_tools.len();
-    let router = server.tool_router_mut();
     for spec in cypher_tools {
         let schema = spec
             .parameters
@@ -95,9 +94,10 @@ pub fn register_cypher_tools(
                 .map(|s| std::borrow::Cow::Owned(s.to_string())),
             Arc::new(schema),
         );
+        let route_name = spec.name.clone();
         let template = spec.cypher.clone();
         let runner = runner.clone();
-        router.add_route(ToolRoute::new_dyn(
+        server.tool_router_mut().add_route(ToolRoute::new_dyn(
             attr,
             move |ctx: ToolCallContext<'_, McpServer>| -> DynFut<'_, Result<CallToolResponse, McpError>> {
                 let runner = runner.clone();
@@ -116,6 +116,11 @@ pub fn register_cypher_tools(
                 })
             },
         ));
+        crate::raw_query_routes::protect_query_route(
+            server,
+            &route_name,
+            crate::raw_query_routes::TEMPLATE_QUERY_POINTER,
+        );
     }
     Ok(count)
 }

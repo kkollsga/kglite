@@ -42,6 +42,8 @@ mod embedder;
 mod explore;
 mod extensions;
 mod modes;
+mod raw_query_routes;
+mod raw_stdio;
 mod recipe_queries;
 mod selftest;
 mod server_run;

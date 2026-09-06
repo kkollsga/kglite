@@ -2067,6 +2067,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "futures",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -2079,6 +2080,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 

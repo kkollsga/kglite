@@ -573,28 +573,6 @@ mod tests {
             .issues
             .iter()
             .any(|issue| issue.kind == VariableIssueKind::IntegerRange));
-
-        for raw in [
-            r#"{"value":1267650600228229401496703205376}"#,
-            r#"{"value":-1267650600228229401496703205376}"#,
-        ] {
-            let variables: Value = serde_json::from_str(raw).unwrap();
-            let error = schema
-                .validate_variables(variables.as_object().unwrap())
-                .unwrap_err();
-            assert!(error
-                .issues
-                .iter()
-                .any(|issue| issue.kind == VariableIssueKind::IntegerRange));
-        }
-        let nonfinite: Value = serde_json::from_str(r#"{"value":1e400}"#).unwrap();
-        let error = schema
-            .validate_variables(nonfinite.as_object().unwrap())
-            .unwrap_err();
-        assert!(error
-            .issues
-            .iter()
-            .any(|issue| issue.kind == VariableIssueKind::WrongType));
     }
 
     #[test]

@@ -156,6 +156,7 @@ class McpClient:
     def __init__(self, proc: subprocess.Popen[bytes]) -> None:
         self.proc = proc
         self._next_id = 0
+        self._pending_responses: dict[int, dict[str, Any]] = {}
         # Drain stderr in the background so the subprocess buffer doesn't fill up
         # if the server logs verbosely. We don't assert against stderr — just
         # collect it for diagnostics on failure.
@@ -181,6 +182,9 @@ class McpClient:
     def _recv(self, expected_id: int, timeout_s: float = 30.0) -> dict[str, Any]:
         """Read NDJSON responses from stdout until one matching `expected_id`
         comes back. Notifications and other ids are buffered/ignored."""
+        pending = self._pending_responses.pop(expected_id, None)
+        if pending is not None:
+            return pending
         deadline = time.monotonic() + timeout_s
         assert self.proc.stdout is not None
         while time.monotonic() < deadline:
@@ -197,7 +201,9 @@ class McpClient:
                 continue
             if msg.get("id") == expected_id:
                 return msg
-            # Otherwise it's a notification or unrelated response — drop it.
+            # Preserve concurrent responses until their caller asks for that id.
+            if isinstance(msg.get("id"), int):
+                self._pending_responses[msg["id"]] = msg
         raise TimeoutError(f"Timed out waiting for response id={expected_id}")
 
     def initialize(self) -> dict[str, Any]:
@@ -236,6 +242,53 @@ class McpClient:
         if "error" in resp:
             raise RuntimeError(f"prompts/list errored: {resp['error']}")
         return resp["result"]["prompts"]
+
+    def send_tool_raw(
+        self,
+        name: str,
+        arguments_json: str,
+        *,
+        line_ending: bytes = b"\n",
+        bom: bool = False,
+        split_at: Optional[int] = None,
+    ) -> int:
+        """Send exact argument lexemes without Python's JSON decoder normalizing them."""
+        rid = self._allocate_id()
+        prefix = b"\xef\xbb\xbf" if bom else b""
+        line = (
+            '{"jsonrpc":"2.0","id":'
+            + str(rid)
+            + ',"method":"tools/call","params":{"name":'
+            + json.dumps(name)
+            + ',"arguments":'
+            + arguments_json
+            + "}}"
+        ).encode("utf-8")
+        assert self.proc.stdin is not None
+        framed = prefix + line + line_ending
+        if split_at is None:
+            self.proc.stdin.write(framed)
+        else:
+            self.proc.stdin.write(framed[:split_at])
+            self.proc.stdin.flush()
+            self.proc.stdin.write(framed[split_at:])
+        self.proc.stdin.flush()
+        return rid
+
+    def receive_tool_raw(self, rid: int, name: str) -> dict[str, Any]:
+        response = self.receive_tool_response_raw(rid, name)
+        return response["result"]
+
+    def receive_tool_response_raw(self, rid: int, name: str) -> dict[str, Any]:
+        response = self._recv(rid)
+        assert response["id"] == rid
+        if "error" in response:
+            raise RuntimeError(f"tools/call({name}) errored: {response['error']}")
+        return response
+
+    def call_tool_raw(self, name: str, arguments_json: str, **kwargs: Any) -> dict[str, Any]:
+        rid = self.send_tool_raw(name, arguments_json, **kwargs)
+        return self.receive_tool_raw(rid, name)
 
     def call_tool(self, name: str, arguments: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         rid = self._allocate_id()
@@ -3055,3 +3108,200 @@ class TestCsvHttpServer:
                 client.shutdown()
         finally:
             squatter.close()
+
+
+class TestRawQueryNumberAdmission:
+    def test_direct_route_rejects_raw_integer_and_preserves_marker_map(self, graph_fixture: Path):
+        client = _spawn(["--graph", str(graph_fixture)])
+        try:
+            rid = client.send_tool_raw(
+                "cypher_query",
+                '{"query":"RETURN $outer AS value","params":{"outer":[{"value":1267650600228229401496703205376}]}}',
+                line_ending=b"\r\n",
+                bom=True,
+            )
+            response = client.receive_tool_response_raw(rid, "cypher_query")
+            rejected = response["result"]
+            assert _is_error(rejected)
+            assert "$.outer[0].value" in _text_content(rejected)
+            assert "signed 64-bit range" in _text_content(rejected)
+
+            marker = client.call_tool_raw(
+                "cypher_query",
+                '{"query":"RETURN $value AS value","params":{"value":{"$serde_json::private::Number":"123"}}}',
+            )
+            assert not _is_error(marker)
+            assert "$serde_json::private::Number" in _text_content(marker)
+        finally:
+            client.shutdown()
+
+    def test_nonfinite_carrier_cannot_execute_and_keeps_request_id(self, graph_fixture: Path):
+        client = _spawn(["--graph", str(graph_fixture)])
+        try:
+            rid = client.send_tool_raw(
+                "cypher_query",
+                '{"query":"RETURN $value AS value","params":{"value":1e400}}',
+            )
+            response = client.receive_tool_response_raw(rid, "cypher_query")
+            rejected = response["result"]
+            assert response["id"] == rid
+            assert _is_error(rejected)
+            assert "$.value" in _text_content(rejected)
+            assert "finite 64-bit float range" in _text_content(rejected)
+
+            shadowed = client.call_tool_raw(
+                "cypher_query",
+                '{"query":"RETURN $value AS value","params":{"value":1e400},"params":{"value":1}}',
+            )
+            assert _is_error(shadowed)
+            assert "could not be decoded losslessly" in _text_content(shadowed)
+
+            admitted = client.call_tool_raw(
+                "cypher_query",
+                '{"query":"RETURN $value AS value","params":{"value":1e300}}',
+            )
+            assert not _is_error(admitted)
+        finally:
+            client.shutdown()
+
+    def test_transport_resumes_after_fragmented_malformed_and_compatibility_lines(self, graph_fixture: Path):
+        client = _spawn(["--graph", str(graph_fixture)])
+        try:
+            assert client.proc.stdin is not None
+            client.proc.stdin.write(b'{"jsonrpc":"2.0","id":999,"method":\n')
+            client.proc.stdin.write(b'{"jsonrpc":"2.0","method":"notifications/vendor-private","params":{"n":1e400}}\n')
+            client.proc.stdin.write(
+                b'{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":999,"reason":"test"}}\n'
+            )
+            client.proc.stdin.flush()
+            first = client.send_tool_raw(
+                "cypher_query",
+                '{"query":"RETURN $value AS value","params":{"value":1e300}}',
+                split_at=37,
+            )
+            second = client.send_tool_raw(
+                "cypher_query",
+                '{"query":"RETURN $value AS value","params":{"value":2}}',
+            )
+            for rid in [second, first]:
+                answer = client.receive_tool_raw(rid, "cypher_query")
+                assert not _is_error(answer)
+        finally:
+            client.shutdown()
+
+    def test_duplicate_keys_follow_last_wins_and_depth_remains_bounded(self, graph_fixture: Path):
+        client = _spawn(["--graph", str(graph_fixture)])
+        try:
+            shadowed = client.call_tool_raw(
+                "cypher_query",
+                '{"query":"RETURN $value AS value",'
+                '"params":{"value":1267650600228229401496703205376},'
+                '"params":{"value":1}}',
+            )
+            assert not _is_error(shadowed)
+            assert "1" in _text_content(shadowed)
+
+            effective = client.call_tool_raw(
+                "cypher_query",
+                '{"query":"RETURN $value AS value","params":{"value":1},'
+                '"params":{"value":1267650600228229401496703205376}}',
+            )
+            assert _is_error(effective)
+            assert "$.value" in _text_content(effective)
+
+            assert client.proc.stdin is not None
+            too_deep = "[" * 128 + "1e400" + "]" * 128
+            client.send_tool_raw(
+                "cypher_query",
+                '{"query":"RETURN $value AS value","params":{"value":' + too_deep + "}}",
+            )
+            resumed = client.call_tool_raw(
+                "cypher_query",
+                '{"query":"RETURN $value AS value","params":{"value":1}}',
+            )
+            assert not _is_error(resumed)
+        finally:
+            client.shutdown()
+
+    def test_final_request_without_line_feed_is_decoded_at_eof(self, graph_fixture: Path):
+        client = _spawn(["--graph", str(graph_fixture)])
+        try:
+            rid = client.send_tool_raw(
+                "cypher_query",
+                '{"query":"RETURN $value AS value","params":{"value":7}}',
+                line_ending=b"",
+            )
+            assert client.proc.stdin is not None
+            client.proc.stdin.close()
+            response = client.receive_tool_response_raw(rid, "cypher_query")
+            assert response["id"] == rid
+            assert not _is_error(response["result"])
+            assert "7" in _text_content(response["result"])
+        finally:
+            client.shutdown()
+
+    def test_template_and_recipe_routes_reject_only_their_query_arguments(self, tmp_path: Path):
+        graph = tmp_path / "raw-routes.kgl"
+        _build_fixture_graph(graph)
+        (tmp_path / "raw-routes_mcp.yaml").write_text(
+            "extensions:\n"
+            "  cypher_recipes:\n"
+            "    numeric:\n"
+            "      description: Numeric recipe.\n"
+            "      queries:\n"
+            "        echo:\n"
+            "          description: Echo.\n"
+            "          parameters:\n"
+            "            type: object\n"
+            "            properties:\n"
+            "              value: {type: number}\n"
+            "            required: [value]\n"
+            "            additionalProperties: false\n"
+            "          cypher: RETURN $value AS value\n"
+            "tools:\n"
+            "  - name: write_template\n"
+            "    description: Write a probe.\n"
+            "    cypher: RETURN $value AS value\n"
+            "    parameters:\n"
+            "      type: object\n"
+            "      properties:\n"
+            "        value: {type: number}\n"
+            "      required: [value]\n"
+            "      additionalProperties: false\n",
+            encoding="utf-8",
+        )
+        client = _spawn(["--graph", str(graph)])
+        try:
+            template_rid = client.send_tool_raw("write_template", '{"value":1e400}')
+            template_response = client.receive_tool_response_raw(template_rid, "write_template")
+            template = template_response["result"]
+            assert template_response["id"] == template_rid
+            assert _is_error(template)
+            assert "$.value" in _text_content(template)
+
+            recipe_rid = client.send_tool_raw(
+                "run_recipe_query",
+                '{"recipe":"numeric","query":"echo","variables":{"value":1e400}}',
+            )
+            recipe_response = client.receive_tool_response_raw(recipe_rid, "run_recipe_query")
+            recipe = recipe_response["result"]
+            assert recipe_response["id"] == recipe_rid
+            assert _is_error(recipe)
+            assert "$.value" in _text_content(recipe)
+
+            template_control = client.call_tool_raw("write_template", '{"value":1e300}')
+            recipe_control = client.call_tool_raw(
+                "run_recipe_query",
+                '{"recipe":"numeric","query":"echo","variables":{"value":1e300}}',
+            )
+            assert not _is_error(template_control)
+            assert not _is_error(recipe_control)
+
+            # A large nonquery argument is outside every protected query subtree.
+            overview = client.call_tool_raw(
+                "graph_overview",
+                '{"types":[],"vendor":1267650600228229401496703205376}',
+            )
+            assert "signed 64-bit range" not in _text_content(overview)
+        finally:
+            client.shutdown()

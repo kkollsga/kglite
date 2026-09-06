@@ -430,6 +430,11 @@ pub fn register(
             },
         );
     }
+    crate::raw_query_routes::protect_query_route(
+        server,
+        "cypher_query",
+        crate::raw_query_routes::CYPHER_QUERY_POINTER,
+    );
     let s = state.clone();
     let cleanup_temp = builtins.temp_cleanup_on_overview;
     let temp_dir = builtins.temp_dir.clone();

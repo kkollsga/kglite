@@ -17,7 +17,7 @@ def test_blueprint_keeps_out_of_range_number_refusal(tmp_path: Path):
         kglite.from_blueprint(str(path), save=False)
 
 
-def test_arbitrary_precision_loads_and_resaves_pre_feature_portable_file(tmp_path: Path):
+def test_loads_and_resaves_pre_phase2b_portable_file(tmp_path: Path):
     fixture = Path(__file__).parent / "fixtures" / "json_number_contract_pre_feature.kgl"
     loaded = kglite.load(str(fixture))
     expected = [{"a": 1, "score": 1.5, "weight": 3.5, "b": 2}]
@@ -27,3 +27,9 @@ def test_arbitrary_precision_loads_and_resaves_pre_feature_portable_file(tmp_pat
     resaved = tmp_path / "resaved.kgl"
     loaded.save(str(resaved))
     assert kglite.load(str(resaved)).cypher(query).to_list() == expected
+
+
+def test_parse_json_preserves_serde_private_number_marker_object():
+    raw = '{"$serde_json::private::Number":"123"}'
+    rows = kglite.KnowledgeGraph().cypher("RETURN parse_json($raw) AS value", params={"raw": raw}).to_list()
+    assert rows == [{"value": {"$serde_json::private::Number": "123"}}]

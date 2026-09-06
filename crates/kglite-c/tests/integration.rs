@@ -206,6 +206,64 @@ fn params_json_round_trip() {
 }
 
 #[test]
+fn raw_json_marker_object_and_batch_selector_preserve_effective_values() {
+    let graph = kglite_graph_new();
+    let mut session: *mut KgliteSession = std::ptr::null_mut();
+    assert_eq!(
+        unsafe { kglite_session_new(graph, &mut session) },
+        KgliteStatusCode::Ok
+    );
+
+    let query = CString::new("RETURN $value AS value").unwrap();
+    let params = CString::new(r#"{"value":{"$serde_json::private::Number":"123"}}"#).unwrap();
+    let mut result = std::ptr::null_mut();
+    let mut error = std::ptr::null();
+    assert_eq!(
+        unsafe {
+            kglite_session_execute_read(
+                session,
+                query.as_ptr(),
+                params.as_ptr(),
+                &mut result,
+                &mut error,
+            )
+        },
+        KgliteStatusCode::Ok
+    );
+    assert!(error.is_null());
+    let rows = unsafe { kglite_cypher_result_rows_json(result) };
+    assert_eq!(
+        unsafe { CStr::from_ptr(rows).to_str().unwrap() },
+        r#"[{"value":{"$serde_json::private::Number":"123"}}]"#
+    );
+    unsafe {
+        kglite_free_string(rows);
+        kglite_cypher_result_free(result);
+    }
+
+    let batch = CString::new(
+        r#"[{"query":"RETURN $value AS value","params":{"value":1267650600228229401496703205376},"params":{"value":1},"vendor":1267650600228229401496703205376}]"#,
+    )
+    .unwrap();
+    let mut output = std::ptr::null();
+    let mut error = std::ptr::null();
+    assert_eq!(
+        unsafe {
+            kglite_session_execute_read_batch(session, batch.as_ptr(), &mut output, &mut error)
+        },
+        KgliteStatusCode::Ok
+    );
+    assert!(error.is_null());
+    let parsed: serde_json::Value =
+        serde_json::from_str(unsafe { CStr::from_ptr(output).to_str().unwrap() }).unwrap();
+    assert_eq!(parsed[0]["rows"][0]["value"], 1);
+    unsafe {
+        kglite_free_string(output);
+        kglite_session_free(session);
+    }
+}
+
+#[test]
 fn create_empty_graph_then_mutate_and_read() {
     // The hole this closes: build a graph from scratch at the C boundary
     // (no pre-built `.kgl` file), mutate it, and read it back — the path a

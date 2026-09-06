@@ -109,10 +109,10 @@ fn assert_success(result: &CallToolResult) -> String {
 
 #[tokio::test]
 async fn registered_query_routes_reject_integer_overflow_before_writes() {
-    let overflow: serde_json::Value = serde_json::from_str(
-        r#"{"query":"RETURN $outer","params":{"outer":[{"value":1267650600228229401496703205376}]}}"#,
-    )
-    .unwrap();
+    let overflow = serde_json::json!({
+        "query": "RETURN $outer",
+        "params": {"outer": [{"value": u64::MAX}]}
+    });
     let read = call(
         kglite_server(state_with_active(fresh_active()), Builtins::default()),
         "cypher_query",
@@ -123,10 +123,10 @@ async fn registered_query_routes_reject_integer_overflow_before_writes() {
     assert!(text_of(&read).contains("$.outer[0].value"));
 
     let state = state_with_active(fresh_active());
-    let invalid_write: serde_json::Value = serde_json::from_str(
-        r#"{"query":"CREATE (:Rejected {id: $value})","params":{"value":1267650600228229401496703205376}}"#,
-    )
-    .unwrap();
+    let invalid_write = serde_json::json!({
+        "query": "CREATE (:Rejected {id: $value})",
+        "params": {"value": u64::MAX}
+    });
     let rejected = call(
         kglite_server(state.clone(), writable_builtins()),
         "cypher_query",

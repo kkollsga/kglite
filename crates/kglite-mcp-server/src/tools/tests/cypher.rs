@@ -520,8 +520,7 @@ fn params_from_json_converts_the_json_value_types() {
 
 #[test]
 fn query_routes_reject_unrepresentable_json_numbers_with_paths() {
-    let value: serde_json::Value =
-        serde_json::from_str(r#"{"outer":[{"value":1267650600228229401496703205376}]}"#).unwrap();
+    let value = serde_json::json!({"outer": [{"value": u64::MAX}]});
     let params = value.as_object().unwrap();
     let error = params_from_json(Some(params)).unwrap_err();
     assert!(error.contains("$.outer[0].value"), "{error}");

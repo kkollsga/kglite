@@ -13,6 +13,7 @@ use crate::strings::alloc_c_string;
 use kglite::api::mutation::{add_edges_from_specs, EdgeSpec};
 use kglite::api::param::{
     json_object_to_query_value_map, json_object_to_value_map, json_value_to_kglite_value,
+    validate_json_query_numbers_at,
 };
 use kglite::api::session::{execute_mut, execute_read, ExecuteOptions, Session};
 use kglite::api::{Embedder, Value};
@@ -824,6 +825,9 @@ fn parse_params_json(
     if s.is_empty() {
         return Ok(HashMap::new());
     }
+    validate_json_query_numbers_at(s, &[]).map_err(|error| {
+        QueryParamDecodeError::new(KgliteStatusCode::InvalidArgument, error.to_string())
+    })?;
     let parsed: serde_json::Value = match serde_json::from_str(s) {
         Ok(v) => v,
         Err(error) => {
@@ -891,6 +895,9 @@ fn parse_batch_queries(
             ));
         }
     };
+    validate_json_query_numbers_at(s, &["[]", "params"]).map_err(|error| {
+        QueryParamDecodeError::new(KgliteStatusCode::InvalidArgument, error.to_string())
+    })?;
     let parsed: serde_json::Value = match serde_json::from_str(s) {
         Ok(v) => v,
         Err(error) => {
@@ -1329,7 +1336,7 @@ mod tests {
             .to_str()
             .unwrap()
             .to_string();
-        assert!(message.contains("$.outer[0].value"), "{message}");
+        assert!(message.contains("$[0].outer[0].value"), "{message}");
         unsafe { crate::kglite_free_string(error) };
 
         let mut output = std::ptr::null();
@@ -1344,7 +1351,7 @@ mod tests {
             .to_str()
             .unwrap()
             .to_string();
-        assert!(message.contains("$.outer[0].value"), "{message}");
+        assert!(message.contains("$[0].outer[0].value"), "{message}");
         unsafe { crate::kglite_free_string(error) };
 
         let mut result = std::ptr::dangling_mut();
@@ -1389,6 +1396,34 @@ mod tests {
         );
 
         unsafe { kglite_session_free(session) };
+    }
+
+    #[test]
+    fn query_params_preserve_a_serde_private_number_marker_object() {
+        let session = new_test_session();
+        let query = CString::new("RETURN $value AS value").unwrap();
+        let params = CString::new(r#"{"value":{"$serde_json::private::Number":"123"}}"#).unwrap();
+        let mut result = std::ptr::null_mut();
+        let mut error = std::ptr::null();
+        let status = unsafe {
+            kglite_session_execute_read(
+                session,
+                query.as_ptr(),
+                params.as_ptr(),
+                &mut result,
+                &mut error,
+            )
+        };
+        assert_eq!(status, KgliteStatusCode::Ok);
+        assert!(error.is_null());
+        let rows = unsafe { crate::kglite_cypher_result_rows_json(result) };
+        let text = unsafe { CStr::from_ptr(rows) }.to_str().unwrap();
+        assert!(text.contains(r#"$serde_json::private::Number"#), "{text}");
+        unsafe {
+            crate::kglite_free_string(rows);
+            crate::kglite_cypher_result_free(result);
+            kglite_session_free(session);
+        }
     }
 
     #[test]

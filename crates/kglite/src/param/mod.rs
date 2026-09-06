@@ -14,6 +14,10 @@
 //! 2026-05-25 so REST / gRPC bindings don't re-implement the JSON
 //! dispatch each time.
 
+mod raw_json;
+
+pub use raw_json::validate_json_query_numbers_at;
+
 use crate::datatypes::values::Value;
 use std::collections::HashMap;
 
@@ -775,7 +779,7 @@ mod strict_query_parameter_tests {
     }
 
     #[test]
-    fn checked_json_query_numbers_preserve_integer_and_float_spelling() {
+    fn checked_json_query_values_preserve_representable_numbers() {
         let params = json_object_to_query_value_map(&parsed_object(
             r#"{"min":-9223372036854775808,"max":9223372036854775807,"decimal":9223372036854775808.0,"exponent":1e30}"#,
         ))
@@ -787,40 +791,113 @@ mod strict_query_parameter_tests {
     }
 
     #[test]
-    fn checked_json_query_numbers_reject_integer_overflow_with_nested_paths() {
-        for (source, path) in [
-            (r#"{"value":1267650600228229401496703205376}"#, "$.value"),
+    fn raw_query_numbers_reject_lexical_overflow_with_nested_paths() {
+        for (source, pointer, path, kind) in [
             (
-                r#"{"rows":[{"value":-1267650600228229401496703205376}]}"#,
+                r#"{"value":1267650600228229401496703205376}"#,
+                &[][..],
+                "$.value",
+                JsonQueryParameterErrorKind::IntegerOutOfRange,
+            ),
+            (
+                r#"{"params":{"arguments":{"params":{"rows":[{"value":-1267650600228229401496703205376}]}}}}"#,
+                &["params", "arguments", "params"][..],
                 "$.rows[0].value",
+                JsonQueryParameterErrorKind::IntegerOutOfRange,
+            ),
+            (
+                r#"{"value":1e400}"#,
+                &[][..],
+                "$.value",
+                JsonQueryParameterErrorKind::NonFiniteFloat,
             ),
         ] {
-            let error = json_object_to_query_value_map(&parsed_object(source)).unwrap_err();
+            let error = validate_json_query_numbers_at(source, pointer).unwrap_err();
             assert_eq!(error.path(), path);
-            assert_eq!(error.kind(), JsonQueryParameterErrorKind::IntegerOutOfRange);
+            assert_eq!(error.kind(), kind);
         }
     }
 
     #[test]
-    fn checked_json_query_error_paths_escape_unsafe_object_keys() {
-        let error = json_object_to_query_value_map(&parsed_object(
-            r#"{"a\u0000b":1267650600228229401496703205376}"#,
-        ))
-        .unwrap_err();
+    fn raw_query_number_paths_escape_keys_and_build_only_on_failure() {
+        let error =
+            validate_json_query_numbers_at(r#"{"a\u0000b":1267650600228229401496703205376}"#, &[])
+                .unwrap_err();
         assert_eq!(error.path(), r#"$["a\u0000b"]"#);
         assert!(!error.to_string().contains('\0'));
+        assert!(validate_json_query_numbers_at(
+            r#"{"a\u0000b":[-9223372036854775808,1e300]}"#,
+            &[],
+        )
+        .is_ok());
     }
 
     #[test]
-    fn checked_json_query_numbers_reject_nonfinite_exponents() {
-        let error =
-            json_object_to_query_value_map(&parsed_object(r#"{"value":1e400}"#)).unwrap_err();
-        assert_eq!(error.path(), "$.value");
-        assert_eq!(error.kind(), JsonQueryParameterErrorKind::NonFiniteFloat);
+    fn raw_validator_defers_syntax_errors_and_ignores_non_target_numbers() {
+        for malformed in ["{", r#"{"value":01}"#, r#"{"value":1} trailing"#] {
+            assert!(validate_json_query_numbers_at(malformed, &[]).is_ok());
+        }
+        assert!(validate_json_query_numbers_at(
+            r#"{"id":1267650600228229401496703205376,"params":{"arguments":{"other":1}}}"#,
+            &["params", "arguments", "params"],
+        )
+        .is_ok());
     }
 
     #[test]
-    fn tolerant_json_conversion_still_accepts_large_integer_tokens() {
+    fn batch_selector_ignores_non_params_numbers_and_uses_last_duplicate() {
+        let source = r#"[
+            {"query":"RETURN 1","params":{},"vendor":1267650600228229401496703205376},
+            {"params":{"x":1267650600228229401496703205376},"params":{"x":1}}
+        ]"#;
+        assert!(validate_json_query_numbers_at(source, &["[]", "params"]).is_ok());
+        let error = validate_json_query_numbers_at(
+            r#"[{"params":{"x":1},"params":{"x":1267650600228229401496703205376}}]"#,
+            &["[]", "params"],
+        )
+        .unwrap_err();
+        assert_eq!(error.path(), "$[0].x");
+    }
+
+    #[test]
+    fn pointer_selection_uses_json_object_last_wins_semantics() {
+        assert!(validate_json_query_numbers_at(
+            r#"{"params":{"arguments":{"params":{"x":1267650600228229401496703205376},"params":{"x":1}}}}"#,
+            &["params", "arguments", "params"],
+        )
+        .is_ok());
+        assert!(validate_json_query_numbers_at(
+            r#"{"params":{"arguments":{"params":{"a":1267650600228229401496703205376,"b":1267650600228229401496703205376,"a":1}}}}"#,
+            &["params", "arguments", "params"],
+        )
+        .is_err());
+        assert!(validate_json_query_numbers_at(
+            r#"{"params":{"arguments":{"params":{"x":1267650600228229401496703205376}},"arguments":{"params":{"x":1}}}}"#,
+            &["params", "arguments", "params"],
+        )
+        .is_ok());
+        assert!(validate_json_query_numbers_at(
+            r#"{"params":{"arguments":{"variables":{"x":1267650600228229401496703205376},"variables":{"x":1}}}}"#,
+            &["params", "arguments", "variables"],
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn scanner_matches_serde_nesting_boundary() {
+        let accepted = format!("{}0{}", "[".repeat(127), "]".repeat(127));
+        assert!(validate_json_query_numbers_at(&accepted, &[]).is_ok());
+        assert!(serde_json::from_str::<serde_json::Value>(&accepted).is_ok());
+        let rejected = format!("{}1e400{}", "[".repeat(127), "]".repeat(127));
+        assert!(validate_json_query_numbers_at(&rejected, &[]).is_err());
+
+        let deferred = format!("{}1e400{}", "[".repeat(128), "]".repeat(128));
+        assert!(validate_json_query_numbers_at(&deferred, &[]).is_ok());
+        assert!(serde_json::from_str::<serde_json::Value>(&deferred).is_err());
+    }
+
+    #[test]
+    fn tolerant_json_conversion_still_accepts_materialized_large_numbers() {
         let value: serde_json::Value =
             serde_json::from_str("1267650600228229401496703205376").unwrap();
         assert!(matches!(

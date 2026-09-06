@@ -441,31 +441,28 @@ mod numeric_bound_tests {
     }
 
     #[test]
-    fn numeric_bounds_reject_unrepresentable_json_numbers() {
-        for (bounds, path, reason) in [
-            (
-                r#""minimum":1e400"#,
-                "parameters.properties.value.minimum",
-                "finite 64-bit float",
-            ),
-            (
-                r#""maximum":1267650600228229401496703205376"#,
-                "parameters.properties.value.maximum",
-                "signed 64-bit range",
-            ),
-            (
-                r#""minimum":-1267650600228229401496703205376"#,
-                "parameters.properties.value.minimum",
-                "signed 64-bit range",
-            ),
-        ] {
-            let error =
-                ParameterSchema::compile_root(&schema_with_bounds(bounds), &["value".to_string()])
-                    .unwrap_err();
-            let message = error.to_string();
-            assert!(message.contains(path), "{message}");
-            assert!(message.contains(reason), "{message}");
-        }
+    fn typed_unsigned_bound_above_i64_is_rejected() {
+        let mut schema = schema_with_bounds(r#""minimum":0"#);
+        schema["properties"]["value"]["maximum"] = Value::Number(Number::from(u64::MAX));
+        let error = ParameterSchema::compile_root(&schema, &["value".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("parameters.properties.value.maximum"),
+            "{error}"
+        );
+        assert!(error.contains("signed 64-bit range"), "{error}");
+    }
+
+    #[test]
+    fn ordinary_json_parser_refuses_nonfinite_bound_before_schema_compile() {
+        let source = r#"{
+            "type":"object",
+            "properties":{"value":{"type":"number","minimum":1e400}},
+            "required":["value"],
+            "additionalProperties":false
+        }"#;
+        assert!(serde_json::from_str::<Value>(source).is_err());
     }
 
     #[test]

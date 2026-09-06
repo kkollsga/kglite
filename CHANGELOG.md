@@ -39,7 +39,10 @@ before upgrading.
   must fit a finite 64-bit float. Rejections retain the nested array/object
   path; C callers receive `InvalidArgument` plus an owned message when they
   supply `out_error_msg`. Declared property ingestion and Cypher `parse_json()`
-  keep their existing tolerant conversion behavior.
+  keep their existing tolerant conversion behavior. Raw C and MCP query
+  entrances inspect number lexemes without changing serde_json's process-wide
+  number representation, so ordinary objects whose key is
+  `$serde_json::private::Number` remain objects.
 
 - Endpoint values now resolve consistently in eager and lazy query results,
   nested containers and direct Python graph outputs, using the executing graph

@@ -41,10 +41,9 @@ pub(crate) fn register_recipe_query_routes(
         return Ok(0);
     }
 
-    let router = server.tool_router_mut();
     let collisions = [LIST_RECIPE_QUERIES_TOOL, RUN_RECIPE_QUERY_TOOL]
         .into_iter()
-        .filter(|name| router.map.contains_key(*name))
+        .filter(|name| server.tool_router_mut().map.contains_key(*name))
         .collect::<Vec<_>>();
     if !collisions.is_empty() {
         anyhow::bail!(
@@ -54,7 +53,7 @@ pub(crate) fn register_recipe_query_routes(
     }
 
     let list_catalog = catalog.clone();
-    router.add_route(ToolRoute::new_dyn(
+    server.tool_router_mut().add_route(ToolRoute::new_dyn(
         recipe_tool::<ListRecipeQueriesArgs, ListRecipeQueriesOutput>(
             LIST_RECIPE_QUERIES_TOOL,
             LIST_DESCRIPTION,
@@ -72,7 +71,7 @@ pub(crate) fn register_recipe_query_routes(
         },
     ));
 
-    router.add_route(ToolRoute::new_dyn(
+    server.tool_router_mut().add_route(ToolRoute::new_dyn(
         recipe_tool::<RunRecipeQueryArgs, RunRecipeQueryOutput>(
             RUN_RECIPE_QUERY_TOOL,
             RUN_DESCRIPTION,
@@ -90,6 +89,11 @@ pub(crate) fn register_recipe_query_routes(
             })
         },
     ));
+    crate::raw_query_routes::protect_query_route(
+        server,
+        RUN_RECIPE_QUERY_TOOL,
+        crate::raw_query_routes::RECIPE_QUERY_POINTER,
+    );
 
     Ok(2)
 }
@@ -407,10 +411,11 @@ mod tests {
         let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
         let server_handle = tokio::spawn(async move { server.serve(server_transport).await });
         let client = ().serve(client_transport).await.expect("start MCP client");
-        let arguments: Value = serde_json::from_str(
-            r#"{"recipe":"review","query":"echo","variables":{"value":1267650600228229401496703205376}}"#,
-        )
-        .unwrap();
+        let arguments = serde_json::json!({
+            "recipe": "review",
+            "query": "echo",
+            "variables": {"value": u64::MAX}
+        });
         let result = client
             .call_tool(
                 CallToolRequestParams::new(RUN_RECIPE_QUERY_TOOL)

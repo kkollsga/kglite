@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use mcp_methods::server::{init_tracing, load_env_for_mode, McpServer, ServerOptions};
-use rmcp::transport::stdio;
 use rmcp::ServiceExt;
 
 use crate::tools::GraphState;
@@ -866,7 +865,14 @@ pub(crate) async fn run_async(
     );
 
     let service = server
-        .serve(stdio())
+        .serve(crate::raw_stdio::QueryAwareStdio::new(
+            tokio::io::stdin(),
+            tokio::io::stdout(),
+            crate::raw_query_routes::route_pointers(
+                manifest.as_ref(),
+                recipe_catalog_summary.is_some(),
+            ),
+        ))
         .await
         .context("failed to start MCP service over stdio")?;
     service.waiting().await?;
@@ -886,6 +892,33 @@ mod boot_manifest_tests {
         let path = dir.join("graph_watch_mcp.yaml");
         std::fs::write(&path, body).expect("write manifest");
         mcp_methods::server::load_manifest(&path).expect("manifest loads")
+    }
+
+    #[test]
+    fn recipe_numeric_bounds_accept_reachable_yaml_signed_and_finite_values() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manifest = manifest_with(
+            tmp.path(),
+            "extensions:\n\
+             \x20 cypher_recipes:\n\
+             \x20   numeric:\n\
+             \x20     description: Numeric.\n\
+             \x20     queries:\n\
+             \x20       echo:\n\
+             \x20         description: Echo.\n\
+             \x20         parameters:\n\
+             \x20           type: object\n\
+             \x20           properties:\n\
+             \x20             value:\n\
+             \x20               type: number\n\
+             \x20               minimum: -1e300\n\
+             \x20               maximum: 9223372036854775807\n\
+             \x20           required: [value]\n\
+             \x20           additionalProperties: false\n\
+             \x20         cypher: RETURN $value AS value\n",
+        );
+        let catalog = boot_recipe_catalog(Some(&manifest)).expect("reachable bounds compile");
+        assert_eq!(catalog.discovery_summary().unwrap().query_count, 1);
     }
 
     /// The retired key is *accepted*, not honoured: a manifest that still
