@@ -297,11 +297,14 @@ impl RepairScanner<'_> {
     }
 }
 
+type ServerMessageCodec = JsonRpcMessageCodec<TxJsonRpcMessage<RoleServer>>;
+type SharedWriter<W> = Arc<Mutex<Option<FramedWrite<W, ServerMessageCodec>>>>;
+
 pub(crate) struct QueryAwareStdio<R, W> {
     read: BufReader<R>,
     line: Vec<u8>,
     decoder: RawLineCodec<RxJsonRpcMessage<RoleServer>>,
-    write: Arc<Mutex<Option<FramedWrite<W, JsonRpcMessageCodec<TxJsonRpcMessage<RoleServer>>>>>>,
+    write: SharedWriter<W>,
     query_routes: Arc<HashMap<String, &'static [&'static str]>>,
 }
 
