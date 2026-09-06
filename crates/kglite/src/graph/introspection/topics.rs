@@ -1333,7 +1333,7 @@ pub(super) fn write_fluent_topic_schema(xml: &mut String) {
         "      <m sig=\"describe(types=['...'])\">AI-optimised XML for specific types.</m>\n",
     );
     xml.push_str("      <m sig=\"define_schema(schema_dict, replace=False)\">Enforce schema constraints. Merges per node/connection type: a type the call names takes the new declaration, a type it omits keeps its own. replace=True makes the incoming schema the whole schema, withdrawing constraints on every type it omits. Unknown keys are rejected, so a typo'd declaration cannot pass for a constraint.</m>\n");
-    xml.push_str("      <m sig=\"verify_unique_constraints()\">Re-scan stored data for UNIQUE / primary_key violations and return one dict per violated constraint. The audit for paths that bypass enforcement (RDF / N-Triples loaders, embedding carry).</m>\n");
+    xml.push_str("      <m sig=\"verify_unique_constraints()\">Re-scan stored data for UNIQUE / primary_key violations and return one dict per violated constraint. The audit for paths that bypass enforcement (N-Triples loader and embedding carry); general RDF loading requires a fresh bootstrap graph.</m>\n");
     xml.push_str("    </methods>\n");
     xml.push_str("    <examples>\n");
     xml.push_str("      <ex desc=\"full schema\">graph.schema()</ex>\n");

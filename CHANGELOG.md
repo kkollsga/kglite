@@ -48,6 +48,13 @@ before upgrading.
 
 ### Changed
 
+- Rust `load_rdf` now requires a fresh empty in-memory destination without
+  schema, indexes, constraints, identity aliases or mutation capture. Load into
+  a separate `DirGraph::new()` instead of appending into an existing graph.
+  This intentionally restricts the loader's former constraint bypass; Python
+  and C already create fresh graphs, and the separate N-Triples loader retains
+  its existing behavior.
+
 - Python snapshots, sessions, cursors and transactions capture query defaults
   when created. Omitted options inherit those defaults, including the built-in
   180-second query timeout; explicit `timeout_ms=0` disables the query deadline.

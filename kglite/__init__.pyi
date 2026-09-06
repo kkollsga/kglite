@@ -5125,10 +5125,12 @@ class KnowledgeGraph:
         currently present.
 
         The on-demand counterpart of the rebuild ``load()`` runs. Enforcement
-        covers the Cypher write path and the bulk loaders, but **not** the RDF /
-        N-Triples loaders or the embedding-carry path — a graph filled through
+        covers the Cypher write path and the bulk loaders, but **not** the
+        N-Triples loader or the embedding-carry path — a graph filled through
         those can hold duplicates a declared ``UNIQUE`` (or ``primary_key``)
-        constraint forbids. This is the audit for that case::
+        constraint forbids. The general RDF loader instead requires a fresh
+        bootstrap graph; declare constraints after loading. This is the audit
+        for bypassing paths::
 
             graph.define_schema({"nodes": {"Entity": {"unique": ["isbn"]}}})
             graph.load_ntriples("catalogue.nt")     # bypasses enforcement

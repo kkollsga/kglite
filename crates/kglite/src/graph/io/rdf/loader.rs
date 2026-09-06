@@ -115,17 +115,17 @@ impl FoldState {
     }
 }
 
-/// Load an RDF file into `graph` (in-memory backend). Dispatches on the
-/// file extension: `.ttl` → Turtle, `.nt` → N-Triples, `.nq` → N-Quads,
-/// `.trig` → TriG. Quad graph names are ignored.
+/// Load an RDF file into a fresh empty in-memory `graph`.
+///
+/// Use [`DirGraph::new`]: populated graphs, schema/index/constraint declarations,
+/// identity aliases and mutation capture are refused before parsing or mutation.
+/// This bootstrap loader does not append or enforce existing declarations.
+/// Python and C callers already allocate a fresh destination.
+///
+/// Dispatches on the file extension: `.ttl` → Turtle, `.nt` → N-Triples,
+/// `.nq` → N-Quads, `.trig` → TriG. Quad graph names are ignored.
 pub fn load_rdf(graph: &mut DirGraph, path: &str, config: &RdfConfig) -> Result<RdfStats, String> {
-    if graph.graph.is_mapped() || graph.graph.is_disk() {
-        return Err(
-            "load_rdf currently supports the in-memory (Default) backend only; \
-             mapped/disk graphs are not yet supported"
-                .to_string(),
-        );
-    }
+    super::admission::check_target(graph)?;
 
     let ext = path
         .rsplit('.')

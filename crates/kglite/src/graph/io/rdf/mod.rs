@@ -15,9 +15,13 @@
 //! - [`fold`] — typed-literal → [`crate::datatypes::values::Value`] coercion.
 //! - [`loader`] — `load_rdf` entry point + the triple-fold driver.
 
+mod admission;
 mod curie;
 mod fold;
 mod interner;
 mod loader;
 
 pub use loader::{load_rdf, RdfConfig, RdfStats};
+
+#[cfg(test)]
+mod admission_tests;

@@ -248,10 +248,12 @@ far in memory. On a durable graph that costs nothing, because the load reaches
 the log as one frame at the end — a crash mid-load recovers to the pre-load
 state.
 
-**Two write paths bypass enforcement entirely:** the RDF and N-Triples loaders,
-and the embedding-carry path. A graph filled through those can hold data that
-violates a declared constraint; `verify_unique_constraints()` exists to audit
-exactly that case.
+The N-Triples loader and embedding-carry path bypass constraint enforcement;
+a graph filled through those can hold violations, which
+`verify_unique_constraints()` can audit. The general RDF loader is a fresh-graph
+bootstrap operation: Python and C return a new in-memory graph, and Rust
+`load_rdf(&mut graph, ...)` refuses populated or configured targets before
+writing. Load RDF first, then declare and validate its constraints.
 
 One thing about the error surface is worth knowing before you write `except`
 clauses. A violation raises `ConstraintViolationError` and a declaration that
