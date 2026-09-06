@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import kglite
+from tests.value_assertions import assert_rows_equal
 
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = json.loads((ROOT / "tests" / "cypher_contract" / "cases.json").read_text(encoding="utf-8"))
@@ -30,7 +31,7 @@ def test_independent_cypher_behavior(case, tmp_path):
         query = query.replace("{csv_dir}", str(tmp_path))
 
     actual = graph.cypher(query, params=case.get("params")).to_list()
-    assert actual == case["expected"], case["requirement"]
+    assert_rows_equal(actual, case["expected"], order="ordered")
 
 
 def test_clean_room_artifact_guard():

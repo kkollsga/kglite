@@ -25,6 +25,7 @@ RUNNER = ROOT / "tests" / "test_cypher_clean_room_contract.py"
 PROVENANCE_GUARDED_PATHS = (
     "tests/cypher_contract",
     "tests/test_cypher_clean_room_contract.py",
+    "tests/value_assertions.py",
 )
 REVIEWED_SEMANTIC_SUITES = (
     "tests/test_cypher_differential.py",
@@ -48,7 +49,21 @@ FORBIDDEN_TEXT = (
     "openCypher TCK",
     "Technology Compatibility Kit",
 )
-ALLOWED_RUNNER_IMPORTS = {"__future__", "json", "pathlib", "pytest", "kglite", "scripts"}
+ALLOWED_RUNNER_IMPORTS = {"__future__", "json", "pathlib", "pytest", "kglite", "scripts", "tests.value_assertions"}
+ALLOWED_ASSERTION_IMPORTS = {"__future__", "dataclasses", "datetime", "math", "typing"}
+
+
+def unexpected_imports(source: str, allowed: set[str]) -> set[str]:
+    unexpected = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            names = {alias.name for alias in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            names = {node.module or ""}
+        else:
+            continue
+        unexpected.update(name for name in names if name not in allowed and name.split(".", 1)[0] not in allowed)
+    return unexpected
 
 
 def validate() -> list[str]:
@@ -56,7 +71,10 @@ def validate() -> list[str]:
     for rel in PROVENANCE_GUARDED_PATHS + REVIEWED_SEMANTIC_SUITES:
         if not (ROOT / rel).exists():
             errors.append(f"conformance-surface manifest is stale: {rel} does not exist")
-    files = [path for path in CONTRACT_ROOT.rglob("*") if path.is_file()]
+    files = []
+    for rel in PROVENANCE_GUARDED_PATHS:
+        path = ROOT / rel
+        files.extend(p for p in path.rglob("*") if p.is_file()) if path.is_dir() else files.append(path)
     for path in files:
         if path.suffix.lower() in FORBIDDEN_SUFFIXES:
             errors.append(f"forbidden external-suite artifact type: {path.relative_to(ROOT)}")
@@ -84,17 +102,15 @@ def validate() -> list[str]:
             if field not in case:
                 errors.append(f"contract case {index} is missing {field!r}")
 
-    tree = ast.parse(RUNNER.read_text(encoding="utf-8"), filename=str(RUNNER))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            imported = {alias.name.split(".", 1)[0] for alias in node.names}
-        elif isinstance(node, ast.ImportFrom):
-            imported = {(node.module or "").split(".", 1)[0]}
-        else:
-            continue
-        unexpected = imported - ALLOWED_RUNNER_IMPORTS
+    for path, allowed in [
+        (RUNNER, ALLOWED_RUNNER_IMPORTS),
+        (ROOT / "tests/value_assertions.py", ALLOWED_ASSERTION_IMPORTS),
+    ]:
+        unexpected = unexpected_imports(path.read_text(encoding="utf-8"), allowed)
         if unexpected:
-            errors.append(f"contract runner imports unexpected dependencies: {sorted(unexpected)}")
+            errors.append(
+                f"contract helper/runner imports unexpected dependencies in {path.name}: {sorted(unexpected)}"
+            )
     return errors
 
 

@@ -328,7 +328,12 @@ def test_storage_and_disk_jobs_run_bounded_regression_targets() -> None:
     assert len(parity_runs) == 1, "storage-parity should run exactly one pytest invocation"
     parity_args = parity_runs[0]
     assert _markers(parity_args) == ["parity"]
+    assert parity_args[parity_args.index("-p") + 1] == "scripts.parity_ownership"
+    assert parity_args[parity_args.index("--parity-owner") + 1] == "storage-parity"
     for target in (
+        "tests/test_community_detection.py",
+        "tests/test_cypher_scalar_storage_golden.py",
+        "tests/test_edge_cases_parity.py",
         "tests/test_storage_parity.py",
         "tests/test_phase1_parity.py",
         "tests/test_phase2_parity.py",
@@ -2046,3 +2051,27 @@ def test_dedup_gates_are_consistent() -> None:
             assert not gated_needs, f"{job} is exempt from dedup but gated"
         else:
             assert gated_needs and gated_if, f"{job}: dedup gating incomplete (needs={gated_needs}, if={gated_if})"
+
+
+@pytest.mark.parametrize(
+    "removed",
+    ["scripts.parity_ownership", "--parity-owner storage-parity", "tests/test_cypher_scalar_storage_golden.py"],
+)
+def test_parity_execution_guard_rejects_missing_owner_or_target(monkeypatch, removed):
+    from copy import deepcopy
+
+    original = _ci_job
+    parity = deepcopy(original("storage-parity"))
+    changed = False
+    for step in parity["steps"]:
+        if removed in step.get("run", ""):
+            step["run"] = step["run"].replace(removed, "")
+            changed = True
+    assert changed, "mutation must change the actual invocation"
+    monkeypatch.setattr(
+        __import__(__name__, fromlist=["_ci_job"]),
+        "_ci_job",
+        lambda name: parity if name == "storage-parity" else original(name),
+    )
+    with pytest.raises((AssertionError, ValueError)):
+        test_storage_and_disk_jobs_run_bounded_regression_targets()

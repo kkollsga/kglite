@@ -1,0 +1,348 @@
+{
+  "tests/test_community_detection.py::TestLeidenCypher::test_leiden_parity_across_modes[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_community_detection.py::TestLeidenCypher::test_leiden_parity_across_modes[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_community_detection.py::TestLeidenCypher::test_leiden_parity_across_modes[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_community_detection.py::TestBoundedMemoryParity::test_k_core_parity_across_modes[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_community_detection.py::TestBoundedMemoryParity::test_k_core_parity_across_modes[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_community_detection.py::TestBoundedMemoryParity::test_k_core_parity_across_modes[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_community_detection.py::TestBoundedMemoryParity::test_k_core_with_pendant_parity[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_community_detection.py::TestBoundedMemoryParity::test_k_core_with_pendant_parity[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_community_detection.py::TestBoundedMemoryParity::test_k_core_with_pendant_parity[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_cypher_scalar_storage_golden.py::test_range_temporal_duration_and_regex_golden[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_cypher_scalar_storage_golden.py::test_range_temporal_duration_and_regex_golden[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_cypher_scalar_storage_golden.py::test_range_temporal_duration_and_regex_golden[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_zero_node_describe_schema_find_cypher[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_zero_node_describe_schema_find_cypher[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_zero_node_describe_schema_find_cypher[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_single_node_single_edge[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_single_node_single_edge[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_single_node_single_edge[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_long_chain_traversal_1000_hops[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_long_chain_traversal_1000_hops[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_long_chain_traversal_1000_hops[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_long_chain_traversal_path_materialization_100_hops[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_long_chain_traversal_path_materialization_100_hops[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_long_chain_traversal_path_materialization_100_hops[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_unicode_roundtrip[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_unicode_roundtrip[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_unicode_roundtrip[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_unicode_save_load_roundtrip[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_unicode_save_load_roundtrip[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_unicode_save_load_roundtrip[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_type_promotion_int_float_string[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_type_promotion_int_float_string[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_type_promotion_int_float_string[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_null_nan_empty_string_properties[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_null_nan_empty_string_properties[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_null_nan_empty_string_properties[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_large_cypher_result_100k_rows[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_large_cypher_result_100k_rows[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_large_cypher_result_100k_rows[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_nan_not_equal_itself[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_nan_not_equal_itself[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_edge_cases_parity.py::test_nan_not_equal_itself[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase1_parity.py::test_edge_iteration_stability_related": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase1_parity.py::test_edge_iteration_stability_about": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase1_parity.py::test_neighbors_directed_per_node": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase1_parity.py::test_neighbors_undirected_per_node": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase1_parity.py::test_nodes_of_type_determinism": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase1_parity.py::test_nodes_of_type_determinism_topic": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase1_parity.py::test_connection_metadata_parity": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase1_parity.py::test_edge_count_per_type_parity": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase1_parity.py::test_per_node_outdegree_parity": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase2_parity.py::test_conflict_matrix_nodes[update]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase2_parity.py::test_conflict_matrix_nodes[replace]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase2_parity.py::test_conflict_matrix_nodes[skip]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase2_parity.py::test_conflict_matrix_nodes[preserve]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase2_parity.py::test_conflict_matrix_edges_replace": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase2_parity.py::test_mid_batch_failure_schema_locked": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase2_parity.py::test_schema_locked_unknown_property_message": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase2_parity.py::test_tombstone_visibility_detach_delete": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase2_parity.py::test_merge_idempotency_node": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase2_parity.py::test_merge_idempotency_edge": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase2_parity.py::test_collect_then_delete_snapshot": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase2_parity.py::test_disk_conflict_update_applies": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase2_parity.py::test_disk_conflict_replace_clears_omitted_properties": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase2_parity.py::test_disk_create_persists_properties": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase2_parity.py::test_disk_merge_create_and_match": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase3_parity.py::test_traversal_snapshot_resists_later_create[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase3_parity.py::test_traversal_snapshot_resists_later_create[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase3_parity.py::test_traversal_snapshot_resists_later_create[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase3_parity.py::test_traversal_snapshot_resists_later_delete[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase3_parity.py::test_traversal_snapshot_resists_later_delete[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase3_parity.py::test_traversal_snapshot_resists_later_delete[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase3_parity.py::test_traversal_row_count_parity_across_modes[MATCH (a:Person)-[:KNOWS*1..2]->(b:Person) RETURN count(*) AS n]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase3_parity.py::test_traversal_row_count_parity_across_modes[MATCH ()-[:KNOWS]->() RETURN count(*) AS n]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase3_parity.py::test_traversal_row_count_parity_across_modes[MATCH (a:Person)<-[:KNOWS]-(b:Person) RETURN count(*) AS n]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase3_parity.py::test_pagerank_score_set_parity_post_migration[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase3_parity.py::test_pagerank_score_set_parity_post_migration[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase3_parity.py::test_pagerank_score_set_parity_post_migration[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase3_parity.py::test_edge_references_iteration_count_parity": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase4_parity.py::test_kgl_golden_hash": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase4_parity.py::test_kgl_v3_file_rejected_with_clear_error": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase4_parity.py::test_kgl_v3_save_is_deterministic": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase4_parity.py::test_save_load_round_trip_cross_mode[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase4_parity.py::test_save_load_round_trip_cross_mode[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase4_parity.py::test_save_load_round_trip_cross_mode[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase4_parity.py::test_save_incremental_v0_7_6": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase4_parity.py::test_save_rss_ceiling": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase5_parity.py::test_graph_copy_cow_correctness_memory": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase5_parity.py::test_graph_copy_cow_correctness_mapped": {
+    "owner": "storage-parity"
+  },
+  "tests/test_phase5_parity.py::test_dead_code_check": {
+    "owner": "workspace-clippy",
+    "reason": "Static cargo clippy check is already required by the workspace clippy CI job."
+  },
+  "tests/test_storage_parity.py::test_cypher_parity[filter_eq_string-MATCH (n:Entity) WHERE n.category = 'cat_3' RETURN count(n) AS c]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_storage_parity.py::test_cypher_parity[filter_range_numeric-MATCH (n:Entity) WHERE n.score >= 25.0 AND n.score < 75.0 RETURN count(n) AS c]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_storage_parity.py::test_cypher_parity[filter_in_list-MATCH (n:Entity) WHERE n.category IN ['cat_1', 'cat_3', 'cat_5'] RETURN count(n) AS c]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_storage_parity.py::test_cypher_parity[filter_contains-MATCH (n:Entity) WHERE n.description CONTAINS 'cluster 7' RETURN count(n) AS c]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_storage_parity.py::test_cypher_parity[aggregation_group_by-MATCH (n:Entity) RETURN n.category AS cat, count(n) AS cnt ORDER BY cat]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_storage_parity.py::test_cypher_parity[two_hop_count-MATCH (a:Entity)-[:RELATED]->(b:Entity)-[:ABOUT]->(t:Topic) WHERE t.domain = 'domain_2' RETURN count(DISTINCT a) AS c]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_storage_parity.py::test_cypher_parity[exact_path_relationship_ids-MATCH p=(a:Entity {eid: 0})-[:RELATED*1..2]->(b:Entity) RETURN [r IN relationships(p) | id(r)] AS ids ORDER BY ids]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_storage_parity.py::test_cypher_parity[order_by_limit-MATCH (n:Entity) RETURN n.eid AS id, n.score AS s ORDER BY s DESC LIMIT 5]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_storage_parity.py::test_cypher_parity[optional_match-MATCH (n:Entity) OPTIONAL MATCH (n)-[:ABOUT]->(t:Topic) WITH n, count(t) AS cnt RETURN cnt, count(n) AS entities ORDER BY cnt]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_storage_parity.py::test_cypher_parity[distinct_on_target-MATCH (e:Entity)-[:ABOUT]->(t:Topic) RETURN count(DISTINCT t) AS topics]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_storage_parity.py::test_cypher_parity[property_exists-MATCH (n:Entity) WHERE n.rank IS NOT NULL RETURN count(n) AS c]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_storage_parity.py::test_find_by_title_parity": {
+    "owner": "storage-parity"
+  },
+  "tests/test_storage_parity.py::test_degrees_parity": {
+    "owner": "storage-parity"
+  },
+  "tests/test_storage_parity.py::test_bulk_selected_update_parity": {
+    "owner": "storage-parity"
+  },
+  "tests/test_storage_parity.py::test_schema_parity": {
+    "owner": "storage-parity"
+  },
+  "tests/test_storage_parity.py::test_describe_shape_parity": {
+    "owner": "storage-parity"
+  },
+  "tests/test_storage_parity.py::test_db_labels_parity": {
+    "owner": "storage-parity"
+  },
+  "tests/test_storage_parity.py::test_db_relationship_types_parity": {
+    "owner": "storage-parity"
+  },
+  "tests/test_storage_parity.py::test_db_indexes_parity": {
+    "owner": "storage-parity"
+  },
+  "tests/test_storage_parity.py::test_property_type_constraint_parity": {
+    "owner": "storage-parity"
+  },
+  "tests/test_storage_parity.py::test_relationship_constraint_parity": {
+    "owner": "storage-parity"
+  },
+  "tests/test_storage_parity.py::test_cdc_mode_parity": {
+    "owner": "storage-parity"
+  },
+  "tests/test_storage_parity.py::test_save_load_round_trip": {
+    "owner": "storage-parity"
+  },
+  "tests/test_storage_parity.py::test_relationship_alternation_parity": {
+    "owner": "storage-parity"
+  },
+  "tests/test_storage_parity.py::test_strongly_connected_components_parity": {
+    "owner": "storage-parity"
+  }
+}

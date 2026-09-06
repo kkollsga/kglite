@@ -30,6 +30,7 @@ from __future__ import annotations
 import pytest
 
 import kglite
+from tests.value_assertions import canonical_rows
 
 # Each entry is `(name, fixture, query, params)`. The corpus aims to
 # exercise:
@@ -5223,17 +5224,24 @@ MUTATION_QUERIES: list[tuple[str, str]] = [
 ]
 
 
-def _normalize(rows: list[dict]) -> list[tuple]:
-    """Sort + canonicalize rows so unordered queries compare equal.
+# Most legacy corpus cases specify only a bag of rows. These named cases
+# additionally pin the final ORDER BY, rather than inferring a contract from
+# query text (which can contain nested or intermediate ordering).
+ORDERED_CASES = frozenset(
+    {
+        "trigger_generic_top_k",
+        "skip_and_limit",
+        "order_by_return_alias",
+        "text_bm25_top_k",
+        "text_bm25_complete_top_k",
+        "text_bm25_top_k_stale_over_limit",
+    }
+)
 
-    Modeled on `tests/test_storage_parity.py::_rows()`. Each row becomes
-    a tuple of (key, str(value)) pairs sorted by key — handles dict
-    ordering and mixed numeric/string types. Final list is sorted so
-    queries without ORDER BY are still comparable.
-    """
-    canonical = [tuple(sorted((k, str(v)) for k, v in row.items())) for row in rows]
-    canonical.sort()
-    return canonical
+
+def _normalize(rows: list[dict], *, order="bag") -> list[tuple]:
+    """Compare exact typed values; bag mode retains nested order and duplicates."""
+    return canonical_rows(rows, order=order)
 
 
 @pytest.mark.differential
@@ -5253,8 +5261,9 @@ def test_optimized_matches_naive(
     g = request.getfixturevalue(fixture)
     kwargs = {"params": params} if params else {}
 
-    naive = _normalize(g.cypher(query, disable_optimizer=True, **kwargs).to_list())
-    optimized = _normalize(g.cypher(query, **kwargs).to_list())
+    order = "ordered" if name in ORDERED_CASES else "bag"
+    naive = _normalize(g.cypher(query, disable_optimizer=True, **kwargs).to_list(), order=order)
+    optimized = _normalize(g.cypher(query, **kwargs).to_list(), order=order)
 
     assert optimized == naive, (
         f"Optimizer divergence on `{name}`:\n"
@@ -5274,7 +5283,7 @@ def test_optimized_matches_naive(
     # the current corpus is cheap, and failures identify the exact query/pass
     # pair.
     for pass_name in kglite.cypher_pass_names():
-        isolated = _normalize(g.cypher(query, disabled_passes=[pass_name], **kwargs).to_list())
+        isolated = _normalize(g.cypher(query, disabled_passes=[pass_name], **kwargs).to_list(), order=order)
         assert isolated == naive, (
             f"Single-pass isolation divergence on `{name}` with `{pass_name}` disabled:\n"
             f"  query:     {query}\n"
