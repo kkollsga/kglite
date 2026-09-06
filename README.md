@@ -577,9 +577,9 @@ for tested/build-only tiers, libc floors, PyPy status, and source-build fallback
 
 ## Stability
 
-KGLite is beta software and remains pre-1.0. Patch releases preserve public
-source APIs; a 0.x minor release may make an intentional breaking source-API
-change when it is documented with a migration path. Saved graph files have a
+KGLite is beta software and remains pre-1.0. Any release, including a patch,
+may make an intentional breaking source-API change, documented in the changelog
+with migration guidance. Review the changelog before upgrading. Saved graph files have a
 separate format lifecycle: a release either reads an older format or refuses it
 with an explicit rebuild/migration error; see
 [CHANGELOG.md](https://github.com/kkollsga/kglite/blob/main/CHANGELOG.md).

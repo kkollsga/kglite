@@ -98,7 +98,7 @@ def test_graph_copy_cow_correctness_mapped():
 #: (run on each platform; the script writes whichever entry matches the
 #: current host).
 BINARY_SIZE_BASELINES = {
-    "darwin": 22_168_560,  # 0.16.23 darwin baseline
+    "darwin": 22_515_888,  # 0.16.24 darwin baseline
     "linux": 28_810_000,  # estimate: the post-code_tree Linux estimate (30.2 MB)
     # scaled by the same −4.6% the macOS loader removal measured. Both
     # removals deliberately recaptured DOWNWARD so the +10% budget guards
@@ -457,6 +457,10 @@ def test_binary_size_regression():
                        zip + quick-xml, the release's one new dependency
                        subtree (13 packages, feature-gated in the core crate,
                        always on in the wheel).
+      - 0.16.24:       22,515,888 bytes (≈21.5 MB), +347,328 bytes (+1.6%).
+                       Adds retrieval diagnostics/policy, node-property
+                       ontology contracts, complete WAL state capture and
+                       correctness checks across queries, blueprints and exports.
 
     Raising the baseline is a deliberate act — every bump should
     be accompanied by an updated growth note above. For a precise
@@ -489,7 +493,7 @@ def test_binary_size_regression():
     gate = int(baseline * 1.10)
     assert size <= gate, (
         f"{bin_path.name} = {size:,} bytes > gate {gate:,} "
-        f"(+10% over 0.16.23 {platform_key} baseline {baseline:,}). "
+        f"(+10% over 0.16.24 {platform_key} baseline {baseline:,}). "
         "Investigate what grew before raising the gate — see the "
         "growth note in this test's docstring for the breakdown shape."
     )

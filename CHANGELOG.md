@@ -3,9 +3,13 @@
 All notable changes to KGLite will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+and release numbers use `major.minor.patch`. While KGLite is pre-1.0, patch
+releases may include documented breaking changes; review the migration notes
+before upgrading.
 
 ## [Unreleased]
+
+## [0.16.24] - 2026-09-06
 
 ### Added
 - Actual vector retrieval diagnostics for ordinary queries and PROFILE, including
@@ -25,6 +29,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and persistence; ontology property types accept `list` and `array`.
 
 ### Changed
+
+- Rust migration: initialize the new `ClassDecl` property-contract fields and
+  `QueryDiagnostics.retrieval` when constructing these structs directly; update
+  exhaustive `RawOp` matches for `WalNode` and `WalGroup`. The semver scan reports
+  194 passing checks and two breaking-change categories (added public fields
+  and exhaustive enum variants). `wrap_for_durability` is also now fallible:
+  propagate its error with `?` or handle it explicitly.
+- Clarify that pre-1.0 patch releases may contain documented API breaks, matching
+  the Rust embedding guidance and the project's release policy.
+- Correctness has measured costs: complete capture of a 10,000-parallel-edge
+  relationship group takes about 1.29–1.32 ms per durable update, up from
+  0.124–0.127 ms; a 220-write log grows from about 9.7 KB to 31.19 MB. Early
+  deletion also retains an unresolved microsecond-scale slowdown. These costs
+  remain documented performance work; this release is not a universal speedup.
 
 - Newly computed aggregate IDs use tagged JSON tuples (`group:[...]`) to keep
   grouping components distinct. All newly generated aggregate IDs change;

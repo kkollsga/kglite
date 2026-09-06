@@ -18,11 +18,17 @@
       "sha256": "1b23da8d130234e10ed261987e411a69da11a1f2f6feae6443b8f06a8c00f0f7",
       "status": "rejected"
     },
-    "current.json": {
-      "evidence": "Raw alias of the inflated 0.16.23 macOS capture; retained for historical workload identity, not reference eligibility.",
+    "0_16_24.json": {
+      "evidence": "Release 0.16.24, 2026-09-06: two complete 36-cell release captures, 100 rounds and 20 warmups, 30-second settle; 34 common cells vs accepted 0.16.19 have worst min +4.3%/+4.4%, both 20% and 30% gates pass. Normal desktop load (prebuild 2.56/1.99/1.72), no simultaneous native build during captures; two new cells reviewed across repeat. Release evidence dev-docs/temp/release-0.16.24/benchmark-pair.json. Older rejected captures and separate early-deletion exception remain unchanged.",
       "platform": "Darwin/arm64",
-      "sha256": "1b23da8d130234e10ed261987e411a69da11a1f2f6feae6443b8f06a8c00f0f7",
-      "status": "rejected"
+      "sha256": "df0b628eaec6cbd60691d7aa4ee78c1b6dfccb4b4560bafab2d31ccfabca0043",
+      "status": "accepted"
+    },
+    "current.json": {
+      "evidence": "Release 0.16.24, 2026-09-06: two complete 36-cell release captures, 100 rounds and 20 warmups, 30-second settle; 34 common cells vs accepted 0.16.19 have worst min +4.3%/+4.4%, both 20% and 30% gates pass. Normal desktop load (prebuild 2.56/1.99/1.72), no simultaneous native build during captures; two new cells reviewed across repeat. Release evidence dev-docs/temp/release-0.16.24/benchmark-pair.json. Older rejected captures and separate early-deletion exception remain unchanged.",
+      "platform": "Darwin/arm64",
+      "sha256": "df0b628eaec6cbd60691d7aa4ee78c1b6dfccb4b4560bafab2d31ccfabca0043",
+      "status": "accepted"
     },
     "current.linux.json": {
       "evidence": "Preserved 36-cell CI secondary reference as of 0.16.23. Released 0.13.2 wheel provenance and cells_added caveats remain intact: 11 cells are provisional scaled estimates, not Linux measurements. The primary same-runner CI comparison remains authoritative for those cells.",
@@ -38,7 +44,7 @@
     }
   },
   "references": {
-    "Darwin/arm64": "0_16_19.json",
+    "Darwin/arm64": "0_16_24.json",
     "Linux/x86_64": "reference_0_16_23.linux.json"
   },
   "schema_version": 1
