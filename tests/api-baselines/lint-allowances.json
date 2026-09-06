@@ -173,7 +173,7 @@
       "classification": "api-shape"
     },
     {
-      "identity": "crates/kglite-py/src/graph/pyapi/session.rs::fn:run_write:fn run_write( &self, py: Python<'_>, query: &str, param_map: HashMap<String, Value>, qopts: QueryOpts, ) -> PyResult<Py<PyAny>>::clippy::result_large_err",
+      "identity": "crates/kglite-py/src/graph/pyapi/session.rs::fn:run_write:fn run_write( &self, py: Python<'_>, query: &str, param_map: HashMap<String, Value>, qopts: QueryOpts, callback_capable: bool, ) -> PyResult<Py<PyAny>>::clippy::result_large_err",
       "classification": "api-shape"
     },
     {
