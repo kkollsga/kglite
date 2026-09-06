@@ -598,6 +598,16 @@ def test_scheduled_stress_is_bounded_and_excludes_large_runner_case() -> None:
     assert "manual/large-runner" in large
 
 
+def test_python_matrix_leaves_external_drivers_to_the_conformance_job() -> None:
+    invocations = [
+        args for args in _pytest_invocations(_ci_job("python-tests")) if _markers(args) == ["bolt and not benchmark"]
+    ]
+    assert len(invocations) == 1, "the Python matrix must retain its Bolt behavior suite"
+    assert "--ignore=tests/test_bolt_driver_conformance.py" in invocations[0], (
+        "external driver downloads must run only in their dedicated, cached conformance job"
+    )
+
+
 def test_bolt_driver_conformance_installs_both_toolchains() -> None:
     """The suites skip when their toolchain is missing, which is right locally
     and useless in CI — a runner without a JDK would report green while never

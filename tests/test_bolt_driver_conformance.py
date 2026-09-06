@@ -1,10 +1,8 @@
 """Official non-Python Bolt driver conformance — JavaScript and Java.
 
-Until now `kglite-bolt-server`'s README could only claim the official *Python*
-driver was regression-tested. Every other driver "may connect", which is a
-promise nobody had checked. These wrappers close that gap for the two that
-matter most: JavaScript, the largest driver audience, and Java, whose only route
-to a kglite graph is this server — there is no in-process JVM binding.
+The official JavaScript and Java drivers exercise the Bolt server through
+their independent protocol implementations. The in-process JVM binding has
+its own ABI and parity tests.
 
 Each suite lives beside this file under `tests/conformance/<lang>/` and is
 written in that language against its own official driver — the point is

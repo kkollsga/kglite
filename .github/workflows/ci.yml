@@ -605,7 +605,9 @@ jobs:
         # `pytest-benchmark` plugin which CI doesn't install (perf
         # baselines are captured locally via
         # `make refresh-release-constants`, not gated in CI).
-        run: pytest tests/ -m "bolt and not benchmark" -v --tb=short
+        # Official JS/Java drivers run once in bolt-driver-conformance,
+        # which owns their toolchains, dependency cache and non-skip gate.
+        run: pytest tests/ -m "bolt and not benchmark" -v --tb=short --ignore=tests/test_bolt_driver_conformance.py
 
       - name: Run binary-size gate
         # Production source structure and complexity run once in the
