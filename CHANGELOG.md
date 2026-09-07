@@ -473,6 +473,23 @@ before upgrading.
   Both documents now show the filterless shape and say to filter on the graph
   instead.
 
+- **`create_index()` and `list_indexes()` now say whether the index they
+  report will actually be read.** `create_index('T', 'name')` answered
+  `created: True`, listed the index as `ONLINE` and had `describe()` name it as
+  the accelerator for that property — while no lookup ever consulted it.
+  `name`, `type`, `node_type` and `label` resolve *structurally*: a node
+  carrying no such stored property answers with its title or its node type, so
+  an index built from stored values alone is a subset of what a `MATCH`
+  compares against, and the matcher refuses to read it (which is why the
+  answers were right, just unaccelerated). The build is kept — the values are
+  real, and a disk graph's persistent bundle does serve them — and the report
+  is now honest: `create_index()` returns `serves_lookups` and `not_serving`
+  (a sentence naming the structural resolution and what to index instead),
+  `list_indexes()` carries `serves_lookups` beside `state`, and `describe()`'s
+  `indexed=` attribute no longer claims a fast path the engine does not take.
+  A `name` that is the type's *declared title field* is an alias, not a
+  structural name, and still serves. `SHOW INDEXES` is unchanged.
+
 ## [0.17.0] - 2026-09-07
 
 ### Fixed

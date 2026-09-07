@@ -496,13 +496,51 @@ impl DirGraph {
     /// an mmap snapshot that declines every lookup once the graph has moved
     /// under it, so naming it as the accelerator for a predicate is a claim the
     /// engine contradicts until the next `reindex()` or `save()`.
+    ///
+    /// The in-memory arm asks [`Self::index_answers_point_lookup`], not
+    /// [`Self::has_index`], for the same reason: a built index on a
+    /// structurally-resolved name (`name`, `type`, `node_type`, `label`) is
+    /// one [`Self::point_lookup_index_key`] refuses to read, so a surface that
+    /// reported it as the accelerator would be naming a structure no query
+    /// consults. It also picks up the case where an id/title *alias* index
+    /// answers a lookup spelled with the canonical name, or the reverse.
     pub fn index_serves_lookups(&self, node_type: &str, property: &str) -> bool {
-        if self.has_index(node_type, property) {
+        if self.index_answers_point_lookup(node_type, property) {
             return true;
         }
         self.graph
             .as_disk()
             .is_some_and(|dg| dg.property_index_is_serving(node_type, property))
+    }
+
+    /// Why a *declared* index on `(node_type, property)` will not answer a
+    /// lookup — the sentence a surface that has just built one owes its
+    /// caller. `None` when it serves, and `None` when none was declared (that
+    /// is `has_any_index`'s question, not this one's).
+    pub fn index_not_serving_reason(&self, node_type: &str, property: &str) -> Option<String> {
+        if self.index_serves_lookups(node_type, property)
+            || !self.has_any_index(node_type, property)
+        {
+            return None;
+        }
+        let resolved = self.resolve_alias(node_type, property);
+        if let Some(fallback) = crate::graph::schema::soft_alias_fallback(resolved) {
+            let source = match fallback {
+                crate::graph::schema::SoftAliasFallback::Title => "title",
+                crate::graph::schema::SoftAliasFallback::TypeString => "node type",
+            };
+            return Some(format!(
+                "'{property}' is resolved structurally on {node_type}: a node carrying no stored \
+                 '{property}' answers with its {source}, which this index was built from stored \
+                 values alone and does not hold. Lookups scan rather than read a subset, so this \
+                 index accelerates nothing. Index the property the values are actually stored \
+                 under, or match on the {source} directly."
+            ));
+        }
+        Some(format!(
+            "the persistent index bundle for {node_type}.{property} has not caught up with \
+             writes made since it was built, so lookups scan until the next reindex() or save()."
+        ))
     }
 
     /// The equality indexes on this graph, built or merely declared.

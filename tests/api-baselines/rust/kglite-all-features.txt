@@ -3384,6 +3384,7 @@ pub fn kglite::api::DirGraph::has_any_index(&self, node_type: &str, property: &s
 pub fn kglite::api::DirGraph::has_composite_index(&self, node_type: &str, properties: &[alloc::string::String]) -> bool
 pub fn kglite::api::DirGraph::has_index(&self, node_type: &str, property: &str) -> bool
 pub fn kglite::api::DirGraph::has_persistent_property_index(&self, node_type: &str, property: &str) -> bool
+pub fn kglite::api::DirGraph::index_not_serving_reason(&self, node_type: &str, property: &str) -> core::option::Option<alloc::string::String>
 pub fn kglite::api::DirGraph::index_serves_lookups(&self, node_type: &str, property: &str) -> bool
 pub fn kglite::api::DirGraph::list_composite_indexes(&self) -> alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<alloc::string::String>)>
 pub fn kglite::api::DirGraph::list_composite_indexes_with_state(&self) -> alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<alloc::string::String>, kglite::api::introspection::IndexState)>

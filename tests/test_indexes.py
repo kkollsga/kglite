@@ -165,3 +165,71 @@ class TestIndexRebuildAfterReload:
         # alias resolution must happen per-column.
         result = reloaded_graph.create_composite_index("Star", ["starId", "sector"])
         assert result["unique_combinations"] == 100
+
+
+class TestStructurallyResolvedIndexHonesty:
+    """`name`, `type`, `node_type` and `label` resolve structurally: a node
+    carrying no such stored property answers with its title or its node type.
+    An index over one of them holds the stored values alone, so the matcher
+    refuses to read it — and every surface that reports the index must say so
+    rather than reporting a working accelerator."""
+
+    @staticmethod
+    def mixed_graph():
+        graph = KnowledgeGraph()
+        graph.cypher("CREATE (:T {id:1, title:'Ann', name:'Nan', city:'Oslo'}),(:T {id:2, title:'Bob', city:'Oslo'})")
+        return graph
+
+    @pytest.mark.parametrize(
+        "property,source",
+        [("name", "title"), ("type", "node type"), ("node_type", "node type"), ("label", "node type")],
+    )
+    def test_create_index_reports_the_index_no_query_reads(self, property, source):
+        graph = self.mixed_graph()
+        info = graph.create_index("T", property)
+        assert info["created"] is True
+        assert info["serves_lookups"] is False
+        assert f"'{property}' is resolved structurally on T" in info["not_serving"]
+        assert source in info["not_serving"]
+
+    def test_an_ordinary_property_index_still_reports_serving(self):
+        graph = self.mixed_graph()
+        info = graph.create_index("T", "city")
+        assert info["serves_lookups"] is True
+        assert info["not_serving"] is None
+
+    def test_list_indexes_carries_the_same_answer_beside_online(self):
+        graph = self.mixed_graph()
+        graph.create_index("T", "name")
+        graph.create_index("T", "city")
+        listed = {row["property"]: row for row in graph.list_indexes()}
+        assert listed["name"]["state"] == "ONLINE" and listed["name"]["serves_lookups"] is False
+        assert listed["city"]["state"] == "ONLINE" and listed["city"]["serves_lookups"] is True
+
+    def test_describe_stops_naming_it_as_the_accelerator(self):
+        graph = self.mixed_graph()
+        graph.create_index("T", "name")
+        graph.create_index("T", "city")
+        described = graph.describe(types=["T"])
+        name_line = next(line for line in described.splitlines() if 'name="name"' in line)
+        city_line = next(line for line in described.splitlines() if 'name="city"' in line)
+        assert "indexed=" not in name_line
+        assert 'indexed="eq"' in city_line
+
+    def test_the_answers_themselves_are_unchanged_by_the_index(self):
+        graph = self.mixed_graph()
+        before = graph.cypher("MATCH (n:T {name:'Bob'}) RETURN n.id AS id").to_list()
+        assert before == [{"id": 2}]  # resolved from the title, never stored
+        graph.create_index("T", "name")
+        assert graph.cypher("MATCH (n:T {name:'Bob'}) RETURN n.id AS id").to_list() == before
+        assert graph.cypher("MATCH (n:T {name:'Nan'}) RETURN n.id AS id").to_list() == [{"id": 1}]
+
+    def test_a_title_field_spelled_name_is_a_declared_alias_and_does_serve(self):
+        # `name` here is the type's title field, so it resolves to `title`, not
+        # structurally — the index holds every node's value and is read.
+        graph = KnowledgeGraph()
+        graph.add_nodes(pd.DataFrame({"pid": [1, 2], "name": ["Ann", "Bob"]}), "P", "pid", "name")
+        info = graph.create_index("P", "name")
+        assert info["serves_lookups"] is True
+        assert info["not_serving"] is None
+        assert graph.cypher("MATCH (n:P {name:'Bob'}) RETURN n.pid AS pid").to_list() == [{"pid": 2}]

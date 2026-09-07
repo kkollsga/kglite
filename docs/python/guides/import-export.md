@@ -526,6 +526,14 @@ Two index types:
 
 Both also accelerate Cypher `WHERE` clauses. Composite indexes support multi-property equality.
 
+`create_index()` reports `serves_lookups` beside `created`, because the two are
+not the same question. An index on `name`, `type`, `node_type` or `label` is
+built but never read: those names resolve *structurally* — a node with no such
+stored property answers with its title or its node type — so the index holds a
+subset of what a `MATCH` compares against, and the matcher scans instead.
+`not_serving` carries the explanation, and `list_indexes()` repeats the answer
+next to each entry's `state`.
+
 ```python
 graph.create_index('Prospect', 'prospect_geoprovince')        # equality index
 graph.create_range_index('Person', 'age')                      # B-Tree range index

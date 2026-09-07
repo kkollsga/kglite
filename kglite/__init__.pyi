@@ -6124,18 +6124,37 @@ class KnowledgeGraph:
         ``created`` is then ``False``. It is ``True`` only when this call made
         a new index.
 
+        ``serves_lookups`` says whether queries will actually read what was
+        built, and ``not_serving`` carries the reason when they will not.
+        ``created=True`` only means an index now exists. The case worth knowing
+        is a **structurally resolved** property name — ``name``, ``type``,
+        ``node_type`` and ``label``, where a node with no such stored property
+        answers with its title or its node type instead. An index over those
+        holds the stored values only, so it is a subset of what a ``MATCH``
+        resolves; on memory and mapped graphs the matcher refuses to read it
+        (and scans, which is correct but unaccelerated). Index the property the
+        values are really stored under, or match on the title / node type.
+
         Args:
             node_type: Node type to index.
             property: Property name to index.
 
         Returns:
             Dict with ``node_type``, ``property``, ``unique_values``,
-            ``persistent``, and ``created`` (``False`` if the index already existed).
+            ``persistent``, ``created`` (``False`` if the index already
+            existed), ``serves_lookups`` (``bool``) and ``not_serving``
+            (``str`` explaining why not, or ``None``).
 
         Raises:
             ValueError: If ``node_type`` exists only as a secondary label —
                 property indexes are keyed by primary type, so such an index
                 would never be consulted. Index the nodes' primary type.
+
+        Example:
+            ```python
+            graph.create_index('Star', 'name')['not_serving']
+            # "'name' is resolved structurally on Star: a node carrying no ..."
+            ```
         """
         ...
 
@@ -6197,11 +6216,18 @@ class KnowledgeGraph:
         """
         ...
 
-    def list_indexes(self) -> list[dict[str, str]]:
+    def list_indexes(self) -> list[dict[str, Any]]:
         """List the in-memory equality indexes.
 
-        Each dict has ``node_type``, ``property`` and ``state``. Range,
-        composite and disk-backed persistent indexes are not included.
+        Each dict has ``node_type``, ``property``, ``state`` and
+        ``serves_lookups``. Range, composite and disk-backed persistent indexes
+        are not included.
+
+        ``serves_lookups`` is ``False`` for an entry queries will not read: a
+        ``DEFERRED`` one, which is not built yet, and one on a structurally
+        resolved name (``name``, ``type``, ``node_type``, ``label``) — see
+        :meth:`create_index` for why. ``state`` answers only whether the index
+        was built.
 
         ``state`` is ``"ONLINE"`` for a built index and ``"DEFERRED"`` for one
         a ``kglite.load(..., defer_index_rebuild=True)`` has declared but not

@@ -21,8 +21,9 @@ impl KnowledgeGraph {
     ///
     /// Returns:
     ///     Dict with ``node_type``, ``property``, ``unique_values`` (count),
-    ///     ``persistent`` (disk-backed), and ``created`` (False if the index
-    ///     already existed).
+    ///     ``persistent`` (disk-backed), ``created`` (False if the index
+    ///     already existed), ``serves_lookups`` (whether queries will read it)
+    ///     and ``not_serving`` (why not, or None).
     ///
     /// Example:
     ///     ```python
@@ -64,12 +65,23 @@ impl KnowledgeGraph {
                 ))
             })?;
 
+        // `created` alone reported success for an index no query would ever
+        // read — an index on a structurally-resolved name (`name`, `type`,
+        // `node_type`, `label`) is built from stored values while `MATCH`
+        // resolves the name per node, so the matcher refuses to read it. The
+        // build is kept (its values are real, and a disk graph does serve
+        // them), and the caller is told what it got.
+        let serves = graph.index_serves_lookups(node_type, property);
+        let reason = graph.index_not_serving_reason(node_type, property);
+
         let result_dict = PyDict::new(py);
         result_dict.set_item("node_type", node_type)?;
         result_dict.set_item("property", property)?;
         result_dict.set_item("unique_values", unique_values)?;
         result_dict.set_item("persistent", persistent_disk)?;
         result_dict.set_item("created", !already_existed)?;
+        result_dict.set_item("serves_lookups", serves)?;
+        result_dict.set_item("not_serving", reason)?;
         self.commit_wal()?;
 
         Ok(result_dict.into())
@@ -202,7 +214,8 @@ impl KnowledgeGraph {
     /// range indexes and composite indexes are not included.
     ///
     /// Returns:
-    ///     List of dictionaries with 'node_type', 'property' and 'state' keys
+    ///     List of dictionaries with 'node_type', 'property', 'state' and
+    ///     'serves_lookups' keys
     ///
     /// Example:
     ///     ```python
@@ -220,9 +233,16 @@ impl KnowledgeGraph {
         let result_list = pyo3::types::PyList::empty(py);
         for (node_type, property, state) in indexes {
             let idx_dict = PyDict::new(py);
+            // `state` is Neo4j's word for "was it built" — `ONLINE` for every
+            // index this listing can see. Whether a query then *reads* it is a
+            // separate question, and one an index on a structurally-resolved
+            // name answers no to; a deferred one answers no because it has not
+            // been built yet.
+            let serves = self.inner.index_serves_lookups(&node_type, &property);
             idx_dict.set_item("node_type", node_type)?;
             idx_dict.set_item("property", property)?;
             idx_dict.set_item("state", state.as_str())?;
+            idx_dict.set_item("serves_lookups", serves)?;
             result_list.append(idx_dict)?;
         }
 
