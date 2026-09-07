@@ -4885,7 +4885,9 @@ class KnowledgeGraph:
 
         Preserves exact integer cells before restoring the column order and dtypes recorded by
         :meth:`set_table_property` (columns that held nulls come back as
-        pandas nullable dtypes, e.g. ``Int64``). A node without the property
+        pandas nullable dtypes, e.g. ``Int64``). Timezone-aware columns are
+        stored as UTC instants and come back at the recorded zone carrying
+        that instant. A node without the property
         yields an empty frame with the registered columns. Unsupported recorded
         dtypes retain a safe inferred representation.
 

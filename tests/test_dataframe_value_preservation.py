@@ -95,3 +95,31 @@ def test_table_setter_keeps_zero_column_refusal():
     with pytest.raises(ValueError, match="DataFrame has no columns"):
         graph.set_table_property("N", 1, "items", pd.DataFrame(index=range(2)))
     assert graph.cypher("MATCH (n:N) RETURN n.items AS items").column("items") == [None]
+
+
+def test_table_frame_restores_timezone_aware_instants(tmp_path):
+    graph = kglite.KnowledgeGraph()
+    graph.cypher("CREATE (:N{id:1})")
+    oslo = pd.Series(
+        [pd.Timestamp("2024-01-02 03:04:05.123456", tz="Europe/Oslo"), None],
+        dtype="datetime64[us, Europe/Oslo]",
+    )
+    utc = pd.Series(
+        [pd.Timestamp("2024-01-02 02:04:05.123456", tz="UTC"), None],
+        dtype="datetime64[us, UTC]",
+    )
+    naive = pd.Series([dt.datetime(2024, 1, 2, 3, 4, 5, 123456), None], dtype="datetime64[us]")
+    graph.set_table_property("N", 1, "items", pd.DataFrame({"oslo": oslo, "utc": utc, "naive": naive}))
+    path = tmp_path / "table.kgl"
+    graph.save(str(path))
+    for owner in [graph, kglite.load(str(path))]:
+        actual = owner.get_table_property("N", 1, "items")
+        assert str(actual.oslo.dtype) == "datetime64[us, Europe/Oslo]"
+        assert actual.oslo.dt.tz_convert("UTC").iloc[0] == oslo.dt.tz_convert("UTC").iloc[0]
+        assert pd.isna(actual.oslo.iloc[1])
+        assert str(actual.utc.dtype) == "datetime64[us, UTC]"
+        assert actual.utc.iloc[0] == utc.iloc[0]
+        assert pd.isna(actual.utc.iloc[1])
+        assert str(actual.naive.dtype) == "datetime64[us]"
+        assert actual.naive.iloc[0] == naive.iloc[0]
+        assert pd.isna(actual.naive.iloc[1])

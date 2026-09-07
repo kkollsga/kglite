@@ -9,6 +9,13 @@ before upgrading.
 
 ## [Unreleased]
 
+### Fixed
+
+- `get_table_property` now returns timezone-aware columns at the stored
+  instant. Restoring a recorded aware dtype read the stored UTC time as a
+  zone-local wall clock, shifting every cell in a non-UTC column by the zone
+  offset.
+
 ## [0.17.0] - 2026-09-07
 
 ### Fixed

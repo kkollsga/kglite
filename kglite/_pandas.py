@@ -28,17 +28,37 @@ def dataframe(data, columns=None, dtypes=None, native_dtypes=None):
             prepared[name] = values
             continue
         try:
-            prepared[name] = pd.array(values, dtype=target) if target == "Int64" else pd.Series(values, dtype=target)
+            prepared[name] = _column(pd, values, target)
         except (TypeError, ValueError):
             if target == inferred:
                 raise
-            prepared[name] = (
-                values
-                if inferred is None
-                else (pd.array(values, dtype=inferred) if inferred == "Int64" else pd.Series(values, dtype=inferred))
-            )
+            prepared[name] = values if inferred is None else _column(pd, values, inferred)
     # Ordered/duplicate labels retain the existing constructor's semantics.
     return pd.DataFrame(prepared, columns=columns)
+
+
+def _column(pd, values, dtype):
+    """Build one column at the recorded dtype."""
+    if dtype == "Int64":
+        return pd.array(values, dtype=dtype)
+    aware = _aware_datetime_dtype(pd, dtype)
+    if aware is None:
+        return pd.Series(values, dtype=dtype)
+    # Aware cells are stored as UTC-naive instants, so constructing straight at
+    # the aware dtype would read the UTC wall clock as zone-local time and shift
+    # every value by the zone offset.
+    naive = pd.Series(values, dtype=f"datetime64[{aware.unit}]")
+    return naive.dt.tz_localize("UTC").dt.tz_convert(aware.tz)
+
+
+def _aware_datetime_dtype(pd, dtype):
+    """Return a tz-aware target as a dtype object; every other target is None."""
+    if isinstance(dtype, str):
+        if not dtype.startswith("datetime64[") or "," not in dtype:
+            return None
+        # An unusable zone raises here and reaches the caller's dtype fallback.
+        dtype = pd.api.types.pandas_dtype(dtype)
+    return dtype if isinstance(dtype, pd.DatetimeTZDtype) else None
 
 
 def _integer_dtype(values):
