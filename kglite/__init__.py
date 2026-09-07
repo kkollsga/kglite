@@ -1,5 +1,8 @@
 """KGLite - A high-performance graph database library with Python bindings written in Rust."""
 
+from typing import Protocol as _Protocol
+from typing import runtime_checkable as _runtime_checkable
+
 from .blueprint import (  # noqa: E402  (must override star-import from .kglite)
     from_blueprint,
     from_records,
@@ -49,6 +52,28 @@ from .kglite import (  # explicit re-exports — names listed in __all__ below
     trim_memory,
 )
 from .retry import retry_on_conflict
+
+
+@_runtime_checkable
+class EmbeddingModel(_Protocol):
+    """Structural type for embedding models passed to ``embed_texts`` /
+    ``search_text``.
+
+    Runtime-checkable, so ``isinstance(my_embedder, EmbeddingModel)`` answers
+    whether an object satisfies the duck type the embedding calls expect. The
+    full contract — which members are required, which are optional, and what
+    ``model_id`` provenance buys — is in ``kglite/__init__.pyi``, which the
+    published API docs are generated from.
+    """
+
+    @property
+    def dimension(self) -> int: ...
+
+    def embed(self, texts: "list[str]") -> "list[list[float]]": ...
+
+    def load(self) -> None: ...
+
+    def unload(self) -> None: ...
 
 
 class Agg:
@@ -638,6 +663,7 @@ __all__ = [
     "from_networkx",
     "Agg",
     "Spatial",
+    "EmbeddingModel",
     # Typed exception classes. See docs/python/error-handling.md for the
     # hierarchy.
     "KgError",

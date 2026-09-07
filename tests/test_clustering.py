@@ -374,7 +374,8 @@ class TestDescribeCypherTiers:
     def test_tier2_has_hint_for_tier3(self):
         g = KnowledgeGraph()
         desc = g.describe(cypher=True)
-        assert "graph_overview(cypher=[" in desc
+        assert "describe(cypher=[" in desc
+        assert "graph_overview(" not in desc
 
     # -- Tier 3: topic detail (cypher=list) --
 
@@ -500,7 +501,7 @@ class TestDescribeCypherTiers:
         g.cypher("CREATE (:B {name: 'b'})")
         g.cypher("MATCH (a:A), (b:B) CREATE (a)-[:KNOWS]->(b)")
         desc = g.describe()
-        assert "connections hint" in desc or "graph_overview(connections=" in desc
+        assert "connections hint" in desc or "describe(connections=" in desc
 
     def test_overview_connection_map_has_counts(self):
         """Overview connection map should include count attribute."""

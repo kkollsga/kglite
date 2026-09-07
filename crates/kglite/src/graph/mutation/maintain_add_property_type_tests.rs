@@ -7,8 +7,8 @@
 //! its first value made it state the opposite for every heterogeneous batch.
 
 use super::*;
-use crate::graph::introspection::describe::compute_description;
-use crate::graph::introspection::{ConnectionDetail, CypherDetail, FluentDetail};
+use crate::graph::introspection::describe::{compute_description, DescribeRequest};
+use crate::graph::introspection::DescribeSurface;
 use crate::graph::languages::cypher::parser::parse_cypher;
 use crate::graph::languages::cypher::planner::schema_check::collect_query_warnings;
 
@@ -240,17 +240,8 @@ fn describe_renders_a_mixed_property() {
         .collect();
     update_node_properties(&mut graph, &batch, "score").expect("update");
 
-    let xml = compute_description(
-        &graph,
-        None,
-        &ConnectionDetail::Off,
-        &CypherDetail::Off,
-        &FluentDetail::Off,
-        None,
-        None,
-        None,
-    )
-    .expect("describe");
+    let xml = compute_description(&graph, &DescribeRequest::new(DescribeSurface::Python))
+        .expect("describe");
     assert!(xml.contains("score"), "the property is missing: {xml}");
     assert!(xml.contains("mixed"), "the recorded type is missing: {xml}");
 }

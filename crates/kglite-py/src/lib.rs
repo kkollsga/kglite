@@ -67,7 +67,9 @@ pub mod api {
     pub use kglite_core::api::introspection::compute_description;
     pub use kglite_core::api::introspection::compute_schema;
     pub use kglite_core::api::introspection::SchemaOverview;
-    pub use kglite_core::api::introspection::{ConnectionDetail, CypherDetail, FluentDetail};
+    pub use kglite_core::api::introspection::{
+        ConnectionDetail, CypherDetail, DescribeRequest, DescribeSurface, FluentDetail,
+    };
     pub use kglite_core::api::io::{load_file, save_graph};
     pub use kglite_core::api::DirGraph;
     pub use kglite_core::api::{explore_markdown, ExploreOptions};

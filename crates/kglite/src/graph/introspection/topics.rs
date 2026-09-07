@@ -3,6 +3,8 @@
 //! API subsystem. Rendered by describe() when the user asks for a
 //! specific topic.
 
+use super::DescribeSurface;
+
 // ── Cypher tier 3: topic detail functions ──────────────────────────────────
 
 const CYPHER_TOPIC_LIST: &str = "MATCH, WHERE, RETURN, WITH, HAVING, ORDER BY, UNWIND, UNION, \
@@ -14,9 +16,13 @@ const CYPHER_TOPIC_LIST: &str = "MATCH, WHERE, RETURN, WITH, HAVING, ORDER BY, U
     type_domain_violation, type_range_violation, parallel_edges, ontology";
 
 /// Tier 3: detailed Cypher docs for specific topics with params and examples.
-pub(super) fn write_cypher_topics(xml: &mut String, topics: &[String]) -> Result<(), String> {
+pub(super) fn write_cypher_topics(
+    xml: &mut String,
+    topics: &[String],
+    surface: DescribeSurface,
+) -> Result<(), String> {
     if topics.is_empty() {
-        write_cypher_overview(xml);
+        write_cypher_overview(xml, surface);
         return Ok(());
     }
 
@@ -769,7 +775,7 @@ const FLUENT_TOPIC_LIST: &str = "select, where, traverse, compare, spatial, temp
     loading, export, indexes, set_ops, subgraph, schema, transactions";
 
 /// Tier 2: compact fluent API reference grouped by functional area.
-pub(super) fn write_fluent_overview(xml: &mut String) {
+pub(super) fn write_fluent_overview(xml: &mut String, surface: DescribeSurface) {
     xml.push_str("<fluent_api>\n");
     xml.push_str("  <note>Selection model: most methods return a new KnowledgeGraph with updated selection. Data is materialised only on retrieval (collect, to_df, etc.).</note>\n");
 
@@ -903,14 +909,24 @@ pub(super) fn write_fluent_overview(xml: &mut String) {
     xml.push_str("    <method sig=\"begin_read()\">Read-only transaction, O(1) cost (context manager).</method>\n");
     xml.push_str("  </group>\n");
 
-    xml.push_str("  <hint>Use graph_overview(fluent=['traverse','where','spatial',...]) for detailed docs with examples.</hint>\n");
+    xml.push_str(&format!(
+        "  <hint>Use {} for detailed docs with examples.</hint>\n",
+        surface.call(
+            "fluent=['traverse','where','spatial',...]",
+            "--fluent-topics traverse,where,spatial"
+        )
+    ));
     xml.push_str("</fluent_api>\n");
 }
 
 /// Tier 3: detailed fluent API docs for specific topics with params and examples.
-pub(super) fn write_fluent_topics(xml: &mut String, topics: &[String]) -> Result<(), String> {
+pub(super) fn write_fluent_topics(
+    xml: &mut String,
+    topics: &[String],
+    surface: DescribeSurface,
+) -> Result<(), String> {
     if topics.is_empty() {
-        write_fluent_overview(xml);
+        write_fluent_overview(xml, surface);
         return Ok(());
     }
 
@@ -1360,7 +1376,7 @@ pub(super) fn write_fluent_topic_transactions(xml: &mut String) {
 
 /// Tier 2: compact Cypher reference — all clauses, operators, functions, procedures.
 /// No examples. Ends with hint to use tier 3.
-pub(super) fn write_cypher_overview(xml: &mut String) {
+pub(super) fn write_cypher_overview(xml: &mut String, surface: DescribeSurface) {
     xml.push_str("<cypher>\n");
 
     xml.push_str("  <clauses>\n");
@@ -1443,7 +1459,13 @@ pub(super) fn write_cypher_overview(xml: &mut String) {
     xml.push_str("    <item feature=\"Primary-type mutation\" note=\"Each node has an immutable primary type plus optional secondary labels via SET n:Label / CREATE (n:A:B) / g.add_label(...). MATCH (n:A:B) AND-intersects. SET n.type writes a property; recreate or migrate the node to change its primary type.\"/>\n");
     xml.push_str("    <item feature=\"Variable-length weighted paths\" note=\"Unweighted variable-length paths (*1..3) are supported\"/>\n");
     xml.push_str("  </limitations>\n");
-    xml.push_str("  <hint>Use graph_overview(cypher=['MATCH','cluster','spatial',...]) for detailed docs with examples.</hint>\n");
+    xml.push_str(&format!(
+        "  <hint>Use {} for detailed docs with examples.</hint>\n",
+        surface.call(
+            "cypher=['MATCH','cluster','spatial',...]",
+            "--cypher-topics MATCH,cluster,spatial"
+        )
+    ));
     xml.push_str("</cypher>\n");
 }
 

@@ -11,6 +11,28 @@ before upgrading.
 
 ### Fixed
 
+- `describe()` no longer tells a Python caller to call `graph_overview(...)`.
+  Every "call this for more" hint in the rendered document was written for the
+  MCP tool, so `KnowledgeGraph.describe()` pointed at a method the class does
+  not have and `kglite describe` pointed at a tool the CLI does not ship. The
+  asking surface is now part of the request, and each reader is told its own
+  spelling — `describe(types=['T'])`, `kglite describe GRAPH --types T`,
+  `graph_overview(types=['T'])`. **API:** `kglite::api::compute_description`
+  takes a `DescribeRequest` (built from `DescribeRequest::new(surface)`)
+  instead of eight positional arguments; the MCP output is unchanged.
+
+- `from kglite import EmbeddingModel` works. The stub declared it as a
+  `@runtime_checkable` Protocol — the type a caller writes to annotate their
+  own embedder — and the package never defined it, so the documented import
+  raised `AttributeError`. It is now a real export, and
+  `isinstance(embedder, EmbeddingModel)` answers.
+
+- `graph.sample(node_type='Person')` works. The runtime parameter was named
+  `node_type_or_n` while the stub, the reference docs and the method's own Args
+  block all said `node_type`, so the only documented keyword call was a
+  `TypeError`. The positional forms (`sample('Person', 10)`, `sample(3)`,
+  `sample()`) are unchanged.
+
 - `keys()` now accepts a map, not only a node or a relationship.
   `keys({a: 1, b: 2})`, `keys($m)` and — the case where both halves are ours —
   `keys(properties(n))` all returned a silent `null` — openCypher defines the
@@ -188,6 +210,15 @@ before upgrading.
   rounded bound the recipe author did not write.
 
 ### Changed
+
+- Two stub corrections where the *documentation* was the wrong half.
+  `embeddings()` now declares its first parameter as
+  `node_type_or_text_column` in both overloads — it is the only keyword the
+  runtime accepts, and `node_type=` would lie about the one-argument form
+  `embeddings('summary')`. `ResultView.__str__` promised a "vertical card
+  format"; it returns the same bordered table as `repr()`, and materialises
+  every row to build it, which the docstring and the class's
+  materialisation list now say.
 
 - **`add_nodes` now refuses to re-declare the identity of a node type that
   already has nodes.** A call naming a `unique_id_field` (or

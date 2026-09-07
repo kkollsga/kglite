@@ -464,15 +464,17 @@ pub mod api {
         pub use crate::graph::introspection::connectivity::DerivedEdgeStats;
         /// Debug-string helpers (schema / selection dumps) for diagnostics.
         pub use crate::graph::introspection::debugging;
-        pub use crate::graph::introspection::describe::{compute_description, mcp_quickstart};
+        pub use crate::graph::introspection::describe::{
+            compute_description, mcp_quickstart, DescribeRequest,
+        };
         pub use crate::graph::introspection::schema_overview::{
             compute_connection_type_stats, compute_neighbors_schema, compute_property_stats,
             compute_schema,
         };
         pub use crate::graph::introspection::{
             compute_type_connectivity, derive_edge_counts_from_triples, schema_overview_to_json,
-            ConnectionDetail, ConnectionTypeStats, CypherDetail, FluentDetail, SchemaOverview,
-            EXACT_PROPERTY_STATS_MAX_NODES,
+            ConnectionDetail, ConnectionTypeStats, CypherDetail, DescribeSurface, FluentDetail,
+            SchemaOverview, EXACT_PROPERTY_STATS_MAX_NODES,
         };
         /// Core-type-count tier classification — the four ranges `describe()`
         /// adapts its output by (supporting types, those with a parent, are not

@@ -31,17 +31,7 @@ mod declared_type_annotation_tests {
     }
 
     fn describe(graph: &DirGraph) -> String {
-        compute_description(
-            graph,
-            None,
-            &ConnectionDetail::Off,
-            &CypherDetail::Off,
-            &FluentDetail::Off,
-            None,
-            None,
-            None,
-        )
-        .unwrap()
+        compute_description(graph, &DescribeRequest::new(DescribeSurface::Python)).unwrap()
     }
 
     /// An agent planning a write needs to know the value will be rejected
@@ -85,13 +75,10 @@ mod declared_type_annotation_tests {
         let with_connections = |graph: &DirGraph| {
             compute_description(
                 graph,
-                None,
-                &ConnectionDetail::Topics(vec!["KNOWS".to_string()]),
-                &CypherDetail::Off,
-                &FluentDetail::Off,
-                None,
-                None,
-                None,
+                &DescribeRequest {
+                    connections: &ConnectionDetail::Topics(vec!["KNOWS".to_string()]),
+                    ..DescribeRequest::new(DescribeSurface::Python)
+                },
             )
             .unwrap()
         };
@@ -189,8 +176,13 @@ mod focused_detail_error_tests {
     #[test]
     fn a_near_miss_type_name_is_suggested() {
         let graph = vessel_graph();
-        let error = build_focused_detail(&graph, &["vessel".to_string()], None)
-            .expect_err("unknown type must error");
+        let error = build_focused_detail(
+            &graph,
+            &["vessel".to_string()],
+            None,
+            DescribeSurface::Python,
+        )
+        .expect_err("unknown type must error");
         assert!(error.contains("Did you mean 'Vessel'?"), "{error}");
         assert!(error.contains("Available: Vessel"), "{error}");
     }
@@ -200,8 +192,13 @@ mod focused_detail_error_tests {
     #[test]
     fn a_far_type_name_gets_no_invented_suggestion() {
         let graph = vessel_graph();
-        let error = build_focused_detail(&graph, &["Xyzzy".to_string()], None)
-            .expect_err("unknown type must error");
+        let error = build_focused_detail(
+            &graph,
+            &["Xyzzy".to_string()],
+            None,
+            DescribeSurface::Python,
+        )
+        .expect_err("unknown type must error");
         assert!(!error.contains("Did you mean"), "{error}");
     }
 }
@@ -249,17 +246,7 @@ mod index_annotation_tests {
     }
 
     fn describe(graph: &DirGraph) -> String {
-        compute_description(
-            graph,
-            None,
-            &ConnectionDetail::Off,
-            &CypherDetail::Off,
-            &FluentDetail::Off,
-            None,
-            None,
-            None,
-        )
-        .unwrap()
+        compute_description(graph, &DescribeRequest::new(DescribeSurface::Python)).unwrap()
     }
 
     fn attr_of(described: &str, property: &str) -> String {
@@ -426,5 +413,126 @@ mod disk_connection_sampling_tests {
             "both Doc→Doc edges must be counted, got {:?}",
             acc.pair_counts
         );
+    }
+}
+
+/// Every hint `describe()` emits names a callable the *reader* can actually
+/// invoke.
+///
+/// The whole document was written for the MCP tool: a Python caller was told
+/// to call `graph_overview(...)`, which is not a method on `KnowledgeGraph`,
+/// and a CLI user was told the same. The surface is threaded through
+/// [`DescribeRequest`] so each reader is told its own spelling — and the
+/// negative half is the regression net: nothing may leak another surface's
+/// name.
+#[cfg(test)]
+mod surface_hint_tests {
+    use super::*;
+    use crate::datatypes::values::Value;
+    use crate::graph::schema::NodeData;
+    use crate::graph::storage::GraphWrite;
+    use std::collections::HashMap;
+
+    fn two_type_graph() -> DirGraph {
+        let mut graph = DirGraph::new();
+        for (ty, id) in [("Person", 1u32), ("Paper", 2)] {
+            let node = NodeData::new(
+                Value::UniqueId(id),
+                Value::String(format!("n{id}")),
+                ty.to_string(),
+                HashMap::from([("note".to_string(), Value::Int64(1))]),
+                &mut graph.interner,
+            );
+            let idx = graph.graph.add_node(node);
+            graph
+                .type_indices
+                .entry_or_default(ty.to_string())
+                .push(idx);
+        }
+        graph
+    }
+
+    /// Renders on every axis that carries hints, so a hint added to one
+    /// builder cannot escape the assertion by living in a track this test
+    /// does not ask for.
+    fn all_tracks(graph: &DirGraph, surface: DescribeSurface) -> String {
+        let mut out = String::new();
+        let requests = [
+            DescribeRequest {
+                ..DescribeRequest::new(surface)
+            },
+            DescribeRequest {
+                connections: &ConnectionDetail::Overview,
+                ..DescribeRequest::new(surface)
+            },
+            DescribeRequest {
+                type_search: Some("n"),
+                ..DescribeRequest::new(surface)
+            },
+            DescribeRequest {
+                cypher: &CypherDetail::Overview,
+                ..DescribeRequest::new(surface)
+            },
+            DescribeRequest {
+                fluent: &FluentDetail::Overview,
+                ..DescribeRequest::new(surface)
+            },
+        ];
+        for request in requests {
+            out.push_str(&compute_description(graph, &request).unwrap());
+        }
+        out
+    }
+
+    #[test]
+    fn each_surface_is_told_its_own_overview_call() {
+        let graph = two_type_graph();
+
+        let python = all_tracks(&graph, DescribeSurface::Python);
+        assert!(python.contains("describe(types="), "got: {python}");
+        assert!(
+            !python.contains("graph_overview("),
+            "the Python surface must not name the MCP tool: {python}"
+        );
+        assert!(
+            !python.contains("kglite describe"),
+            "the Python surface must not name the CLI: {python}"
+        );
+
+        let mcp = all_tracks(&graph, DescribeSurface::Mcp);
+        assert!(mcp.contains("graph_overview(types="), "got: {mcp}");
+        assert!(
+            !mcp.contains("kglite describe"),
+            "the MCP surface must not name the CLI: {mcp}"
+        );
+
+        let cli = all_tracks(&graph, DescribeSurface::Cli);
+        assert!(cli.contains("kglite describe GRAPH --types"), "got: {cli}");
+        assert!(
+            !cli.contains("graph_overview("),
+            "the CLI must not name the MCP tool: {cli}"
+        );
+    }
+
+    /// A hint is XML attribute content, so a surface spelling must not carry
+    /// a character that would break the document an agent parses.
+    #[test]
+    fn no_surface_spelling_breaks_the_xml() {
+        let graph = two_type_graph();
+        for surface in [
+            DescribeSurface::Python,
+            DescribeSurface::Cli,
+            DescribeSurface::Mcp,
+        ] {
+            let rendered = all_tracks(&graph, surface);
+            for line in rendered.lines().filter(|l| l.contains("hint=\"")) {
+                let hint = line.split("hint=\"").nth(1).unwrap();
+                let hint = hint.split('"').next().unwrap();
+                assert!(
+                    !hint.contains('<') && !hint.contains('>'),
+                    "hint attribute carries raw angle brackets: {line}"
+                );
+            }
+        }
     }
 }

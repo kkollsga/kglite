@@ -28,8 +28,8 @@ use super::topics::{
     write_cypher_overview, write_cypher_topics, write_fluent_overview, write_fluent_topics,
 };
 use super::{
-    graph_scale, ConnectionDetail, ConnectionTypeStats, CypherDetail, FluentDetail, GraphScale,
-    NeighborsSchema, PropertyStatInfo,
+    graph_scale, ConnectionDetail, ConnectionTypeStats, CypherDetail, DescribeSurface,
+    FluentDetail, GraphScale, NeighborsSchema, PropertyStatInfo,
 };
 
 // ── Describe: shared XML writers ────────────────────────────────────────────
@@ -262,7 +262,12 @@ fn connection_props_attr(graph: &DirGraph, ct: &ConnectionTypeStats) -> String {
 
 /// When `parent_types` is non-empty, filter out connections where ALL source types
 /// are supporting children of the target type (the implicit OF_* pattern).
-fn write_connection_map(xml: &mut String, graph: &DirGraph, conn_stats: &[ConnectionTypeStats]) {
+fn write_connection_map(
+    xml: &mut String,
+    graph: &DirGraph,
+    conn_stats: &[ConnectionTypeStats],
+    surface: DescribeSurface,
+) {
     let has_tiers = !graph.parent_types.is_empty();
 
     let filtered: Vec<&ConnectionTypeStats> = conn_stats
@@ -369,8 +374,9 @@ fn write_connection_map(xml: &mut String, graph: &DirGraph, conn_stats: &[Connec
         }
         if hidden > 0 {
             xml.push_str(&format!(
-                "    <more count=\"{}\" hint=\"graph_overview(connections=True) for every connection type\"/>\n",
-                hidden
+                "    <more count=\"{}\" hint=\"{} for every connection type\"/>\n",
+                hidden,
+                surface.call("connections=True", "--connections")
             ));
         }
         xml.push_str("  </connections>\n");
@@ -550,7 +556,7 @@ fn accumulate_connection_topic(
 
 /// Connections overview: every connection type with count, endpoints, property
 /// names — truncated to the 50 largest once the graph carries over 500 of them.
-fn write_connections_overview(xml: &mut String, graph: &DirGraph) {
+fn write_connections_overview(xml: &mut String, graph: &DirGraph, surface: DescribeSurface) {
     let mut conn_stats = compute_connection_type_stats(graph);
     if conn_stats.is_empty() {
         xml.push_str("<connections/>\n");
@@ -608,8 +614,9 @@ fn write_connections_overview(xml: &mut String, graph: &DirGraph) {
     }
     if capped {
         xml.push_str(&format!(
-            "  <more count=\"{}\" hint=\"graph_overview(connections=['TYPE']) for specific connection details\"/>\n",
-            total_conn - 50
+            "  <more count=\"{}\" hint=\"{} for specific connection details\"/>\n",
+            total_conn - 50,
+            surface.call("connections=['TYPE']", "--connection-types TYPE")
         ));
     }
     xml.push_str("</connections>\n");
@@ -795,7 +802,7 @@ const INDEXING_HINT: &str = "    <indexing hint=\"Properties annotated indexed='
 /// carries that feature — `hybrid` only when it carries *both* retrieval
 /// lanes, since fusing one lane is just that lane. The language-surface
 /// sections are unconditional.
-fn write_extensions(xml: &mut String, graph: &DirGraph) {
+fn write_extensions(xml: &mut String, graph: &DirGraph, surface: DescribeSurface) {
     let has_timeseries = !graph.timeseries_configs.is_empty();
     let has_spatial = !graph.spatial_configs.is_empty()
         || graph
@@ -825,10 +832,22 @@ fn write_extensions(xml: &mut String, graph: &DirGraph) {
     }
     xml.push_str("    <algorithms hint=\"CALL proc() YIELD node, col — score (pagerank/betweenness/degree/closeness), community (louvain/leiden/label_propagation), component (connected_components), coreness (k_core), coefficient (clustering_coefficient), cluster (cluster), dependency_count (ready_set — nodes whose outgoing-E dependencies all satisfy a `done` predicate). Algorithms take optional {node_type, relationship} scoping.\"/>\n");
     xml.push_str("    <rules hint=\"CALL proc(...) YIELD ... — structural validators. Unary: orphan_node, self_loop, missing_required_edge, missing_inbound_edge, duplicate_title, duplicate_id, null_property. Pair: cycle_2step, inverse_violation, parallel_edges. Schema: type_domain_violation, type_range_violation, edge_property_violation (ontology property checks). Cardinality: cardinality_violation. Triple: transitivity_violation. Projection: outline({root, root_type?, edge}) YIELD node, depth, parent_id, node_type, node_id_type, parent_type, parent_id_type, node_token, parent_token (BFS tree; tokens are result-local identity keys; render via kglite.outline). Compose with WHERE/RETURN/aggregation as normal Cypher rows.\"/>\n");
-    xml.push_str("    <cypher hint=\"Standard openCypher is supported — MATCH/OPTIONAL MATCH/WHERE/WITH/UNWIND/RETURN, ORDER BY/SKIP/LIMIT, DISTINCT, variable-length paths, and the usual aggregates (count/sum/avg/min/max/collect) all work; write ordinary Cypher, not a dialect. The items listed here are KGLite EXTENSIONS on top of it: ||, =~, coalesce(), CALL kglite.cluster/kglite.pagerank/kglite.louvain/..., distance(), contains(). graph_overview(cypher=True) for reference, graph_overview(cypher=['topic']) for detailed docs.\"/>\n");
-    xml.push_str("    <fluent_api hint=\"Method-chaining API: select/where/traverse/collect. graph_overview(fluent=True) for reference, graph_overview(fluent=['topic']) for detailed docs.\"/>\n");
+    xml.push_str(&format!(
+        "    <cypher hint=\"Standard openCypher is supported — MATCH/OPTIONAL MATCH/WHERE/WITH/UNWIND/RETURN, ORDER BY/SKIP/LIMIT, DISTINCT, variable-length paths, and the usual aggregates (count/sum/avg/min/max/collect) all work; write ordinary Cypher, not a dialect. The items listed here are KGLite EXTENSIONS on top of it: ||, =~, coalesce(), CALL kglite.cluster/kglite.pagerank/kglite.louvain/..., distance(), contains(). {} for reference, {} for detailed docs.\"/>\n",
+        surface.call("cypher=True", "--cypher"),
+        surface.call("cypher=['topic']", "--cypher-topics topic"),
+    ));
+    xml.push_str(&format!(
+        "    <fluent_api hint=\"Method-chaining API: select/where/traverse/collect. {} for reference, {} for detailed docs.\"/>\n",
+        surface.call("fluent=True", "--fluent"),
+        surface.call("fluent=['topic']", "--fluent-topics topic"),
+    ));
     if graph.graph.edge_count() > 0 {
-        xml.push_str("    <connections hint=\"graph_overview(connections=True) for all connection types, graph_overview(connections=['TYPE']) for deep-dive with properties and samples.\"/>\n");
+        xml.push_str(&format!(
+            "    <connections hint=\"{} for all connection types, {} for deep-dive with properties and samples.\"/>\n",
+            surface.call("connections=True", "--connections"),
+            surface.call("connections=['TYPE']", "--connection-types TYPE"),
+        ));
     }
     xml.push_str("    <temporal hint=\"valid_at(entity, date, 'from', 'to'), valid_during(entity, start, end, 'from', 'to') — temporal filtering on nodes/edges. NULL = open-ended.\"/>\n");
     xml.push_str("    <bug_report hint=\"bug_report(query, result, expected, description) — file a Cypher bug report to reported_bugs.md.\"/>\n");
@@ -1463,18 +1482,22 @@ fn write_type_detail(
 
 /// Build inventory for Medium-tier graphs (16-200 types): size bands with
 /// complexity markers and capability flags.
-fn build_inventory(graph: &DirGraph) -> String {
-    build_inventory_capped(graph, None)
+fn build_inventory(graph: &DirGraph, surface: DescribeSurface) -> String {
+    build_inventory_capped(graph, None, surface)
 }
 
 /// Build inventory for Large-tier graphs (201-5000 types): show top-N types, summarize rest.
-fn build_large_inventory(graph: &DirGraph) -> String {
-    build_inventory_capped(graph, Some(50))
+fn build_large_inventory(graph: &DirGraph, surface: DescribeSurface) -> String {
+    build_inventory_capped(graph, Some(50), surface)
 }
 
 /// When `max_types` is None, all types are listed (Medium tier).
 /// When Some(n), only top-n types by count are listed (Large tier).
-fn build_inventory_capped(graph: &DirGraph, max_types: Option<usize>) -> String {
+fn build_inventory_capped(
+    graph: &DirGraph,
+    max_types: Option<usize>,
+    surface: DescribeSurface,
+) -> String {
     let mut caps = compute_type_capabilities(graph);
     bubble_capabilities(&mut caps, &graph.parent_types);
     let child_counts = children_counts(&graph.parent_types);
@@ -1561,20 +1584,23 @@ fn build_inventory_capped(graph: &DirGraph, max_types: Option<usize>) -> String 
     xml.push_str(&type_strs.join(", "));
     if hidden > 0 {
         xml.push_str(&format!(
-            "\n    <more count=\"{}\" hint=\"graph_overview(type_search='pattern') to find more\"/>",
-            hidden
+            "\n    <more count=\"{}\" hint=\"{} to find more\"/>",
+            hidden,
+            surface.call("type_search='pattern'", "--type-search pattern")
         ));
     }
     xml.push_str("\n  </types>\n");
 
     let conn_stats = compute_connection_type_stats(graph);
-    write_connection_map(&mut xml, graph, &conn_stats);
-    write_extensions(&mut xml, graph);
+    write_connection_map(&mut xml, graph, &conn_stats, surface);
+    write_extensions(&mut xml, graph, surface);
     write_exploration_hints(&mut xml, graph, &conn_stats);
 
-    xml.push_str(
-        "  <hint>Use graph_overview(types=['TypeName']) for properties, samples. Use graph_overview(connections=['CONN_TYPE']) for edge property stats and samples.</hint>\n",
-    );
+    xml.push_str(&format!(
+        "  <hint>Use {} for properties, samples. Use {} for edge property stats and samples.</hint>\n",
+        surface.call("types=['TypeName']", "--types TypeName"),
+        surface.call("connections=['CONN_TYPE']", "--connection-types CONN_TYPE"),
+    ));
     xml.push_str("</graph>");
     xml
 }
@@ -1582,7 +1608,7 @@ fn build_inventory_capped(graph: &DirGraph, max_types: Option<usize>) -> String 
 /// Build statistical summary for extreme-scale graphs (5001+ types).
 /// Uses only pre-loaded data (type_indices, connection_type_metadata) for instant response.
 /// No expensive computations — no capability scan, no join candidates, no edge scans.
-fn build_extreme_inventory(graph: &DirGraph) -> String {
+fn build_extreme_inventory(graph: &DirGraph, surface: DescribeSurface) -> String {
     let mut xml = String::with_capacity(4096);
 
     let node_count = graph.graph.node_count();
@@ -1667,8 +1693,9 @@ fn build_extreme_inventory(graph: &DirGraph) -> String {
         conn_names.sort();
         conn_names.truncate(30);
         xml.push_str(&format!(
-            "  <connection_summary count=\"{}\" hint=\"counts not yet cached — use graph_overview(connections=True) to populate\">\n",
-            conn_type_count
+            "  <connection_summary count=\"{}\" hint=\"counts not yet cached — use {} to populate\">\n",
+            conn_type_count,
+            surface.call("connections=True", "--connections")
         ));
         for ct in &conn_names {
             xml.push_str(&format!("    <conn type=\"{}\"/>\n", xml_escape(ct)));
@@ -1682,8 +1709,9 @@ fn build_extreme_inventory(graph: &DirGraph) -> String {
         xml.push_str("  </connection_summary>\n");
     } else if edge_count > 0 {
         xml.push_str(&format!(
-            "  <connection_summary hint=\"{} edges present, use graph_overview(connections=True) for details\"/>\n",
-            edge_count
+            "  <connection_summary hint=\"{} edges present, use {} for details\"/>\n",
+            edge_count,
+            surface.call("connections=True", "--connections")
         ));
     }
 
@@ -1691,8 +1719,15 @@ fn build_extreme_inventory(graph: &DirGraph) -> String {
     xml.push_str("  <extensions>\n");
     xml.push_str("    <algorithms hint=\"CALL proc() YIELD node, col — score (pagerank/betweenness/degree/closeness), community (louvain/leiden/label_propagation), component (connected_components), coreness (k_core), coefficient (clustering_coefficient), cluster (cluster), dependency_count (ready_set — nodes whose outgoing-E dependencies all satisfy a `done` predicate). Algorithms take optional {node_type, relationship} scoping.\"/>\n");
     xml.push_str("    <rules hint=\"CALL proc(...) YIELD ... — structural validators. Unary: orphan_node, self_loop, missing_required_edge, missing_inbound_edge, duplicate_title, duplicate_id, null_property. Pair: cycle_2step, inverse_violation, parallel_edges. Schema: type_domain_violation, type_range_violation, edge_property_violation (ontology property checks). Cardinality: cardinality_violation. Triple: transitivity_violation. Projection: outline({root, root_type?, edge}) YIELD node, depth, parent_id, node_type, node_id_type, parent_type, parent_id_type, node_token, parent_token (BFS tree; tokens are result-local identity keys; render via kglite.outline).\"/>\n");
-    xml.push_str("    <cypher hint=\"Standard openCypher is supported — MATCH/WHERE/WITH/RETURN, ORDER BY/SKIP/LIMIT, variable-length paths and the usual aggregates all work; write ordinary Cypher, not a dialect. KGLite adds documented extensions on top. graph_overview(cypher=True) for reference, graph_overview(cypher=['topic']) for detailed docs.\"/>\n");
-    xml.push_str("    <fluent_api hint=\"Method-chaining API: select/where/traverse/collect. graph_overview(fluent=True) for reference.\"/>\n");
+    xml.push_str(&format!(
+        "    <cypher hint=\"Standard openCypher is supported — MATCH/WHERE/WITH/RETURN, ORDER BY/SKIP/LIMIT, variable-length paths and the usual aggregates all work; write ordinary Cypher, not a dialect. KGLite adds documented extensions on top. {} for reference, {} for detailed docs.\"/>\n",
+        surface.call("cypher=True", "--cypher"),
+        surface.call("cypher=['topic']", "--cypher-topics topic"),
+    ));
+    xml.push_str(&format!(
+        "    <fluent_api hint=\"Method-chaining API: select/where/traverse/collect. {} for reference.\"/>\n",
+        surface.call("fluent=True", "--fluent"),
+    ));
     xml.push_str("    <bug_report hint=\"bug_report(query, result, expected, description) — file a Cypher bug report.\"/>\n");
     xml.push_str(INDEXING_HINT);
     xml.push_str("  </extensions>\n");
@@ -1701,21 +1736,28 @@ fn build_extreme_inventory(graph: &DirGraph) -> String {
         "  <search_hint>{} types — too many to list. Progressive discovery:\n",
         type_count
     ));
-    xml.push_str(
-        "    graph_overview(type_search='software')   — find types by name + see their connections\n",
-    );
-    xml.push_str(
-        "    graph_overview(types=['software'])        — full detail: properties, samples\n",
-    );
-    xml.push_str(
-        "    graph_overview(connections=['P31'])        — connection detail: per-pair counts, properties, samples</search_hint>\n",
-    );
+    xml.push_str(&format!(
+        "    {}   — find types by name + see their connections\n",
+        surface.call("type_search='software'", "--type-search software")
+    ));
+    xml.push_str(&format!(
+        "    {}        — full detail: properties, samples\n",
+        surface.call("types=['software']", "--types software")
+    ));
+    xml.push_str(&format!(
+        "    {}        — connection detail: per-pair counts, properties, samples</search_hint>\n",
+        surface.call("connections=['P31']", "--connection-types P31")
+    ));
     xml.push_str("</graph>");
     xml
 }
 
 /// Build inventory with inline detail for simple graphs (≤15 types).
-fn build_inventory_with_detail(graph: &DirGraph, truncate_at: Option<usize>) -> String {
+fn build_inventory_with_detail(
+    graph: &DirGraph,
+    truncate_at: Option<usize>,
+    surface: DescribeSurface,
+) -> String {
     let mut caps = compute_type_capabilities(graph);
     bubble_capabilities(&mut caps, &graph.parent_types);
     let mut xml = String::with_capacity(4096);
@@ -1764,8 +1806,8 @@ fn build_inventory_with_detail(graph: &DirGraph, truncate_at: Option<usize>) -> 
     xml.push_str("  </types>\n");
 
     let conn_stats = compute_connection_type_stats(graph);
-    write_connection_map(&mut xml, graph, &conn_stats);
-    write_extensions(&mut xml, graph);
+    write_connection_map(&mut xml, graph, &conn_stats, surface);
+    write_extensions(&mut xml, graph, surface);
     write_exploration_hints(&mut xml, graph, &conn_stats);
 
     xml.push_str("</graph>");
@@ -1776,6 +1818,7 @@ fn build_focused_detail(
     graph: &DirGraph,
     types: &[String],
     truncate_at: Option<usize>,
+    surface: DescribeSurface,
 ) -> Result<String, String> {
     for t in types {
         if !graph.type_indices.contains_key(t) {
@@ -1791,11 +1834,14 @@ fn build_focused_detail(
             let total = names.len();
             if total > 100 {
                 return Err(format!(
-                    "Node type '{}' not found.{} {} types in graph — use graph_overview(type_search='{}') to search.",
+                    "Node type '{}' not found.{} {} types in graph — use {} to search.",
                     t,
                     hint,
                     total,
-                    t.to_lowercase()
+                    surface.call(
+                        &format!("type_search='{}'", t.to_lowercase()),
+                        &format!("--type-search {}", t.to_lowercase())
+                    )
                 ));
             }
             return Err(format!(
@@ -1845,7 +1891,7 @@ fn build_focused_detail(
 ///
 /// Every cap above is the Small/Medium one; Large and Extreme graphs use the
 /// tighter set computed at the top of the function.
-fn build_type_search_results(graph: &DirGraph, pattern: &str) -> String {
+fn build_type_search_results(graph: &DirGraph, pattern: &str, surface: DescribeSurface) -> String {
     let pattern_lower = pattern.to_lowercase();
     let scale = graph_scale(graph);
     let is_extreme = matches!(scale, GraphScale::Large | GraphScale::Extreme);
@@ -1999,35 +2045,79 @@ fn build_type_search_results(graph: &DirGraph, pattern: &str) -> String {
         xml.push_str("  </connected>\n");
     }
 
-    xml.push_str(
-        "  <hint>Use graph_overview(types=['TypeName']) for properties + samples.</hint>\n",
-    );
+    xml.push_str(&format!(
+        "  <hint>Use {} for properties + samples.</hint>\n",
+        surface.call("types=['TypeName']", "--types TypeName"),
+    ));
     xml.push_str("</type_search>");
     xml
 }
 
 // ── Describe: entry point ──────────────────────────────────────────────────
 
+/// What one caller wants described, and who is asking.
+///
+/// Four independent axes plus the asking surface. Build it from
+/// [`DescribeRequest::new`], which requires the surface and defaults every
+/// axis off, and override the axes with struct-update syntax — the surface has
+/// no default because a wrong one puts a callable the reader does not have
+/// into every hint of the document.
+#[derive(Clone, Copy)]
+pub struct DescribeRequest<'a> {
+    /// Node type deep-dive (`None` = inventory, `Some` = focused detail).
+    pub types: Option<&'a [String]>,
+    /// Connection type docs (Off = in inventory, Overview = all, Topics = specific).
+    pub connections: &'a ConnectionDetail,
+    /// Cypher language reference (Off = hint, Overview = compact, Topics = detailed).
+    pub cypher: &'a CypherDetail,
+    /// Fluent API reference (Off = hint, Overview = compact, Topics = detailed).
+    pub fluent: &'a FluentDetail,
+    /// Search node types by name substring instead of describing the graph.
+    pub type_search: Option<&'a str>,
+    /// Cap on `(source_type, target_type)` pairs in a connection deep-dive.
+    pub max_pairs: Option<usize>,
+    /// Truncate sampled string values to this many characters.
+    pub sample_truncate: Option<usize>,
+    /// Whose spelling the "call this for more" hints use.
+    pub surface: DescribeSurface,
+}
+
+impl<'a> DescribeRequest<'a> {
+    /// The inventory request for `surface`: every axis off.
+    pub fn new(surface: DescribeSurface) -> Self {
+        static CONNECTIONS_OFF: ConnectionDetail = ConnectionDetail::Off;
+        static CYPHER_OFF: CypherDetail = CypherDetail::Off;
+        static FLUENT_OFF: FluentDetail = FluentDetail::Off;
+        Self {
+            types: None,
+            connections: &CONNECTIONS_OFF,
+            cypher: &CYPHER_OFF,
+            fluent: &FLUENT_OFF,
+            type_search: None,
+            max_pairs: None,
+            sample_truncate: None,
+            surface,
+        }
+    }
+}
+
 /// Build an XML description of the graph for AI agents (progressive disclosure).
 ///
-/// Four independent axes:
-/// - `types` → Node type deep-dive (None=inventory, Some=focused detail).
-/// - `connections` → Connection type docs (Off=in inventory, Overview=all, Topics=specific).
-/// - `cypher` → Cypher language reference (Off=hint, Overview=compact, Topics=detailed).
-/// - `fluent` → Fluent API reference (Off=hint, Overview=compact, Topics=detailed).
-///
 /// When `connections`, `cypher`, or `fluent` is not Off, only those tracks are returned.
-#[allow(clippy::too_many_arguments)]
 pub fn compute_description(
     graph: &DirGraph,
-    types: Option<&[String]>,
-    connections: &ConnectionDetail,
-    cypher: &CypherDetail,
-    fluent: &FluentDetail,
-    type_search: Option<&str>,
-    max_pairs: Option<usize>,
-    sample_truncate: Option<usize>,
+    request: &DescribeRequest<'_>,
 ) -> Result<String, String> {
+    let DescribeRequest {
+        types,
+        connections,
+        cypher,
+        fluent,
+        type_search,
+        max_pairs,
+        sample_truncate,
+        surface,
+    } = *request;
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena (protocol in disk/graph.rs); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
@@ -2059,27 +2149,27 @@ pub fn compute_description(
 
         let mut result = String::with_capacity(4096);
         if let Some(pattern) = type_search {
-            result = build_type_search_results(graph, pattern);
+            result = build_type_search_results(graph, pattern, surface);
         }
         match connections {
             ConnectionDetail::Off => {}
-            ConnectionDetail::Overview => write_connections_overview(&mut result, graph),
+            ConnectionDetail::Overview => write_connections_overview(&mut result, graph, surface),
             ConnectionDetail::Topics(ref topics) => {
                 write_connections_detail(&mut result, graph, topics, max_pairs, sample_truncate)?;
             }
         }
         match cypher {
             CypherDetail::Off => {}
-            CypherDetail::Overview => write_cypher_overview(&mut result),
+            CypherDetail::Overview => write_cypher_overview(&mut result, surface),
             CypherDetail::Topics(ref topics) => {
-                write_cypher_topics(&mut result, topics)?;
+                write_cypher_topics(&mut result, topics, surface)?;
             }
         }
         match fluent {
             FluentDetail::Off => {}
-            FluentDetail::Overview => write_fluent_overview(&mut result),
+            FluentDetail::Overview => write_fluent_overview(&mut result, surface),
             FluentDetail::Topics(ref topics) => {
-                write_fluent_topics(&mut result, topics)?;
+                write_fluent_topics(&mut result, topics, surface)?;
             }
         }
         return Ok(result);
@@ -2087,15 +2177,15 @@ pub fn compute_description(
 
     let result = match types {
         Some(requested) if !requested.is_empty() => {
-            build_focused_detail(graph, requested, sample_truncate)?
+            build_focused_detail(graph, requested, sample_truncate, surface)?
         }
         _ => {
             let scale = graph_scale(graph);
             match scale {
-                GraphScale::Small => build_inventory_with_detail(graph, sample_truncate),
-                GraphScale::Medium => build_inventory(graph),
-                GraphScale::Large => build_large_inventory(graph),
-                GraphScale::Extreme => build_extreme_inventory(graph),
+                GraphScale::Small => build_inventory_with_detail(graph, sample_truncate, surface),
+                GraphScale::Medium => build_inventory(graph, surface),
+                GraphScale::Large => build_large_inventory(graph, surface),
+                GraphScale::Extreme => build_extreme_inventory(graph, surface),
             }
         }
     };

@@ -520,17 +520,12 @@ fn spill_reclaims_the_heap_it_materialises() {
 /// a saved graph.
 #[test]
 fn describe_reports_columnar_properties() {
-    use crate::graph::introspection::{ConnectionDetail, CypherDetail, FluentDetail};
+    use crate::graph::introspection::describe::DescribeRequest;
+    use crate::graph::introspection::DescribeSurface;
     let graph = seeded_columnar();
     let xml = crate::graph::introspection::describe::compute_description(
         &graph,
-        None,
-        &ConnectionDetail::Off,
-        &CypherDetail::Off,
-        &FluentDetail::Off,
-        None,
-        None,
-        None,
+        &DescribeRequest::new(DescribeSurface::Python),
     )
     .unwrap();
     assert!(

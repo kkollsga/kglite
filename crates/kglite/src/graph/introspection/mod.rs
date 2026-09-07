@@ -153,6 +153,43 @@ pub fn graph_scale(graph: &DirGraph) -> GraphScale {
     }
 }
 
+/// Which surface is asking for a description, so its hints can name a callable
+/// the reader can actually invoke.
+///
+/// The rendered document is full of "call X for more" hints, and one spelling
+/// cannot serve all three: `graph_overview` is an MCP tool name, not a
+/// `KnowledgeGraph` method, and the CLI takes flags rather than keyword
+/// arguments. See [`DescribeSurface::call`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DescribeSurface {
+    /// Python `KnowledgeGraph.describe(...)`.
+    Python,
+    /// The `kglite describe` subcommand.
+    Cli,
+    /// The MCP `graph_overview` tool.
+    Mcp,
+}
+
+impl DescribeSurface {
+    /// Render one "call this for more" hint in this surface's own spelling.
+    ///
+    /// `kwargs` is the keyword-argument form the Python method and the MCP
+    /// tool share (`types=['T']`); `flags` is the CLI's (`--types T`), which
+    /// is a different shape, not a different name. Both spellings are supplied
+    /// at the hint site so neither can be grown without the other.
+    ///
+    /// The result lands inside an XML attribute, so no spelling may contain
+    /// `<`, `>` or a double quote — pinned by
+    /// `describe_tests::surface_hint_tests::no_surface_spelling_breaks_the_xml`.
+    pub fn call(self, kwargs: &str, flags: &str) -> String {
+        match self {
+            DescribeSurface::Python => format!("describe({kwargs})"),
+            DescribeSurface::Mcp => format!("graph_overview({kwargs})"),
+            DescribeSurface::Cli => format!("kglite describe GRAPH {flags}"),
+        }
+    }
+}
+
 /// Level of Cypher documentation requested via `describe(cypher=...)`.
 pub enum CypherDetail {
     /// No Cypher docs (default).

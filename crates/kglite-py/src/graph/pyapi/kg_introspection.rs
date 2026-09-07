@@ -1638,13 +1638,16 @@ impl KnowledgeGraph {
         let fluent_detail = extract_fluent_param(fluent)?;
         introspection::compute_description(
             &self.inner,
-            types.as_deref(),
-            &conn_detail,
-            &cypher_detail,
-            &fluent_detail,
-            type_search.as_deref(),
-            max_pairs,
-            sample_truncate,
+            &introspection::DescribeRequest {
+                types: types.as_deref(),
+                connections: &conn_detail,
+                cypher: &cypher_detail,
+                fluent: &fluent_detail,
+                type_search: type_search.as_deref(),
+                max_pairs,
+                sample_truncate,
+                ..introspection::DescribeRequest::new(introspection::DescribeSurface::Python)
+            },
         )
         .map_err(|e: String| -> PyErr {
             crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))

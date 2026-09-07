@@ -455,7 +455,8 @@ class TestDescribe:
         root = ET.fromstring(large_schema_graph.describe())
         hint = root.find("hint")
         assert hint is not None
-        assert "graph_overview" in hint.text
+        assert "describe(types=" in hint.text
+        assert "graph_overview" not in hint.text
 
     def test_large_graph_has_types_count(self, large_schema_graph):
         root = ET.fromstring(large_schema_graph.describe())
@@ -1123,9 +1124,11 @@ class TestTypeSearch:
         assert root.find("connections") is None
 
     def test_hint_guides_deeper(self, social_graph):
-        """Output should guide agent to graph_overview(types=[...])."""
+        """A Python caller must be pointed at `describe(types=[...])` — the
+        method it actually has — not at the MCP tool's name."""
         result = social_graph.describe(type_search="Person")
-        assert "graph_overview(types=" in result
+        assert "describe(types=" in result
+        assert "graph_overview(" not in result
 
     def test_capped_at_50(self, extreme_graph):
         """With many matches, should cap at 50."""
@@ -1382,7 +1385,7 @@ class TestDescribeTokenBudget:
         assert len(conns.findall("conn")) == 50
         more = conns.find("more")
         assert more is not None and more.attrib["count"] == "10"
-        assert "graph_overview(connections=True)" in more.attrib["hint"]
+        assert "describe(connections=True)" in more.attrib["hint"]
 
     def test_connection_map_under_the_cap_has_no_marker(self, social_graph):
         root = ET.fromstring(social_graph.describe())

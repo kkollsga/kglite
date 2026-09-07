@@ -417,7 +417,8 @@ class ResultView:
     missing/cyclic references and fractional timestamp output across formats.
 
     Data is only converted to Python objects when you actually access rows
-    (via iteration, indexing, ``to_list()``, or ``to_df()``). This makes
+    (via iteration, indexing, ``to_list()``, ``to_df()``, or rendering the view
+    with ``repr()`` / ``print()``). This makes
     ``cypher()`` calls fast even for large result sets — the cost is deferred
     to when you consume the data.
 
@@ -672,7 +673,11 @@ class ResultView:
     def __iter__(self) -> ResultIter: ...
     def __repr__(self) -> str: ...
     def __str__(self) -> str:
-        """Vertical card format: one key-value per line, rows separated by blank lines."""
+        """Identical to :meth:`__repr__` — the bordered table.
+
+        Like ``repr()``, it materialises every row to render them, so
+        ``print(view)`` on a deferred result converts the whole result set.
+        """
         ...
 
 def estimate_load_memory(path: str) -> dict[str, int]:
@@ -4227,8 +4232,9 @@ class KnowledgeGraph:
         - ``sample()`` — sample 5 nodes from the current selection
 
         Args:
-            node_type_or_n: A node type (str) or sample count (int).
-            n: Sample count when first arg is a node type. Default ``5``.
+            node_type: A node type (str) or, positionally, a sample count
+                (int) — the merged first argument the two call shapes share.
+            n: Sample count when the first argument is a node type. Default ``5``.
 
         Returns:
             :class:`ResultView` with sampled node rows.
@@ -7397,11 +7403,17 @@ class KnowledgeGraph:
         ...
 
     @overload
-    def embeddings(self, node_type: str, text_column: str) -> dict[Any, list[float]]:
+    def embeddings(self, node_type_or_text_column: str, text_column: str) -> dict[Any, list[float]]:
         """Retrieve all embeddings for a node type.
 
+        The first parameter carries one of two meanings, which is why it is
+        named for both: with a second argument it is the **node type**, and
+        alone it is the **text column** (the overload below). It is the only
+        keyword the runtime accepts for that position — ``node_type=`` would
+        be a keyword that lies about the one-argument form.
+
         Args:
-            node_type: The node type (e.g. 'Article').
+            node_type_or_text_column: The node type (e.g. 'Article').
             text_column: Source text column name (e.g. 'summary').
 
         Returns:
@@ -7410,7 +7422,7 @@ class KnowledgeGraph:
         ...
 
     @overload
-    def embeddings(self, text_column: str) -> dict[Any, list[float]]:
+    def embeddings(self, node_type_or_text_column: str) -> dict[Any, list[float]]:
         """Retrieve embeddings for nodes in the current selection.
 
         With no selection active this covers the whole graph (the same
@@ -7418,7 +7430,7 @@ class KnowledgeGraph:
         emptied returns ``{}``.
 
         Args:
-            text_column: Source text column name (e.g. 'summary').
+            node_type_or_text_column: Source text column name (e.g. 'summary').
 
         Returns:
             Dict mapping node IDs to embedding vectors.

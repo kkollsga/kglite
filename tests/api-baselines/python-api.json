@@ -28,6 +28,7 @@
     "from_networkx",
     "Agg",
     "Spatial",
+    "EmbeddingModel",
     "KgError",
     "CypherError",
     "CypherSyntaxError",
@@ -261,6 +262,32 @@
         "code": {
           "kind": "attribute",
           "type": "str"
+        }
+      },
+      "module": "kglite"
+    },
+    "EmbeddingModel": {
+      "bases": [
+        "Protocol"
+      ],
+      "constructible": true,
+      "constructor": "(*args, **kwargs)",
+      "kind": "class",
+      "members": {
+        "dimension": {
+          "kind": "property"
+        },
+        "embed": {
+          "kind": "method",
+          "signature": "(self, texts: 'list[str]') -> 'list[list[float]]'"
+        },
+        "load": {
+          "kind": "method",
+          "signature": "(self) -> None"
+        },
+        "unload": {
+          "kind": "method",
+          "signature": "(self) -> None"
         }
       },
       "module": "kglite"
@@ -947,7 +974,7 @@
         },
         "sample": {
           "kind": "method",
-          "signature": "(self, /, node_type_or_n=None, n=None)"
+          "signature": "(self, /, node_type=None, n=None)"
         },
         "save": {
           "kind": "method",

@@ -397,15 +397,15 @@ impl KnowledgeGraph {
     ///   - ``sample("Person", 10)`` — sample 10 nodes of the given type
     ///   - ``sample(3)`` — sample 3 nodes from the current selection
     ///   - ``sample()`` — sample 5 nodes from the current selection
-    #[pyo3(signature = (node_type_or_n=None, n=None))]
+    #[pyo3(signature = (node_type=None, n=None))]
     fn sample(
         &self,
-        node_type_or_n: Option<&Bound<'_, PyAny>>,
+        node_type: Option<&Bound<'_, PyAny>>,
         n: Option<usize>,
     ) -> PyResult<Py<PyAny>> {
         let default_n = 5usize;
 
-        let (node_type, count) = match node_type_or_n {
+        let (node_type, count) = match node_type {
             Some(arg) => {
                 if let Ok(s) = arg.extract::<String>() {
                     (Some(s), n.unwrap_or(default_n))

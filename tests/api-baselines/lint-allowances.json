@@ -325,10 +325,6 @@
       "classification": "transitional"
     },
     {
-      "identity": "crates/kglite/src/graph/introspection/describe.rs::fn:compute_description:pub fn compute_description( graph: &DirGraph, types: Option<&[String]>, connections: &ConnectionDetail, cypher: &CypherDetail, fluent: &FluentDetail, type_search: Option<&str>, max_pairs: Option<usize>, sample_truncate: Option<usize>, ) -> Result<String, String>::clippy::too_many_arguments",
-      "classification": "transitional"
-    },
-    {
       "identity": "crates/kglite/src/graph/introspection/describe.rs::fn:write_connection_property:fn write_connection_property( xml: &mut String, graph: &DirGraph, rel_type: &str, prop_name: &str, stats: EdgePropertyAccum, truncate_at: Option<usize>, max_prop_values: usize, )::clippy::too_many_arguments",
       "classification": "transitional"
     },

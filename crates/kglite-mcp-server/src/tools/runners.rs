@@ -6,7 +6,8 @@ use std::collections::HashMap;
 use anyhow::Result;
 use kglite::api::cypher;
 use kglite::api::introspection::{
-    compute_description, compute_schema, ConnectionDetail, CypherDetail, FluentDetail,
+    compute_description, compute_schema, ConnectionDetail, CypherDetail, DescribeRequest,
+    DescribeSurface, FluentDetail,
 };
 
 use crate::tools::*;
@@ -232,20 +233,21 @@ pub(crate) fn run_overview(graph: &ActiveGraph, args: &OverviewArgs) -> Result<S
     let fluent = FluentDetail::Off;
     match compute_description(
         graph.kg.dir(),
-        args.types.as_deref(),
-        &conn,
-        &cy,
-        &fluent,
-        None,
-        None,
-        // `sample_truncate`. `None` means "emit every sampled value at full
-        // length", which this surface — the one with the tightest token
-        // budget and the least ability to scroll past a wall of text — was
-        // passing while Python's `describe()` has defaulted to 40 chars
-        // since it shipped. A single long text property (a description, a
-        // file blob) could dominate the whole overview. 40 matches the
-        // Python default so the same graph reads the same way everywhere.
-        Some(40),
+        &DescribeRequest {
+            types: args.types.as_deref(),
+            connections: &conn,
+            cypher: &cy,
+            fluent: &fluent,
+            // `None` means "emit every sampled value at full length", which
+            // this surface — the one with the tightest token budget and the
+            // least ability to scroll past a wall of text — was passing while
+            // Python's `describe()` has defaulted to 40 chars since it
+            // shipped. A single long text property (a description, a file
+            // blob) could dominate the whole overview. 40 matches the Python
+            // default so the same graph reads the same way everywhere.
+            sample_truncate: Some(40),
+            ..DescribeRequest::new(DescribeSurface::Mcp)
+        },
     ) {
         // Prepend a server-level identity header so the active root + build
         // time are the first thing an agent reads — staleness after a root

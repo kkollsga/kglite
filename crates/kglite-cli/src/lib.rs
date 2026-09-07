@@ -23,7 +23,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use kglite::api::introspection::{
-    compute_description, ConnectionDetail, CypherDetail, FluentDetail,
+    compute_description, ConnectionDetail, CypherDetail, DescribeRequest, DescribeSurface,
+    FluentDetail,
 };
 use kglite::api::io::{
     load_file, open_or_create_graph, GraphWriterLease, OpenDisposition, WriteOwnership,
@@ -583,13 +584,16 @@ fn run_describe(path: &Path, options: DescribeOptions) -> Result<()> {
 fn describe_graph(graph: &Arc<DirGraph>, options: &DescribeOptions) -> Result<String> {
     compute_description(
         graph,
-        options.types.as_deref(),
-        &options.connections,
-        &options.cypher,
-        &options.fluent,
-        options.type_search.as_deref(),
-        options.max_pairs,
-        options.sample_truncate,
+        &DescribeRequest {
+            types: options.types.as_deref(),
+            connections: &options.connections,
+            cypher: &options.cypher,
+            fluent: &options.fluent,
+            type_search: options.type_search.as_deref(),
+            max_pairs: options.max_pairs,
+            sample_truncate: options.sample_truncate,
+            ..DescribeRequest::new(DescribeSurface::Cli)
+        },
     )
     .map_err(|e| anyhow::anyhow!("describe failed: {e}"))
 }

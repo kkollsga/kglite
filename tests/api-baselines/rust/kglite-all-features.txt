@@ -1561,6 +1561,21 @@ pub enum kglite::api::introspection::CypherDetail
 pub kglite::api::introspection::CypherDetail::Off
 pub kglite::api::introspection::CypherDetail::Overview
 pub kglite::api::introspection::CypherDetail::Topics(alloc::vec::Vec<alloc::string::String>)
+pub enum kglite::api::introspection::DescribeSurface
+pub kglite::api::introspection::DescribeSurface::Cli
+pub kglite::api::introspection::DescribeSurface::Mcp
+pub kglite::api::introspection::DescribeSurface::Python
+impl kglite::api::introspection::DescribeSurface
+pub fn kglite::api::introspection::DescribeSurface::call(self, kwargs: &str, flags: &str) -> alloc::string::String
+impl core::clone::Clone for kglite::api::introspection::DescribeSurface
+pub fn kglite::api::introspection::DescribeSurface::clone(&self) -> kglite::api::introspection::DescribeSurface
+impl core::cmp::Eq for kglite::api::introspection::DescribeSurface
+impl core::cmp::PartialEq for kglite::api::introspection::DescribeSurface
+pub fn kglite::api::introspection::DescribeSurface::eq(&self, other: &kglite::api::introspection::DescribeSurface) -> bool
+impl core::fmt::Debug for kglite::api::introspection::DescribeSurface
+pub fn kglite::api::introspection::DescribeSurface::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for kglite::api::introspection::DescribeSurface
+impl core::marker::StructuralPartialEq for kglite::api::introspection::DescribeSurface
 pub enum kglite::api::introspection::FluentDetail
 pub kglite::api::introspection::FluentDetail::Off
 pub kglite::api::introspection::FluentDetail::Overview
@@ -1617,6 +1632,20 @@ pub fn kglite::api::introspection::ConnectivityTriple::deserialize<__D>(__deseri
 pub struct kglite::api::introspection::DerivedEdgeStats
 pub kglite::api::introspection::DerivedEdgeStats::counts: std::collections::hash::map::HashMap<alloc::string::String, usize>
 pub kglite::api::introspection::DerivedEdgeStats::endpoints: std::collections::hash::map::HashMap<alloc::string::String, (std::collections::hash::set::HashSet<alloc::string::String>, std::collections::hash::set::HashSet<alloc::string::String>)>
+pub struct kglite::api::introspection::DescribeRequest<'a>
+pub kglite::api::introspection::DescribeRequest::connections: &'a kglite::api::introspection::ConnectionDetail
+pub kglite::api::introspection::DescribeRequest::cypher: &'a kglite::api::introspection::CypherDetail
+pub kglite::api::introspection::DescribeRequest::fluent: &'a kglite::api::introspection::FluentDetail
+pub kglite::api::introspection::DescribeRequest::max_pairs: core::option::Option<usize>
+pub kglite::api::introspection::DescribeRequest::sample_truncate: core::option::Option<usize>
+pub kglite::api::introspection::DescribeRequest::surface: kglite::api::introspection::DescribeSurface
+pub kglite::api::introspection::DescribeRequest::type_search: core::option::Option<&'a str>
+pub kglite::api::introspection::DescribeRequest::types: core::option::Option<&'a [alloc::string::String]>
+impl<'a> kglite::api::introspection::DescribeRequest<'a>
+pub fn kglite::api::introspection::DescribeRequest<'a>::new(surface: kglite::api::introspection::DescribeSurface) -> Self
+impl<'a> core::clone::Clone for kglite::api::introspection::DescribeRequest<'a>
+pub fn kglite::api::introspection::DescribeRequest<'a>::clone(&self) -> kglite::api::introspection::DescribeRequest<'a>
+impl<'a> core::marker::Copy for kglite::api::introspection::DescribeRequest<'a>
 pub struct kglite::api::introspection::NeighborConnection
 pub kglite::api::introspection::NeighborConnection::connection_type: alloc::string::String
 pub kglite::api::introspection::NeighborConnection::count: usize
@@ -1654,7 +1683,7 @@ pub fn kglite::api::introspection::TypeCapabilities::has_location(&self) -> bool
 pub fn kglite::api::introspection::TypeCapabilities::has_timeseries(&self) -> bool
 pub const kglite::api::introspection::EXACT_PROPERTY_STATS_MAX_NODES: usize
 pub fn kglite::api::introspection::compute_connection_type_stats(graph: &kglite::api::DirGraph) -> alloc::vec::Vec<kglite::api::introspection::ConnectionTypeStats>
-pub fn kglite::api::introspection::compute_description(graph: &kglite::api::DirGraph, types: core::option::Option<&[alloc::string::String]>, connections: &kglite::api::introspection::ConnectionDetail, cypher: &kglite::api::introspection::CypherDetail, fluent: &kglite::api::introspection::FluentDetail, type_search: core::option::Option<&str>, max_pairs: core::option::Option<usize>, sample_truncate: core::option::Option<usize>) -> core::result::Result<alloc::string::String, alloc::string::String>
+pub fn kglite::api::introspection::compute_description(graph: &kglite::api::DirGraph, request: &kglite::api::introspection::DescribeRequest<'_>) -> core::result::Result<alloc::string::String, alloc::string::String>
 pub fn kglite::api::introspection::compute_neighbors_schema(graph: &kglite::api::DirGraph, node_type: &str) -> core::result::Result<kglite::api::introspection::NeighborsSchema, alloc::string::String>
 pub fn kglite::api::introspection::compute_property_stats(graph: &kglite::api::DirGraph, node_type: &str, max_values: usize, sample_size: core::option::Option<usize>) -> core::result::Result<alloc::vec::Vec<kglite::api::introspection::PropertyStatInfo>, alloc::string::String>
 pub fn kglite::api::introspection::compute_schema(graph: &kglite::api::DirGraph) -> kglite::api::introspection::SchemaOverview
