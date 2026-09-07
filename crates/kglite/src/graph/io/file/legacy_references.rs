@@ -717,4 +717,41 @@ mod tests {
         assert_normalized(&loaded);
         assert_eq!(selected_generation_files(&path), before);
     }
+
+    #[test]
+    fn disk_load_refuses_malformed_lazy_edge_payload_without_rewriting_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("malformed-legacy-disk");
+        let mut graph = raw_fixture();
+        graph.enable_disk_mode().unwrap();
+        let mut graph = Arc::new(graph);
+        save_graph(&mut graph, path.to_str().unwrap()).unwrap();
+        drop(graph);
+
+        let snapshot = crate::graph::storage::disk::generation::resolve_snapshot(&path).unwrap();
+        let segment = snapshot.snapshot_dir.join("seg_000");
+        let offsets = std::fs::read(segment.join("edge_prop_offsets.bin")).unwrap();
+        let start = u64::from_le_bytes(offsets[0..8].try_into().unwrap()) as usize;
+        let end = u64::from_le_bytes(offsets[8..16].try_into().unwrap()) as usize;
+        assert!(
+            end >= start + 4,
+            "fixture needs one non-empty edge property slot"
+        );
+        let heap_path = segment.join("edge_prop_heap.bin");
+        let mut heap = std::fs::read(&heap_path).unwrap();
+        heap[start..end].fill(0);
+        heap[start..start + 4].copy_from_slice(&[1, 1, 4, 2]);
+        std::fs::write(&heap_path, heap).unwrap();
+        let corrupted = selected_generation_files(&path);
+
+        let error = load_file(path.to_str().unwrap())
+            .err()
+            .expect("malformed persisted edge properties must refuse the complete snapshot");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert_eq!(
+            selected_generation_files(&path),
+            corrupted,
+            "a refused load must not rewrite the selected disk generation"
+        );
+    }
 }
