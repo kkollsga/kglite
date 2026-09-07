@@ -535,8 +535,10 @@ class ResultView:
           operators, and do not produce per-row records.
         - ``elapsed_ms`` (int): wall-clock query duration in milliseconds.
         - ``timeout_ms`` (Optional[int]): the deadline that was in effect,
-          or ``None`` when no deadline applied (memory graphs by default,
-          or any call with ``timeout_ms=0``). A deadline that fires raises
+          or ``None`` when no deadline applied. From Python that is a call
+          with ``timeout_ms=0`` (or a graph under
+          ``set_default_timeout(0)``) — every other Python call carries the
+          180,000 ms default, on every storage mode. A deadline that fires raises
           :class:`CypherTimeoutError` rather than returning a partial
           ``ResultView``, so a returned result never carries a truncated-by-
           timeout row set.
@@ -6450,9 +6452,19 @@ class KnowledgeGraph:
                 and call ``ResultView.to_df()`` when you want both the frame
                 and ``rv.warnings``.
             params: Optional parameter dict for ``$param`` substitution.
-                Datetimes with a UTC offset normalize to UTC and return as
-                naive datetimes, preserving microseconds; naive datetimes and
-                pure dates retain their existing meaning. Container values
+                Timezone-aware ``datetime``
+                parameters are converted to UTC and stored **without a zone** —
+                KGLite's temporal values are zoneless, so
+                ``datetime(2024, 3, 9, 14, 30, tzinfo=timezone(timedelta(hours=2)))``
+                binds as ``2024-03-09T12:30``, exactly as the Cypher
+                ``datetime()`` constructor normalises an offset-bearing
+                literal. Bind a naive datetime when you want the wall-clock
+                value preserved. The Bolt server, which receives a zoned
+                PackStream type it cannot losslessly translate, *refuses* such
+                a parameter instead of converting it — the two surfaces
+                deliberately differ, because converting on the wire would
+                silently corrupt a driver's zoned round-trip. Microseconds are preserved; naive
+                datetimes and pure dates retain their existing meaning. Container values
                 allow at most 64 active list, tuple, dict or ndarray expansions
                 (an ndarray and its converted list each count). Recursive
                 containers raise ``ValueError``; exceeding this depth raises
@@ -7961,6 +7973,10 @@ class Session:
         :attr:`ResultView.diagnostics` carries ``row_limit`` plus the exact
         pre-truncation ``total_rows``.
 
+        Parameter conversion — including the naive-UTC normalisation of a
+        timezone-aware ``datetime``, which the Bolt server refuses rather than
+        converting — is identical to :meth:`KnowledgeGraph.cypher`.
+
         Omitted/None options inherit the defaults captured when the Session was
         created. The built-in Python timeout is 180_000ms; ``timeout_ms=0`` disables
         the per-query deadline. A zero row cap retains no rows, not unlimited rows.
@@ -8127,6 +8143,10 @@ class FrozenGraph:
         :attr:`ResultView.diagnostics` carries ``row_limit`` plus the exact
         pre-truncation ``total_rows``.
 
+        Parameter conversion — including the naive-UTC normalisation of a
+        timezone-aware ``datetime``, which the Bolt server refuses rather than
+        converting — is identical to :meth:`KnowledgeGraph.cypher`.
+
         Omitted/None options inherit the snapshot's captured defaults. The built-in
         Python timeout is 180_000ms; ``timeout_ms=0`` disables that query deadline.
         """
@@ -8194,7 +8214,9 @@ class Transaction:
 
         Args:
             query: Cypher query string. Supports ``EXPLAIN`` and ``PROFILE`` prefixes.
-            params: Optional query parameters.
+            params: Optional query parameters. Converted exactly as
+                :meth:`KnowledgeGraph.cypher` converts them, timezone-aware
+                ``datetime`` normalisation to naive UTC included.
             to_df: If True, return a pandas DataFrame.
             write_scope: Role-scoped write whitelist — see
                 :meth:`KnowledgeGraph.cypher`.

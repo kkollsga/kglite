@@ -263,6 +263,9 @@ impl GraphState {
         ExecPolicy {
             value_codecs: self.value_codecs(),
             parallel: self.parallel,
+            // Boot decides no deadline of its own; `None` means the shared
+            // default, which a `cypher_query` call may override per call.
+            timeout_ms: None,
         }
     }
 

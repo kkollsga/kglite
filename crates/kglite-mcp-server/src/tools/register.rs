@@ -388,7 +388,7 @@ pub fn register(
             move |args| {
                 let csv = csv.clone();
                 s.ensure_graph_fresh();
-                let policy = s.exec_policy();
+                let policy = s.exec_policy().with_timeout_ms(args.timeout_ms);
                 let scope = args.write_scope.clone();
                 let git_sha = args.git_sha.clone();
                 let modified_by = args.modified_by.clone();
@@ -418,7 +418,7 @@ pub fn register(
             move |args| {
                 let csv = csv.clone();
                 s.ensure_graph_fresh();
-                let policy = s.exec_policy();
+                let policy = s.exec_policy().with_timeout_ms(args.timeout_ms);
                 let params = match params_from_json(args.params.as_ref()) {
                     Ok(params) => params,
                     Err(error) => return map_body(Err(error), |body| s.with_rebuild_warning(body)),

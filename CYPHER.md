@@ -2705,8 +2705,13 @@ multi-label patterns, `WITH`-rebound variables, the built-ins, and every
 comparison the runtime can actually answer are all left alone.
 
 `timeout_ms` resolution: explicit `cypher(..., timeout_ms=N)` >
-`kg.set_default_timeout(ms)` > the Python default of 180,000 ms. Pass
-`timeout_ms=0` to disable the deadline for one call. Expanding, aggregation,
+`kg.set_default_timeout(ms)` > a default of 180,000 ms. Pass
+`timeout_ms=0` to disable the deadline for one call. **The default is
+per-surface, and each surface declares its own:** the Python API and the MCP
+server (`cypher_query`'s `timeout_ms` argument) both apply the 180,000 ms
+default; the CLI applies none and takes `--timeout-ms` per call; the Bolt
+server applies none, per the Neo4j "absent `tx_timeout` means no timeout" wire
+contract. Expanding, aggregation,
 set-operation, subquery-join, procedure, and mutation loops poll cooperatively.
 Use `Session.execute()` or `Transaction` when a failed/timed-out mutation must
 roll back; direct `KnowledgeGraph.cypher()` writes execute in place.

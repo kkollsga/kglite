@@ -65,6 +65,27 @@ Details worth knowing before writing one:
   instead of being ignored — an allowlist that silently fails open is worse than
   none.
 
+## Query deadlines
+
+**Every query this server runs has a 180,000 ms (three-minute) deadline**, the
+same default the Python API applies, shared as one constant in the engine. It
+is a liveness property, not a preference: an agent has no cancel channel once a
+tool call is in flight, and a runaway read holds the active graph's read lock —
+which stalls the single-flight rebuild gate every later tool call enters. One
+bad query would otherwise take the whole server with it.
+
+`cypher_query` takes an optional `timeout_ms` argument that overrides it for
+one call. `timeout_ms: 0` runs without a deadline — the escape hatch for the
+long analytical query the default exists to bound, used deliberately rather
+than by accident. The deadline applies to every route that reaches the engine:
+the built-in tool, manifest `tools[].cypher` templates, and recipe queries.
+
+`row_limit` — the Python knob that caps the rows a call *retains* — is
+deliberately **not** exposed here. This server already bounds its own output
+(a 15-row inline preview, and a cap on served CSV), and a `row_limit` on top
+of that would silently truncate a `FORMAT CSV` export, which is the opposite of
+what that route guarantees. Write `LIMIT n` in the query.
+
 ## Refreshing a rebuilt graph
 
 A `--graph` server serving a regular `.kgl` file re-reads it by itself. Every

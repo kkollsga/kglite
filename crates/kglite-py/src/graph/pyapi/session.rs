@@ -563,7 +563,7 @@ impl Session {
     /// writes, take a fresh `cursor()`.
     fn cursor(&self, py: Python<'_>) -> crate::graph::KnowledgeGraph {
         let mut kg = crate::graph::KnowledgeGraph::from_arc(self.read_snapshot(py));
-        self.defaults.apply_to(&mut kg);
+        kg.apply_query_defaults(self.defaults);
         kg.lifecycle.orphaned_from_cdc = kg.inner.cdc_enabled();
         if kg.inner.owns_wal_capture() {
             if self

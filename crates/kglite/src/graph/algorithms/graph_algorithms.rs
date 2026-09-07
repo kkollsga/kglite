@@ -21,9 +21,15 @@ use super::community::{scoped_universe, DedupNeighborSource};
 /// Mirrors the MATCH timeout text in `cypher::executor::mod::check_deadline`,
 /// adapted for procedure context (no anchor hint — large graphs may simply
 /// not converge within the default 20s).
+///
+/// The remedy names every surface's own spelling rather than only Python's:
+/// the message is emitted from the core and reaches the C ABI, the CLI, the
+/// MCP server and Bolt, on none of which `cypher(timeout_ms=…)` is a thing a
+/// caller can type.
 pub fn algorithm_timeout_err() -> String {
-    "CALL procedure timed out. Pass timeout_ms=N to cypher() to extend, \
-     or timeout_ms=0 to disable the deadline. Scope to a subgraph with \
+    "CALL procedure timed out. To extend the deadline, pass timeout_ms=N in \
+     Python or in the MCP cypher_query tool, or --timeout-ms N on the CLI; \
+     0 means no deadline. Scope to a subgraph with \
      {node_type: '...', where: '...'} to run on fewer nodes."
         .to_string()
 }

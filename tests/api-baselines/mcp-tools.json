@@ -17,6 +17,15 @@
           "query": {
             "description": "Cypher query string. Append `FORMAT CSV` for CSV-encoded output.",
             "type": "string"
+          },
+          "timeout_ms": {
+            "description": "Deadline for this query, in milliseconds. Omit for the server default\nof 180000 (three minutes); pass `0` to run without a deadline. The\ndefault exists because a tool call has no cancel channel and one\nrunaway read blocks every later call on this server, so a query that\nneeds longer must say so explicitly.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -344,6 +353,15 @@
           "query": {
             "description": "Cypher query string. Append `FORMAT CSV` for CSV-encoded output.",
             "type": "string"
+          },
+          "timeout_ms": {
+            "description": "Deadline for this query, in milliseconds. Omit for the server default\nof 180000 (three minutes); pass `0` to run without a deadline. The\ndefault exists because a tool call has no cancel channel and one\nrunaway read blocks every later call on this server, so a query that\nneeds longer must say so explicitly.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "write_scope": {
             "description": "Role-scoped write whitelist (write-enabled servers only) \u2014 so an agent\ncan plan in its own types (`[\"Plan\",\"Task\"]`) without touching\nresearch-owned ones. When set, every **node** write (`CREATE`, `MERGE`,\n`SET`, `REMOVE`, `DELETE`, `DETACH DELETE`, node-type index/constraint\nDDL) is judged by the node's *stored* type \u2014 a pattern label cannot\nwiden the scope \u2014 and a **relationship** write (edge `CREATE`,\n`DELETE r`, `SET r.p`, `REMOVE r.p`) is allowed only when at least one\nendpoint's stored type is in the list. Deleting a node in scope removes\nits relationships whatever they point at. An empty list denies every\nmutation. Ignored on read-only servers. When the server's operator has\npinned a write scope (`--write-scope` / `extensions.write_scope`), this\nlist is **intersected** with it: it can narrow the pinned scope, never\nwiden it, and omitting it leaves the pinned scope in force.",
@@ -837,6 +855,15 @@
             "description": "Cypher query string. Append `FORMAT CSV` for CSV-encoded output.",
             "type": "string"
           },
+          "timeout_ms": {
+            "description": "Deadline for this query, in milliseconds. Omit for the server default\nof 180000 (three minutes); pass `0` to run without a deadline. The\ndefault exists because a tool call has no cancel channel and one\nrunaway read blocks every later call on this server, so a query that\nneeds longer must say so explicitly.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "write_scope": {
             "description": "Role-scoped write whitelist (write-enabled servers only) \u2014 so an agent\ncan plan in its own types (`[\"Plan\",\"Task\"]`) without touching\nresearch-owned ones. When set, every **node** write (`CREATE`, `MERGE`,\n`SET`, `REMOVE`, `DELETE`, `DETACH DELETE`, node-type index/constraint\nDDL) is judged by the node's *stored* type \u2014 a pattern label cannot\nwiden the scope \u2014 and a **relationship** write (edge `CREATE`,\n`DELETE r`, `SET r.p`, `REMOVE r.p`) is allowed only when at least one\nendpoint's stored type is in the list. Deleting a node in scope removes\nits relationships whatever they point at. An empty list denies every\nmutation. Ignored on read-only servers. When the server's operator has\npinned a write scope (`--write-scope` / `extensions.write_scope`), this\nlist is **intersected** with it: it can narrow the pinned scope, never\nwiden it, and omitting it leaves the pinned scope in force.",
             "items": {
@@ -1275,6 +1302,15 @@
           "query": {
             "description": "Cypher query string. Append `FORMAT CSV` for CSV-encoded output.",
             "type": "string"
+          },
+          "timeout_ms": {
+            "description": "Deadline for this query, in milliseconds. Omit for the server default\nof 180000 (three minutes); pass `0` to run without a deadline. The\ndefault exists because a tool call has no cancel channel and one\nrunaway read blocks every later call on this server, so a query that\nneeds longer must say so explicitly.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -1683,6 +1719,15 @@
           "query": {
             "description": "Cypher query string. Append `FORMAT CSV` for CSV-encoded output.",
             "type": "string"
+          },
+          "timeout_ms": {
+            "description": "Deadline for this query, in milliseconds. Omit for the server default\nof 180000 (three minutes); pass `0` to run without a deadline. The\ndefault exists because a tool call has no cancel channel and one\nrunaway read blocks every later call on this server, so a query that\nneeds longer must say so explicitly.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [

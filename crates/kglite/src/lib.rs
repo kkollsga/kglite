@@ -790,6 +790,13 @@ pub mod api {
         /// `LOAD CSV` filesystem capability. Every binding decides what its
         /// callers get; see `ExecuteOptions::csv_import`.
         pub use crate::graph::languages::cypher::executor::load_csv::CsvImportPolicy;
+        /// Captured per-surface query policy and the shared deadline default.
+        /// Two bindings would otherwise re-type `180_000`, which is exactly
+        /// how two surfaces come to disagree about what "the default" is;
+        /// *whether* a surface adopts it stays a per-binding decision.
+        pub use crate::graph::session::{
+            deadline_from, QueryDefaults, ResolvedQueryOptions, DEFAULT_TIMEOUT_MS,
+        };
         pub use crate::graph::session::{
             execute_mut, execute_read, resolve_noderef_value, resolve_noderefs, CommitOutcome,
             ExecuteOptions, ExecuteOutcome, Session, Transaction, QUERY_THREAD_STACK_SIZE,

@@ -34,9 +34,10 @@ pub(super) fn check_interrupt(interrupt: &Interrupt) -> Result<(), String> {
 /// on this text.
 const TIMEOUT_MESSAGE: &str = "Query timed out. Hints: anchor the query with MATCH (n {id: ...}) \
      or a pattern property matching an indexed column (e.g. \
-     MATCH (n {label: 'X'})). To allow a longer run, pass \
-     timeout_ms=N to cypher() or set kg.set_default_timeout(ms); \
-     timeout_ms=0 disables the deadline.";
+     MATCH (n {label: 'X'})). To allow a longer run, raise this call's \
+     deadline — timeout_ms=N in Python and in the MCP cypher_query tool, \
+     --timeout-ms N on the CLI, or kg.set_default_timeout(ms) for every later \
+     Python query on that graph; 0 means no deadline.";
 
 /// Wording for a raised cancel flag; matches the pattern matcher's
 /// (`pattern_matching::matcher`) so both carriers read identically.

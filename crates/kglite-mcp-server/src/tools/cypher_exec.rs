@@ -100,7 +100,8 @@ pub(crate) fn params_from_json(
 /// One struct rather than a parameter per setting: these are all read off the
 /// same [`GraphState`] at the same moment, and a route that threads them
 /// individually can silently drop one — which is indistinguishable, from the
-/// outside, from the knob having no effect.
+/// outside, from the knob having no effect. That is also why the per-call
+/// deadline lives here rather than as a seventh positional argument.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct ExecPolicy<'a> {
     /// Manifest-declared literal codecs (`extensions.value_codecs`).
@@ -108,6 +109,32 @@ pub(crate) struct ExecPolicy<'a> {
     /// The operator's parallel-runtime opt-in. Honoured on reads only — see
     /// [`execute_cypher_inner`] and `run_cypher_write`.
     pub(crate) parallel: bool,
+    /// This call's deadline, in milliseconds. `None` takes the shared
+    /// [`kglite::api::session::DEFAULT_TIMEOUT_MS`]; `Some(0)` disables the
+    /// deadline. Boot supplies `None`; the `cypher_query` tool's `timeout_ms`
+    /// argument overrides it per call.
+    ///
+    /// This server *adopts* the default (the Python surface's, one constant
+    /// shared through the core) rather than running unbounded, because an
+    /// agent has no cancel channel and a runaway read holds the active graph's
+    /// read lock — which stalls `ensure_reloaded_graph_fresh`'s single-flight
+    /// rebuild gate, and with it every later tool call. It is a liveness
+    /// property, not a preference.
+    pub(crate) timeout_ms: Option<u64>,
+}
+
+impl<'a> ExecPolicy<'a> {
+    /// This policy with one call's `timeout_ms` laid over it.
+    pub(crate) fn with_timeout_ms(self, timeout_ms: Option<u64>) -> Self {
+        Self { timeout_ms, ..self }
+    }
+
+    /// The instant this execution must stop at.
+    pub(crate) fn deadline(&self) -> Option<std::time::Instant> {
+        kglite::api::session::QueryDefaults::default()
+            .resolve(self.timeout_ms, None, None)
+            .deadline
+    }
 }
 
 /// Execute read-only Cypher without choosing a presentation format.
@@ -142,6 +169,7 @@ pub(crate) fn execute_cypher_inner(
     // A permission, not an instruction: the engine still applies its own
     // per-operator row × cost-class gate, so a small query is unaffected.
     opts.parallel = policy.parallel;
+    opts.deadline = policy.deadline();
     kglite::api::session::execute_read(kg.dir(), query, &opts).map_err(CypherRunError::engine)
 }
 

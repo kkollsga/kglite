@@ -43,6 +43,26 @@ values outside its 0–999,999,999 nanosecond field are rejected with a typed er
 `datetime()` normalises offset-bearing input to UTC; `localdatetime()` keeps
 its local wall time. Neither parsed constructor drops fractional seconds.
 
+### Timezone-aware `datetime` parameters
+
+**A timezone-aware `datetime` bound as a query parameter is converted to UTC
+and stored without a zone.** KGLite's temporal values are zoneless, so
+`datetime(2024, 3, 9, 14, 30, tzinfo=timezone(timedelta(hours=2)))` binds as
+`2024-03-09T12:30`, exactly as the Cypher `datetime()` constructor normalises
+an offset-bearing literal. Bind a naive datetime when you want the wall-clock
+value preserved.
+
+The Bolt server does **not** do this: it receives an explicitly zoned
+PackStream type and *refuses* the parameter
+(`Neo.ClientError.Request.Invalid`) rather than converting it. The two
+surfaces differ on purpose. Python's `datetime` arrives through a conversion
+the language already forces — the value has no wire representation that
+carries the zone onward — while a PackStream `DateTime` is a distinct type a
+driver expects to round-trip, and converting it would silently corrupt that
+round-trip. Making Python refuse would break working code for no gain; making
+Bolt convert would lose data. See
+{doc}`../operators/bolt-server` for the Bolt half.
+
 ## `NodeRef` vs `Node` — reference vs materialised
 
 `Value::NodeRef(u32)` and `Value::Node(Box<NodeValue>)` look similar

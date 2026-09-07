@@ -795,7 +795,7 @@ fn write_connections_detail(
 /// The legend for every `indexed=` attribute [`index_kinds`] emits. Emitted by
 /// both `<extensions>` writers, so it lives here rather than as two literals
 /// that can disagree about what the vocabulary means.
-const INDEXING_HINT: &str = "    <indexing hint=\"Properties annotated indexed='eq' are O(log N) via MATCH (n:T {prop: value}); indexed='eq,prefix' also accelerates WHERE n.prop STARTS WITH 'x' (the sorted disk-backed string index only); indexed='range' accelerates &lt;, &lt;=, &gt;, &gt;= and ORDER BY. Prefer anchored queries over unanchored scans; the default Cypher deadline is 3 minutes (override per-call with timeout_ms or globally with set_default_timeout).\"/>\n";
+const INDEXING_HINT: &str = "    <indexing hint=\"Properties annotated indexed='eq' are O(log N) via MATCH (n:T {prop: value}); indexed='eq,prefix' also accelerates WHERE n.prop STARTS WITH 'x' (the sorted disk-backed string index only); indexed='range' accelerates &lt;, &lt;=, &gt;, &gt;= and ORDER BY. Prefer anchored queries over unanchored scans; Python and the MCP server apply a default Cypher deadline of 3 minutes (override per-call with timeout_ms, or globally in Python with set_default_timeout); the CLI and the Bolt server apply none.\"/>\n";
 
 /// Write the `<extensions>` element. The timeseries, spatial, lexical,
 /// semantic, hybrid and connections sections appear only when the graph

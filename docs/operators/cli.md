@@ -65,6 +65,25 @@ column order — `RETURN 1 AS zz, 2 AS aa` yields `{"zz": 1, "aa": 2}`, the
 same order `--format csv` writes its header in. The top-level shape is a
 plain array, so `jq '.[0].name'` addresses the first row's column.
 
+### Query deadlines
+
+**The CLI applies no query deadline by default.** That is a declared
+divergence, not an oversight: the Python API and the MCP server both default
+to 180,000 ms, and the CLI does not, because `Ctrl-C` cancels a running read
+here and a batch query over a Wikidata-scale graph legitimately runs for hours.
+A silent three-minute kill would be the regression.
+
+Bound one call with `--timeout-ms`, on `query` and on `write`:
+
+```bash
+kglite query app.kgl "MATCH (a)-[*1..6]-(b) RETURN count(*) AS n" --timeout-ms 30000
+```
+
+The query exits non-zero with the engine's timeout message. `--timeout-ms 0`
+is the same as omitting the flag. `row_limit` — the Python knob that caps the
+rows a call *retains* — has no CLI spelling; write `LIMIT n` in the query,
+which is what a one-shot command wants anyway.
+
 Run a write statement and save the graph:
 
 ```bash

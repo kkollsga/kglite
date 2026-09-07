@@ -105,3 +105,19 @@ def test_local_workspace_has_one_activation_tool(mcp_contract):
     names = {tool["name"] for tool in tools}
     assert "set_root_dir" in names
     assert "repo_management" not in names
+
+
+def test_cypher_query_declares_its_deadline_and_the_default(mcp_contract):
+    """The MCP server adopts the shared 180 s default because a tool call has
+    no cancel channel and a runaway read stalls the reload gate every later
+    call goes through. A default nothing declares is one an agent cannot plan
+    around, so the number is part of the published schema, not lore."""
+    for mode, tools in mcp_contract.items():
+        cypher = next((tool for tool in tools if tool["name"] == "cypher_query"), None)
+        if cypher is None:
+            continue
+        properties = cypher["inputSchema"].get("properties", {})
+        assert "timeout_ms" in properties, f"{mode}: cypher_query must expose timeout_ms"
+        described = properties["timeout_ms"].get("description", "")
+        assert "180000" in described, f"{mode}: the default must be named, got {described!r}"
+        assert "0" in described, f"{mode}: the disable spelling must be named"

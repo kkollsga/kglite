@@ -1,62 +1,36 @@
 //! Python query policy, captured when a handle is derived from another.
+//!
+//! The policy struct itself, the resolution rule and the 180 s default live in
+//! [`kglite_core::api::session`] — the MCP server applies the same default, and
+//! a second copy of the constant is how two surfaces come to disagree about
+//! what "the default" is. What stays here is the Python-flavoured half: the
+//! `set_default_*` capture on `KnowledgeGraph` and the derived-handle
+//! constructor.
 use crate::graph::embedder::Embedder;
 use crate::graph::{CursorState, GraphLifecycle, KnowledgeGraph};
 use kglite_core::api::{CowSelection, DirGraph};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
-const DEFAULT_TIMEOUT_MS: u64 = 180_000;
-
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct QueryDefaults {
-    pub(crate) timeout_ms: Option<u64>,
-    pub(crate) max_work_units: Option<usize>,
-    pub(crate) row_limit: Option<usize>,
-}
-
-pub(crate) struct ResolvedQueryOptions {
-    pub(crate) timeout_ms: Option<u64>,
-    pub(crate) deadline: Option<Instant>,
-    pub(crate) max_work_units: Option<usize>,
-    pub(crate) row_limit: Option<usize>,
-}
-
-pub(crate) fn deadline_from(timeout_ms: Option<u64>) -> Option<Instant> {
-    timeout_ms
-        .filter(|ms| *ms != 0)
-        .map(|ms| Instant::now() + Duration::from_millis(ms))
-}
-
-impl QueryDefaults {
-    pub(crate) fn resolve(
-        self,
-        timeout_ms: Option<u64>,
-        max_work_units: Option<usize>,
-        row_limit: Option<usize>,
-    ) -> ResolvedQueryOptions {
-        let timeout_ms = timeout_ms.or(self.timeout_ms).or(Some(DEFAULT_TIMEOUT_MS));
-        ResolvedQueryOptions {
-            timeout_ms: timeout_ms.filter(|ms| *ms != 0),
-            deadline: deadline_from(timeout_ms),
-            max_work_units: max_work_units.or(self.max_work_units),
-            row_limit: row_limit.or(self.row_limit),
-        }
-    }
-
-    pub(crate) fn apply_to(self, graph: &mut KnowledgeGraph) {
-        graph.default_timeout_ms = self.timeout_ms;
-        graph.default_max_work_units = self.max_work_units;
-        graph.default_row_limit = self.row_limit;
-    }
-}
+pub(crate) use kglite_core::api::session::{deadline_from, QueryDefaults};
 
 impl KnowledgeGraph {
+    /// The captured policy this handle runs its own queries under, and the
+    /// one a derived handle inherits.
     pub(crate) fn query_defaults(&self) -> QueryDefaults {
         QueryDefaults {
             timeout_ms: self.default_timeout_ms,
             max_work_units: self.default_max_work_units,
             row_limit: self.default_row_limit,
         }
+    }
+
+    /// Write a captured policy onto a handle. The wheel keeps the three
+    /// fields flat on `KnowledgeGraph` (they back the `set_default_*`
+    /// pymethods), so this is the Python-side half of the core struct.
+    pub(crate) fn apply_query_defaults(&mut self, defaults: QueryDefaults) {
+        self.default_timeout_ms = defaults.timeout_ms;
+        self.default_max_work_units = defaults.max_work_units;
+        self.default_row_limit = defaults.row_limit;
     }
 
     /// The one constructor for a handle derived from this one. A derived
@@ -81,7 +55,7 @@ impl KnowledgeGraph {
             default_row_limit: None,
             lifecycle,
         };
-        self.query_defaults().apply_to(&mut derived);
+        derived.apply_query_defaults(self.query_defaults());
         derived
     }
 
@@ -112,25 +86,19 @@ impl KnowledgeGraph {
 mod tests {
     use super::*;
 
+    /// The resolution rule itself is tested in the core; this pins that the
+    /// wheel's capture reaches it — a `set_default_timeout(0)` must stay "no
+    /// deadline" rather than collapsing into "inherit the 180 s default".
     #[test]
-    fn literal_zero_and_optional_inheritance_have_distinct_meanings() {
+    fn a_captured_zero_timeout_survives_the_core_resolution() {
         let policy = QueryDefaults {
             timeout_ms: Some(0),
-            max_work_units: Some(1),
+            max_work_units: None,
             row_limit: Some(2),
         };
         let inherited = policy.resolve(None, None, None);
         assert!(inherited.deadline.is_none());
-        assert_eq!(inherited.max_work_units, Some(1));
         assert_eq!(inherited.row_limit, Some(2));
-        let explicit = policy.resolve(Some(5), Some(0), Some(0));
-        assert!(explicit.deadline.is_some());
-        assert_eq!(explicit.max_work_units, Some(0));
-        assert_eq!(explicit.row_limit, Some(0));
-        assert!(QueryDefaults::default()
-            .resolve(None, None, None)
-            .deadline
-            .is_some());
         assert!(deadline_from(Some(0)).is_none());
     }
 }

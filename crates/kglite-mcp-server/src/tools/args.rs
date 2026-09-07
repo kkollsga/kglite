@@ -16,6 +16,13 @@ pub(crate) struct ReadCypherArgs {
     /// so it can never be read as Cypher syntax.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Deadline for this query, in milliseconds. Omit for the server default
+    /// of 180000 (three minutes); pass `0` to run without a deadline. The
+    /// default exists because a tool call has no cancel channel and one
+    /// runaway read blocks every later call on this server, so a query that
+    /// needs longer must say so explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
@@ -31,6 +38,13 @@ pub(crate) struct CypherArgs {
     /// so it can never be read as Cypher syntax.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Deadline for this query, in milliseconds. Omit for the server default
+    /// of 180000 (three minutes); pass `0` to run without a deadline. The
+    /// default exists because a tool call has no cancel channel and one
+    /// runaway read blocks every later call on this server, so a query that
+    /// needs longer must say so explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
     /// Role-scoped write whitelist (write-enabled servers only) — so an agent
     /// can plan in its own types (`["Plan","Task"]`) without touching
     /// research-owned ones. When set, every **node** write (`CREATE`, `MERGE`,

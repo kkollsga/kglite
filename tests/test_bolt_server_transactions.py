@@ -364,6 +364,27 @@ def test_auto_commit_mutation_is_refused_as_a_client_error(bolt_server):
     assert "explicit transaction" in str(error)
 
 
+def test_a_zoned_datetime_parameter_is_refused_with_its_remedy(bolt_server):
+    """The declared divergence from Python, pinned from the wire side. Python
+    *converts* an aware datetime to naive UTC; this server *refuses* a zoned
+    PackStream temporal, because it is a distinct type the driver expects to
+    round-trip and dropping the zone would silently corrupt that. A refusal is
+    only useful if it names the way through, so the message must keep naming
+    the zoneless types to send instead."""
+    import datetime
+
+    aware = datetime.datetime(2024, 3, 9, 14, 30, tzinfo=datetime.timezone(datetime.timedelta(hours=2)))
+    with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
+        with driver.session() as session:
+            with pytest.raises(neo4j.exceptions.ClientError) as excinfo:
+                session.run("RETURN $v AS v", v=aware).consume()
+    error = excinfo.value
+    assert error.code == "Neo.ClientError.Request.Invalid"
+    message = str(error)
+    assert "zoneless" in message
+    assert "LocalDateTime" in message, "the refusal must name what to send instead"
+
+
 def test_multi_statement_in_one_run_pinned_behavior(bolt_server):
     """Multiple statements in one RUN — kglite's parser handles one
     statement per RUN, so `CREATE ...; CREATE ...` either parses only

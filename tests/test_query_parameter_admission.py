@@ -120,3 +120,27 @@ def test_declared_ingestion_keeps_tolerant_unsupported_value_policy():
     value = graph.cypher("MATCH(n:N) RETURN n.value AS value").to_list()[0]["value"]
     assert isinstance(value, str)
     assert value.startswith("<object object at 0x")
+
+
+def test_a_timezone_aware_datetime_parameter_binds_as_naive_utc():
+    """The declared conversion, pinned. KGLite's temporal values are zoneless,
+    so a bound aware datetime normalises to UTC and loses its zone — the same
+    rule the Cypher `datetime()` constructor already applies to an
+    offset-bearing literal. This is Python's answer *only*: the Bolt server
+    refuses the same parameter (`Neo.ClientError.Request.Invalid`) rather than
+    converting it, because a PackStream zoned type is one a driver expects to
+    round-trip. Both behaviours are correct for their surface, and the
+    divergence is declared in `docs/python/value-projection.md` and
+    `docs/operators/bolt-server.md` rather than unified."""
+    import datetime
+
+    aware = datetime.datetime(2024, 3, 9, 14, 30, 5, 123456, tzinfo=datetime.timezone(datetime.timedelta(hours=2)))
+    graph = kglite.KnowledgeGraph()
+    bound = graph.cypher("RETURN $v AS v", params={"v": aware}).to_list()[0]["v"]
+    assert bound == datetime.datetime(2024, 3, 9, 12, 30, 5, 123456)
+    assert bound.tzinfo is None, "a bound temporal must come back zoneless"
+
+    # A naive datetime keeps its wall-clock value — the documented way to
+    # preserve one.
+    naive = datetime.datetime(2024, 3, 9, 14, 30, 5, 123456)
+    assert graph.cypher("RETURN $v AS v", params={"v": naive}).to_list()[0]["v"] == naive

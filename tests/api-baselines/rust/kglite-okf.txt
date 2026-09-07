@@ -2196,6 +2196,24 @@ pub kglite::api::session::ExecuteOutcome::explain: bool
 pub kglite::api::session::ExecuteOutcome::is_mutation: bool
 pub kglite::api::session::ExecuteOutcome::output_format: kglite::api::cypher::OutputFormat
 pub kglite::api::session::ExecuteOutcome::result: kglite::api::cypher::CypherResult
+pub struct kglite::api::session::QueryDefaults
+pub kglite::api::session::QueryDefaults::max_work_units: core::option::Option<usize>
+pub kglite::api::session::QueryDefaults::row_limit: core::option::Option<usize>
+pub kglite::api::session::QueryDefaults::timeout_ms: core::option::Option<u64>
+impl kglite::api::session::QueryDefaults
+pub fn kglite::api::session::QueryDefaults::resolve(self, timeout_ms: core::option::Option<u64>, max_work_units: core::option::Option<usize>, row_limit: core::option::Option<usize>) -> kglite::api::session::ResolvedQueryOptions
+impl core::clone::Clone for kglite::api::session::QueryDefaults
+pub fn kglite::api::session::QueryDefaults::clone(&self) -> kglite::api::session::QueryDefaults
+impl core::default::Default for kglite::api::session::QueryDefaults
+pub fn kglite::api::session::QueryDefaults::default() -> kglite::api::session::QueryDefaults
+impl core::fmt::Debug for kglite::api::session::QueryDefaults
+pub fn kglite::api::session::QueryDefaults::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for kglite::api::session::QueryDefaults
+pub struct kglite::api::session::ResolvedQueryOptions
+pub kglite::api::session::ResolvedQueryOptions::deadline: core::option::Option<std::time::Instant>
+pub kglite::api::session::ResolvedQueryOptions::max_work_units: core::option::Option<usize>
+pub kglite::api::session::ResolvedQueryOptions::row_limit: core::option::Option<usize>
+pub kglite::api::session::ResolvedQueryOptions::timeout_ms: core::option::Option<u64>
 pub struct kglite::api::session::Session
 impl kglite::api::session::Session
 pub fn kglite::api::session::Session::begin(&self) -> kglite::api::session::Transaction
@@ -2222,7 +2240,9 @@ pub fn kglite::api::session::Transaction::has_writes(&self) -> bool
 pub fn kglite::api::session::Transaction::is_read_only(&self) -> bool
 pub fn kglite::api::session::Transaction::take_working(self) -> (core::option::Option<kglite::api::DirGraph>, u64)
 pub fn kglite::api::session::Transaction::working_mut(&mut self) -> core::result::Result<&mut kglite::api::DirGraph, kglite::error::KgError>
+pub const kglite::api::session::DEFAULT_TIMEOUT_MS: u64
 pub const kglite::api::session::QUERY_THREAD_STACK_SIZE: usize
+pub fn kglite::api::session::deadline_from(timeout_ms: core::option::Option<u64>) -> core::option::Option<std::time::Instant>
 pub fn kglite::api::session::execute_mut(graph: &mut kglite::api::DirGraph, query: &str, opts: &kglite::api::session::ExecuteOptions<'_>) -> core::result::Result<kglite::api::session::ExecuteOutcome, kglite::error::KgError>
 pub fn kglite::api::session::execute_read(graph: &kglite::api::DirGraph, query: &str, opts: &kglite::api::session::ExecuteOptions<'_>) -> core::result::Result<kglite::api::session::ExecuteOutcome, kglite::error::KgError>
 pub fn kglite::api::session::resolve_noderef_value<'v>(graph: &kglite::api::storage::GraphBackend, value: &'v kglite::datatypes::values::Value) -> alloc::borrow::Cow<'v, kglite::datatypes::values::Value>

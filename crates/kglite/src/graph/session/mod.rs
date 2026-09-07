@@ -55,6 +55,9 @@ pub(crate) use self::noderefs::{
     property_value_needs_snapshot, snapshot_dataframe_properties, snapshot_property_values,
 };
 pub use self::noderefs::{resolve_noderef_value, resolve_noderefs};
+pub use self::query_defaults::{
+    deadline_from, QueryDefaults, ResolvedQueryOptions, DEFAULT_TIMEOUT_MS,
+};
 pub use self::transaction::{CommitOutcome, Session, Transaction};
 
 #[cfg(test)]
@@ -70,6 +73,7 @@ pub(crate) mod noderefs;
 mod param_presence_tests;
 #[cfg(test)]
 mod plan_cache_cost_tests;
+pub(crate) mod query_defaults;
 #[cfg(test)]
 mod query_warnings_tests;
 #[cfg(test)]

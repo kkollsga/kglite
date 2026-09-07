@@ -8,7 +8,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use kglite::api::param::kglite_value_to_json;
 use kglite::api::session::{
-    execute_mut, execute_read, CsvImportPolicy, ExecuteOptions, ExecuteOutcome,
+    deadline_from, execute_mut, execute_read, CsvImportPolicy, ExecuteOptions, ExecuteOutcome,
 };
 use kglite::api::{make_dir_graph_mut, DirGraph, Value};
 
@@ -24,6 +24,16 @@ pub struct QueryOptions {
     /// Opt in to the parallel Cypher runtime (`--parallel`). Off by default;
     /// a hint the engine's own runtime gate may decline.
     pub parallel: bool,
+    /// Deadline for this statement, in milliseconds (`--timeout-ms`).
+    ///
+    /// `None` is **no deadline**, and that is the CLI's declared default — not
+    /// an oversight, and deliberately unlike Python and the MCP server, which
+    /// adopt `kglite::api::session::DEFAULT_TIMEOUT_MS`. A human at a terminal
+    /// has Ctrl-C (reads and `CALL` are interruptible), and a batch query over
+    /// a Wikidata-scale graph legitimately runs for hours, so a silent
+    /// three-minute kill would be a regression. `Some(0)` is the same as
+    /// `None`.
+    pub timeout_ms: Option<u64>,
 }
 
 /// Execute one Cypher statement through the mutable session path.
@@ -37,6 +47,7 @@ pub fn execute(
     options: &QueryOptions,
 ) -> Result<ExecuteOutcome> {
     let mut opts = ExecuteOptions::new(params).with_csv_import(CsvImportPolicy::LocalFilesystem);
+    opts.deadline = deadline_from(options.timeout_ms);
     opts.cancel = options.cancel;
     opts.write_scope = options.write_scope.as_ref();
     opts.git_sha = options.git_sha.as_deref();
@@ -60,9 +71,10 @@ pub fn execute_readonly(
     params: &HashMap<String, Value>,
     options: &QueryOptions,
 ) -> Result<ExecuteOutcome> {
-    let opts = ExecuteOptions::new(params)
+    let mut opts = ExecuteOptions::new(params)
         .with_csv_import(CsvImportPolicy::LocalFilesystem)
         .with_parallel(options.parallel);
+    opts.deadline = deadline_from(options.timeout_ms);
     Ok(execute_read(graph, query, &opts)?)
 }
 

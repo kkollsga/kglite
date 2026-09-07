@@ -343,3 +343,36 @@ def test_readme_links_every_python_guide() -> None:
     assert guides, "no Python guides found on disk"
     missing = [stem for stem in guides if f"python/guides/{stem}.html" not in readme]
     assert not missing, f"guides with no README link: {missing}"
+
+
+def test_every_query_surface_declares_its_own_deadline_default() -> None:
+    """A default nothing says out loud is one a caller cannot plan around, and
+    four surfaces disagreeing about it silently is worse than any one of the
+    four answers. Two adopt the shared 180,000 ms constant, two declare that
+    they apply none — and each page says which, so a reader of one page is not
+    left extrapolating from another surface's behaviour.
+
+    This is a *declaration* contract, not a value contract: the code is free to
+    change what the CLI does, as long as the CLI's page still says so."""
+    surfaces = {
+        REPO_ROOT / "docs/operators/mcp-server.md": ("180,000 ms", "timeout_ms"),
+        REPO_ROOT / "docs/operators/cli.md": ("no query deadline by default", "--timeout-ms"),
+        REPO_ROOT / "docs/operators/bolt-server.md": ("no query deadline of its own", "tx_timeout"),
+        REPO_ROOT / "CYPHER.md": ("per-surface, and each surface declares its own", "180,000 ms"),
+    }
+    for path, needles in surfaces.items():
+        text = path.read_text(encoding="utf-8")
+        for needle in needles:
+            assert needle in text, f"{path.name} must declare its deadline: missing {needle!r}"
+
+
+def test_both_sides_of_the_aware_datetime_divergence_are_documented() -> None:
+    """Python converts an aware `datetime` to naive UTC; Bolt refuses one. Both
+    are right for their surface, so neither page may describe only its own half
+    — a reader who finds one behaviour must be told the other exists."""
+    python_side = (REPO_ROOT / "docs/python/value-projection.md").read_text(encoding="utf-8")
+    bolt_side = (REPO_ROOT / "docs/operators/bolt-server.md").read_text(encoding="utf-8")
+    assert "zoneless" in python_side and "Bolt server" in python_side
+    assert "refuses" in python_side, "the Python page must name Bolt's refusal"
+    assert "zoneless" in bolt_side and "naive UTC" in bolt_side
+    assert "value-projection" in bolt_side, "the Bolt page must link the Python half"

@@ -113,6 +113,53 @@ def test_query_subcommand_json(tmp_path):
     assert rows == [{"name": "Alice", "age": 30}]
 
 
+def test_query_subcommand_timeout_ms_bounds_a_runaway_query(tmp_path):
+    """`--timeout-ms` is the CLI's only deadline. There is deliberately no
+    default (see `docs/operators/cli.md`): Ctrl-C is the interactive cancel and
+    a batch query over a very large graph may legitimately run for hours, so a
+    silent three-minute kill would be a regression. But a caller who *wants* a
+    bound had no way to ask for one."""
+    import kglite
+
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (:Person {name: 'Alice'})")
+    p = tmp_path / "g.kgl"
+    g.save(str(p))
+
+    proc = _run_args_proc(
+        "query",
+        str(p),
+        "UNWIND range(1, 400000) AS a UNWIND range(1, 400000) AS b RETURN count(a + b) AS n",
+        "--timeout-ms",
+        "50",
+    )
+    assert proc.returncode != 0
+    assert "timed out" in (proc.stdout + proc.stderr)
+
+
+def test_query_subcommand_has_no_deadline_without_the_flag(tmp_path):
+    """The declared absence, asserted rather than assumed: the same query the
+    test above kills at 50 ms is still running well past the 180 s another
+    surface would have stopped it at — so this asserts the *flag's* absence
+    means no bound, via a `--timeout-ms 0` control and the help text, without
+    waiting three minutes to prove it."""
+    import kglite
+
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (:Person {name: 'Alice'})")
+    p = tmp_path / "g.kgl"
+    g.save(str(p))
+
+    for argv in ([], ["--timeout-ms", "0"]):
+        proc = _run_args_proc("query", str(p), "MATCH (p:Person) RETURN p.name AS name", *argv)
+        assert proc.returncode == 0, proc.stderr
+        assert "Alice" in proc.stdout
+
+    help_text = _run_args("query", "--help")
+    assert "--timeout-ms" in help_text
+    assert "Omitted means no deadline" in help_text, help_text
+
+
 def test_write_subcommand_saves_graph(tmp_path):
     import kglite
 

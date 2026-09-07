@@ -112,6 +112,12 @@ enum Command {
         /// engine's runtime size gate, still run sequentially.
         #[arg(long)]
         parallel: bool,
+        /// Deadline for this statement, in milliseconds. Omitted means no
+        /// deadline, which is this CLI's declared default: Ctrl-C is the
+        /// interactive cancel, and a batch query over a very large graph may
+        /// legitimately run for hours. 0 is the same as omitting it.
+        #[arg(long)]
+        timeout_ms: Option<u64>,
     },
     /// Run a write-capable Cypher statement against a `.kgl` graph.
     Write {
@@ -136,6 +142,12 @@ enum Command {
         /// Actor id to stamp on auto_timestamp types.
         #[arg(long)]
         modified_by: Option<String>,
+        /// Deadline for this statement, in milliseconds. Omitted means no
+        /// deadline, which is this CLI's declared default: Ctrl-C is the
+        /// interactive cancel, and a batch query over a very large graph may
+        /// legitimately run for hours. 0 is the same as omitting it.
+        #[arg(long)]
+        timeout_ms: Option<u64>,
     },
     /// Print the dependency frontier from `CALL ready_set(...)`.
     ReadySet {
@@ -302,9 +314,10 @@ where
         query,
         format,
         parallel,
+        timeout_ms,
     }) = &cli.command
     {
-        run_query(graph, query, (*format).into(), *parallel)?;
+        run_query(graph, query, (*format).into(), *parallel, *timeout_ms)?;
         return Ok(());
     }
     if let Some(Command::Write {
@@ -315,6 +328,7 @@ where
         write_scope,
         git_sha,
         modified_by,
+        timeout_ms,
     }) = &cli.command
     {
         run_write(
@@ -322,9 +336,13 @@ where
             query,
             (*format).into(),
             *save,
-            write_scope.as_deref(),
-            git_sha.clone(),
-            modified_by.clone(),
+            exec::QueryOptions {
+                write_scope: exec::parse_write_scope(write_scope.as_deref()),
+                git_sha: git_sha.clone(),
+                modified_by: modified_by.clone(),
+                timeout_ms: *timeout_ms,
+                ..exec::QueryOptions::default()
+            },
         )?;
         return Ok(());
     }
@@ -479,7 +497,13 @@ fn run_export_sqlite(graph_path: &Path, output: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-fn run_query(path: &Path, query: &str, mode: Mode, parallel: bool) -> Result<()> {
+fn run_query(
+    path: &Path,
+    query: &str,
+    mode: Mode,
+    parallel: bool,
+    timeout_ms: Option<u64>,
+) -> Result<()> {
     let graph = load_graph(path)?;
     let (_, is_mutation) = kglite::api::cypher::parse_with_mutation_check(query)
         .map_err(|e| anyhow::anyhow!("Cypher parse error: {e}"))?;
@@ -489,6 +513,7 @@ fn run_query(path: &Path, query: &str, mode: Mode, parallel: bool) -> Result<()>
     let params: HashMap<String, Value> = HashMap::new();
     let options = QueryOptions {
         parallel,
+        timeout_ms,
         ..QueryOptions::default()
     };
     let outcome = exec::execute_readonly(&graph, query, &params, &options)
@@ -501,14 +526,16 @@ fn run_query(path: &Path, query: &str, mode: Mode, parallel: bool) -> Result<()>
     Ok(())
 }
 
+/// `options` rather than four more positional arguments: the write knobs
+/// (scope, provenance, deadline) are exactly the `QueryOptions` the executor
+/// already takes, so threading them one by one only creates a place to drop
+/// one silently.
 fn run_write(
     path: &Path,
     query: &str,
     mode: Mode,
     persist: bool,
-    write_scope: Option<&str>,
-    git_sha: Option<String>,
-    modified_by: Option<String>,
+    options: exec::QueryOptions,
 ) -> Result<()> {
     let (mut graph, mut ownership) = if persist {
         let (graph, ownership) = open_owned(path, Some(StorageMode::Memory))?;
@@ -520,12 +547,6 @@ fn run_write(
         (graph, None)
     };
     let params: HashMap<String, Value> = HashMap::new();
-    let options = QueryOptions {
-        write_scope: exec::parse_write_scope(write_scope),
-        git_sha,
-        modified_by,
-        ..QueryOptions::default()
-    };
     let outcome = exec::execute(&mut graph, query, &params, &options)
         .with_context(|| "Cypher execution failed")?;
     if let Some(ownership) = ownership.as_mut() {
@@ -561,7 +582,7 @@ fn run_ready_set(
          ORDER BY dependency_count, id",
         config.join(", ")
     );
-    run_query(path, &query, mode, false)
+    run_query(path, &query, mode, false, None)
 }
 
 struct DescribeOptions {

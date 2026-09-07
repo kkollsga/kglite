@@ -11,6 +11,15 @@ before upgrading.
 
 ### Fixed
 
+- **The MCP server now applies a query deadline.** It had none of any kind, so
+  a runaway `cypher_query` held the active graph's read lock — which stalls the
+  single-flight rebuild gate every later tool call enters — and an agent has no
+  cancel channel to undo it with. One bad query took the whole server with it.
+  Every route that reaches the engine (the built-in tool, manifest
+  `tools[].cypher` templates, recipe queries) now runs under the same
+  180,000 ms default the Python API applies, shared as one constant in the
+  engine rather than re-typed per surface.
+
 - `describe()` no longer tells a Python caller to call `graph_overview(...)`.
   Every "call this for more" hint in the rendered document was written for the
   MCP tool, so `KnowledgeGraph.describe()` pointed at a method the class does
@@ -236,6 +245,39 @@ before upgrading.
   rounded bound the recipe author did not write.
 
 ### Changed
+
+- **Query deadlines are declared per surface, and two surfaces gained a knob.**
+  Only the Python API had a default or a way to set one; the divergence was
+  real but undocumented, so a caller could not tell an absent deadline from an
+  unmentioned one.
+  - MCP `cypher_query` takes an optional `timeout_ms` argument (`0` disables
+    the deadline), and adopts the 180,000 ms default — see Fixed, above.
+  - `kglite query` and `kglite write` take `--timeout-ms`. The CLI still
+    applies **no** default, and now says so: `Ctrl-C` is the interactive
+    cancel, and a batch query over a Wikidata-scale graph legitimately runs for
+    hours, so a silent three-minute kill would be the regression.
+  - The Bolt server is unchanged and declared — "absent `tx_timeout` means no
+    timeout" is the Neo4j wire contract.
+  - `row_limit` stays Python-only, and `docs/operators/{mcp-server,cli}.md`
+    now say why (on MCP it would silently truncate a `FORMAT CSV` export,
+    which is the opposite of what that route guarantees).
+  - The engine's timeout messages named `cypher(timeout_ms=…)` /
+    `kg.set_default_timeout(ms)` — Python spellings, printed to CLI, MCP, Bolt
+    and C-ABI callers who cannot type either. They now name each surface's own
+    knob.
+  - **API:** `kglite::api::session` gains `QueryDefaults`,
+    `ResolvedQueryOptions`, `deadline_from` and `DEFAULT_TIMEOUT_MS`, lifted
+    out of the Python wrapper so one constant serves every binding.
+
+- **Timezone-aware `datetime` parameters: the divergence is now declared, not
+  unified.** Python converts one to naive UTC (KGLite's temporal values are
+  zoneless, and its own Cypher `datetime()` constructor already normalises an
+  offset-bearing literal the same way); the Bolt server refuses one, because a
+  zoned PackStream temporal is a type a driver expects to round-trip and
+  dropping the zone would silently corrupt that. Neither behaviour changed —
+  both are now stated in `kglite/__init__.pyi`,
+  `docs/python/value-projection.md` and `docs/operators/bolt-server.md`, each
+  page naming the other surface's answer, and both are pinned by tests.
 
 - **A client mistake is now published as a client error, with one class per
   cause.** Six exception classes changed, all of them narrowing a Python-side

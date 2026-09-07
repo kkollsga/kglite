@@ -613,6 +613,43 @@ class TestGraphMode:
         finally:
             client.shutdown()
 
+    def test_cypher_query_honours_an_explicit_deadline(self, graph_fixture: Path):
+        """A runaway query must end by itself. The MCP server had no deadline
+        of any kind: a query that never finished held the active graph's read
+        lock, which stalls the single-flight rebuild gate every later tool call
+        enters, so one bad query took the whole server with it — and an agent
+        has no cancel channel to undo it with."""
+        client = _spawn(["--graph", str(graph_fixture)])
+        try:
+            r = client.call_tool(
+                "cypher_query",
+                {
+                    # A cartesian blow-up over the fixture: cheap to write,
+                    # far more than 50 ms to finish.
+                    "query": ("UNWIND range(1, 400000) AS a UNWIND range(1, 400000) AS b RETURN count(a + b) AS n"),
+                    "timeout_ms": 50,
+                },
+            )
+            text = _text_content(r)
+            assert "timed out" in text, text
+        finally:
+            client.shutdown()
+
+    def test_an_explicit_zero_runs_without_a_deadline(self, graph_fixture: Path):
+        """`0` is the escape hatch, and it has to still mean "no deadline"
+        after the server acquired one — otherwise the default is unopt-out-able
+        for the long analytical query it exists to bound."""
+        client = _spawn(["--graph", str(graph_fixture)])
+        try:
+            r = client.call_tool(
+                "cypher_query",
+                {"query": "MATCH (p:Person) RETURN count(p) AS n", "timeout_ms": 0},
+            )
+            assert not _is_error(r), _text_content(r)
+            assert "4" in _text_content(r)
+        finally:
+            client.shutdown()
+
     def test_cypher_query_traversal(self, graph_fixture: Path):
         client = _spawn(["--graph", str(graph_fixture)])
         try:
@@ -1951,6 +1988,12 @@ class TestYamlManifest:
         assert listing["structuredContent"]["recipes"][0]["query_count"] == 1
         elapsed = result["structuredContent"]["result"]["diagnostics"]["elapsed_ms"]
         assert isinstance(elapsed, int) and elapsed >= 0
+        # The MCP server adopts the shared 180 s default, so every route
+        # through `execute_cypher_inner` — recipes included — reports the
+        # deadline it actually ran under. It is derived from the *remaining*
+        # time, so it lands just under the budget rather than exactly on it.
+        deadline_ms = result["structuredContent"]["result"]["diagnostics"]["timeout_ms"]
+        assert 175_000 <= deadline_ms <= 180_000, deadline_ms
         assert result["structuredContent"]["result"] == {
             "columns": ["people"],
             "rows": [[4]],
@@ -1959,7 +2002,7 @@ class TestYamlManifest:
                 "elapsed_ms": elapsed,
                 "retrieval": [],
                 "row_limit": None,
-                "timeout_ms": None,
+                "timeout_ms": deadline_ms,
                 "total_rows": None,
                 "warnings": [],
             },

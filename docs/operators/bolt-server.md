@@ -113,10 +113,27 @@ server or a disk-mode graph answers with, where no rewrite of the request
 helps. KGLite typed errors map to Neo4j status codes for syntax, schema,
 timeout, access-mode, conflict, and execution failures.
 
-KGLite does not yet implement Bolt transaction timeouts. A top-level
+KGLite does not yet implement Bolt transaction timeouts, and this server
+applies **no query deadline of its own** — a declared divergence from the
+Python API and the MCP server, which both apply the shared 180,000 ms default.
+"Absent `tx_timeout` means no timeout" is the Neo4j wire contract, and a driver
+that wants a bound sends one. A top-level
 `tx_timeout` of zero, NULL, or absent means no timeout; any nonzero value is
-rejected before RUN or BEGIN changes state. A `tx_timeout` key nested inside
-`tx_metadata` remains ordinary user metadata.
+rejected before RUN or BEGIN changes state (`Neo.ClientError.Request.Invalid`).
+A `tx_timeout` key nested inside `tx_metadata` remains ordinary user metadata.
+
+## Timezone-aware datetime parameters
+
+A zoned PackStream temporal (`DateTime`, `DateTimeZoneId`, `Time`) is
+**refused** with `Neo.ClientError.Request.Invalid`: KGLite's temporal values
+are zoneless, so there is no lossless translation, and silently dropping the
+zone would corrupt a driver's round-trip. Send `LocalDateTime`, `LocalTime` or
+`Date` instead.
+
+The Python API deliberately differs — it *converts* an aware `datetime` to
+naive UTC, because that is what its own Cypher `datetime()` constructor already
+does to an offset-bearing literal and there is no wire type on that side to
+corrupt. See {doc}`../python/value-projection` for the Python half.
 
 The supported behavior is locked by the standing Bolt correctness and
 differential suites. Avoid relying on an exact test/query count or a particular
