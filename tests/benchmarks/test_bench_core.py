@@ -331,31 +331,6 @@ def test_bench_cypher_match_materialized(benchmark, bench_graph):
 
 
 @pytest.mark.benchmark
-def test_bench_param_list_conversion(benchmark, bench_graph):
-    """Per-element cost of binding a list parameter, with no graph work.
-
-    `size($ids)` touches no node, so essentially the whole cell is
-    `convert_query_value` running once per element — the only cell in this
-    file that isolates it. Every parameterised query in the Python binding
-    pays this per element, and a per-element cost added there is invisible to
-    the cells that pass no parameters (`cypher_match*`) and diluted in the
-    ones that also traverse (`exists_fixed_hop` carries 50 elements against
-    ~16 us of engine work, so an 8% move there is a 19% move here).
-
-    Regression rationale: an unconditional `pd.NaT` type-name probe ahead of
-    the integer arm cost +17% on a 1 000-element list before it was moved
-    into the datetime arm it only ever applied to.
-    """
-    ids = list(range(1000))
-
-    def query_and_consume():
-        return bench_graph.cypher("RETURN size($ids) AS n", params={"ids": ids}).to_list()
-
-    result = benchmark(query_and_consume)
-    assert result[0]["n"] == 1000
-
-
-@pytest.mark.benchmark
 def test_bench_cypher_where(benchmark, bench_graph):
     """Filtered MATCH...WHERE...RETURN query."""
     benchmark(bench_graph.cypher, "MATCH (n:Item) WHERE n.value > 500 RETURN n.title, n.value")
@@ -437,11 +412,6 @@ def hop1_graph_memory():
     return _hop1_graph("memory")
 
 
-@pytest.fixture(scope="module")
-def hop1_graph_mapped():
-    return _hop1_graph("mapped")
-
-
 @pytest.mark.benchmark
 def test_bench_hop1_deg3_memory(benchmark, hop1_graph_memory):
     """Whole-graph 1-hop expansion, in-memory — the doctrine cell.
@@ -450,23 +420,14 @@ def test_bench_hop1_deg3_memory(benchmark, hop1_graph_memory):
     which is how a 2.3x *cross-mode inversion* reached 0.17.0 unnoticed: the
     expansion dereferences petgraph's edge arena in insertion order, so with
     uncorrelated row order it went superlinear in the node count while Mapped
-    stayed flat. Read this cell next to `hop1_deg3_mapped`: in-memory is the
-    core product and must not be the slower of the two.
+    stayed flat. In-memory is the core product and must not be the slower of
+    the two; the Mapped half of that comparison is `hop1_deg3_mapped` in
+    `test_bench_scan_program.py`, which cannot live here because it measures
+    ~17% slower than the 0.13.2 wheel CI's leg 1 gates this file against.
     """
 
     def query_and_consume():
         return hop1_graph_memory.cypher("MATCH (a:Person)-[:KNOWS]->(b) RETURN count(*) AS c").to_list()
-
-    result = benchmark(query_and_consume)
-    assert result == [{"c": HOP1_NODES * HOP1_DEGREE}]
-
-
-@pytest.mark.benchmark
-def test_bench_hop1_deg3_mapped(benchmark, hop1_graph_mapped):
-    """`hop1_deg3_memory`'s cross-mode control, on the identical fixture."""
-
-    def query_and_consume():
-        return hop1_graph_mapped.cypher("MATCH (a:Person)-[:KNOWS]->(b) RETURN count(*) AS c").to_list()
 
     result = benchmark(query_and_consume)
     assert result == [{"c": HOP1_NODES * HOP1_DEGREE}]

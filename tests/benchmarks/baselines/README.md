@@ -40,3 +40,12 @@ scaled estimates, not Linux measurements. Acceptance preserves that secondary
 check; it does not convert estimates into observations. The primary same-runner
 CI comparison remains authoritative. `promote_linux_benchmark.py` validates fresh
 Linux wheel provenance and workload coverage before promoting replacement data.
+
+A cell belongs in `test_bench_core.py` only if it runs *unmodified* under the published 0.13.2
+reference wheel AND the current build is within 20% of it: CI's perf gate copies that one file
+out of the checkout, benchmarks 0.13.2 with it on the same runner, and gates every cell in it at
+20% (leg 1) plus 30% against `current.linux.json` (leg 2), both with `--require-exact-set`. A cell
+that fails either half — a deliberate slowdown since 0.13.2, or a margin near the threshold —
+goes in a non-core module such as `test_bench_scan_program.py`, and a core cell added mid-cycle
+needs a new versioned capture on both platforms before the gate can pass. Skipping this cost a
+full CI round on 2026-09-08.

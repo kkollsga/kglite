@@ -30,16 +30,22 @@
       "sha256": "4833975b791052fc598cab0fcccec75a503b8e77d54ad14a0a670ca27732751b",
       "status": "accepted"
     },
-    "current.json": {
-      "evidence": "Two agreeing release captures; all minima within 4%, no heavy tails; intentional D2 disk reopen +278.5%/+292.2% retained; other cells below 20%, with load_kgl and fixed-hop watch-band. See dev-docs/temp/contract-implementation/release-0.17.0/benchmark-qualification.md.",
+    "0_17_0_cells.json": {
+      "evidence": "0_17_0.json plus one cell: the harness gained test_bench_hop1_deg3_memory mid-cycle (859d874d, deep-scan program), so the accepted 0.17.0 release capture no longer covers the tracked cell set. Its row is the release-shaped capture of this tree at 859d874d plus the NaT fix (.bench-current.json, 39 cells, dirty tree, min 9.692 ms), carried over unchanged apart from the per-iteration data slimming refresh_release_constants.py applies to every baseline. Every other row is byte-identical to 0_17_0.json, which stays the Darwin anchor reference.",
       "platform": "Darwin/arm64",
-      "sha256": "4833975b791052fc598cab0fcccec75a503b8e77d54ad14a0a670ca27732751b",
+      "sha256": "f2659cf8bdc83d314f9a63f3915a04072adab630a337c41b36fafcdeb8478555",
+      "status": "accepted"
+    },
+    "current.json": {
+      "evidence": "0_17_0.json plus one cell: the harness gained test_bench_hop1_deg3_memory mid-cycle (859d874d, deep-scan program), so the accepted 0.17.0 release capture no longer covers the tracked cell set. Its row is the release-shaped capture of this tree at 859d874d plus the NaT fix (.bench-current.json, 39 cells, dirty tree, min 9.692 ms), carried over unchanged apart from the per-iteration data slimming refresh_release_constants.py applies to every baseline. Every other row is byte-identical to 0_17_0.json, which stays the Darwin anchor reference.",
+      "platform": "Darwin/arm64",
+      "sha256": "f2659cf8bdc83d314f9a63f3915a04072adab630a337c41b36fafcdeb8478555",
       "status": "accepted"
     },
     "current.linux.json": {
-      "evidence": "Preserved 36-cell CI secondary reference as of 0.16.23. Released 0.13.2 wheel provenance and cells_added caveats remain intact: 11 cells are provisional scaled estimates, not Linux measurements. The primary same-runner CI comparison remains authoritative for those cells.",
+      "evidence": "reference_0_16_23.linux.json plus one cell: the harness gained test_bench_hop1_deg3_memory mid-cycle (859d874d, deep-scan program) and CI leg 2 requires an exact cell-set match. The new row is a PROVISIONAL scaled estimate, not a Linux measurement \u2014 kglite 0.13.2 run unmodified on macOS/M4 2026-09-08 (15.405 ms min, the slower of two agreeing runs) scaled 3.9x, per the cells_added note and the precedent of the eleven existing estimated rows. Acceptance preserves the secondary check; it does not convert an estimate into an observation.",
       "platform": "Linux/x86_64",
-      "sha256": "808b62244434d859f9a4db7570dde2bca1a9ea9920c463321cbc27cb0a8f699a",
+      "sha256": "8b894493a8a352901e1dadbcf78ee9407b06b83b82b449d69fbd1e03935dfb43",
       "status": "accepted"
     },
     "reference_0_16_23.linux.json": {
@@ -47,11 +53,17 @@
       "platform": "Linux/x86_64",
       "sha256": "808b62244434d859f9a4db7570dde2bca1a9ea9920c463321cbc27cb0a8f699a",
       "status": "accepted"
+    },
+    "reference_0_17_0_cells.linux.json": {
+      "evidence": "reference_0_16_23.linux.json plus one cell: the harness gained test_bench_hop1_deg3_memory mid-cycle (859d874d, deep-scan program) and CI leg 2 requires an exact cell-set match. The new row is a PROVISIONAL scaled estimate, not a Linux measurement \u2014 kglite 0.13.2 run unmodified on macOS/M4 2026-09-08 (15.405 ms min, the slower of two agreeing runs) scaled 3.9x, per the cells_added note and the precedent of the eleven existing estimated rows. Acceptance preserves the secondary check; it does not convert an estimate into an observation.",
+      "platform": "Linux/x86_64",
+      "sha256": "8b894493a8a352901e1dadbcf78ee9407b06b83b82b449d69fbd1e03935dfb43",
+      "status": "accepted"
     }
   },
   "references": {
     "Darwin/arm64": "0_17_0.json",
-    "Linux/x86_64": "reference_0_16_23.linux.json"
+    "Linux/x86_64": "reference_0_17_0_cells.linux.json"
   },
   "schema_version": 1
 }
