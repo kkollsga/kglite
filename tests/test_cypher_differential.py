@@ -784,6 +784,71 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) WITH p MATCH (p)-[:KNOWS]->(q:Person) RETURN p.name AS p, q.name AS q",
         None,
     ),
+    # ── hoist_with_where ──
+    # A `WITH … WHERE p` carries its predicate inside the WITH, where the
+    # pushdown passes never looked; the hoist lifts it into the ordinary
+    # `(Match, Where, With)` shape. One trigger per rewrite arm, one entry
+    # per bail (H1–H7), so the corpus exercises the whole decision.
+    (
+        "with_where_hoist",
+        "social_graph",
+        "MATCH (p:Person) WITH p WHERE p.age > 30 RETURN count(*) AS n",
+        None,
+    ),
+    (
+        "with_where_hoist_rows",
+        "social_graph",
+        "MATCH (p:Person) WITH p WHERE p.city = 'Oslo' RETURN p.name AS n",
+        None,
+    ),
+    (
+        # H5 satisfied while the WITH drops `q`: the predicate reads only the
+        # projected variable, so the hoist fires and the dropped binding is
+        # still dropped.
+        "with_where_scope_hidden",
+        "social_graph",
+        "MATCH (p:Person)-[:KNOWS]->(q:Person) WITH p WHERE p.age > 30 RETURN p.name AS n",
+        None,
+    ),
+    (
+        # H2 — the predicate is a HAVING over groups. Hoisting it ahead of the
+        # aggregation is the `push_limit_into_aggregate` data-loss shape one
+        # stage earlier.
+        "with_having_agg_bail",
+        "social_graph",
+        "MATCH (p:Person) WITH p.city AS c, count(*) AS k WHERE k > 1 RETURN c, k",
+        None,
+    ),
+    (
+        # H3 — DISTINCT.
+        "with_where_distinct_bail",
+        "social_graph",
+        "MATCH (p:Person) WITH DISTINCT p.city AS c WHERE c <> 'Oslo' RETURN c",
+        None,
+    ),
+    (
+        # H6 — the predicate reads an alias the WITH introduces, which does not
+        # exist before the projection.
+        "with_where_alias_bail",
+        "social_graph",
+        "MATCH (p:Person) WITH p.age AS a WHERE a > 30 RETURN count(*) AS n",
+        None,
+    ),
+    (
+        # H1 — a clause between the MATCH and the WITH.
+        "with_where_non_adjacent_bail",
+        "social_graph",
+        "MATCH (p:Person) UNWIND [22, 30] AS k WITH p, k WHERE p.age > k RETURN count(*) AS n",
+        None,
+    ),
+    (
+        # H7 — an OPTIONAL MATCH before the WITH: filtering a null-extended row
+        # before the null-extension happens is a different question.
+        "with_where_optional_bail",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(q) WITH p, q WHERE q.age > 30 RETURN count(*) AS n",
+        None,
+    ),
     # ── desugar_multi_match_return_aggregate ──
     # Regression test for the bug found by this harness on first run:
     # `MATCH (p) MATCH (c) RETURN p.city, count(c)` was over-finely
@@ -5409,6 +5474,7 @@ PASS_TRIGGER_CASES: dict[str, tuple[str, str]] = {
     "optimize_nested_queries": ("differential", "call_uncorrelated_body_fusion_then_limit"),
     "lower_fixed_var_length_hops": ("differential", "lower_two_hop_unanchored_count"),
     "rewrite_count_bound_var_to_star": ("differential", "count_all_typed"),
+    "hoist_with_where": ("differential", "with_where_hoist"),
     "push_where_into_match.1": ("differential", "where_eq"),
     "anchor_element_id": ("differential", "element_id_anchor_param"),
     "fold_or_to_in": ("differential", "or_chain_to_in"),

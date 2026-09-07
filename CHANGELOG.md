@@ -246,6 +246,23 @@ before upgrading.
 
 ### Changed
 
+- **A `WHERE` written behind a `WITH` now reaches the pattern matcher.**
+  `WHERE` has three homes in the AST and the pushdown passes read only two of
+  them, so `MATCH (n:Person) WITH n WHERE n.age > 30 RETURN count(*)`
+  materialised every node to filter it per row. The new `hoist_with_where`
+  optimizer pass lifts the predicate into a standalone `WHERE` ahead of the
+  `WITH`, after which the `WITH` is a pass-through the existing fold removes.
+  Measured over 100k nodes (release build, `min` of 40 rounds, two agreeing
+  runs, the same binary with and without the pass): **26.3 ms → 1.83 ms
+  (14.4x)** on that count, **27.9 ms → 1.01 ms (27.7x)** on a string equality,
+  **44.6 ms → 1.72 ms (26.0x)** on a 22-property node type, and 27.5 ms →
+  14.3 ms (1.9x) when the rows are actually delivered. The rewritten query
+  lands on the same 1.81 ms the predicate costs written ahead of the `WITH`.
+  It declines a `HAVING`/aggregating `WITH`, a `DISTINCT` one, a predicate
+  reading an alias the `WITH` introduces or a variable it hides (which is a
+  scope error and stays one), and an `OPTIONAL MATCH` before the `WITH`.
+  Disable with `cypher(..., disabled_passes=['hoist_with_where'])`.
+
 - **Query deadlines are declared per surface, and two surfaces gained a knob.**
   Only the Python API had a default or a way to set one; the divergence was
   real but undocumented, so a caller could not tell an absent deadline from an

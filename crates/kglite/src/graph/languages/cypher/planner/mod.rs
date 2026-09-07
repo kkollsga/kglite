@@ -19,6 +19,7 @@ pub mod rel_predicate_pushdown;
 pub mod schema_check;
 pub mod simplification;
 mod var_length_lowering;
+mod with_boundary;
 
 use annotations::{
     pass_mark_disjoint_fixed_trails, pass_mark_fast_var_length_paths,
@@ -39,6 +40,7 @@ use join_order::{
 use node_anchor::anchor_element_id;
 use rel_predicate_pushdown::extract_pushable_rel_predicates_with_params;
 use var_length_lowering::lower_fixed_var_length_hops;
+use with_boundary::pass_hoist_with_where;
 
 use simplification::{
     desugar_multi_match_return_aggregate, fold_or_to_in, fold_pass_through_with,
@@ -60,7 +62,9 @@ type PassFn = fn(&mut CypherQuery, &PassCtx);
 /// load-bearing — comments on individual entries call out cross-pass
 /// dependencies. Adding a new pass: write the impl, write a `pass_*`
 /// wrapper, register here with a unique name, doc-comment the wrapper,
-/// add at least one query to `tests/test_cypher_differential.py`.
+/// add at least one query to `tests/test_cypher_differential.py`. The
+/// wrapper lives in this file by default and beside its impl when this
+/// file is at its line cap (`hoist_with_where` is the first such case).
 ///
 /// ## `CALL { }` (CallSubquery) barrier audit
 ///
@@ -104,6 +108,12 @@ pub const PASSES: &[(&str, PassFn)] = &[
         "rewrite_count_bound_var_to_star",
         pass_rewrite_count_bound_var_to_star,
     ),
+    // Lift a `WITH … WHERE` predicate into a standalone WHERE ahead of the
+    // WITH. Runs BEFORE the pushdown passes and the pass-through fold, which
+    // are the two things it exists to feed: with the predicate hoisted, both
+    // `push_where_into_match` passes see it and `fold_pass_through_with` sees
+    // a WITH whose `where_clause` is now empty.
+    ("hoist_with_where", pass_hoist_with_where),
     ("push_where_into_match.1", pass_push_where_into_match),
     ("fold_or_to_in", pass_fold_or_to_in),
     // second push_where pass: catches IN predicates created by fold_or_to_in
@@ -719,3 +729,7 @@ mod tests;
 #[cfg(test)]
 #[path = "planner_fusion_tests.rs"]
 mod fusion_tests;
+
+#[cfg(test)]
+#[path = "with_boundary_tests.rs"]
+mod with_boundary_tests;
