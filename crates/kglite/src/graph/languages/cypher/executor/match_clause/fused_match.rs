@@ -1,3 +1,16 @@
+/// One output group of the fused OPTIONAL-MATCH aggregate: the evaluated
+/// group-key tuple, the running counts over every driving row that hashed to
+/// it, and the index of the first such row (bindings + non-count expression
+/// context).
+struct GroupedOptionalCount {
+    key_values: Vec<Value>,
+    /// `count(*)`: every driving row contributes at least one expanded row.
+    star_count: i64,
+    /// `count(var)` over an OPTIONAL-bound variable: null padding counts zero.
+    match_count: i64,
+    first_row: usize,
+}
+
 impl<'a> CypherExecutor<'a> {
     /// Fused OPTIONAL MATCH + WITH count() execution.
     /// Instead of expanding each input row into N matched rows then aggregating,
@@ -39,7 +52,19 @@ impl<'a> CypherExecutor<'a> {
         }
 
         let carried_vars = grouping_variables(&with_clause.items);
-        let mut result_rows = Vec::with_capacity(existing.rows.len());
+
+        // Aggregate per group key, not per driving row. The counts below are
+        // computed per driving row, but two driving rows that evaluate to the
+        // same group key are ONE output row whose counts are the sum — a
+        // per-row emission returned `n.city` twice with its partial counts
+        // whenever two nodes shared a city, and the same for any driving MATCH
+        // that repeats a node. `groups` keeps first-seen order (the order the
+        // materialized aggregation emits) and remembers the first row of each
+        // group, which supplies the carried bindings and the non-count part of
+        // a derived expression.
+        let mut groups: Vec<GroupedOptionalCount> = Vec::new();
+        let mut group_index: FxHashMap<Vec<Value>, usize> = FxHashMap::default();
+        let mut key_scratch: Vec<Value> = Vec::with_capacity(group_key_indices.len());
 
         for (scan_count, row) in existing.rows.iter().enumerate() {
             if scan_count.is_multiple_of(2048) {
@@ -82,26 +107,53 @@ impl<'a> CypherExecutor<'a> {
             // which is exactly match_count.
             let star_count = match_count.max(1);
 
+            key_scratch.clear();
+            for &idx in &group_key_indices {
+                let item = &with_clause.items[idx];
+                key_scratch.push(self.evaluate_expression(&item.expression, row)?);
+            }
+
+            match group_index.get(key_scratch.as_slice()) {
+                Some(&gi) => {
+                    groups[gi].star_count += star_count;
+                    groups[gi].match_count += match_count;
+                }
+                None => {
+                    group_index.insert(key_scratch.clone(), groups.len());
+                    groups.push(GroupedOptionalCount {
+                        key_values: std::mem::take(&mut key_scratch),
+                        star_count,
+                        match_count,
+                        first_row: scan_count,
+                    });
+                }
+            }
+        }
+
+        let mut result_rows = Vec::with_capacity(groups.len());
+        for group in &groups {
+            let row = &existing.rows[group.first_row];
             let mut projected = Bindings::with_capacity(
                 group_key_indices.len() + count_items.len() + derived_items.len(),
             );
 
-            for &idx in &group_key_indices {
-                let item = &with_clause.items[idx];
-                let key = return_item_column_name(item);
-                let val = self.evaluate_expression(&item.expression, row)?;
-                projected.insert(key, val);
+            for (ki, &idx) in group_key_indices.iter().enumerate() {
+                let key = return_item_column_name(&with_clause.items[idx]);
+                projected.insert(key, group.key_values[ki].clone());
             }
 
             // Derived expressions with embedded count() — substitute the
-            // computed count into every count(...) sub-tree, then run
+            // group's count into every count(...) sub-tree, then run
             // through the standard expression evaluator. The row's
             // projected bindings (e.g. `total` from a prior WITH) are
             // already in scope.
             for &(_, item) in &derived_items {
                 let key = return_item_column_name(item);
-                let substituted =
-                    substitute_count_with_value(&item.expression, star_count, match_count);
+                let substituted = substitute_count_with_value(
+                    &item.expression,
+                    group.star_count,
+                    group.match_count,
+                );
                 let val = self.evaluate_expression(&substituted, row)?;
                 projected.insert(key, val);
             }
@@ -109,8 +161,10 @@ impl<'a> CypherExecutor<'a> {
             for &(_, item) in &count_items {
                 let key = return_item_column_name(item);
                 let value = match &item.expression {
-                    Expression::FunctionCall { args, .. } if count_call_is_star(args) => star_count,
-                    _ => match_count,
+                    Expression::FunctionCall { args, .. } if count_call_is_star(args) => {
+                        group.star_count
+                    }
+                    _ => group.match_count,
                 };
                 projected.insert(key, Value::Int64(value));
             }

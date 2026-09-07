@@ -637,7 +637,11 @@ fn pass_fuse_count_short_circuits(query: &mut CypherQuery, ctx: &PassCtx) {
 /// edge vars (`count(r)`) count as local-to-OPT; multi-pattern clauses
 /// and a clause-owned `WHERE` (`OPTIONAL MATCH … WHERE …`) bail, the latter
 /// because the fused counter counts a pattern's matches with no hook to
-/// test a predicate per candidate.
+/// test a predicate per candidate. **No grouping key** bails too: the fused
+/// operator is driven by the incoming rows, so an ungrouped aggregate — which
+/// yields exactly one row over the whole expansion, and one row with zero even
+/// when the driving set is empty — has no driving row to attach its single
+/// result to.
 fn pass_fuse_optional_match_aggregate(query: &mut CypherQuery, _ctx: &PassCtx) {
     fuse_optional_match_aggregate(query)
 }

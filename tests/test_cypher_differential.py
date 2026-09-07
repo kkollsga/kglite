@@ -983,6 +983,70 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) OPTIONAL MATCH (p)-[r:KNOWS]->(:Person) RETURN p.name AS n, count(r) AS k",
         None,
     ),
+    # ── fuse_optional_match_aggregate (0.17.x bug — grouping) ──
+    # Every entry above carried a group key unique per driving row, so the
+    # fused operator's one-row-per-driving-row emission matched the
+    # materialised aggregation by accident. An ungrouped aggregate yields
+    # exactly one row over the whole expansion, and repeated group keys merge.
+    (
+        "optional_ungrouped_count_star",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(:Person) RETURN count(*) AS c",
+        None,
+    ),
+    (
+        "optional_ungrouped_count_var",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[r:KNOWS]->(:Person) RETURN count(r) AS c",
+        None,
+    ),
+    (
+        "optional_ungrouped_two_counts",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[r:KNOWS]->(:Person) RETURN count(*) AS a, count(r) AS b",
+        None,
+    ),
+    (
+        "optional_ungrouped_count_with",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(:Person) WITH count(*) AS c RETURN c",
+        None,
+    ),
+    (
+        "optional_ungrouped_count_order_by",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(:Person) RETURN count(*) AS c ORDER BY c",
+        None,
+    ),
+    (
+        "optional_ungrouped_count_chained",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(q:Person) "
+        "OPTIONAL MATCH (q)-[:KNOWS]->(r:Person) RETURN count(*) AS c",
+        None,
+    ),
+    (
+        # Empty driving set: one row carrying 0, not zero rows.
+        "optional_ungrouped_count_empty_outer",
+        "social_graph",
+        "MATCH (p:NoSuchLabel) OPTIONAL MATCH (p)-[:KNOWS]->(:Person) RETURN count(*) AS c",
+        None,
+    ),
+    (
+        # A group key several driving rows share: one row per city, counts summed.
+        "optional_count_repeated_group_key",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[r:KNOWS]->(:Person) RETURN p.city AS c, count(r) AS k ORDER BY c",
+        None,
+    ),
+    (
+        # A driving MATCH that repeats the group variable across rows.
+        "optional_count_repeated_driving_row",
+        "social_graph",
+        "MATCH (p:Person)-[:KNOWS]->(:Person) OPTIONAL MATCH (p)-[r:KNOWS]->(:Person) "
+        "RETURN p.name AS n, count(r) AS k ORDER BY n",
+        None,
+    ),
     # ── fuse_optional_match_aggregate (0.9.6 bug — collect()[slice] over OPTIONAL) ──
     # `aggregates_only_count` fell through `_ => true` for ListSlice/IndexAccess,
     # so `collect(x)[0..3]` was wrongly admitted to the count-only fusion.

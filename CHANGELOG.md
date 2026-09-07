@@ -11,6 +11,13 @@ before upgrading.
 
 ### Fixed
 
+- An aggregate after `OPTIONAL MATCH` now groups. `MATCH (n:P) OPTIONAL MATCH
+  (n)-[:K]->(m) RETURN count(*)` returned one plausible per-node count per row
+  instead of one row over the whole expansion (and zero rows, instead of one
+  row with `0`, when the outer match was empty); a grouping key several rows
+  shared, such as `RETURN n.city, count(*)`, returned one partial-count row per
+  driving row instead of one summed row per city. Ungrouped aggregates now take
+  the unfused path and the fused operator aggregates per group key.
 - `get_table_property` now returns timezone-aware columns at the stored
   instant. Restoring a recorded aware dtype read the stored UTC time as a
   zone-local wall clock, shifting every cell in a non-UTC column by the zone

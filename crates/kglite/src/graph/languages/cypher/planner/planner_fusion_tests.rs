@@ -910,3 +910,213 @@ fn test_push_limit_into_aggregate_bails_on_with_inline_filter() {
         .any(|clause| matches!(clause, Clause::With(w) if w.group_limit_hint == Some(5)));
     assert!(hinted, "unfiltered WITH + LIMIT must still be hinted");
 }
+
+// ============================================================================
+// fuse_optional_match_aggregate — grouping goldens
+//
+// Absolute expected values, not a differential: the fused and unfused paths
+// agreed on every corpus entry only because each carried a group key that
+// happened to be unique per driving row.
+// ============================================================================
+
+/// Four `P` nodes, five `K` edges, and a deliberately non-unique `city`
+/// property. `MATCH (n:P) OPTIONAL MATCH (n)-[:K]->(m)` expands to five rows:
+/// `a→b`, `a→c`, `b→c`, `c→d`, and the null-padded `d`.
+fn optional_aggregate_graph() -> DirGraph {
+    let nodes = crate::datatypes::DataFrame::from_cypher_rows(
+        vec!["id".into(), "title".into(), "city".into()],
+        vec![
+            vec![
+                Value::Int64(1),
+                Value::String("a".into()),
+                Value::String("X".into()),
+            ],
+            vec![
+                Value::Int64(2),
+                Value::String("b".into()),
+                Value::String("X".into()),
+            ],
+            vec![
+                Value::Int64(3),
+                Value::String("c".into()),
+                Value::String("Y".into()),
+            ],
+            vec![
+                Value::Int64(4),
+                Value::String("d".into()),
+                Value::String("Y".into()),
+            ],
+        ],
+    )
+    .unwrap();
+    let edges = crate::datatypes::DataFrame::from_cypher_rows(
+        vec!["src".into(), "tgt".into()],
+        vec![
+            vec![Value::Int64(1), Value::Int64(2)],
+            vec![Value::Int64(1), Value::Int64(3)],
+            vec![Value::Int64(2), Value::Int64(3)],
+            vec![Value::Int64(3), Value::Int64(4)],
+        ],
+    )
+    .unwrap();
+
+    let mut graph = DirGraph::new();
+    crate::graph::mutation::maintain::add_nodes(
+        &mut graph,
+        nodes,
+        "P".to_string(),
+        "id".to_string(),
+        Some("title".to_string()),
+        None,
+    )
+    .unwrap();
+    crate::graph::mutation::maintain::add_connections(
+        &mut graph,
+        edges,
+        "K".to_string(),
+        "P".to_string(),
+        "src".to_string(),
+        "P".to_string(),
+        "tgt".to_string(),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    graph
+}
+
+/// Run `text` through the full optimizer pipeline and return its rows.
+fn optimized_rows(graph: &DirGraph, text: &str) -> Vec<Vec<Value>> {
+    let params = HashMap::new();
+    let mut query = parse_cypher(text).unwrap();
+    optimize(&mut query, graph, &params);
+    crate::graph::languages::cypher::executor::CypherExecutor::with_params(graph, &params, None)
+        .execute(&query)
+        .unwrap()
+        .rows
+}
+
+/// True when the optimizer routed `text` through `FusedOptionalMatchAggregate`.
+fn fuses_optional_aggregate(graph: &DirGraph, text: &str) -> bool {
+    let params = HashMap::new();
+    let mut query = parse_cypher(text).unwrap();
+    optimize(&mut query, graph, &params);
+    query
+        .clauses
+        .iter()
+        .any(|c| matches!(c, Clause::FusedOptionalMatchAggregate { .. }))
+}
+
+/// An aggregate with no grouping key yields exactly ONE row over the whole
+/// expansion (openCypher 9 §10.3). The fused operator emits one row per
+/// driving row, so every shape here returned four plausible per-node counts.
+#[test]
+fn ungrouped_optional_match_aggregate_returns_one_row() {
+    let graph = optional_aggregate_graph();
+
+    for (text, expected) in [
+        (
+            "MATCH (n:P) OPTIONAL MATCH (n)-[:K]->(m) RETURN count(*) AS c",
+            vec![vec![Value::Int64(5)]],
+        ),
+        (
+            "MATCH (n:P) OPTIONAL MATCH (n)-[:K]->(m) RETURN count(m) AS c",
+            vec![vec![Value::Int64(4)]],
+        ),
+        (
+            "MATCH (n:P) OPTIONAL MATCH (n)-[:K]->(m) RETURN count(*) AS a, count(m) AS b",
+            vec![vec![Value::Int64(5), Value::Int64(4)]],
+        ),
+        (
+            "MATCH (n:P) OPTIONAL MATCH (n)-[:K]->(m) WITH count(*) AS c RETURN c",
+            vec![vec![Value::Int64(5)]],
+        ),
+        (
+            "MATCH (n:P) OPTIONAL MATCH (n)-[:K]->(m) RETURN count(*) AS c ORDER BY c",
+            vec![vec![Value::Int64(5)]],
+        ),
+        (
+            // The worst spelling: one plausible wrong scalar, no row count to
+            // give it away.
+            "MATCH (n:P) OPTIONAL MATCH (n)-[:K]->(m) RETURN count(*) AS c LIMIT 1",
+            vec![vec![Value::Int64(5)]],
+        ),
+        (
+            "MATCH (n:P) OPTIONAL MATCH (n)-[:K]->(m) OPTIONAL MATCH (m)-[:K]->(o) \
+             RETURN count(*) AS c",
+            vec![vec![Value::Int64(5)]],
+        ),
+        (
+            // An empty driving set still aggregates to one row, not none.
+            "MATCH (n:Q) OPTIONAL MATCH (n)-[:K]->(m) RETURN count(*) AS c",
+            vec![vec![Value::Int64(0)]],
+        ),
+    ] {
+        assert_eq!(optimized_rows(&graph, text), expected, "wrong rows: {text}");
+        assert!(
+            !fuses_optional_aggregate(&graph, text),
+            "an ungrouped aggregate must not fuse: {text}"
+        );
+    }
+}
+
+/// The control: a group key that is unique per driving row keeps fusing, and
+/// keeps its answer. Without this the bail could be widened into a removal of
+/// the pass and nothing would notice.
+#[test]
+fn grouped_optional_match_aggregate_still_fuses() {
+    let graph = optional_aggregate_graph();
+    let text = "MATCH (n:P) OPTIONAL MATCH (n)-[:K]->(m) RETURN n.title AS t, count(*) AS c \
+                ORDER BY t";
+
+    assert!(
+        fuses_optional_aggregate(&graph, text),
+        "a grouped aggregate must still take the fused path"
+    );
+    assert_eq!(
+        optimized_rows(&graph, text),
+        vec![
+            vec![Value::String("a".into()), Value::Int64(2)],
+            vec![Value::String("b".into()), Value::Int64(1)],
+            vec![Value::String("c".into()), Value::Int64(1)],
+            vec![Value::String("d".into()), Value::Int64(1)],
+        ]
+    );
+}
+
+/// Same class as the ungrouped case: the fused operator emitted one row per
+/// driving row, so two driving rows sharing a group key produced two rows
+/// carrying their own partial counts instead of one row carrying the sum.
+#[test]
+fn optional_match_aggregate_merges_repeated_group_keys() {
+    let graph = optional_aggregate_graph();
+
+    // `city` is X for nodes a,b and Y for c,d: two groups, counts 2+1 and 1+1.
+    assert_eq!(
+        optimized_rows(
+            &graph,
+            "MATCH (n:P) OPTIONAL MATCH (n)-[:K]->(m) RETURN n.city AS city, count(*) AS c \
+             ORDER BY city"
+        ),
+        vec![
+            vec![Value::String("X".into()), Value::Int64(3)],
+            vec![Value::String("Y".into()), Value::Int64(2)],
+        ]
+    );
+
+    // A driving MATCH that repeats `n` (a has two outgoing K edges) groups to
+    // one row whose count covers both of its driving rows.
+    assert_eq!(
+        optimized_rows(
+            &graph,
+            "MATCH (n:P)-[:K]->(z) OPTIONAL MATCH (n)-[:K]->(m) RETURN n.title AS t, \
+             count(*) AS c ORDER BY t"
+        ),
+        vec![
+            vec![Value::String("a".into()), Value::Int64(4)],
+            vec![Value::String("b".into()), Value::Int64(1)],
+            vec![Value::String("c".into()), Value::Int64(1)],
+        ]
+    );
+}

@@ -187,11 +187,16 @@ pub(crate) fn fuse_optional_match_aggregate(query: &mut CypherQuery) {
 }
 
 /// Eligible for OPTIONAL-MATCH fusion: simple variable group keys and
-/// count() aggregates only.
+/// count() aggregates only, and at least one of each. The group key is
+/// mandatory: the fused executor is driven by the incoming rows, and an
+/// aggregate with no grouping key collapses the whole expansion to a single
+/// row it has no driving row to attach to (and must still emit that row when
+/// the driving set is empty).
 pub(crate) fn is_fusable_with_clause(with: &WithClause) -> bool {
     use crate::graph::languages::cypher::ast::is_aggregate_expression;
 
     let mut has_count = false;
+    let mut has_group_key = false;
 
     for item in &with.items {
         if is_aggregate_expression(&item.expression) {
@@ -213,10 +218,11 @@ pub(crate) fn is_fusable_with_clause(with: &WithClause) -> bool {
             if !matches!(&item.expression, Expression::Variable(_)) {
                 return false;
             }
+            has_group_key = true;
         }
     }
 
-    has_count
+    has_count && has_group_key
 }
 
 /// True when every aggregate call inside `expr` is `count`. The
@@ -291,7 +297,8 @@ fn aggregates_only_count(expr: &Expression) -> bool {
 /// (`l.korttittel`, not just bare `l`) — *except* on a variable bound only by
 /// the OPTIONAL MATCH. The fused executor evaluates group keys against the
 /// source row, so `pet.name` for a post-OPTIONAL `pet` resolves to NULL and
-/// silently merges every row into one wrong group.
+/// silently merges every row into one wrong group. A group key is required
+/// here for the same reason as in `is_fusable_with_clause`.
 pub(crate) fn is_fusable_return_clause(
     ret: &ReturnClause,
     opt_match_vars: &std::collections::HashSet<String>,
@@ -299,6 +306,7 @@ pub(crate) fn is_fusable_return_clause(
     use crate::graph::languages::cypher::ast::is_aggregate_expression;
 
     let mut has_count = false;
+    let mut has_group_key = false;
 
     for item in &ret.items {
         if is_aggregate_expression(&item.expression) {
@@ -327,10 +335,11 @@ pub(crate) fn is_fusable_return_clause(
                 }
                 _ => return false,
             }
+            has_group_key = true;
         }
     }
 
-    has_count
+    has_count && has_group_key
 }
 
 /// True when every `count(...)` reachable inside `expr` is non-DISTINCT
