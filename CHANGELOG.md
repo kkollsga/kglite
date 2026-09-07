@@ -11,6 +11,15 @@ before upgrading.
 
 ### Fixed
 
+- `to_subgraph()` now carries the caller's captured query defaults. It was the
+  one derived handle that reset them, so a graph under
+  `set_default_row_limit(10)` answered every row through
+  `g.select('P').to_subgraph().cypher(...)` — and the same for
+  `set_default_timeout` and `set_default_max_work_units`. Every derived handle
+  now goes through one constructor, so the defaults cannot be dropped by a
+  handle added later. `save_subset()` writes a file rather than deriving a
+  handle and is unchanged.
+
 - A `*0..` variable-length pattern now yields its zero-length path when the
   relationship type is unknown to the graph. `MATCH (a)-[:ABSENT*0..2]->(b)`
   returned no rows at all instead of `b = a`, and the same pattern inside

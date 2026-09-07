@@ -11,14 +11,13 @@ use crate::datatypes::{py_in, py_out};
 use crate::graph::{get_graph_mut, KnowledgeGraph};
 use kglite_core::api::mutation::OperationReport;
 use kglite_core::api::GraphRead;
+use kglite_core::api::PlanStep;
 use kglite_core::api::TemporalContext;
-use kglite_core::api::{CowSelection, PlanStep};
 use petgraph::graph::NodeIndex;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3::Bound;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 /// Map a core `filtering::*` error string into the fluent-API `PyErr`. Shared
 /// by every selection-mutator routed through `derive_with`.
@@ -657,24 +656,7 @@ impl KnowledgeGraph {
         // deliberately detached, so `self` is what owns the durability state.
         self.commit_wal()?;
 
-        let mut new_kg = KnowledgeGraph {
-            inner: self.inner.clone(),
-            cursor: crate::graph::CursorState {
-                selection: if keep_selection.unwrap_or(false) {
-                    self.cursor.selection.clone()
-                } else {
-                    CowSelection::new()
-                },
-                reports: self.cursor.reports.clone(),
-                last_mutation_stats: None,
-                temporal_context: self.cursor.temporal_context.clone(),
-            },
-            embedder: self.embedder.as_ref().map(Arc::clone),
-            default_timeout_ms: self.default_timeout_ms,
-            default_max_work_units: self.default_max_work_units,
-            default_row_limit: self.default_row_limit,
-            lifecycle: self.detached_view_lifecycle(),
-        };
+        let mut new_kg = self.detached_view(keep_selection.unwrap_or(false));
 
         let report = kglite_core::api::mutation::NodeOperationReport {
             operation_type: "update".to_string(),

@@ -1441,15 +1441,16 @@ impl KnowledgeGraph {
                     crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
                 })?;
 
-        Ok(KnowledgeGraph {
-            inner: Arc::new(extracted),
-            cursor: crate::graph::CursorState::new(),
-            embedder: None,
-            default_timeout_ms: None,
-            default_max_work_units: None,
-            default_row_limit: None,
-            lifecycle: crate::graph::GraphLifecycle::detached(),
-        })
+        // The extracted graph is a handle derived from this one: it answers the
+        // caller's queries, so it answers under the caller's query defaults.
+        // The embedder is deliberately not carried — the subgraph is an
+        // independent graph, and `set_embedder` is how one is registered.
+        Ok(self.derive_handle(
+            Arc::new(extracted),
+            crate::graph::CursorState::new(),
+            None,
+            crate::graph::GraphLifecycle::detached(),
+        ))
     }
 
     /// Save the current selection as an independent subgraph file.

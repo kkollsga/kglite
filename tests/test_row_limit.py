@@ -213,3 +213,69 @@ def test_transaction_cypher_takes_the_cap():
         rv = tx.cypher(ALL_ITEMS, row_limit=5)
         assert len(rv.to_list()) == 5
         assert rv.diagnostics["total_rows"] == 30
+
+
+# ── every derived handle inherits the captured defaults ────────────────────
+#
+# A handle derived from another is the same caller's query policy under a new
+# name. `to_subgraph()` was the one constructor that dropped it, so a graph
+# under a 10-row cap answered 1000 rows through its subgraph — enumerated here
+# so a constructor added later cannot quietly repeat it.
+
+
+def _configured() -> kglite.KnowledgeGraph:
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(
+        pd.DataFrame({"id": [1, 2, 3], "title": ["a", "b", "c"], "v": [1.0, 2.0, 3.0]}),
+        "Item",
+        "id",
+        "title",
+    )
+    g.add_connections(pd.DataFrame({"s": [1], "t": [2]}), "K", "Item", "s", "Item", "t")
+    g.set_default_row_limit(2)
+    g.set_default_timeout(1234)
+    g.set_default_max_work_units(77)
+    return g
+
+
+DERIVED_HANDLES = {
+    "copy": lambda g: g.copy(),
+    "__copy__": lambda g: g.__copy__(),
+    "__deepcopy__": lambda g: g.__deepcopy__({}),
+    "select": lambda g: g.select("Item"),
+    "where": lambda g: g.select("Item").where({"id": 1}),
+    "expand": lambda g: g.select("Item").expand(hops=1),
+    "sort": lambda g: g.select("Item").sort("id"),
+    "limit": lambda g: g.select("Item").limit(1),
+    "traverse": lambda g: g.select("Item").traverse("K"),
+    "valid_at": lambda g: g.valid_at("2024-01-01"),
+    "add_properties": lambda g: g.select("Item").traverse("K").add_properties({"Item": ["title"]}),
+    "create_connections": lambda g: g.select("Item").traverse("K").create_connections("R"),
+    "calculate": lambda g: g.select("Item").calculate("v * 2", store_as="d"),
+    "collect_children": lambda g: g.select("Item").traverse("K").collect_children("title", store_as="kids"),
+    "count": lambda g: g.select("Item").traverse("K").count(store_as="c"),
+    "to_subgraph": lambda g: g.select("Item").to_subgraph(),
+    "session.cursor": lambda g: g.session().cursor(),
+}
+
+
+@pytest.mark.parametrize("name", sorted(DERIVED_HANDLES))
+def test_every_derived_handle_inherits_the_captured_defaults(name):
+    with pywarnings.catch_warnings():
+        pywarnings.simplefilter("ignore")
+        handle = DERIVED_HANDLES[name](_configured())
+    assert isinstance(handle, kglite.KnowledgeGraph), f"{name} no longer returns a handle"
+    assert handle.get_default_row_limit() == 2, name
+    assert handle.get_default_timeout() == 1234, name
+    assert handle.get_default_max_work_units() == 77, name
+
+
+def test_a_subgraph_query_is_capped_by_the_inherited_row_limit():
+    """The observable consequence: the cap the caller set applies to the
+    subgraph's own queries, not just to the graph it came from."""
+    g = _items(30)
+    g.set_default_row_limit(5)
+    sub = g.select("Item").to_subgraph()
+    result = sub.cypher(ALL_ITEMS)
+    assert len(result.to_list()) == 5
+    assert result.diagnostics["total_rows"] == 30

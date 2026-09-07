@@ -1125,24 +1125,7 @@ impl KnowledgeGraph {
         })?;
         self.commit_wal()?;
 
-        let mut new_kg = KnowledgeGraph {
-            inner: self.inner.clone(),
-            cursor: crate::graph::CursorState {
-                selection: if keep_selection.unwrap_or(false) {
-                    self.cursor.selection.clone()
-                } else {
-                    CowSelection::new()
-                },
-                reports: self.cursor.reports.clone(),
-                last_mutation_stats: None,
-                temporal_context: self.cursor.temporal_context.clone(),
-            },
-            embedder: self.embedder.as_ref().map(Arc::clone),
-            default_timeout_ms: self.default_timeout_ms,
-            default_max_work_units: self.default_max_work_units,
-            default_row_limit: self.default_row_limit,
-            lifecycle: self.detached_view_lifecycle(),
-        };
+        let mut new_kg = self.detached_view(keep_selection.unwrap_or(false));
 
         new_kg.add_report(OperationReport::ConnectionOperation(result));
 
@@ -1202,24 +1185,7 @@ impl KnowledgeGraph {
         )?;
         self.commit_wal()?;
 
-        let mut new_kg = KnowledgeGraph {
-            inner: self.inner.clone(),
-            cursor: crate::graph::CursorState {
-                selection: if keep_selection.unwrap_or(true) {
-                    self.cursor.selection.clone()
-                } else {
-                    CowSelection::new()
-                },
-                reports: self.cursor.reports.clone(),
-                last_mutation_stats: None,
-                temporal_context: self.cursor.temporal_context.clone(),
-            },
-            embedder: self.embedder.as_ref().map(Arc::clone),
-            default_timeout_ms: self.default_timeout_ms,
-            default_max_work_units: self.default_max_work_units,
-            default_row_limit: self.default_row_limit,
-            lifecycle: self.detached_view_lifecycle(),
-        };
+        let mut new_kg = self.detached_view(keep_selection.unwrap_or(true));
 
         new_kg.cursor.selection.add_plan_step(
             PlanStep::new("ADD_PROPERTIES", None, result.nodes_updated)
@@ -1331,24 +1297,7 @@ impl KnowledgeGraph {
         // mutation. It never did.
         self.commit_wal()?;
 
-        let mut new_kg = KnowledgeGraph {
-            inner: self.inner.clone(),
-            cursor: crate::graph::CursorState {
-                selection: if keep_selection.unwrap_or(false) {
-                    self.cursor.selection.clone()
-                } else {
-                    CowSelection::new()
-                },
-                reports: self.cursor.reports.clone(),
-                last_mutation_stats: None,
-                temporal_context: self.cursor.temporal_context.clone(),
-            },
-            embedder: self.embedder.as_ref().map(Arc::clone),
-            default_timeout_ms: self.default_timeout_ms,
-            default_max_work_units: self.default_max_work_units,
-            default_row_limit: self.default_row_limit,
-            lifecycle: self.detached_view_lifecycle(),
-        };
+        let mut new_kg = self.detached_view(keep_selection.unwrap_or(false));
 
         new_kg.add_report(OperationReport::NodeOperation(result));
 
@@ -1437,24 +1386,7 @@ impl KnowledgeGraph {
                     // Same as `collect_children`: the stored calculation is a
                     // node-property write and belongs in the log.
                     self.commit_wal()?;
-                    let mut new_kg = KnowledgeGraph {
-                        inner: self.inner.clone(),
-                        cursor: crate::graph::CursorState {
-                            selection: if keep_selection.unwrap_or(false) {
-                                self.cursor.selection.clone()
-                            } else {
-                                CowSelection::new()
-                            },
-                            reports: self.cursor.reports.clone(),
-                            last_mutation_stats: None,
-                            temporal_context: self.cursor.temporal_context.clone(),
-                        },
-                        embedder: self.embedder.as_ref().map(Arc::clone),
-                        default_timeout_ms: self.default_timeout_ms,
-                        default_max_work_units: self.default_max_work_units,
-                        default_row_limit: self.default_row_limit,
-                        lifecycle: self.detached_view_lifecycle(),
-                    };
+                    let mut new_kg = self.detached_view(keep_selection.unwrap_or(false));
 
                     new_kg.add_report(OperationReport::CalculationOperation(report));
 
@@ -1611,24 +1543,7 @@ impl KnowledgeGraph {
             // write and belongs in the log.
             self.commit_wal()?;
 
-            let mut new_kg = KnowledgeGraph {
-                inner: self.inner.clone(),
-                cursor: crate::graph::CursorState {
-                    selection: if keep_selection.unwrap_or(false) {
-                        self.cursor.selection.clone()
-                    } else {
-                        CowSelection::new()
-                    },
-                    reports: self.cursor.reports.clone(),
-                    last_mutation_stats: None,
-                    temporal_context: self.cursor.temporal_context.clone(),
-                },
-                embedder: self.embedder.as_ref().map(Arc::clone),
-                default_timeout_ms: self.default_timeout_ms,
-                default_max_work_units: self.default_max_work_units,
-                default_row_limit: self.default_row_limit,
-                lifecycle: self.detached_view_lifecycle(),
-            };
+            let mut new_kg = self.detached_view(keep_selection.unwrap_or(false));
 
             new_kg.add_report(OperationReport::CalculationOperation(result));
 
@@ -1854,21 +1769,18 @@ impl KnowledgeGraph {
     /// the original. Useful for running mutations without affecting the
     /// source graph.
     fn copy(&self) -> Self {
-        KnowledgeGraph {
-            inner: Arc::new(self.inner.independent_copy()),
+        self.derive_handle(
+            Arc::new(self.inner.independent_copy()),
             // Deliberate: the as-of date carries to the copy, the rest does not.
-            cursor: crate::graph::CursorState {
+            crate::graph::CursorState {
                 selection: CowSelection::new(),
                 reports: OperationReports::new(),
                 last_mutation_stats: None,
                 temporal_context: self.cursor.temporal_context.clone(),
             },
-            embedder: self.embedder.as_ref().map(Arc::clone),
-            default_timeout_ms: self.default_timeout_ms,
-            default_max_work_units: self.default_max_work_units,
-            default_row_limit: self.default_row_limit,
-            lifecycle: crate::graph::GraphLifecycle::detached(),
-        }
+            self.embedder.as_ref().map(Arc::clone),
+            crate::graph::GraphLifecycle::detached(),
+        )
     }
 
     fn __copy__(&self) -> Self {

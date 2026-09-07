@@ -5830,6 +5830,10 @@ class KnowledgeGraph:
         """Extract selected nodes into a new independent graph.
 
         The new graph contains only selected nodes and the edges between them.
+        Like every other derived handle it carries this graph's captured query
+        defaults (``set_default_row_limit``, ``set_default_timeout``,
+        ``set_default_max_work_units``); the embedder is not carried — register
+        one with :func:`set_embedder` if the subgraph needs it.
         """
         ...
 

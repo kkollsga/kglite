@@ -1,5 +1,8 @@
 //! Python query policy, captured when a handle is derived from another.
-use crate::graph::KnowledgeGraph;
+use crate::graph::embedder::Embedder;
+use crate::graph::{CursorState, GraphLifecycle, KnowledgeGraph};
+use kglite_core::api::{CowSelection, DirGraph};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const DEFAULT_TIMEOUT_MS: u64 = 180_000;
@@ -54,6 +57,54 @@ impl KnowledgeGraph {
             max_work_units: self.default_max_work_units,
             row_limit: self.default_row_limit,
         }
+    }
+
+    /// The one constructor for a handle derived from this one. A derived
+    /// handle is the same caller under a new name, so it carries the captured
+    /// query policy — building the struct literal by hand instead is how
+    /// `to_subgraph` came to answer a thousand rows under a ten-row cap.
+    /// Graphs that are *not* derived (`kglite.open`, a blueprint load) keep
+    /// their own literal and start from the unset defaults.
+    pub(crate) fn derive_handle(
+        &self,
+        inner: Arc<DirGraph>,
+        cursor: CursorState,
+        embedder: Option<Arc<dyn Embedder>>,
+        lifecycle: GraphLifecycle,
+    ) -> Self {
+        let mut derived = KnowledgeGraph {
+            inner,
+            cursor,
+            embedder,
+            default_timeout_ms: None,
+            default_max_work_units: None,
+            default_row_limit: None,
+            lifecycle,
+        };
+        self.query_defaults().apply_to(&mut derived);
+        derived
+    }
+
+    /// A handle onto the same graph for an operation that has already landed
+    /// on `self.inner`: the reports and temporal context follow, the selection
+    /// only when the caller asked to keep it, and the lifecycle is detached so
+    /// `self` stays the owner of the durability state.
+    pub(crate) fn detached_view(&self, keep_selection: bool) -> Self {
+        self.derive_handle(
+            self.inner.clone(),
+            CursorState {
+                selection: if keep_selection {
+                    self.cursor.selection.clone()
+                } else {
+                    CowSelection::new()
+                },
+                reports: self.cursor.reports.clone(),
+                last_mutation_stats: None,
+                temporal_context: self.cursor.temporal_context.clone(),
+            },
+            self.embedder.as_ref().map(Arc::clone),
+            self.detached_view_lifecycle(),
+        )
     }
 }
 
