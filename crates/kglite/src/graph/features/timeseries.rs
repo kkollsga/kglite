@@ -30,7 +30,13 @@ pub struct TimeseriesConfig {
 
 /// A single node's timeseries data: a sorted NaiveDate index with multiple value channels.
 /// Stored in `DirGraph::timeseries_store`, keyed by `NodeIndex.index()`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `PartialEq` because `MutationOp` derives it and
+/// [`MutationOp::SetNodeTimeseries`](crate::graph::wal::MutationOp) carries a
+/// whole one. Channel values are `f64`, so a channel holding a `NaN` (the
+/// missing-value marker) is never equal to itself — which is the float
+/// contract, not a store bug, and is why nothing compares stores for identity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NodeTimeseries {
     /// Sorted NaiveDate keys. Resolution determines granularity:
     /// year → 2020-01-01, month → 2020-02-01, day → 2020-02-15.

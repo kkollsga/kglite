@@ -28,7 +28,20 @@ from kglite import KnowledgeGraph
 #   rebuild command instead.
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_WORKSPACE_MANIFEST = _REPO_ROOT / "Cargo.toml"
+
+#: Files whose mtime a prebuilt server binary must not predate. The root
+#: manifest catches every version bump and checkout; the rest are the
+#: *format-defining* sources — a change to one of them can make a stale binary
+#: refuse or misread what a freshly built peer wrote, without touching the
+#: version at all. A WAL revision bump did exactly that: the manifest was
+#: untouched, so the guard saw nothing, and the servers refused every log the
+#: current build produced.
+_FORMAT_SOURCES = (
+    _REPO_ROOT / "Cargo.toml",
+    _REPO_ROOT / "crates" / "kglite" / "src" / "graph" / "wal.rs",
+    _REPO_ROOT / "crates" / "kglite" / "src" / "graph" / "io" / "file.rs",
+    _REPO_ROOT / "crates" / "kglite" / "src" / "serde_codec" / "mod.rs",
+)
 
 # Markers whose tests legitimately run long (30GB mapped graphs, multi-GB
 # model downloads, sustained load). Everything else falls under the 120 s
@@ -94,18 +107,38 @@ def rss_mb() -> float:
     return usage.ru_maxrss / (1024 * 1024) if sys.platform == "darwin" else usage.ru_maxrss / 1024
 
 
+def newest_format_source() -> Path:
+    """The most recently modified of `_FORMAT_SOURCES` that exists.
+
+    Separate from `binary_skip_reason` so the staleness *input* is testable
+    without a built binary — and so a missing file (a renamed module) cannot
+    silently reduce the guard to the manifest alone.
+    """
+    present = [path for path in _FORMAT_SOURCES if path.exists()]
+    if not present:
+        raise RuntimeError(
+            "no format-defining source found; _FORMAT_SOURCES in tests/conftest.py "
+            "names files that no longer exist, which would disable the stale-binary guard"
+        )
+    return max(present, key=lambda path: path.stat().st_mtime)
+
+
 def binary_skip_reason(name: str, binary: Path, build_hint: str) -> str | None:
     """Skip reason for a binary-backed suite, or None when it should run.
 
-    Staleness is classified by mtime against the root Cargo.toml: every
-    version bump (and every checkout touching it) moves that mtime, so an
-    older binary cannot be trusted to reflect the current workspace. CI is
-    unaffected — it builds immediately before testing.
+    Staleness is classified by mtime against `_FORMAT_SOURCES`: the root
+    manifest (every version bump and every checkout moves it) plus the sources
+    that define an on-disk format the binary and the extension must agree on.
+    An older binary cannot be trusted to read what the current build writes.
+    CI is unaffected — it builds immediately before testing.
     """
     if not binary.exists():
         return f"{name} not built (expected at {binary}). Build with: {build_hint}"
-    if binary.stat().st_mtime < _WORKSPACE_MANIFEST.stat().st_mtime:
-        return f"{name} at {binary} predates the workspace manifest (stale build) — rebuild with: {build_hint}"
+    newest = newest_format_source()
+    if binary.stat().st_mtime < newest.stat().st_mtime:
+        return (
+            f"{name} at {binary} predates {newest.relative_to(_REPO_ROOT)} (stale build) — rebuild with: {build_hint}"
+        )
     return None
 
 

@@ -1151,13 +1151,15 @@ def open(
         snapshot-only semantics.
 
     Note:
-        Mutations that the log cannot express are **checkpoint-only**, and are
-        persisted by ``save()`` rather than by the log: **embeddings** and
-        **timeseries channels**, both bulk numeric payloads rather than
-        declarations. Everything else is logged, including the declarations
-        made by :meth:`set_parent_type`, :meth:`define_ontology`,
-        :meth:`create_index`, ``CREATE CONSTRAINT``, :meth:`set_spatial` and
-        :meth:`set_schema_version`. A
+        The log carries every mutation, including the declarations made by
+        :meth:`set_parent_type`, :meth:`define_ontology`, :meth:`create_index`,
+        ``CREATE CONSTRAINT``, :meth:`set_spatial` and
+        :meth:`set_schema_version`, and the bulk payloads written by
+        :meth:`add_timeseries` and :meth:`embed_texts` (with their model id and
+        per-node text hashes). What replay rebuilds rather than reads back is
+        derived state — the HNSW index behind :meth:`build_vector_index` is
+        reconstructed from the replayed vectors, since it addresses store slots
+        that replay renumbers. A
         ``Session`` also refuses write queries on a durable graph, because its
         writes land on a working copy that neither the log nor ``save()`` can
         reach — use ``cypher()`` or ``begin()``.

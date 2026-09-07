@@ -944,8 +944,8 @@ fn apply_timeseries<'py>(
             .map(|(name, col)| (name.clone(), sorted.iter().map(|&i| col[i]).collect()))
             .collect();
 
-        graph.timeseries_store.insert(
-            node_idx.index(),
+        graph.set_node_timeseries(
+            node_idx,
             kglite_core::api::timeseries::NodeTimeseries { keys, channels },
         );
         ts_nodes_loaded += 1;
@@ -964,8 +964,8 @@ fn apply_timeseries<'py>(
     }
     let bin_type = existing.and_then(|c| c.bin_type.clone());
 
-    graph.timeseries_configs.insert(
-        node_type.to_string(),
+    graph.set_timeseries_config(
+        node_type,
         kglite_core::api::timeseries::TimeseriesConfig {
             resolution: resolved_resolution,
             channels: merged_channels,

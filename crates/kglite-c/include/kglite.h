@@ -393,8 +393,10 @@ KgliteStatusCode kglite_embedder_fastembed_new(const char *model_name,
  *   (unknown node type, inconsistent dimension, unknown metric); the message
  *   explains which.
  *
- * **The store is not durable until saved.** Embeddings are checkpoint-only;
- * call [`kglite_session_save`](crate::kglite_session_save) to persist them.
+ * **The store is not durable until saved.** This ABI has no durable open —
+ * that is a separate symbol when one ships — so nothing here is write-ahead
+ * logged; call [`kglite_session_save`](crate::kglite_session_save) to persist
+ * the vectors.
  *
  * # Safety
  *

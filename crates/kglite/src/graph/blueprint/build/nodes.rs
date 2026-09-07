@@ -581,12 +581,10 @@ fn apply_timeseries(
                 })
             });
         let Some(idx) = node_idx else { continue };
-        graph.timeseries_store.insert(idx.index(), node_ts);
+        graph.set_node_timeseries(idx, node_ts);
     }
 
     let merged = ts::merge_config(graph.timeseries_configs.get(node_type), resolved);
-    graph
-        .timeseries_configs
-        .insert(node_type.to_string(), merged);
+    graph.set_timeseries_config(node_type, merged);
     Ok(())
 }

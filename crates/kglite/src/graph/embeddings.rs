@@ -48,6 +48,7 @@ use crate::graph::algorithms::vector::DistanceMetric;
 use crate::graph::dir_graph::DirGraph;
 use crate::graph::schema::EmbeddingStore;
 use crate::graph::storage::GraphRead;
+use crate::graph::wal::EmbeddingWrite;
 
 use petgraph::graph::NodeIndex;
 
@@ -248,7 +249,9 @@ where
         store.set_embedding(node_idx.index(), vector.as_ref());
     }
     let embeddings_stored = store.len();
+    let slots: Vec<usize> = store.slot_to_node.clone();
     graph.embeddings.insert(key, store);
+    graph.note_embedding_write(node_type, text_column, EmbeddingWrite::Replace, &slots);
     graph.bump_version();
 
     Ok(EmbeddingIngestReport {
@@ -301,6 +304,14 @@ where
         store.set_embedding(node_idx.index(), vector.as_ref());
     }
     let embeddings_stored = store.len();
+    // This batch only — an incremental ingest that re-logged the whole store
+    // per call would cost O(n²) bytes for the O(n) vectors it writes.
+    let slots: Vec<usize> = prepared
+        .entries
+        .iter()
+        .map(|(node_idx, _)| node_idx.index())
+        .collect();
+    graph.note_embedding_write(node_type, text_column, EmbeddingWrite::Upsert, &slots);
     graph.bump_version();
 
     Ok(EmbeddingIngestReport {
@@ -336,6 +347,49 @@ where
 // into a struct would move the same names one level down for no reader gain.
 #[allow(clippy::too_many_arguments)]
 pub fn build_vector_index(
+    graph: &mut DirGraph,
+    node_type: &str,
+    text_column: &str,
+    m: Option<usize>,
+    ef_construction: Option<usize>,
+    ef_search: Option<usize>,
+    metric: Option<&str>,
+    auto_refresh_limit: Option<usize>,
+) -> Result<VectorIndexReport, String> {
+    let report = build_index_structure(
+        graph,
+        node_type,
+        text_column,
+        m,
+        ef_construction,
+        ef_search,
+        metric,
+        auto_refresh_limit,
+    )?;
+    // The *resolved* parameters, not the caller's `None`s: replay reproduces
+    // the index this build actually produced, without re-deriving defaults
+    // that may have moved between the writing and the recovering build.
+    graph.note_declaration(crate::graph::wal::MutationOp::SetVectorIndex {
+        node_type: node_type.to_string(),
+        text_column: text_column.to_string(),
+        metric: Some(report.metric.clone()),
+        m: Some(report.m),
+        ef_construction,
+        ef_search,
+        auto_refresh_limit,
+        present: true,
+    });
+    Ok(report)
+}
+
+/// The build half of [`build_vector_index`], without the log. WAL replay
+/// rebuilds through this: it has the declaration already, and noting here
+/// would append to the buffer it is recovering from.
+// Same argument list as the public wrapper, for the same reason: every one is
+// an HNSW tuning knob or the catch-up ceiling, and a struct would move the
+// names one level down for no reader gain.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_index_structure(
     graph: &mut DirGraph,
     node_type: &str,
     text_column: &str,
@@ -415,6 +469,27 @@ pub fn build_vector_index(
 /// Drop the HNSW index over `(node_type, "{text_column}_emb")`, returning
 /// whether one existed. Search reverts to the exact scan; the vectors stay.
 pub fn drop_vector_index(graph: &mut DirGraph, node_type: &str, text_column: &str) -> bool {
+    let had = drop_index_structure(graph, node_type, text_column);
+    graph.note_declaration(crate::graph::wal::MutationOp::SetVectorIndex {
+        node_type: node_type.to_string(),
+        text_column: text_column.to_string(),
+        metric: None,
+        m: None,
+        ef_construction: None,
+        ef_search: None,
+        auto_refresh_limit: None,
+        present: false,
+    });
+    had
+}
+
+/// The drop half of [`drop_vector_index`], without the log — the replay
+/// counterpart, for the reason [`build_index_structure`] gives.
+pub(crate) fn drop_index_structure(
+    graph: &mut DirGraph,
+    node_type: &str,
+    text_column: &str,
+) -> bool {
     match graph.embeddings.get_mut(&store_key(node_type, text_column)) {
         Some(store) => {
             let had = store.has_index();
@@ -423,6 +498,13 @@ pub fn drop_vector_index(graph: &mut DirGraph, node_type: &str, text_column: &st
         }
         None => false,
     }
+}
+
+/// Whether a store exists for `(node_type, text_column)` at all.
+pub fn store_exists(graph: &DirGraph, node_type: &str, text_column: &str) -> bool {
+    graph
+        .embeddings
+        .contains_key(&store_key(node_type, text_column))
 }
 
 /// Whether an HNSW index is currently built over `(node_type, text_column)`.

@@ -66,9 +66,35 @@ before upgrading.
   load uses, and constraints are reinstalled through their own declarers, so a
   recovered constraint both enforces and resolves by name for `DROP
   CONSTRAINT`. The WAL header moves 5→6 (tags 0–7 unchanged, so every older
-  log still replays exactly). **Embeddings and timeseries channels remain
-  checkpoint-only** — both are bulk numeric payloads rather than declarations
-  — and both durability guides now say so exactly.
+  log still replays exactly).
+
+- Timeseries channels and embeddings now survive a crash before the first
+  checkpoint too — the last two classes the log did not carry. Under
+  `durable="normal"` / `"full"`, a graph that had loaded a timeseries or
+  embedded a text column recovered every row and none of the payload:
+  `timeseries()`, `time_index()` and `timeseries_config()` came back `None`,
+  `list_embeddings()` empty, `embedding_info()` `None` and `has_vector_index()`
+  `False`, taking the `model_id` provenance and the per-node text hashes with
+  them — so a recovered `embed_texts(mode='changed')` re-embedded the whole
+  corpus. Measured against a `save()` control arm, the log was *byte-identical*
+  with and without a 500-node timeseries. Both classes are now captured at core
+  choke points and replayed: `set_timeseries`, `set_time_index`,
+  `add_ts_channel`, `add_timeseries` and `add_nodes(timeseries=…)`;
+  `set_embeddings`, `add_embeddings`, `embed_texts`, `remove_embeddings`,
+  `import_embeddings` and `copy_embeddings_from`, each carrying its model id
+  and text hashes in the same record as its vectors. `build_vector_index` /
+  `drop_vector_index` log the *declaration* only — the HNSW topology addresses
+  store slots that replay renumbers, so it is rebuilt from the replayed
+  vectors, the same way a replayed `CREATE INDEX` is rebuilt from the
+  recovered rows. Payloads are keyed by `(node_type, id)`, never by the
+  physical slot the stores use, so a replayed `DELETE` drops the node's series
+  and vector instead of handing them to whatever takes the slot next. The WAL
+  header moves 6→7 (tags 0–13 unchanged, so every older log still replays
+  exactly). **Note the frame size:** a bulk timeseries load now logs its whole
+  payload, so a 10 000-node × 365-day × 3-channel `add_timeseries` writes a
+  ~129 MB frame assembled in memory — inside the format's 4 GiB cap and
+  cheaper per source row than the node rows the log already carried, but a real
+  cost on a very large ingest.
 
 - `kglite … --format json` now emits each row's keys in the query's column
   order instead of alphabetising them. `RETURN 1 AS zz, 2 AS aa, 3 AS mm`

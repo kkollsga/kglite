@@ -71,7 +71,10 @@ impl DirGraph {
                 }
             }
 
-            self.embeddings.insert((node_type, prop), dst_store);
+            let text_column = crate::graph::embeddings::text_column_of(&prop)
+                .unwrap_or(&prop)
+                .to_string();
+            self.set_embedding_store(&node_type, &text_column, dst_store);
             stores_copied += 1;
         }
 

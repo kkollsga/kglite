@@ -67,6 +67,7 @@ mod labels;
 pub mod node_remap;
 mod node_write;
 pub mod ontology_apply;
+mod payloads;
 mod persistence_lifecycle;
 pub mod range_index_layer;
 pub(crate) mod rel_constraints;

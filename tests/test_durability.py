@@ -2179,13 +2179,13 @@ def _saved_arm(tmp_path, body: str, read):
     return read(_open(control / "app.kgl", "memory"))
 
 
-def _declaration_case(tmp_path, storage, level, body: str, read):
+def _declaration_case(tmp_path, storage, level, body: str, read, seed: str = _SEED):
     """Crash before any checkpoint, reopen, and require the recovered answer
     to equal the one a `save()` would have produced."""
-    _crash_child(tmp_path, _SEED + body, storage, durable=level)
+    _crash_child(tmp_path, seed + body, storage, durable=level)
     assert not (tmp_path / "app.kgl").exists(), "the case must have no checkpoint to lean on"
     recovered = read(_open(tmp_path / "app.kgl", storage, durable=level))
-    expected = _saved_arm(tmp_path, _SEED + body + "\n        g.save()\n", read)
+    expected = _saved_arm(tmp_path, seed + body + "\n        g.save()\n", read)
     assert recovered == expected
     return recovered
 
@@ -2374,3 +2374,277 @@ def test_replayed_constraint_does_not_revalidate_the_checkpoint(tmp_path, storag
     g = _open(tmp_path / "app.kgl", storage)
     assert g.cypher("MATCH (n:A) RETURN count(n) AS c").scalar() == 3
     assert [c["name"] for c in g.cypher("SHOW CONSTRAINTS").to_list()] == ["u"]
+
+
+# ── timeseries and embedding payloads ────────────────────────────────
+#
+# The two remaining checkpoint-only classes after WAL v6. Unlike the
+# declarations above these are *bulk payloads* — a node's whole date index and
+# channel set, a store's whole vector buffer — but the loss has the same shape:
+# a crash before the first `save()` recovered every row while `timeseries()`,
+# `timeseries_config()`, `list_embeddings()` and `has_vector_index()` all
+# answered as if the load had never happened, and the recovered app's next
+# `save()` baked that in. Design:
+# dev-docs/designs/timeseries-embeddings-wal-2026-09.md.
+
+_PAYLOAD_SEED = """
+        import pandas as pd
+        g = open_durable()
+        g.add_nodes(
+            pd.DataFrame({"id": [1, 2], "title": ["a", "b"],
+                          "txt": ["alpha text", "beta text"]}),
+            "Co",
+            unique_id_field="id",
+        )
+"""
+
+#: A *named* embedder. The provenance assertions are vacuous without one: an
+#: embedder with no `model_id` reports `'model': None` in both arms, so a
+#: replay that dropped the stamp would still compare equal.
+_EMBEDDER = """
+        import hashlib
+        class E:
+            dimension = 8
+            model_id = "durable/stub-v1"
+            def embed(self, texts):
+                return [
+                    [float(b) for b in hashlib.sha256(t.encode()).digest()[:8]]
+                    for t in texts
+                ]
+        g.set_embedder(E())
+"""
+
+_TIMESERIES = """
+        g.set_timeseries("Co", resolution="day", units={"oil": "MSm3"},
+                         bin_type="total")
+        g.add_timeseries(
+            "Co",
+            data=pd.DataFrame({
+                "fk": [1, 1, 2, 2],
+                "date": ["2020-01-01", "2020-02-01", "2020-01-01", "2020-02-01"],
+                "oil": [1.0, 2.0, 3.0, 4.0],
+                "gas": [5.0, 6.0, 7.0, 8.0],
+            }),
+            fk="fk",
+            time_key=["date"],
+            channels=["oil", "gas"],
+        )
+"""
+
+
+def _payload_case(tmp_path, storage, level, body: str, read):
+    """`_declaration_case` over the payload seed — two `Co` nodes with a text
+    column to embed and an id to hang a timeseries on."""
+    return _declaration_case(tmp_path, storage, level, body, read, _PAYLOAD_SEED)
+
+
+def _read_timeseries(g):
+    return (
+        g.timeseries(1),
+        g.timeseries(2),
+        g.time_index(1),
+        g.timeseries_config(),
+    )
+
+
+def _read_embeddings(g):
+    return (
+        g.list_embeddings(),
+        g.embedding_info("Co", "txt"),
+        g.has_vector_index("Co", "txt"),
+    )
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+@pytest.mark.parametrize("level", LOGGING_LEVELS)
+def test_timeseries_survives_hard_crash(tmp_path, storage, level):
+    got = _payload_case(tmp_path, storage, level, _TIMESERIES, _read_timeseries)
+    series, _, index, config = got
+    assert series["channels"]["oil"] == [1.0, 2.0]
+    assert index == ["2020-01-01", "2020-02-01"]
+    assert config["Co"]["resolution"] == "day"
+    assert sorted(config["Co"]["channels"]) == ["gas", "oil"]
+    assert config["Co"]["units"] == {"oil": "MSm3"}
+    assert config["Co"]["bin_type"] == "total"
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_per_node_time_index_and_channel_survive_hard_crash(tmp_path, storage):
+    """`set_time_index` + `add_ts_channel` — the one-node-at-a-time writers,
+    which also grow the type's declared channel list."""
+    got = _payload_case(
+        tmp_path,
+        storage,
+        "normal",
+        '\n        g.set_timeseries("Co", resolution="month")'
+        '\n        g.set_time_index(1, ["2021-01", "2021-02"])'
+        '\n        g.add_ts_channel(1, "flow", [1.5, 2.5])\n',
+        lambda g: (g.time_index(1), g.timeseries(1, "flow"), g.timeseries_config("Co")),
+    )
+    index, series, config = got
+    assert index == ["2021-01-01", "2021-02-01"]
+    assert series["values"] == [1.5, 2.5]
+    assert config["channels"] == ["flow"]
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_timeseries_loaded_by_add_nodes_survives_hard_crash(tmp_path, storage):
+    """`add_nodes(timeseries=...)` writes the store from the ingest path
+    rather than from `add_timeseries`."""
+    got = _payload_case(
+        tmp_path,
+        storage,
+        "normal",
+        "\n        g.add_nodes("
+        '\n            pd.DataFrame({"id": [1, 1], "date": ["2022-01-01", "2022-02-01"],'
+        '\n                          "rate": [4.0, 5.0]}),'
+        '\n            "Co",'
+        '\n            unique_id_field="id",'
+        '\n            timeseries={"time": "date", "channels": ["rate"],'
+        '\n                        "resolution": "day"},'
+        "\n        )\n",
+        lambda g: (g.time_index(1), g.timeseries(1, "rate")),
+    )
+    index, series = got
+    assert index == ["2022-01-01", "2022-02-01"]
+    assert series["values"] == [4.0, 5.0]
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+@pytest.mark.parametrize("level", LOGGING_LEVELS)
+def test_embeddings_survive_hard_crash(tmp_path, storage, level):
+    got = _payload_case(
+        tmp_path,
+        storage,
+        level,
+        _EMBEDDER + '\n        g.embed_texts("Co", "txt", show_progress=False)\n',
+        _read_embeddings,
+    )
+    stores, info, indexed = got
+    assert [(s["node_type"], s["text_column"], s["count"]) for s in stores] == [("Co", "txt", 2)]
+    assert info["dimension"] == 8
+    assert info["model"] == "durable/stub-v1", "the model stamp must ride with the vectors"
+    assert info["hashed"] == 2, "text hashes must ride with the vectors"
+    assert indexed is False
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+@pytest.mark.parametrize("level", LOGGING_LEVELS)
+def test_vector_index_declaration_survives_hard_crash(tmp_path, storage, level):
+    got = _payload_case(
+        tmp_path,
+        storage,
+        level,
+        _EMBEDDER + '\n        g.embed_texts("Co", "txt", show_progress=False)'
+        '\n        g.build_vector_index("Co", "txt")\n',
+        lambda g: (g.has_vector_index("Co", "txt"), len(g.vector_search("txt", [0.0] * 8, top_k=2))),
+    )
+    assert got == (True, 2)
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_dropped_vector_index_replays_as_dropped(tmp_path, storage):
+    got = _payload_case(
+        tmp_path,
+        storage,
+        "normal",
+        _EMBEDDER + '\n        g.embed_texts("Co", "txt", show_progress=False)'
+        '\n        g.build_vector_index("Co", "txt")'
+        '\n        g.drop_vector_index("Co", "txt")\n',
+        lambda g: g.has_vector_index("Co", "txt"),
+    )
+    assert got is False
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_removed_embedding_store_replays_as_removed(tmp_path, storage):
+    got = _payload_case(
+        tmp_path,
+        storage,
+        "normal",
+        _EMBEDDER + '\n        g.embed_texts("Co", "txt", show_progress=False)'
+        '\n        g.remove_embeddings("Co", "txt")\n',
+        lambda g: g.list_embeddings(),
+    )
+    assert got == []
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_added_embeddings_accumulate_across_frames(tmp_path, storage):
+    """`add_embeddings` is the incremental writer: batch two must not discard
+    batch one on replay."""
+    got = _payload_case(
+        tmp_path,
+        storage,
+        "normal",
+        '\n        g.add_embeddings("Co", "txt", {1: [0.1] * 4})'
+        '\n        g.add_embeddings("Co", "txt", {2: [0.2] * 4})\n',
+        lambda g: g.embedding_info("Co", "txt")["count"],
+    )
+    assert got == 2
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_embed_texts_changed_after_recovery_reembeds_nothing(tmp_path, storage):
+    """The `text_hashes` test with teeth: if the hashes did not replay,
+    `mode='changed'` re-embeds the whole corpus instead of nothing."""
+    _crash_child(
+        tmp_path,
+        _PAYLOAD_SEED + _EMBEDDER + '\n        g.embed_texts("Co", "txt", show_progress=False)\n',
+        storage,
+    )
+    g = _open(tmp_path / "app.kgl", storage)
+
+    class E:
+        dimension = 8
+        model_id = "durable/stub-v1"
+
+        def __init__(self):
+            self.seen = []
+
+        def embed(self, texts):
+            self.seen.extend(texts)
+            return [[0.0] * 8 for _ in texts]
+
+    embedder = E()
+    g.set_embedder(embedder)
+    report = g.embed_texts("Co", "txt", mode="changed", show_progress=False)
+    assert embedder.seen == [], "replayed text hashes must make 'changed' a no-op"
+    assert report["embedded"] == 0
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_deleted_node_drops_its_replayed_payloads(tmp_path, storage):
+    """A replayed `RemoveNode` must take the node's timeseries and vector with
+    it — a payload left keyed to a reusable slot would resurface on the next
+    node to occupy it."""
+    got = _payload_case(
+        tmp_path,
+        storage,
+        "normal",
+        _TIMESERIES + _EMBEDDER + '\n        g.embed_texts("Co", "txt", show_progress=False)'
+        '\n        g.cypher("MATCH (n:Co {id: 1}) DELETE n")\n',
+        lambda g: (
+            g.cypher("MATCH (n:Co) RETURN count(n) AS c").scalar(),
+            g.embedding_info("Co", "txt")["count"],
+            g.time_index(2),
+        ),
+    )
+    assert got == (1, 1, ["2020-01-01", "2020-02-01"])
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_recovered_payloads_survive_the_next_checkpoint(tmp_path, storage):
+    """The permanence case: a recovered app's next `save()` truncates the log,
+    so a payload missing at that moment is gone for good."""
+    _crash_child(
+        tmp_path,
+        _PAYLOAD_SEED + _TIMESERIES + _EMBEDDER + '\n        g.embed_texts("Co", "txt", show_progress=False)\n',
+        storage,
+    )
+    g = _open(tmp_path / "app.kgl", storage)
+    g.save()
+    del g
+    g = _open(tmp_path / "app.kgl", "memory")
+    assert g.time_index(1) == ["2020-01-01", "2020-02-01"]
+    assert g.embedding_info("Co", "txt")["count"] == 2

@@ -482,11 +482,13 @@ impl KnowledgeGraph {
     /// next `save()` — i.e. it silently is not crash-safe.
     ///
     /// Not every `&mut self` method needs it. Ops exist for nodes, edges,
-    /// labels, and the declarations captured at their own choke points —
-    /// identity-field spellings, parent types, the ontology, the schema stamp,
-    /// spatial configs, user indexes and constraints. Embeddings and
-    /// timeseries still have no `MutationOp`, so they are checkpoint-only by
-    /// construction and calling this after one of those alone is a no-op.
+    /// labels, the declarations captured at their own choke points — identity-
+    /// field spellings, parent types, the ontology, the schema stamp, spatial
+    /// configs, user indexes and constraints — and the bulk payloads:
+    /// timeseries channels and embedding stores with their vector-index
+    /// declaration. What is left checkpoint-only is derived state a load
+    /// rebuilds anyway (text indexes, cached norms), for which calling this is
+    /// a no-op.
     #[inline]
     pub(crate) fn commit_wal(&mut self) -> PyResult<()> {
         // Mutation entries reject missing capture ownership before changing data.

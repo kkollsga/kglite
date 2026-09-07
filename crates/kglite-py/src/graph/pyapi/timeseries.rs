@@ -6,7 +6,6 @@ use crate::datatypes::py_in;
 use crate::graph::{get_graph_mut, KnowledgeGraph};
 use chrono::NaiveDate;
 use kglite_core::api::timeseries::{NodeTimeseries, TimeseriesConfig};
-use kglite_core::api::GraphRead;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::collections::HashMap;
@@ -32,10 +31,11 @@ impl KnowledgeGraph {
     ) -> PyResult<()> {
         kglite_core::api::timeseries::validate_resolution(&resolution)
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        self.check_durable_owner()?;
 
         let graph = get_graph_mut(&mut self.inner);
-        graph.timeseries_configs.insert(
-            node_type,
+        graph.set_timeseries_config(
+            &node_type,
             TimeseriesConfig {
                 resolution,
                 channels: channels.unwrap_or_default(),
@@ -43,7 +43,7 @@ impl KnowledgeGraph {
                 bin_type,
             },
         );
-        Ok(())
+        self.commit_wal()
     }
 
     /// Get timeseries configuration for a node type, or all types.
@@ -87,20 +87,21 @@ impl KnowledgeGraph {
 
         kglite_core::api::timeseries::validate_keys_sorted(&date_keys)
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        self.check_durable_owner()?;
 
         let graph = get_graph_mut(&mut self.inner);
         let id_val = py_in::py_value_to_value(node_id)?;
         let node_idx = find_node_by_id(graph, &id_val)?;
 
-        graph.timeseries_store.insert(
-            node_idx.index(),
+        graph.set_node_timeseries(
+            node_idx,
             NodeTimeseries {
                 keys: date_keys,
                 channels: HashMap::new(),
             },
         );
 
-        Ok(())
+        self.commit_wal()
     }
 
     /// Add a timeseries channel to a node.
@@ -114,39 +115,18 @@ impl KnowledgeGraph {
         channel_name: String,
         values: Vec<f64>,
     ) -> PyResult<()> {
-        let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
-        let graph = get_graph_mut(&mut self.inner);
-        let id_val = py_in::py_value_to_value(node_id)?;
-        let node_idx = find_node_by_id(graph, &id_val)?;
+        self.check_durable_owner()?;
+        {
+            let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
+            let graph = get_graph_mut(&mut self.inner);
+            let id_val = py_in::py_value_to_value(node_id)?;
+            let node_idx = find_node_by_id(graph, &id_val)?;
 
-        let ts = graph
-            .timeseries_store
-            .get_mut(&node_idx.index())
-            .ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "Node has no time index. Call set_time_index() first.",
-                )
-            })?;
-
-        kglite_core::api::timeseries::validate_channel_length(
-            ts.keys.len(),
-            values.len(),
-            &channel_name,
-        )
-        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
-
-        // Update config channels list
-        if let Some(node) = graph.graph.node_view(node_idx) {
-            let nt = node.node_type_str(&graph.interner).to_string();
-            if let Some(config) = graph.timeseries_configs.get_mut(&nt) {
-                if !config.channels.contains(&channel_name) {
-                    config.channels.push(channel_name.clone());
-                }
-            }
+            graph
+                .add_timeseries_channel(node_idx, channel_name, values)
+                .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         }
-
-        ts.channels.insert(channel_name, values);
-        Ok(())
+        self.commit_wal()
     }
 
     /// Bulk-load timeseries data from a DataFrame.
@@ -176,6 +156,7 @@ impl KnowledgeGraph {
         resolution: Option<String>,
         units: Option<HashMap<String, String>>,
     ) -> PyResult<Py<PyAny>> {
+        self.check_durable_owner()?;
         // Resolve resolution: parameter > existing config > auto-detect
         let graph_ref = &self.inner;
         let resolved_resolution = if let Some(r) = resolution {
@@ -316,8 +297,8 @@ impl KnowledgeGraph {
                 channels_data.insert(ch_name.clone(), values);
             }
 
-            graph.timeseries_store.insert(
-                node_idx.index(),
+            graph.set_node_timeseries(
+                node_idx,
                 NodeTimeseries {
                     keys,
                     channels: channels_data,
@@ -345,8 +326,8 @@ impl KnowledgeGraph {
         }
         let bin_type = existing.and_then(|c| c.bin_type.clone());
 
-        graph.timeseries_configs.insert(
-            node_type,
+        graph.set_timeseries_config(
+            &node_type,
             TimeseriesConfig {
                 resolution: resolved_resolution,
                 channels: merged_channels,
@@ -354,6 +335,8 @@ impl KnowledgeGraph {
                 bin_type,
             },
         );
+
+        self.commit_wal()?;
 
         // Return summary dict
         let result = PyDict::new(py);

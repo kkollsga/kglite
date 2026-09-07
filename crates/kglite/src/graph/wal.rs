@@ -117,7 +117,18 @@ pub const WAL_MAGIC: [u8; 4] = *b"KWAL";
 /// ontology, a schema stamp, a spatial declaration, a user index or a
 /// constraint. Tags 0–7 are untouched and every older WAL stays a strict
 /// subset; the header moves for the same reason as every bump before it.
-pub const WAL_FORMAT_VERSION: u8 = 6;
+///
+/// **v6 → v7** appends the two remaining above-the-backend classes as tags
+/// 14–17: [`MutationOp::SetNodeTimeseries`],
+/// [`MutationOp::SetTimeseriesConfig`], [`MutationOp::SetEmbeddings`] and
+/// [`MutationOp::SetVectorIndex`]. These are *bulk payloads* rather than
+/// declarations — a node's whole date index and channel set, a store's whole
+/// vector buffer — but they occupied the same blind spot: a crash before the
+/// first checkpoint recovered every row while `timeseries()` and
+/// `list_embeddings()` answered as if the load had never happened. Tags 0–13
+/// are untouched and every older WAL stays a strict subset; the header moves
+/// for the same reason as every bump before it.
+pub const WAL_FORMAT_VERSION: u8 = 7;
 
 /// Oldest WAL format this build can replay. Frames from any version in
 /// `MIN_READABLE_WAL_FORMAT_VERSION..=WAL_FORMAT_VERSION` decode with the
@@ -388,6 +399,99 @@ pub enum MutationOp {
         declared_type: Option<crate::graph::property_types::DeclaredType>,
         present: bool,
     },
+    /// The whole timeseries — sorted date index and every channel — of the
+    /// node `(node_type, id)`, as it stands after the write.
+    ///
+    /// `DirGraph::timeseries_store` is keyed by `NodeIndex.index()`, a
+    /// *physical* slot that a later delete hands to a different node, so the
+    /// op is keyed logically like every other: replay resolves the id against
+    /// the recovered rows. Whole-payload rather than a delta because that is
+    /// what each writer produces — `set_time_index` replaces the index and
+    /// clears the channels, `add_ts_channel` rewrites one channel of a series
+    /// it has in hand — and it keeps the op idempotent.
+    ///
+    /// **This is the WAL's largest frame shape.** A 365-key × 3-channel node
+    /// is ~13 KB, so a 10 000-node bulk load logs one ~129 MB frame, which
+    /// `append_frame_bounded` assembles into a single `Vec` before its one
+    /// `write_all` (deliberately — a one-write frame cannot be torn). Under
+    /// the 4 GiB format cap, and ~3.6× cheaper per source row than the node
+    /// rows the log already carries, but a real transient memory cost.
+    SetNodeTimeseries {
+        node_type: String,
+        id: Value,
+        timeseries: crate::graph::features::timeseries::NodeTimeseries,
+    },
+    /// Replace `node_type`'s timeseries declaration — resolution, known
+    /// channels, units and bin semantics. Insert-or-replace per type, matching
+    /// every writer of `DirGraph::timeseries_configs`.
+    ///
+    /// JSON for the same reason [`MutationOp::SetOntology`] is: three of
+    /// `TimeseriesConfig`'s four fields carry `skip_serializing_if`, so under
+    /// postcard — which is not self-describing and reads a fixed field
+    /// sequence — the struct would write fewer fields than it reads back and
+    /// the whole frame would decode as a torn tail.
+    SetTimeseriesConfig { node_type: String, config: String },
+    /// Vectors for the store `(node_type, "{text_column}_emb")`, with the
+    /// provenance that makes them answerable.
+    ///
+    /// `model_id` and the per-entry text hash ride **in this op**, never
+    /// reconstructed: a replay that restored vectors with `model_id: None`
+    /// would silently break `embedding_info()` and turn
+    /// `embed_texts(mode='changed')` into a full re-embed of the corpus.
+    ///
+    /// Entries are `(node id, vector, source-text hash)` and are keyed
+    /// logically for the same reason [`MutationOp::SetNodeTimeseries`] is —
+    /// the store addresses `NodeIndex.index()`, which a delete reuses.
+    /// `mode` says how the op relates to what the log already carries for this
+    /// store, which is what lets an incremental `add_embeddings` log its own
+    /// batch instead of the whole store each time.
+    SetEmbeddings {
+        node_type: String,
+        text_column: String,
+        dimension: usize,
+        metric: Option<String>,
+        model_id: Option<String>,
+        entries: Vec<(Value, Vec<f32>, Option<u64>)>,
+        mode: EmbeddingWrite,
+    },
+    /// Declare (`present`) or withdraw the HNSW index over
+    /// `(node_type, "{text_column}_emb")`, with the parameters it was built
+    /// from.
+    ///
+    /// Only the *declaration* travels. The index addresses **store slots**,
+    /// which replay renumbers, and `io/file/vector_persistence.rs` already
+    /// states that it is a rebuildable cache and never a correctness
+    /// dependency — so replay rebuilds the topology from the replayed vectors
+    /// through `build_vector_index`, exactly as it rebuilds property indexes
+    /// from recovered rows.
+    SetVectorIndex {
+        node_type: String,
+        text_column: String,
+        metric: Option<String>,
+        m: Option<usize>,
+        ef_construction: Option<usize>,
+        ef_search: Option<usize>,
+        auto_refresh_limit: Option<usize>,
+        present: bool,
+    },
+}
+
+/// How a [`MutationOp::SetEmbeddings`] relates to the vectors the log already
+/// carries for its store.
+///
+/// **Variant order is on-disk format**, for the same reason [`MutationOp`]'s
+/// is: postcard tags by declaration index. Append only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum EmbeddingWrite {
+    /// `set_embeddings` / `embed_texts` / an import: these are the store's
+    /// vectors, so anything logged for it earlier is superseded.
+    Replace,
+    /// `add_embeddings`: this batch joins what the store already holds. Logged
+    /// as the batch rather than the whole store, so an n-batch ingest costs
+    /// O(n) bytes rather than O(n²).
+    Upsert,
+    /// `remove_embeddings`: the store is gone, entries empty.
+    Withdraw,
 }
 
 /// Which user-index structure a [`MutationOp::SetPropertyIndex`] declares.
@@ -1381,7 +1485,7 @@ mod tests {
     #[test]
     fn variant_tags_are_stable_on_disk_format() {
         let id = || Value::Int64(1);
-        let cases: [(u8, MutationOp); 14] = [
+        let cases: [(u8, MutationOp); 18] = [
             (
                 0,
                 MutationOp::UpsertNode {
@@ -1496,6 +1600,46 @@ mod tests {
                     entity_type: "T".into(),
                     properties: vec!["k".into()],
                     declared_type: None,
+                    present: true,
+                },
+            ),
+            (
+                14,
+                MutationOp::SetNodeTimeseries {
+                    node_type: "T".into(),
+                    id: id(),
+                    timeseries: sample_timeseries(),
+                },
+            ),
+            (
+                15,
+                MutationOp::SetTimeseriesConfig {
+                    node_type: "T".into(),
+                    config: "{}".into(),
+                },
+            ),
+            (
+                16,
+                MutationOp::SetEmbeddings {
+                    node_type: "T".into(),
+                    text_column: "txt".into(),
+                    dimension: 2,
+                    metric: None,
+                    model_id: None,
+                    entries: vec![],
+                    mode: EmbeddingWrite::Replace,
+                },
+            ),
+            (
+                17,
+                MutationOp::SetVectorIndex {
+                    node_type: "T".into(),
+                    text_column: "txt".into(),
+                    metric: None,
+                    m: None,
+                    ef_construction: None,
+                    ef_search: None,
+                    auto_refresh_limit: None,
                     present: true,
                 },
             ),
@@ -1679,6 +1823,136 @@ mod tests {
         ];
         let frames = vec![WalFrame { lsn: 1, ops }];
         assert_eq!(read_frames_all(write_wal(&frames)).unwrap(), frames);
+    }
+
+    fn sample_timeseries() -> crate::graph::features::timeseries::NodeTimeseries {
+        crate::graph::features::timeseries::NodeTimeseries {
+            keys: vec![
+                chrono::NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
+                chrono::NaiveDate::from_ymd_opt(2020, 2, 1).unwrap(),
+            ],
+            channels: std::collections::HashMap::from([
+                ("oil".to_string(), vec![1.5, 2.5]),
+                ("gas".to_string(), vec![3.5, 4.5]),
+            ]),
+        }
+    }
+
+    /// Tags 14-17 must survive the file codec unchanged, payload and
+    /// provenance included. Postcard is not self-describing, so a struct that
+    /// wrote fewer fields than it reads back would decode the *whole frame* as
+    /// a torn tail — which is why `TimeseriesConfig`, whose three optional
+    /// fields carry `skip_serializing_if`, travels as JSON while
+    /// `NodeTimeseries`, which has none, travels as itself.
+    #[test]
+    fn payload_ops_round_trip_through_the_file_codec() {
+        let ops = vec![
+            MutationOp::SetNodeTimeseries {
+                node_type: "Co".into(),
+                id: Value::Int64(1),
+                timeseries: sample_timeseries(),
+            },
+            MutationOp::SetTimeseriesConfig {
+                node_type: "Co".into(),
+                config: r#"{"resolution":"day","channels":["oil"],"units":{"oil":"MSm3"},"bin_type":"total"}"#
+                    .into(),
+            },
+            MutationOp::SetEmbeddings {
+                node_type: "Co".into(),
+                text_column: "txt".into(),
+                dimension: 3,
+                metric: Some("cosine".into()),
+                model_id: Some("stub/v1".into()),
+                entries: vec![
+                    (Value::Int64(1), vec![0.5, 0.25, 0.125], Some(42)),
+                    (Value::String("b".into()), vec![1.0, 0.0, -1.0], None),
+                ],
+                mode: EmbeddingWrite::Upsert,
+            },
+            MutationOp::SetEmbeddings {
+                node_type: "Co".into(),
+                text_column: "txt".into(),
+                dimension: 0,
+                metric: None,
+                model_id: None,
+                entries: vec![],
+                mode: EmbeddingWrite::Withdraw,
+            },
+            MutationOp::SetVectorIndex {
+                node_type: "Co".into(),
+                text_column: "txt".into(),
+                metric: Some("euclidean".into()),
+                m: Some(16),
+                ef_construction: Some(200),
+                ef_search: None,
+                auto_refresh_limit: Some(1000),
+                present: true,
+            },
+        ];
+        let frames = vec![WalFrame { lsn: 1, ops }];
+        assert_eq!(read_frames_all(write_wal(&frames)).unwrap(), frames);
+    }
+
+    /// The JSON carrier is not decoration: a `TimeseriesConfig` serialized as
+    /// a struct writes only the fields its `skip_serializing_if`s keep, so a
+    /// frame carrying one would decode short. Pins that the config we put on
+    /// the wire is the config that comes back, empty optionals included.
+    #[test]
+    fn timeseries_config_survives_its_skipped_fields() {
+        let sparse = crate::graph::features::timeseries::TimeseriesConfig {
+            resolution: "month".into(),
+            channels: vec![],
+            units: std::collections::HashMap::new(),
+            bin_type: None,
+        };
+        let document = serde_json::to_string(&sparse).unwrap();
+        let frames = vec![WalFrame {
+            lsn: 1,
+            ops: vec![
+                MutationOp::SetTimeseriesConfig {
+                    node_type: "Co".into(),
+                    config: document,
+                },
+                // A following op is the actual detector: a short decode of the
+                // one above eats this one as a torn tail.
+                MutationOp::SetSchemaVersion { version: 3 },
+            ],
+        }];
+        let got = read_frames_all(write_wal(&frames)).unwrap();
+        assert_eq!(got, frames);
+        let MutationOp::SetTimeseriesConfig { config, .. } = &got[0].ops[0] else {
+            panic!("first op must be the config");
+        };
+        assert_eq!(
+            serde_json::from_str::<crate::graph::features::timeseries::TimeseriesConfig>(config)
+                .unwrap(),
+            sparse
+        );
+    }
+
+    /// A v6 WAL — written before the payload tags existed — replays exactly
+    /// under the v7 schema, the same strict-subset property every earlier bump
+    /// kept.
+    #[test]
+    fn v6_frames_replay_exactly_under_current_schema() {
+        let frames = vec![WalFrame {
+            lsn: 1,
+            ops: vec![
+                MutationOp::SetConstraint {
+                    name: Some("nn".into()),
+                    entity: crate::graph::constraints::EntityKind::Node,
+                    kind: crate::graph::constraints::ConstraintKind::NotNull,
+                    entity_type: "A".into(),
+                    properties: vec!["k".into()],
+                    declared_type: None,
+                    present: true,
+                },
+                MutationOp::SetSchemaVersion { version: 6 },
+            ],
+        }];
+        let bytes = write_wal_version(&frames, 6);
+        assert_eq!(bytes[4], 6, "fixture must carry a v6 header");
+        assert_eq!(read_frames_all(bytes).unwrap(), frames);
     }
 
     /// A v5 WAL — written before the declaration tags existed — replays

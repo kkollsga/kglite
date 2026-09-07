@@ -20,14 +20,66 @@
 
 use std::collections::HashMap;
 
+use crate::datatypes::Value;
 use crate::graph::algorithms::Interrupt;
 use crate::graph::constraints::{
     normalize_properties, ConstraintDeclaration, ConstraintKind, EntityKind,
 };
 use crate::graph::dir_graph::rel_constraints::RelDeclarationError;
+use crate::graph::features::timeseries::NodeTimeseries;
 use crate::graph::property_types::DeclaredType;
 use crate::graph::schema::DirGraph;
-use crate::graph::wal::{MutationOp, PropertyIndexKind};
+use crate::graph::wal::{EmbeddingWrite, MutationOp, PropertyIndexKind};
+
+/// One embedding store's payload, folded across frames into the state it ends
+/// in.
+///
+/// Not last-writer-wins like the declarations: `add_embeddings` logs its own
+/// batch (a whole-store re-log per batch would cost O(n²) bytes), so the
+/// batches have to accumulate. Materializing the end state rather than keeping
+/// every op bounds the fold by the final store instead of by the log's length.
+#[derive(Default)]
+struct StorePayload {
+    /// `false` once a `remove_embeddings` was logged with nothing after it.
+    present: bool,
+    dimension: usize,
+    metric: Option<String>,
+    model_id: Option<String>,
+    /// `(node id, vector, source-text hash)`, in first-seen order; a repeated
+    /// id replaces its entry in place, matching `set_embedding`.
+    entries: Vec<(Value, Vec<f32>, Option<u64>)>,
+    slots: HashMap<Value, usize>,
+}
+
+impl StorePayload {
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.slots.clear();
+    }
+
+    fn upsert(&mut self, id: &Value, vector: &[f32], hash: Option<u64>) {
+        let entry = (id.clone(), vector.to_vec(), hash);
+        match self.slots.get(id) {
+            Some(&slot) => self.entries[slot] = entry,
+            None => {
+                self.slots.insert(id.clone(), self.entries.len());
+                self.entries.push(entry);
+            }
+        }
+    }
+
+    fn forget(&mut self, id: &Value) {
+        let Some(slot) = self.slots.remove(id) else {
+            return;
+        };
+        self.entries.remove(slot);
+        for other in self.slots.values_mut() {
+            if *other > slot {
+                *other -= 1;
+            }
+        }
+    }
+}
 
 /// A node type's declared identity-field spellings, folded across frames.
 /// Each field is last-writer-wins **among the frames that declared it**: a
@@ -53,6 +105,8 @@ enum DeclKey {
     /// the author's name — `DROP CONSTRAINT c` withdraws what `CREATE
     /// CONSTRAINT c` installed, so both must fold into one slot.
     Constraint(EntityKind, String, Vec<String>, ConstraintKind),
+    TimeseriesConfig(String),
+    VectorIndex(String, String),
 }
 
 #[derive(Default)]
@@ -64,11 +118,44 @@ pub(super) struct Declarations {
     /// Everything else, in capture order, one entry per distinct declaration.
     ops: Vec<MutationOp>,
     op_slots: HashMap<DeclKey, usize>,
+    /// Timeseries payloads, last-writer-wins per node — each writer logs the
+    /// whole series it produced, so the newest op is the whole answer.
+    timeseries: Vec<((String, Value), NodeTimeseries)>,
+    timeseries_slots: HashMap<(String, Value), usize>,
+    /// Embedding payloads, accumulated per store — see [`StorePayload`].
+    stores: Vec<((String, String), StorePayload)>,
+    store_slots: HashMap<(String, String), usize>,
 }
 
 impl Declarations {
     pub fn is_empty(&self) -> bool {
-        self.aliases.is_empty() && self.ops.is_empty()
+        self.aliases.is_empty()
+            && self.ops.is_empty()
+            && self.timeseries.is_empty()
+            && self.stores.is_empty()
+    }
+
+    /// Drop every payload still pending for a node the log went on to delete.
+    ///
+    /// Without this a `DELETE` followed by a re-`CREATE` of the same id would
+    /// install the dead node's series and vector onto its replacement: the
+    /// stores are keyed by physical slot, and a freed slot is handed to the
+    /// next node created.
+    pub fn forget_node(&mut self, node_type: &str, id: &Value) {
+        let key = (node_type.to_string(), id.clone());
+        if let Some(slot) = self.timeseries_slots.remove(&key) {
+            self.timeseries.remove(slot);
+            for other in self.timeseries_slots.values_mut() {
+                if *other > slot {
+                    *other -= 1;
+                }
+            }
+        }
+        for ((store_type, _), payload) in &mut self.stores {
+            if store_type == node_type {
+                payload.forget(id);
+            }
+        }
     }
 
     /// Fold one op, or report that it is not a declaration.
@@ -88,6 +175,65 @@ impl Declarations {
                 }
                 return true;
             }
+            MutationOp::SetNodeTimeseries {
+                node_type,
+                id,
+                timeseries,
+            } => {
+                let key = (node_type.clone(), id.clone());
+                match self.timeseries_slots.get(&key) {
+                    Some(&slot) => self.timeseries[slot].1 = timeseries.clone(),
+                    None => {
+                        self.timeseries_slots
+                            .insert(key.clone(), self.timeseries.len());
+                        self.timeseries.push((key, timeseries.clone()));
+                    }
+                }
+                return true;
+            }
+            MutationOp::SetEmbeddings {
+                node_type,
+                text_column,
+                dimension,
+                metric,
+                model_id,
+                entries,
+                mode,
+            } => {
+                let payload = self.store_mut(node_type, text_column);
+                match mode {
+                    EmbeddingWrite::Replace => {
+                        payload.clear();
+                        payload.present = true;
+                    }
+                    EmbeddingWrite::Upsert => payload.present = true,
+                    EmbeddingWrite::Withdraw => {
+                        payload.clear();
+                        payload.present = false;
+                    }
+                }
+                if *dimension > 0 {
+                    payload.dimension = *dimension;
+                }
+                if metric.is_some() {
+                    payload.metric = metric.clone();
+                }
+                if model_id.is_some() {
+                    payload.model_id = model_id.clone();
+                }
+                for (id, vector, hash) in entries {
+                    payload.upsert(id, vector, *hash);
+                }
+                return true;
+            }
+            MutationOp::SetTimeseriesConfig { node_type, .. } => {
+                DeclKey::TimeseriesConfig(node_type.clone())
+            }
+            MutationOp::SetVectorIndex {
+                node_type,
+                text_column,
+                ..
+            } => DeclKey::VectorIndex(node_type.clone(), text_column.clone()),
             MutationOp::SetTypeParent { node_type, .. } => DeclKey::Parent(node_type.clone()),
             MutationOp::SetOntology { .. } => DeclKey::Ontology,
             MutationOp::SetSchemaVersion { .. } => DeclKey::SchemaVersion,
@@ -123,6 +269,16 @@ impl Declarations {
             }
         }
         true
+    }
+
+    fn store_mut(&mut self, node_type: &str, text_column: &str) -> &mut StorePayload {
+        let key = (node_type.to_string(), text_column.to_string());
+        let slot = *self.store_slots.entry(key.clone()).or_insert_with(|| {
+            let slot = self.stores.len();
+            self.stores.push((key, StorePayload::default()));
+            slot
+        });
+        &mut self.stores[slot].1
     }
 
     fn alias_mut(&mut self, node_type: &str) -> &mut TypeAliases {
@@ -175,6 +331,11 @@ impl Declarations {
                 MutationOp::SetSpatialConfig { node_type, config } => {
                     if let Ok(config) = serde_json::from_str(config) {
                         graph.spatial_configs.insert(node_type.clone(), config);
+                    }
+                }
+                MutationOp::SetTimeseriesConfig { node_type, config } => {
+                    if let Ok(config) = serde_json::from_str(config) {
+                        graph.install_timeseries_config(node_type, config);
                     }
                 }
                 _ => {}
@@ -259,6 +420,79 @@ impl Declarations {
                     *present,
                 )?,
                 _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Reinstate the bulk payloads, after the rows are installed, reindexed and
+/// id-indexed.
+///
+/// Last of the three install points, because both halves need finished rows:
+/// every payload is keyed by a logical `(node_type, id)` that has to resolve,
+/// and the vector index is rebuilt from the vectors installed here.
+impl Declarations {
+    pub fn install_payloads(&self, graph: &mut DirGraph) -> Result<(), String> {
+        for ((node_type, id), timeseries) in &self.timeseries {
+            graph.build_id_index(node_type);
+            // An id that resolves to nothing belonged to a node the same log
+            // deleted; the series went with it.
+            if let Some(node_idx) = graph.lookup_by_id_normalized(node_type, id) {
+                graph.install_node_timeseries(node_idx, timeseries.clone());
+            }
+        }
+        for ((node_type, text_column), payload) in &self.stores {
+            if !payload.present {
+                graph.install_embedding_removal(node_type, text_column);
+                continue;
+            }
+            graph.install_embedding_entries(
+                node_type,
+                text_column,
+                (
+                    payload.dimension,
+                    payload.metric.clone(),
+                    payload.model_id.clone(),
+                ),
+                &payload.entries,
+            );
+        }
+        // After the vectors, and through the same builder `build_vector_index`
+        // uses — the logged declaration carries the parameters, never the
+        // topology, which addresses store slots this replay just renumbered.
+        for op in &self.ops {
+            let MutationOp::SetVectorIndex {
+                node_type,
+                text_column,
+                metric,
+                m,
+                ef_construction,
+                ef_search,
+                auto_refresh_limit,
+                present,
+            } = op
+            else {
+                continue;
+            };
+            if !*present {
+                crate::graph::embeddings::drop_index_structure(graph, node_type, text_column);
+                continue;
+            }
+            // A store the log later removed leaves its index declaration with
+            // nothing to build over. That is the writer's own sequence, not a
+            // corrupt log, so it is skipped rather than refused.
+            if crate::graph::embeddings::store_exists(graph, node_type, text_column) {
+                crate::graph::embeddings::build_index_structure(
+                    graph,
+                    node_type,
+                    text_column,
+                    *m,
+                    *ef_construction,
+                    *ef_search,
+                    metric.as_deref(),
+                    *auto_refresh_limit,
+                )?;
             }
         }
         Ok(())

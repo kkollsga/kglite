@@ -116,14 +116,16 @@ explaining that, since the blocker is the commit boundary rather than barrier
 strength; only `durable="off"` is supported. The *default* does not raise, so
 disk callers are unaffected by the default being on elsewhere.
 
-**Not everything is logged.** The log carries nodes, edges, labels, and every
-declaration you make about them — identity-field spellings, `set_parent_type`,
-ontologies, constraints, user-created indexes, `set_spatial` and
-`set_schema_version`. Two things it deliberately does not carry are
-**embeddings** and **timeseries channels**: both are bulk numeric payloads
-rather than declarations, so they stay *checkpoint-only* and are persisted by
-`save()`. If either matters to you, a `save()` after loading it is still part
-of your durability story, not an optimisation.
+**What the log carries.** Nodes, edges, labels, every declaration you make
+about them — identity-field spellings, `set_parent_type`, ontologies,
+constraints, user-created indexes, `set_spatial` and `set_schema_version` —
+and the two bulk payloads: **timeseries channels** and **embeddings**, the
+latter with the model id and per-node text hashes that
+`embed_texts(mode='changed')` reads. A crash before your first `save()`
+therefore loses none of it. The one thing replay rebuilds rather than reads is
+the HNSW vector index: only the `build_vector_index` declaration is logged,
+and the topology is rebuilt from the replayed vectors, because the index
+addresses store slots that replay renumbers.
 
 Three consequences worth internalising before you rely on this:
 

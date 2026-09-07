@@ -374,18 +374,30 @@ model.
   it deleted underneath them — but there is no retention policy yet, so
   checkpoint on a schedule you have the disk budget for, and prune old
   `generations/gen_*` directories yourself once no reader is using them.
-- **Declarations are logged; two kinds of bulk payload are not.** The log
-  describes nodes, edges, labels, and the declarations you make about them:
-  the identity-field spellings an `add_nodes` call names (`unique_id_field` /
-  `node_title_field`), `set_parent_type`, `define_ontology` /
-  `clear_ontology`, `create_index` / `drop_index` and their range and
-  composite siblings, `CREATE CONSTRAINT` / `DROP CONSTRAINT`, `set_spatial`,
-  and `set_schema_version`. A recovered graph is queryable by your own column
-  names, with your indexes built and your constraints enforced. What still has
-  *no* log entry — persisted by `save()` rather than recovered by replay — is
-  **embeddings** and **timeseries channels**, because each is bulk numeric
-  data rather than a declaration and would put the whole payload in a log
-  frame. Call `save()` after loading either if a crash must not lose it.
+- **What the log carries.** Nodes, edges, labels; every declaration you make
+  about them — the identity-field spellings an `add_nodes` call names
+  (`unique_id_field` / `node_title_field`), `set_parent_type`,
+  `define_ontology` / `clear_ontology`, `create_index` / `drop_index` and
+  their range and composite siblings, `CREATE CONSTRAINT` / `DROP
+  CONSTRAINT`, `set_spatial`, `set_schema_version`; and the two bulk payloads
+  — **timeseries channels** (`set_timeseries`, `set_time_index`,
+  `add_ts_channel`, `add_timeseries`, `add_nodes(timeseries=…)`) and
+  **embeddings** (`set_embeddings`, `add_embeddings`, `embed_texts`,
+  `import_embeddings`, `copy_embeddings_from`, and the `build_vector_index`
+  declaration). A recovered graph is queryable by your own column names, with
+  your indexes built, your constraints enforced, your series readable and your
+  vectors searchable — carrying the model id and per-node text hashes, so a
+  following `embed_texts(mode='changed')` re-embeds nothing. What replay does
+  *not* restore is derived state a load rebuilds anyway; the HNSW topology is
+  rebuilt from the replayed vectors rather than logged, because it addresses
+  store slots that replay renumbers.
+- **Bulk payloads make bulk frames.** A timeseries load logs the series it
+  produced, so a 10 000-node × 365-day × 3-channel `add_timeseries` writes one
+  frame of roughly 129 MB, assembled in memory before a single write. That is
+  ~3.6× cheaper per source row than the node rows the log already carries, and
+  far inside the 4 GiB frame cap, but it is a real transient cost on a
+  Wikidata-scale ingest. `durable="off"` (or loading before `open(…,
+  durable=…)`) skips it.
 - **A `with` block is not a transaction.** Each mutation commits as it runs, so
   an exception inside the block does not undo mutations that already returned —
   they are recovered on the next `open()`. Use `begin()` when you want

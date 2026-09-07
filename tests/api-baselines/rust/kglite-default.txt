@@ -2733,8 +2733,11 @@ pub kglite::api::timeseries::NodeTimeseries::channels: std::collections::hash::m
 pub kglite::api::timeseries::NodeTimeseries::keys: alloc::vec::Vec<chrono::naive::date::NaiveDate>
 impl core::clone::Clone for kglite::api::timeseries::NodeTimeseries
 pub fn kglite::api::timeseries::NodeTimeseries::clone(&self) -> kglite::api::timeseries::NodeTimeseries
+impl core::cmp::PartialEq for kglite::api::timeseries::NodeTimeseries
+pub fn kglite::api::timeseries::NodeTimeseries::eq(&self, other: &kglite::api::timeseries::NodeTimeseries) -> bool
 impl core::fmt::Debug for kglite::api::timeseries::NodeTimeseries
 pub fn kglite::api::timeseries::NodeTimeseries::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for kglite::api::timeseries::NodeTimeseries
 impl serde_core::ser::Serialize for kglite::api::timeseries::NodeTimeseries
 pub fn kglite::api::timeseries::NodeTimeseries::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<'de> serde_core::de::Deserialize<'de> for kglite::api::timeseries::NodeTimeseries
@@ -3295,6 +3298,12 @@ pub fn kglite::api::DirGraph::nodes_with_label(&self, label: &str) -> alloc::vec
 pub fn kglite::api::DirGraph::remove_node_label(&mut self, idx: petgraph::graph_impl::NodeIndex, label: kglite::api::InternedKey) -> core::result::Result<bool, alloc::string::String>
 pub fn kglite::api::DirGraph::secondary_label_names(&self, idx: petgraph::graph_impl::NodeIndex) -> alloc::vec::Vec<alloc::string::String>
 pub fn kglite::api::DirGraph::secondary_labels(&self, idx: petgraph::graph_impl::NodeIndex) -> alloc::vec::Vec<kglite::api::InternedKey>
+impl kglite::api::DirGraph
+pub fn kglite::api::DirGraph::add_timeseries_channel(&mut self, node_idx: petgraph::graph_impl::NodeIndex, channel: alloc::string::String, values: alloc::vec::Vec<f64>) -> core::result::Result<(), alloc::string::String>
+pub fn kglite::api::DirGraph::remove_embedding_store(&mut self, node_type: &str, text_column: &str) -> bool
+pub fn kglite::api::DirGraph::set_embedding_store(&mut self, node_type: &str, text_column: &str, store: kglite::api::storage::EmbeddingStore)
+pub fn kglite::api::DirGraph::set_node_timeseries(&mut self, node_idx: petgraph::graph_impl::NodeIndex, timeseries: kglite::api::timeseries::NodeTimeseries)
+pub fn kglite::api::DirGraph::set_timeseries_config(&mut self, node_type: &str, config: kglite::api::timeseries::TimeseriesConfig)
 impl kglite::api::DirGraph
 pub fn kglite::api::DirGraph::auto_timestamp_for(&self, node_type: &str) -> bool
 pub fn kglite::api::DirGraph::auto_timestamp_for_connection(&self, conn_type: &str) -> bool

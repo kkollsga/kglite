@@ -404,9 +404,7 @@ pub fn import_embeddings_from_file(graph: &mut DirGraph, path: &str) -> io::Resu
         }
 
         if imported > 0 {
-            let key =
-                crate::graph::embeddings::store_key(&exported.node_type, &exported.text_column);
-            graph.embeddings.insert(key, store);
+            graph.set_embedding_store(&exported.node_type, &exported.text_column, store);
             stores_count += 1;
         } else if !exported.entries.is_empty() {
             dropped_stores += 1;

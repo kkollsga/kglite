@@ -1094,3 +1094,350 @@ fn a_constraint_the_recovered_rows_violate_refuses_replay_loudly() {
         "a refused replay publishes nothing"
     );
 }
+
+// ── timeseries and embedding payloads ────────────────────────────────
+//
+// Bulk payloads rather than declarations, but the same blind spot before v7:
+// rows recovered while `timeseries()` and `list_embeddings()` answered as if
+// the load had never happened. Design:
+// dev-docs/designs/timeseries-embeddings-wal-2026-09.md.
+
+use crate::graph::features::timeseries::{NodeTimeseries, TimeseriesConfig};
+use crate::graph::wal::EmbeddingWrite;
+
+fn series(values: &[f64]) -> NodeTimeseries {
+    NodeTimeseries {
+        keys: (1..=values.len())
+            .map(|month| chrono::NaiveDate::from_ymd_opt(2020, month as u32, 1).unwrap())
+            .collect(),
+        channels: std::collections::HashMap::from([("oil".to_string(), values.to_vec())]),
+    }
+}
+
+fn set_series(id: i64, values: &[f64]) -> MutationOp {
+    MutationOp::SetNodeTimeseries {
+        node_type: "Person".into(),
+        id: Value::Int64(id),
+        timeseries: series(values),
+    }
+}
+
+fn vectors(entries: Vec<(i64, Vec<f32>, Option<u64>)>, mode: EmbeddingWrite) -> MutationOp {
+    MutationOp::SetEmbeddings {
+        node_type: "Person".into(),
+        text_column: "title".into(),
+        dimension: 2,
+        metric: Some("cosine".into()),
+        model_id: Some("stub/v1".into()),
+        entries: entries
+            .into_iter()
+            .map(|(id, vector, hash)| (Value::Int64(id), vector, hash))
+            .collect(),
+        mode,
+    }
+}
+
+fn stored_series(g: &mut DirGraph, id: i64) -> Option<NodeTimeseries> {
+    let idx = g.lookup_by_id("Person", &Value::Int64(id))?;
+    g.get_node_timeseries(idx.index()).cloned()
+}
+
+fn store(g: &DirGraph) -> Option<&crate::graph::schema::EmbeddingStore> {
+    g.embeddings
+        .get(&("Person".to_string(), "title_emb".to_string()))
+}
+
+#[test]
+fn timeseries_payload_replays_onto_its_logical_node() {
+    let mut g = DirGraph::new();
+    let frames = vec![frame(
+        1,
+        vec![
+            upsert_node(1, "Alice", vec![]),
+            upsert_node(2, "Bob", vec![]),
+            set_series(2, &[1.0, 2.0]),
+            MutationOp::SetTimeseriesConfig {
+                node_type: "Person".into(),
+                config: serde_json::to_string(&TimeseriesConfig {
+                    resolution: "month".into(),
+                    channels: vec!["oil".into()],
+                    units: std::collections::HashMap::new(),
+                    bin_type: None,
+                })
+                .unwrap(),
+            },
+        ],
+    )];
+    apply_frames(&mut g, &frames, 0).unwrap();
+    assert_eq!(stored_series(&mut g, 2), Some(series(&[1.0, 2.0])));
+    assert_eq!(stored_series(&mut g, 1), None);
+    assert_eq!(
+        g.timeseries_configs
+            .get("Person")
+            .map(|c| c.resolution.clone()),
+        Some("month".to_string())
+    );
+}
+
+#[test]
+fn a_replayed_timeseries_is_last_writer_wins_and_idempotent() {
+    let mut g = DirGraph::new();
+    let frames = vec![
+        frame(
+            1,
+            vec![upsert_node(1, "Alice", vec![]), set_series(1, &[1.0])],
+        ),
+        frame(2, vec![set_series(1, &[9.0, 8.0])]),
+    ];
+    apply_frames(&mut g, &frames, 0).unwrap();
+    assert_eq!(stored_series(&mut g, 1), Some(series(&[9.0, 8.0])));
+    // Replaying the same log over the state it produced converges.
+    apply_frames(&mut g, &frames, 0).unwrap();
+    assert_eq!(stored_series(&mut g, 1), Some(series(&[9.0, 8.0])));
+}
+
+#[test]
+fn a_deleted_node_does_not_hand_its_payloads_to_the_slot_that_replaces_it() {
+    // The logical-key case. The stores address `NodeIndex.index()`, which a
+    // delete frees and the next create takes, so a physically-keyed payload
+    // would surface on a node that never had one.
+    let mut g = DirGraph::new();
+    let frames = vec![
+        frame(
+            1,
+            vec![
+                upsert_node(1, "Alice", vec![]),
+                set_series(1, &[1.0, 2.0]),
+                vectors(vec![(1, vec![1.0, 0.0], Some(7))], EmbeddingWrite::Replace),
+            ],
+        ),
+        frame(
+            2,
+            vec![MutationOp::RemoveNode {
+                node_type: "Person".into(),
+                id: Value::Int64(1),
+            }],
+        ),
+        frame(3, vec![upsert_node(2, "Bob", vec![])]),
+    ];
+    apply_frames(&mut g, &frames, 0).unwrap();
+    assert_eq!(
+        stored_series(&mut g, 2),
+        None,
+        "Bob inherited a dead series"
+    );
+    assert_eq!(
+        store(&g).map(|s| s.len()),
+        Some(0),
+        "Bob inherited a dead vector"
+    );
+}
+
+#[test]
+fn embedding_payloads_replay_with_their_provenance() {
+    let mut g = DirGraph::new();
+    let frames = vec![frame(
+        1,
+        vec![
+            upsert_node(1, "Alice", vec![]),
+            upsert_node(2, "Bob", vec![]),
+            vectors(
+                vec![(1, vec![1.0, 0.0], Some(11)), (2, vec![0.0, 1.0], Some(22))],
+                EmbeddingWrite::Replace,
+            ),
+        ],
+    )];
+    apply_frames(&mut g, &frames, 0).unwrap();
+    let idx = g.lookup_by_id("Person", &Value::Int64(1)).unwrap();
+    let store = store(&g).expect("the store must exist");
+    assert_eq!(store.len(), 2);
+    assert_eq!(store.dimension, 2);
+    assert_eq!(store.metric.as_deref(), Some("cosine"));
+    assert_eq!(
+        store.model_id.as_deref(),
+        Some("stub/v1"),
+        "the model stamp rides with the vectors, it is not re-derived"
+    );
+    assert_eq!(
+        store.text_hashes.len(),
+        2,
+        "without the hashes, embed_texts(mode='changed') re-embeds the corpus"
+    );
+    assert_eq!(store.get_embedding(idx.index()), Some(&[1.0f32, 0.0][..]));
+}
+
+#[test]
+fn upserted_embedding_batches_accumulate_across_frames() {
+    // `add_embeddings` logs its own batch, not the whole store — so the fold
+    // has to add them up rather than keep the last one.
+    let mut g = DirGraph::new();
+    let frames = vec![
+        frame(
+            1,
+            vec![
+                upsert_node(1, "Alice", vec![]),
+                upsert_node(2, "Bob", vec![]),
+                vectors(vec![(1, vec![1.0, 0.0], None)], EmbeddingWrite::Upsert),
+            ],
+        ),
+        frame(
+            2,
+            vec![vectors(
+                vec![(2, vec![0.0, 1.0], None)],
+                EmbeddingWrite::Upsert,
+            )],
+        ),
+    ];
+    apply_frames(&mut g, &frames, 0).unwrap();
+    assert_eq!(store(&g).map(|s| s.len()), Some(2));
+}
+
+#[test]
+fn a_replaced_store_discards_the_batches_logged_before_it() {
+    let mut g = DirGraph::new();
+    let frames = vec![
+        frame(
+            1,
+            vec![
+                upsert_node(1, "Alice", vec![]),
+                upsert_node(2, "Bob", vec![]),
+                vectors(vec![(1, vec![1.0, 0.0], None)], EmbeddingWrite::Upsert),
+            ],
+        ),
+        frame(
+            2,
+            vec![vectors(
+                vec![(2, vec![0.0, 1.0], None)],
+                EmbeddingWrite::Replace,
+            )],
+        ),
+    ];
+    apply_frames(&mut g, &frames, 0).unwrap();
+    assert_eq!(store(&g).map(|s| s.len()), Some(1));
+    let idx = g.lookup_by_id("Person", &Value::Int64(2)).unwrap();
+    assert_eq!(
+        store(&g).unwrap().get_embedding(idx.index()),
+        Some(&[0.0f32, 1.0][..])
+    );
+}
+
+#[test]
+fn a_withdrawn_store_replays_as_absent() {
+    let mut g = DirGraph::new();
+    let frames = vec![
+        frame(
+            1,
+            vec![
+                upsert_node(1, "Alice", vec![]),
+                vectors(vec![(1, vec![1.0, 0.0], None)], EmbeddingWrite::Replace),
+            ],
+        ),
+        frame(
+            2,
+            vec![MutationOp::SetEmbeddings {
+                node_type: "Person".into(),
+                text_column: "title".into(),
+                dimension: 0,
+                metric: None,
+                model_id: None,
+                entries: vec![],
+                mode: EmbeddingWrite::Withdraw,
+            }],
+        ),
+    ];
+    apply_frames(&mut g, &frames, 0).unwrap();
+    assert!(store(&g).is_none());
+}
+
+#[test]
+fn a_vector_index_declaration_rebuilds_from_the_replayed_vectors() {
+    // Only the declaration is logged: the HNSW topology addresses store slots,
+    // which this replay renumbers, so it has to be rebuilt after the vectors
+    // land.
+    let mut g = DirGraph::new();
+    let frames = vec![frame(
+        1,
+        vec![
+            upsert_node(1, "Alice", vec![]),
+            upsert_node(2, "Bob", vec![]),
+            vectors(
+                vec![(1, vec![1.0, 0.0], None), (2, vec![0.0, 1.0], None)],
+                EmbeddingWrite::Replace,
+            ),
+            MutationOp::SetVectorIndex {
+                node_type: "Person".into(),
+                text_column: "title".into(),
+                metric: Some("cosine".into()),
+                m: Some(16),
+                ef_construction: None,
+                ef_search: None,
+                auto_refresh_limit: None,
+                present: true,
+            },
+        ],
+    )];
+    apply_frames(&mut g, &frames, 0).unwrap();
+    assert!(crate::graph::embeddings::has_vector_index(
+        &g, "Person", "title"
+    ));
+}
+
+#[test]
+fn a_withdrawn_vector_index_replays_as_dropped() {
+    let mut g = DirGraph::new();
+    let declare = |present| MutationOp::SetVectorIndex {
+        node_type: "Person".into(),
+        text_column: "title".into(),
+        metric: Some("cosine".into()),
+        m: None,
+        ef_construction: None,
+        ef_search: None,
+        auto_refresh_limit: None,
+        present,
+    };
+    let frames = vec![
+        frame(
+            1,
+            vec![
+                upsert_node(1, "Alice", vec![]),
+                vectors(vec![(1, vec![1.0, 0.0], None)], EmbeddingWrite::Replace),
+                declare(true),
+            ],
+        ),
+        frame(2, vec![declare(false)]),
+    ];
+    apply_frames(&mut g, &frames, 0).unwrap();
+    assert!(!crate::graph::embeddings::has_vector_index(
+        &g, "Person", "title"
+    ));
+    assert_eq!(store(&g).map(|s| s.len()), Some(1), "the vectors stay");
+}
+
+#[test]
+fn payloads_replay_from_a_payload_only_frame() {
+    // No node and no edge slot in the plan: an emptiness test counting only
+    // those would skip the whole replay and drop every payload here.
+    let mut g = DirGraph::new();
+    apply_frames(
+        &mut g,
+        &[frame(
+            1,
+            vec![
+                upsert_node(1, "Alice", vec![]),
+                upsert_node(2, "Bob", vec![]),
+            ],
+        )],
+        0,
+    )
+    .unwrap();
+    let frames = vec![frame(
+        2,
+        vec![
+            set_series(1, &[3.0]),
+            vectors(vec![(1, vec![1.0, 0.0], None)], EmbeddingWrite::Replace),
+        ],
+    )];
+    apply_frames(&mut g, &frames, 1).unwrap();
+    assert_eq!(stored_series(&mut g, 1), Some(series(&[3.0])));
+    assert_eq!(store(&g).map(|s| s.len()), Some(1));
+}

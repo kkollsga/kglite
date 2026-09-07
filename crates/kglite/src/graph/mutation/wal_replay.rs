@@ -86,6 +86,9 @@ pub(crate) fn prepare_replay(
     // replay introduced, and its own declarer is what checks it against the
     // recovered rows. A replayed `CREATE INDEX` is rebuilt from those rows.
     plan.declarations.install_schema(&mut working)?;
+    // Last, because the vector index is rebuilt from the vectors this installs
+    // and the timeseries are keyed by ids the id index above just built.
+    plan.declarations.install_payloads(&mut working)?;
     working.bump_version();
     Ok((Some(working), plan.max_lsn))
 }
@@ -138,7 +141,14 @@ fn mutation_op_has_legacy_reference(op: &MutationOp) -> bool {
         | MutationOp::SetSchemaVersion { .. }
         | MutationOp::SetSpatialConfig { .. }
         | MutationOp::SetPropertyIndex { .. }
-        | MutationOp::SetConstraint { .. } => false,
+        | MutationOp::SetConstraint { .. }
+        // The payload ops carry channel floats and embedding vectors, neither
+        // of which can hold a `Value` at all, so no node reference can hide
+        // in one.
+        | MutationOp::SetNodeTimeseries { .. }
+        | MutationOp::SetTimeseriesConfig { .. }
+        | MutationOp::SetEmbeddings { .. }
+        | MutationOp::SetVectorIndex { .. } => false,
     }
 }
 

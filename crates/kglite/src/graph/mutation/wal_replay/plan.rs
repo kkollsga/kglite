@@ -118,6 +118,10 @@ impl ReplayPlan {
                 node.removed = false;
             }
             MutationOp::RemoveNode { node_type, id } => {
+                // The payload half of the barrier. A slot is handed to the
+                // next node created, so a timeseries or vector still pending
+                // for this identity would land on whatever recreates it.
+                self.declarations.forget_node(node_type, id);
                 let node = self.node_mut((node_type.clone(), id.clone()));
                 node.row = None;
                 node.removed = true;
@@ -176,7 +180,11 @@ impl ReplayPlan {
             | MutationOp::SetSchemaVersion { .. }
             | MutationOp::SetSpatialConfig { .. }
             | MutationOp::SetPropertyIndex { .. }
-            | MutationOp::SetConstraint { .. } => {}
+            | MutationOp::SetConstraint { .. }
+            | MutationOp::SetNodeTimeseries { .. }
+            | MutationOp::SetTimeseriesConfig { .. }
+            | MutationOp::SetEmbeddings { .. }
+            | MutationOp::SetVectorIndex { .. } => {}
         }
     }
 
