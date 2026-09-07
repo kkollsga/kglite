@@ -70,27 +70,12 @@ operator extension (documented here so you don't go looking for a hook):
 
 ## Where skills come from (the layers)
 
-Skills load from four layers. On a name collision the **higher** layer wins, so
+Skills load from three layers. On a name collision the **higher** layer wins, so
 you can override a bundled skill by shipping one of the same `name`:
 
-1. **kglite-bundled** (lowest) — compiled into the `kglite-mcp-server` binary
-   from `crates/kglite-mcp-server/skills/` (registered explicitly in
-   `main.rs`). The bundled set today: `cypher_query`, `graph_overview`,
-   `read_code_source`, `save_graph`, `explore`, `code_graph_analysis`,
-   `code_graph_views`. Adding to this set is a kglite change; **operators add
-   their own skills via the project layer below — no rebuild.**
-2. **framework defaults** — from the mcp-methods crate.
-3. **project layer** — a `<basename>.skills/` directory **next to your
-   manifest**. For `my_graph_mcp.yaml` that's `my_graph_mcp.skills/`. This is
-   the operator's home: drop skill files here, no code changes.
-   **The basename is the *manifest's*, not the graph's.** Serving
-   `taxa.kgl` from `my_graph_mcp.yaml` means `my_graph_mcp.skills/`;
-   a `taxa.skills/` directory is never looked at, is never reported as
-   missing (the layer is optional), and costs you every skill in it. If you
-   want a directory keyed to something else, name it under `skills:` — that
-   is layer 4, and a path there that does not exist is a boot error.
-4. **operator-declared paths** (highest) — extra directories listed in
-   `skills:` (see next section).
+1. **bundled defaults** (lowest) — KGLite's compiled skills plus the framework defaults. The KGLite set is registered explicitly from `crates/kglite-mcp-server/skills/`; operators do not need to rebuild it.
+2. **operator-declared paths** — directories listed in `skills:`, in declaration order. Earlier paths win collisions with later paths.
+3. **project layer** (highest) — a `<basename>.skills/` directory next to the manifest. For `my_graph_mcp.yaml` this is `my_graph_mcp.skills/`. The basename is the manifest's, not the graph's. This layer is optional when absent; a declared path that is absent is a boot error.
 
 ## The `skills:` manifest value
 
@@ -99,7 +84,7 @@ you can override a bundled skill by shipping one of the same `name`:
 | Value | Meaning |
 |---|---|
 | absent / `false` / `null` | Skills **off**. No injection, `prompts/list` empty. |
-| `true` | On: kglite-bundled + framework defaults + the `<basename>.skills/` project layer. |
+| `true` | On: bundled defaults + the `<basename>.skills/` project layer. |
 | `"./path"` | On, and also load skills from `./path` (relative to the manifest). |
 | `[true, "./a", "./b"]` | List form: `true` = the bundled/default set, each string = an extra path. Use to combine the defaults with one or more operator packs. |
 
@@ -116,13 +101,12 @@ reading `prompts/list` by hand.
 
 ## Frontmatter schema
 
-Frontmatter is YAML between `---` fences. mcp-methods parses exactly these keys;
-**everything else is ignored** (see "load-bearing vs decorative" below).
+Frontmatter is YAML between `---` fences. Unknown top-level metadata is ignored for compatibility, but unknown keys inside `applies_when` are rejected so a misspelled gate cannot activate a skill.
 
 | Key | Type | Required | Meaning |
 |---|---|---|---|
 | `name` | string | **yes** | Skill identity. Also the tool it injects into by name match (so a skill named `cypher_query` rides the `cypher_query` tool). For a cross-tool skill, use a topic name that is *not* a tool name and rely on `references_tools`. |
-| `description` | string | no | The **routing heuristic** — TRIGGER/SKIP guidance. Injected into the tool description under a `## When to use` header (and sent to `prompts/list`). Keep it to a paragraph; it is never truncated. |
+| `description` | string | **yes** | The **routing heuristic** — TRIGGER/SKIP guidance. Injected into the tool description under a `## When to use` header (and sent to `prompts/list`). Keep it to a paragraph; it is never truncated. |
 | `body` | (the markdown after the frontmatter) | no | The **methodology**. Injected under `## Methodology`, capped (see limits). |
 | `references_tools` | list of strings | no | Extra tools this skill injects into, beyond its name match. **Load-bearing.** A `code_graph_analysis` skill with `references_tools: [cypher_query, graph_overview, explore]` rides all three. |
 | `auto_inject_hint` | bool (default `true`) | no | `false` keeps the skill out of tool descriptions (it still appears in `prompts/list`). Use to ship a skill for prompt-only clients without bloating `tools/list`. |
@@ -132,9 +116,10 @@ Frontmatter is YAML between `---` fences. mcp-methods parses exactly these keys;
 
 `applies_when` keeps a skill silent on graphs it doesn't apply to (e.g. a
 code-graph skill stays off a legal/finance domain graph). Predicates are
-AND-combined; an absent predicate is "satisfied". Re-evaluated against the
-**live** graph on each request, so it tracks post-boot mutations (a workspace
-activating a repo).
+AND-combined; an absent predicate is "satisfied". They are evaluated once at
+server boot, after the graph and tool catalogue are ready. Mutating or replacing
+the graph does not refresh prompt registration or injected tool descriptions;
+restart the server to evaluate the new graph state.
 
 | Predicate | True when |
 |---|---|
@@ -150,9 +135,10 @@ applies_when:
 
 ### Load-bearing vs decorative keys
 
-Only the keys in the table above are read. Several keys appear in older
-bundled files for human documentation but the loader **ignores** them — copying
-them into your skill does nothing:
+Only the keys in the table above affect behavior. Unknown top-level keys remain
+decorative and are ignored, including these keys found in older bundled files.
+Unknown keys nested under `applies_when` are an error; the affected external
+skill is skipped with a path-and-error warning.
 
 - `applies_to` (version floors like `mcp_methods: ">=0.3.36"`) — **decorative**.
   Activation is *not* gated on it; `applies_when` + the layer the file lives in
@@ -197,15 +183,11 @@ is a fallback for the rare custom integration that surfaces prompts.
 
 ## Size limits
 
-- The injected **body** is capped at **16 KB** (hard) with a **4 KB** soft
-  target — keep bodies tight; 16 KB × N tools is real context cost on every
-  `tools/list`. Past 16 KB the body is truncated with a marker.
-- The **`description`** (routing) is small by design and never truncated — it
-  is the highest-value half, so lead with it.
+- A complete skill file above **16,384 bytes** is rejected; it is not truncated. The limit includes frontmatter, `description`, and markdown body.
+- Files above the **4,096-byte** soft target still load, with a warning.
+- The resolved session total has a **65,536-byte** soft limit that warns without dropping skills.
 
-If your methodology is longer than the cap, that's a signal to split it: a
-focused routing `description` plus a tight body beats a wall of text the agent
-skims.
+Keep each file focused. If it exceeds the hard limit, split the methodology into independently routed skills.
 
 ## Worked example: a cross-tool orchestration skill
 

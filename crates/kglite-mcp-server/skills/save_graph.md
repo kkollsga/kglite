@@ -1,6 +1,6 @@
 ---
 name: save_graph
-description: "Persist the active graph to its source `.kgl` file after mutating Cypher (CREATE / SET / DELETE / MERGE / REMOVE). TRIGGER after a chain of mutations the user explicitly wants kept — the in-memory graph won't survive a server restart otherwise. ALSO TRIGGER when the user says \"save\" or \"commit\" in the context of graph edits. SKIP for read-only sessions; the tool won't register unless the manifest sets `builtins.save_graph: true`. SKIP for exploratory mutations the user is iterating on — let them say \"save\" explicitly. SKIP entirely on disk-backed graphs (`storage=\"disk\"`) — those persist on every column flush; save_graph isn't registered for them."
+description: "Persist the active graph to its bound `.kgl` file after mutating Cypher (CREATE / SET / DELETE / MERGE / REMOVE). TRIGGER after a chain of mutations the user explicitly wants kept. ALSO TRIGGER when the user says \"save\" or \"commit\" in the context of graph edits. SKIP for exploratory mutations the user is iterating on. The tool registers when `builtins.save_graph: true` or writable mode is enabled."
 applies_to:
   mcp_methods: ">=0.3.36"
   kglite_mcp_server: ">=0.9.31"
@@ -16,7 +16,7 @@ applies_when:
 
 ## Overview
 
-`save_graph` writes the in-memory graph back to the `.kgl` file the server booted from. It is the **persistence tool** — call it once after a coherent chain of mutations the user wants kept. The tool is **opt-in per manifest**: it doesn't register at all unless the YAML declares `builtins.save_graph: true`. This is deliberate — most kglite deployments are read-only, and exposing save by default would let agents make changes the operator didn't intend.
+`save_graph` writes the active graph back to its bound `.kgl` file. It is the **persistence tool** — call it once after a coherent chain of mutations the user wants kept. The tool registers when the manifest declares `builtins.save_graph: true` or the server is write-enabled with `--writable` / `extensions.writable: true`. The `builtins.save_graph` switch alone exposes save for already-dirty or boot-configured graph state; it does not authorize Cypher mutations.
 
 ## Quick Reference
 
@@ -26,15 +26,15 @@ applies_when:
 | User said "save" / "commit" | `save_graph()` |
 | Each mutation in a long chain | NO — save once at the end, not per-statement |
 | Read-only exploration | Don't call. Tool likely isn't registered anyway. |
-| Disk-backed graph | Don't call. Tool isn't registered for disk graphs. |
+| Any storage mode with changes to publish | `save_graph()` — persistence still requires an explicit save |
 
 ## When the tool isn't registered
 
-If the manifest has `builtins.save_graph: false` (or doesn't declare it at all), `save_graph` won't appear in `tools/list`. If the user asks to save changes and the tool isn't available, surface the manifest gate clearly:
+If neither `builtins.save_graph: true` nor writable mode enables the route, `save_graph` won't appear in `tools/list`. If the user asks to save changes and the tool isn't available, surface the gate clearly:
 
-> "The server doesn't have save enabled — the operator's manifest needs `builtins.save_graph: true` for me to persist changes."
+> "The server doesn't have save enabled — the operator can set `builtins.save_graph: true`, or enable writable mode when graph mutations are intended."
 
-Don't try to write the file directly via `read_source` / shell tools; the active graph lives in memory and the on-disk format is binary. The persistence path is `save_graph` or nothing.
+Don't try to write the file directly via `read_source` / shell tools; the active graph lives in memory and the on-disk format is binary. Use `save_graph` for the bound path or `save_graph_as` on a write-enabled server for another path.
 
 ## What gets saved
 
@@ -50,7 +50,7 @@ What does NOT get saved:
 - Source-tool bindings (`source_roots`, watch handles — these are session state)
 - Workspace state (clone inventory, active repo path — those live in their own files)
 
-## When mutations don't need save_graph
+## When not to publish mutations
 
 If the operator's intent is **try-it-and-see** mutations (a Cypher CREATE to see what the schema looks like with a hypothetical node, or a SET to test a query against modified data), don't call `save_graph` proactively. The next server restart will discard the changes, which is the right behaviour. Save only when the user explicitly says "save" / "commit" / "make this permanent."
 
@@ -60,9 +60,9 @@ If the operator's intent is **try-it-and-see** mutations (a Cypher CREATE to see
 
 ❌ Calling `save_graph` proactively after a read query. Read queries don't mutate; save is a no-op but signals intent the user didn't have.
 
-❌ Trying to use `save_graph` for an output you want at a different path. The tool saves to the boot path only — there's no `to_path` argument. For an alternate output, the agent would need to call the user's own scripting; not in scope for this tool.
+❌ Trying to pass an output path to `save_graph`. The tool publishes to the bound path and has no `to_path` argument. On a write-enabled server, use `save_graph_as` for another path.
 
-❌ Expecting `save_graph` to register on a graph booted with `storage="disk"`. Disk-backed graphs persist column-by-column on every flush; there's no in-memory state to save explicitly.
+❌ Assuming a disk-backed mutation is already published. Disk storage changes session state; call `save_graph` to publish the coherent change set just as you would for other storage modes.
 
 ✅ Save after a chain. CREATE → SET → SET → DELETE → `save_graph()`. One write, one persistent change.
 
@@ -89,6 +89,5 @@ The server holds the cross-process writer lease only **between your first unsave
 
 ## When `save_graph` is the wrong tool
 
-- **Disk-backed mode** — disk graphs persist incrementally; no save call needed.
 - **Workspace mode** — the active graph is a code graph built from cloned source, not a `.kgl` file. The graph is rebuilt every time the workspace is re-activated; persistence isn't the right model here.
 - **Read-only session** — if the operator's manifest doesn't enable save, the tool won't appear, and the session is read-only by design. Respect it.

@@ -861,6 +861,20 @@ class TestGraphMode:
         finally:
             client.shutdown()
 
+    def test_graph_overview_bundled_skill_reference_example(self, graph_fixture: Path):
+        """The bundled skill's ``cypher=['MATCH', 'WHERE']`` example must
+        remain a reference-topic request accepted by the registered schema."""
+        client = _spawn(["--graph", str(graph_fixture)])
+        try:
+            result = client.call_tool("graph_overview", {"cypher": ["MATCH", "WHERE"]})
+            text = _text_content(result)
+        finally:
+            client.shutdown()
+
+        assert not _is_error(result), text
+        assert "<MATCH>" in text, text
+        assert "<WHERE>" in text, text
+
     def test_readonly_server_leaves_the_graph_lockable(self, graph_fixture: Path):
         """A read-only server must not hold the served file's writer lease.
 
@@ -2326,6 +2340,97 @@ class TestExploreAndSkills:
         # code_graph_views references cypher_query.
         assert "mcp-skill:code_graph_views" in tools["cypher_query"]
         assert "is_benchmark" in tools["cypher_query"]
+
+    def test_predicate_activation_is_boot_scoped_on_prompts_and_tool_descriptions(
+        self, graph_fixture: Path, tmp_path: Path
+    ):
+        task_graph = tmp_path / "task.kgl"
+        graph = kglite.KnowledgeGraph()
+        graph.add_nodes(pd.DataFrame({"id": [1], "title": ["Task"]}), "Task", "id", "title")
+        graph.save(str(task_graph))
+
+        pack = tmp_path / "boot-scope-pack"
+        pack.mkdir()
+        (pack / "person.md").write_text(
+            "---\nname: person_boot\ndescription: Person boot route.\n"
+            "references_tools: [cypher_query]\napplies_when:\n"
+            "  graph_has_node_type: [Person]\n---\nPERSON-BOOT-MARKER\n",
+            encoding="utf-8",
+        )
+        (pack / "task.md").write_text(
+            "---\nname: task_late\ndescription: Task late route.\n"
+            "references_tools: [cypher_query]\napplies_when:\n"
+            "  graph_has_node_type: [Task]\n---\nTASK-LATE-MARKER\n",
+            encoding="utf-8",
+        )
+        manifest = tmp_path / "boot_scope_mcp.yaml"
+        manifest.write_text("name: Boot scope\nskills:\n  - ./boot-scope-pack\n", encoding="utf-8")
+
+        client = _spawn(["--graph", str(graph_fixture), "--writable", "--mcp-config", str(manifest)])
+        try:
+            prompts_before = {prompt["name"] for prompt in client.list_prompts()}
+            description_before = next(
+                tool.get("description") or "" for tool in client.list_tools() if tool["name"] == "cypher_query"
+            )
+            loaded = client.call_tool("load_graph", {"path": str(task_graph)})
+            task_count = _text_content(
+                client.call_tool("cypher_query", {"query": "MATCH (n:Task) RETURN count(n) AS count"})
+            )
+            prompts_after = {prompt["name"] for prompt in client.list_prompts()}
+            description_after = next(
+                tool.get("description") or "" for tool in client.list_tools() if tool["name"] == "cypher_query"
+            )
+        finally:
+            client.shutdown()
+
+        assert not _is_error(loaded), _text_content(loaded)
+        assert "1" in task_count, task_count
+        assert "person_boot" in prompts_before
+        assert "task_late" not in prompts_before
+        assert prompts_after == prompts_before
+        assert "PERSON-BOOT-MARKER" in description_before
+        assert "TASK-LATE-MARKER" not in description_before
+        assert description_after == description_before
+
+    def test_unknown_skill_predicate_fails_closed_with_visible_warning(self, code_graph_fixture, tmp_path: Path):
+        pack = tmp_path / "pack"
+        pack.mkdir()
+        (pack / "always.md").write_text(
+            "---\nname: always_gate\ndescription: Always active control.\n"
+            "references_tools: [cypher_query]\n---\nAlways marker.\n",
+            encoding="utf-8",
+        )
+        (pack / "recognized_false.md").write_text(
+            "---\nname: recognized_false\ndescription: False control.\n"
+            "references_tools: [cypher_query]\napplies_when:\n"
+            "  graph_has_node_type: [DefinitelyAbsent]\n---\nFalse marker.\n",
+            encoding="utf-8",
+        )
+        (pack / "typo_gate.md").write_text(
+            "---\nname: typo_gate\ndescription: Must fail closed.\n"
+            "references_tools: [cypher_query]\napplies_when:\n"
+            "  graph_has_node_typo: [Function]\n---\nTypo marker.\n",
+            encoding="utf-8",
+        )
+        manifest = tmp_path / "strict_skills_mcp.yaml"
+        manifest.write_text("name: Strict skills\nskills:\n  - ./pack\n", encoding="utf-8")
+
+        client = _spawn(["--graph", str(code_graph_fixture), "--mcp-config", str(manifest)])
+        try:
+            prompts = {prompt["name"] for prompt in client.list_prompts()}
+            tools = {tool["name"]: (tool.get("description") or "") for tool in client.list_tools()}
+            warning = _wait_for_stderr(client, "graph_has_node_typo")
+        finally:
+            client.shutdown()
+
+        assert "always_gate" in prompts
+        assert "recognized_false" not in prompts
+        assert "typo_gate" not in prompts
+        assert "Always marker." in tools["cypher_query"]
+        assert "False marker." not in tools["cypher_query"]
+        assert "Typo marker." not in tools["cypher_query"]
+        assert "unknown field" in warning
+        assert str(pack / "typo_gate.md") in warning.replace("/./", "/")
 
 
 # ── Test: code-tool gating on non-code graphs ─────────────────────────────

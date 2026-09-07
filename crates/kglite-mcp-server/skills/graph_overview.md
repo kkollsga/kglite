@@ -31,7 +31,7 @@ auto_inject_hint: true
 | First contact with an unfamiliar graph | `graph_overview()` — no args |
 | Drill into one node type's property catalogue | `graph_overview(types=['Function'])` |
 | See connectivity (which types connect via which edges) | `graph_overview(connections=True)` |
-| Sample a custom subset via Cypher | `graph_overview(cypher='MATCH (n:Function {is_test: true}) RETURN n LIMIT 200')` |
+| Read the Cypher reference before a query | `graph_overview(cypher=['MATCH', 'WHERE'])` |
 | Pre-flight a hypothesis | drill into the type you're about to query, look at `vals=` / `sample=` for properties |
 
 ## Reading the output
@@ -78,12 +78,14 @@ graph_overview(types=['Function', 'Class'])
 # Connectivity-focused — when the question is "how does X connect to Y"
 graph_overview(connections=True)
 
-# Targeted Cypher inside the overview surface — useful when you want
-# overview + a specific extract in one call
-graph_overview(cypher='MATCH (n:Function) WHERE n.is_test=true RETURN n.module LIMIT 50')
+# Cypher-reference drill-down before writing a query
+graph_overview(cypher=['MATCH', 'WHERE'])
+
+# Run a custom data query on the query tool
+cypher_query(query='MATCH (n:Function) WHERE n.is_test=true RETURN n.module LIMIT 50')
 ```
 
-The `cypher:` parameter inside `graph_overview` runs the query through the same schema-rendering layer — the row results are formatted alongside the schema context. Convenient when you want "here's the shape AND here's an example."
+The `cypher:` parameter selects reference topics; it accepts `true` for the full reference or a list of topic names. Run data queries with `cypher_query`.
 
 ## Common Pitfalls
 

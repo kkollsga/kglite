@@ -1036,10 +1036,12 @@ RETURN date('2024-01-15') + duration({months: 1}) // → 2024-02-14 (1*30 days),
 | `rand()` / `random()` | Random float [0, 1) |
 | `randomUUID()` | Random RFC 4122 v4 UUID string |
 
-> **Divergence — no NaN and no Infinity.** KGLite's value model has no
-> non-finite float, so an expression with no real result is `null` rather than
-> Neo4j's `NaN` / `Infinity`: `sqrt(-1)`, `log(0)`, `log(-1)` and `log10(-1)`
-> are `null`, and so is every float division or modulo by zero
+> **Divergence — undefined arithmetic returns null.** KGLite's Float64 value
+> can represent NaN and infinities (time-series channels use NaN as a missing
+> sentinel), but these math expressions do not produce a non-finite result.
+> They return `null` rather than Neo4j's `NaN` / `Infinity`: `sqrt(-1)`,
+> `log(0)`, `log(-1)` and `log10(-1)` are `null`, and so is every float
+> division or modulo by zero
 > (`1.0 / 0.0`, `-1.0 / 0.0`, `0.0 / 0.0`, `1.0 % 0.0`). Null then propagates
 > through the rest of the expression and through comparisons, exactly like any
 > other null. *Integer* division by zero is the one case that raises instead
@@ -3721,7 +3723,7 @@ claimed openCypher-compatible subset.
 | `round(x [, precision])` | Covered | |
 | `nodes(p)`, `relationships(p)` | Covered | Exact node order, relationship identity, properties, and traversal direction are preserved for parallel and incoming paths |
 | String functions | Covered | `split`, `replace`, `substring`, `left`, `right`, `trim`, `ltrim`, `rtrim`, `reverse`. All are character-indexed; `split` with an empty delimiter is a documented divergence (see String Functions) |
-| Math functions | Intentional divergence | `abs`, `ceil`, `floor`, `sqrt`, `sign`, `log`/`ln`, `log10`, `exp`, `pow`, `pi`, `rand`, `randomUUID`. KGLite has no NaN/Infinity value, so an undefined result (`sqrt(-1)`, `log(0)`, `1.0/0.0`) is null rather than Neo4j's non-finite float (see Math Functions) |
+| Math functions | Intentional divergence | `abs`, `ceil`, `floor`, `sqrt`, `sign`, `log`/`ln`, `log10`, `exp`, `pow`, `pi`, `rand`, `randomUUID`. Undefined real-number results (`sqrt(-1)`, `log(0)`, `1.0/0.0`) are null rather than Neo4j's non-finite float; KGLite's Float64 value can otherwise represent NaN and infinities (see Math Functions) |
 | Trig functions | Covered | `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2(y,x)`, `cot`, `haversin`, `degrees`, `radians` |
 | Spatial functions | Extension | KGLite's pragmatic `point`, geometry, containment, and distance model |
 | Temporal functions | Extension | `valid_at`, `valid_during`, and KGLite temporal helpers |

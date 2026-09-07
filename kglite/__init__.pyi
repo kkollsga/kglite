@@ -1731,10 +1731,11 @@ def stamp_file_freshness(
     engine never reads the filesystem). For every node with ``path_property``,
     snapshot the file through one descriptor and SET ``mtime_property`` (a
     nanosecond UTC RFC 3339 string) and, unless ``hash_property`` is None, its
-    sha256; a missing file sets both null. Resolved duplicate paths are read
-    once. Updates run in bounded batches inside one atomic transaction. Run
-    after a build; pair with :func:`check_file_freshness`. Returns the count
-    stamped.
+    sha256; a missing file sets both null. Snapshots use a 4,096-entry LRU:
+    recently repeated resolved paths reuse one read, while a path repeated
+    after eviction is read again. Updates run in bounded batches inside one
+    atomic transaction. Run after a build; pair with
+    :func:`check_file_freshness`. Returns the count stamped.
     """
     ...
 

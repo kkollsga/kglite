@@ -535,7 +535,9 @@ def stamp_file_freshness(
     filesystem). For every node carrying ``path_property``, snapshot the file
     through one descriptor and SET ``mtime_property`` (a nanosecond UTC RFC 3339
     string) and, unless ``hash_property`` is None, its sha256. A missing file
-    sets both to null. Run after a build/write; pair with
+    sets both to null. Snapshots use a 4,096-entry LRU: recently repeated
+    resolved paths reuse one read, while a path repeated after eviction is read
+    again. Run after a build/write; pair with
     :func:`check_file_freshness` to detect later drift.
 
     Args:

@@ -51,15 +51,17 @@ path = "src/main.rs"
 # of an error-shaped success body. Same release also runs the result
 # postprocess hook on the error arm, so our identity/rebuild footers still
 # reach an agent reading a failure.
-# 0.4.7 is the compile floor now: `resolve_source_roots_lenient` and
-# `ServerOptions::with_unresolved_source_roots` do not exist below it, and
-# `modes::resolve_declared_source_roots` is built on both. Below 0.4.7 the
+# 0.4.8 is the compile floor now: its strict skill grammar rejects unknown
+# `applies_when` predicates instead of activating a mistyped gate everywhere.
+# The 0.4.7 `resolve_source_roots_lenient` and
+# `ServerOptions::with_unresolved_source_roots` APIs are also required by
+# `modes::resolve_declared_source_roots`. Below 0.4.7 the
 # only resolver is all-or-nothing, so one missing entry in a multi-root
 # `source_roots:` costs every root — a manifest declaring three directories
 # would silently search none of them — and the source tools cannot name the
 # missing root in their own reply, leaving the diagnosis on stderr where the
 # calling agent cannot read it.
-mcp-methods = { version = "0.4.7", default-features = false, features = ["server"] }
+mcp-methods = { version = "0.4.8", default-features = false, features = ["server"] }
 
 # kglite (pure-Rust core) — no pyo3 in the resulting binary, no
 # libpython link. The 0.10.1 lift moved KnowledgeGraph +

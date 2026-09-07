@@ -175,11 +175,10 @@ pub(crate) fn apply_discovery_steer(mode: &Mode, mut options: ServerOptions) -> 
 /// two domain predicates that require knowing what node types and
 /// properties the active graph carries.
 ///
-/// Returning `None` for an unrecognised clause marks the predicate
-/// `Unknown` upstream — the framework's safe default suppresses the
-/// skill when any clause is `Unknown`, which prevents a typo'd
-/// predicate from silently activating a skill against the wrong
-/// domain.
+/// Unknown `applies_when` keys are rejected while the skill file is
+/// parsed. Returning `None` here handles a recognized clause that this
+/// domain evaluator cannot answer; the framework records it as `Unknown`
+/// and suppresses the skill.
 pub(crate) struct KglitePredicateEvaluator {
     pub(crate) state: GraphState,
 }
@@ -498,5 +497,22 @@ mod bundled_skill_body_tests {
         assert!(body.contains("params="));
         assert!(body.contains("200 data rows"));
         assert!(body.contains("openCypher"));
+    }
+
+    /// The bundled examples are copied into live tool descriptions, where an
+    /// invalid call shape sends agents to the wrong route without a compiler
+    /// error. Keep the examples aligned with the registered zero-argument save
+    /// and Cypher-reference overview forms.
+    #[test]
+    fn bundled_lifecycle_skill_examples_match_registered_call_shapes() {
+        let overview = include_str!("../skills/graph_overview.md");
+        assert!(overview.contains("graph_overview(cypher=['MATCH', 'WHERE'])"));
+        assert!(overview.contains("cypher_query(query='MATCH"));
+        assert!(!overview.contains("graph_overview(cypher='MATCH"));
+
+        let save = include_str!("../skills/save_graph.md");
+        assert!(save.contains("`save_graph()`"));
+        assert!(save.contains("`save_graph_as`"));
+        assert!(!save.contains("save_graph(to_path"));
     }
 }

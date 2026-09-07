@@ -11,6 +11,7 @@ before upgrading.
 
 ### Fixed
 
+- MCP skill files now reject unknown `applies_when` predicates instead of silently activating a typo-gated skill. Skill activation is documented as boot-scoped, and bundled `save_graph` / `graph_overview` guidance matches the registered tools and argument schemas.
 - Closing or exiting a persisted Python graph now ends its writer authority,
   including stale WAL access and disk leases retained by snapshots. Retained
   graph data stays readable and privately mutable; transactions begun before
