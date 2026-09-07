@@ -24,10 +24,16 @@
       "sha256": "df0b628eaec6cbd60691d7aa4ee78c1b6dfccb4b4560bafab2d31ccfabca0043",
       "status": "accepted"
     },
-    "current.json": {
-      "evidence": "Release 0.16.24, 2026-09-06: two complete 36-cell release captures, 100 rounds and 20 warmups, 30-second settle; 34 common cells vs accepted 0.16.19 have worst min +4.3%/+4.4%, both 20% and 30% gates pass. Normal desktop load (prebuild 2.56/1.99/1.72), no simultaneous native build during captures; two new cells reviewed across repeat. Release evidence dev-docs/temp/release-0.16.24/benchmark-pair.json. Older rejected captures and separate early-deletion exception remain unchanged.",
+    "0_17_0.json": {
+      "evidence": "Two agreeing release captures; all minima within 4%, no heavy tails; intentional D2 disk reopen +278.5%/+292.2% retained; other cells below 20%, with load_kgl and fixed-hop watch-band. See dev-docs/temp/contract-implementation/release-0.17.0/benchmark-qualification.md.",
       "platform": "Darwin/arm64",
-      "sha256": "df0b628eaec6cbd60691d7aa4ee78c1b6dfccb4b4560bafab2d31ccfabca0043",
+      "sha256": "4833975b791052fc598cab0fcccec75a503b8e77d54ad14a0a670ca27732751b",
+      "status": "accepted"
+    },
+    "current.json": {
+      "evidence": "Two agreeing release captures; all minima within 4%, no heavy tails; intentional D2 disk reopen +278.5%/+292.2% retained; other cells below 20%, with load_kgl and fixed-hop watch-band. See dev-docs/temp/contract-implementation/release-0.17.0/benchmark-qualification.md.",
+      "platform": "Darwin/arm64",
+      "sha256": "4833975b791052fc598cab0fcccec75a503b8e77d54ad14a0a670ca27732751b",
       "status": "accepted"
     },
     "current.linux.json": {
@@ -44,7 +50,7 @@
     }
   },
   "references": {
-    "Darwin/arm64": "0_16_24.json",
+    "Darwin/arm64": "0_17_0.json",
     "Linux/x86_64": "reference_0_16_23.linux.json"
   },
   "schema_version": 1

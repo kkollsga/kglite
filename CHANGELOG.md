@@ -9,6 +9,8 @@ before upgrading.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-09-07
+
 ### Fixed
 
 - MCP skill files now reject unknown `applies_when` predicates instead of silently activating a typo-gated skill. Skill activation is documented as boot-scoped, and bundled `save_graph` / `graph_overview` guidance matches the registered tools and argument schemas.
