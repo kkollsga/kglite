@@ -20,7 +20,7 @@ openCypher's rules are the same at every site::
     x IN [..]      match present           -> true   (NULLs immaterial)
     x IN [..]      no match, list has NULL -> NULL
     x IN [..]      no match, no NULL       -> false
-    x IN []                                -> false  (but NULL IN [] -> NULL)
+    x IN []                                -> false  (every operand, null included)
 
 These goldens pin the behaviour so the shared membership-set rewrite cannot
 move it. They also pin the numeric coercion rule (`values_equal`): an
@@ -217,7 +217,7 @@ def test_in_literal_set_site_semantics(graph, clause, params, expected):
     ("expression", "expected"),
     [
         ("null IN [1, 2]", None),
-        ("null IN []", None),
+        ("null IN []", False),
         ("null IN [null]", None),
         ("1 IN [1, null]", True),
         ("2 IN [1, null]", None),
@@ -428,3 +428,86 @@ def test_unwind_of_duplicate_ids_still_yields_one_row_per_element(graph):
     """
     assert one(graph, "UNWIND [1, 1, 2] AS x MATCH (n:Item) WHERE n.id = x RETURN count(n) AS c") == 3
     assert one(graph, "UNWIND [1, 1, 2] AS x MATCH (n:Item {id: x}) RETURN count(n) AS c") == 3
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# The empty list — false for *every* operand, null included. openCypher's
+# `null IN []` is false, not unknown: an empty list has nothing to compare
+# against, so the answer is known even when the probe is not. KGLite used to
+# answer NULL here at all four predicate sites, disagreeing with its own
+# `any(x IN [] WHERE ...)`, which is `IN`'s definition.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def nullable_tag_graph():
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (:Q {id: 1, tag: 'a'}), (:Q {id: 2})")
+    return g
+
+
+@pytest.mark.parametrize("disable_optimizer", [False, True])
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        ("null IN []", False),
+        ("null IN [1]", None),
+        ("null IN [null]", None),
+        ("1 IN []", False),
+        ("NOT (null IN [])", True),
+        ("null IN [] AND true", False),
+        ("null IN [] OR false", False),
+        # the quantifier form `IN` is defined by — already correct, pinned
+        # here so the two can never disagree again
+        ("any(x IN [] WHERE x = null)", False),
+        ("any(x IN [] WHERE x = 1)", False),
+        ("none(x IN [] WHERE x = 1)", True),
+    ],
+)
+def test_empty_list_is_false_for_every_operand(graph, expression, expected, disable_optimizer):
+    got = graph.cypher(f"RETURN {expression} AS value", disable_optimizer=disable_optimizer).to_list()
+    assert got == [{"value": expected}]
+
+
+@pytest.mark.parametrize("disable_optimizer", [False, True])
+@pytest.mark.parametrize(
+    ("list_form", "params"),
+    [
+        ("[]", None),  # Predicate::InLiteralSet (folded empty set)
+        ("$empty", {"empty": []}),  # Predicate::InExpression / pushed param
+    ],
+)
+def test_empty_list_keeps_null_property_rows_under_negation(nullable_tag_graph, list_form, params, disable_optimizer):
+    """Row-level: a null property `IN []` is false, so `NOT (...)` is true and
+    the null-tag row survives. It used to be unknown, silently dropping the row.
+    """
+    got = nullable_tag_graph.cypher(
+        f"MATCH (n:Q) WHERE NOT (n.tag IN {list_form}) RETURN n.id AS id ORDER BY id",
+        params=params,
+        disable_optimizer=disable_optimizer,
+    ).to_list()
+    assert [r["id"] for r in got] == [1, 2]
+
+    membership = nullable_tag_graph.cypher(
+        f"MATCH (n:Q) RETURN n.id AS id, n.tag IN {list_form} AS m ORDER BY id",
+        params=params,
+        disable_optimizer=disable_optimizer,
+    ).to_list()
+    assert membership == [{"id": 1, "m": False}, {"id": 2, "m": False}]
+
+
+@pytest.mark.parametrize("disable_optimizer", [False, True])
+def test_empty_list_from_a_per_row_expression_is_false_for_null(nullable_tag_graph, disable_optimizer):
+    """`Predicate::In` (a non-literal item list) and `Predicate::InExpression`
+    (a per-row list expression) carry their own copies of the rule.
+    """
+    got = nullable_tag_graph.cypher(
+        """
+        MATCH (n:Q)
+        WITH n, [x IN [1, 2] WHERE x > 9 | x] AS empty
+        RETURN n.id AS id, n.tag IN empty AS m
+        ORDER BY id
+        """,
+        disable_optimizer=disable_optimizer,
+    ).to_list()
+    assert got == [{"id": 1, "m": False}, {"id": 2, "m": False}]

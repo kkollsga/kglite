@@ -11,6 +11,12 @@ before upgrading.
 
 ### Fixed
 
+- `x IN []` is now `false` for every operand, `null` included. `null IN []`
+  answered unknown, so `NOT (n.tag IN [])` and `NOT (n.tag IN $empty)` silently
+  dropped every row whose property was missing, and `n.tag IN []` returned
+  `null` on those rows instead of `false`. The rule now holds at all four `IN`
+  evaluation sites, matching `any(x IN [] WHERE ...)` — `IN`'s own definition —
+  which was already `false`.
 - A disk graph's persistent property indexes no longer answer for rows they do
   not hold. `save()` builds a cross-type `title`/`nid` index on its own, so
   after `save()` + `load()` every `name`/`title` lookup, `{name: ...}` pattern

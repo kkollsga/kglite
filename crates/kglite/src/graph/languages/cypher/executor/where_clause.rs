@@ -772,11 +772,15 @@ impl<'a> CypherExecutor<'a> {
             }
             Predicate::In { expr, list } => {
                 // openCypher three-valued IN semantics:
-                //   NULL IN anything                  → NULL
+                //   x IN []                           → false (any operand, NULL included)
+                //   NULL IN [..]  (non-empty)         → NULL
                 //   x IN [..]  (match present)        → true (NULLs in the list are immaterial)
                 //   x IN [..]  (no match, list has NULL) → NULL
                 //   x IN [..]  (no match, no NULL)    → false
                 let val = self.evaluate_expression(expr, row)?;
+                if list.is_empty() {
+                    return Ok(Some(false));
+                }
                 if matches!(val, Value::Null) {
                     return Ok(None);
                 }
@@ -848,13 +852,12 @@ impl<'a> CypherExecutor<'a> {
             Predicate::InExpression { expr, list_expr } => {
                 // Same Kleene rules as Predicate::In; the LHS and the list are
                 // both arbitrary expressions, so NULL can come from either.
-                // `parse_list_value(&Value::Null)` returns an empty vec, so a
-                // NULL list_val collapses to "empty list, no NULLs seen" —
-                // we lift that check explicitly so it propagates NULL.
+                // `parse_list_value(&Value::Null)` returns an empty vec, and an
+                // empty list is *false* rather than unknown, so a NULL list has
+                // to be lifted explicitly before the emptiness rule applies.
+                // The operand's own NULL is left to `kleene_contains_linear`,
+                // which decides emptiness first.
                 let val = self.evaluate_expression(expr, row)?;
-                if matches!(val, Value::Null) {
-                    return Ok(None);
-                }
                 let list_val = self.evaluate_expression(list_expr, row)?;
                 if matches!(list_val, Value::Null) {
                     return Ok(None);

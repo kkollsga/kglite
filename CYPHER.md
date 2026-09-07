@@ -3688,7 +3688,7 @@ claimed openCypher-compatible subset.
 | Comparison (`=`, `<>`, `<`, `>`, `<=`, `>=`) | Partial | Core scalar comparisons and null propagation are covered; composite and cross-type ordering are not a complete openCypher implementation |
 | Boolean (`AND`, `OR`, `XOR`, `NOT`) | Covered | Predicate and expression positions preserve three-valued results |
 | `IS NULL` / `IS NOT NULL` | Covered | Also works as expressions in RETURN/WITH |
-| `IN [list]` | Covered | Null operands and null-containing no-match lists preserve unknown |
+| `IN [list]` | Covered | Null operands and null-containing no-match lists preserve unknown; an **empty** list is `false` for every operand, `null` included |
 | `CONTAINS` / `STARTS WITH` / `ENDS WITH` | Covered | |
 | `=~` regex | Covered | Full-string match, per openCypher: the pattern must match the entire value, so `'inactive' =~ 'active'` is false. Wrap with `.*` to search, or use `text_match_regex()`, which is a search by design. Shares a process-wide FIFO cache with `text_match_regex()` (128 entries; 2 MiB compiled-program limit; misses compile outside the lock) |
 | `CASE WHEN...THEN...ELSE...END` | Covered | Simple and generic forms |

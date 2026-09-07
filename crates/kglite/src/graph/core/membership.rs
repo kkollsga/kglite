@@ -159,13 +159,22 @@ impl MembershipSet {
     /// openCypher's three-valued `value IN <list>`: `None` is UNKNOWN.
     ///
     /// ```text
-    /// NULL IN anything                    -> UNKNOWN
+    /// x IN []                             -> false   (any x, NULL included)
+    /// NULL IN [..]  (non-empty)           -> UNKNOWN
     /// x IN [..]  match present            -> true    (NULLs immaterial)
     /// x IN [..]  no match, unknown comparison -> UNKNOWN
     /// x IN [..]  every comparison false  -> false
     /// ```
+    ///
+    /// The empty list is decided before the operand is inspected: with no
+    /// element to compare against, the answer is known even when the probe
+    /// is not. This is also what `any(x IN [] WHERE ...)` — `IN`'s own
+    /// definition — answers.
     #[inline]
     pub fn kleene_contains(&self, value: &Value) -> Option<bool> {
+        if self.values.is_empty() {
+            return Some(false);
+        }
         if matches!(value, Value::Null) {
             return None;
         }
@@ -184,6 +193,9 @@ impl MembershipSet {
 /// exit on the first match.
 #[inline]
 pub fn kleene_contains_linear(value: &Value, items: &[Value]) -> Option<bool> {
+    if items.is_empty() {
+        return Some(false);
+    }
     if matches!(value, Value::Null) {
         return None;
     }

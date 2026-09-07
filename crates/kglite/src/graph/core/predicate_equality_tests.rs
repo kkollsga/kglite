@@ -70,6 +70,35 @@ fn structural_identity_is_independent_of_nullable_predicates() {
 }
 
 #[test]
+fn an_empty_list_is_false_for_every_operand_including_null() {
+    // openCypher: `x IN []` is false for *every* x, null included — an empty
+    // list has nothing to compare against, so the answer is known.
+    let empty = MembershipSet::default();
+    assert_eq!(empty.kleene_contains(&Value::Null), Some(false));
+    assert_eq!(empty.kleene_contains(&Value::Int64(1)), Some(false));
+    assert_eq!(empty.kleene_contains(&list(vec![Value::Null])), Some(false));
+    assert_eq!(kleene_contains_linear(&Value::Null, &[]), Some(false));
+    assert_eq!(kleene_contains_linear(&Value::Int64(1), &[]), Some(false));
+
+    // A non-empty list keeps every other Kleene answer.
+    let ones = MembershipSet::new(vec![Value::Int64(1)]);
+    assert_eq!(ones.kleene_contains(&Value::Null), None);
+    assert_eq!(
+        kleene_contains_linear(&Value::Null, &[Value::Int64(1)]),
+        None
+    );
+    let nulls = MembershipSet::new(vec![Value::Null]);
+    assert_eq!(nulls.kleene_contains(&Value::Null), None);
+    assert_eq!(nulls.kleene_contains(&Value::Int64(1)), None);
+
+    // The `PropertyMatcher::In(MembershipSet::default())` sentinel reads
+    // through `matches`, i.e. `== Some(true)`: an empty set still proves
+    // "no candidates" for a null probe.
+    assert!(!empty.matches(&Value::Null));
+    assert!(!empty.matches(&Value::Int64(1)));
+}
+
+#[test]
 fn membership_preserves_unknown_on_both_sides_of_index_threshold() {
     for count in [8, 9] {
         let values: Vec<Value> = (1..=count).map(|i| list(vec![Value::Int64(i)])).collect();
