@@ -332,7 +332,23 @@ pub(crate) mod write_hooks {
     pub(crate) fn any_tracked_index(graph: &DirGraph) -> bool {
         // P10c adds `|| !graph.embeddings.is_empty()` here, and its own arm
         // below each gate.
-        !graph.text_indexes.is_empty()
+        //
+        // The disk arm is a `GraphBackend` discriminant load plus, on a disk
+        // graph, one relaxed atomic: `tracks_index_freshness` is a latched
+        // `OnceLock`. A memory or mapped graph therefore still evaluates one
+        // `is_empty` and one match arm per row, which is what "zero cost when
+        // unindexed" has always meant here.
+        !graph.text_indexes.is_empty() || disk_tracking(graph).is_some()
+    }
+
+    /// The disk backend underneath, if it has a persistent bundle whose
+    /// freshness this write has to move.
+    #[inline]
+    fn disk_tracking(graph: &DirGraph) -> Option<&crate::graph::storage::disk::graph::DiskGraph> {
+        graph
+            .graph
+            .as_disk()
+            .filter(|disk| disk.tracks_index_freshness())
     }
 
     /// A node of `node_type` was created at `node`.
@@ -343,6 +359,25 @@ pub(crate) mod write_hooks {
         }
         note_work();
         crate::graph::text_indexes::note_node_created(graph, node, node_type);
+        if let Some(disk) = disk_tracking(graph) {
+            disk.note_index_node_created(node.index() as u32, node_type);
+        }
+    }
+
+    /// A node was removed at `node`.
+    ///
+    /// Disk-only, and gated on its own rather than through
+    /// [`any_tracked_index`]: a text index prunes the deleted document itself
+    /// (`delete_state::prune_doomed_text_docs`), so routing deletion through
+    /// the shared gate would put work past it for every text-indexed memory
+    /// graph to no effect.
+    #[inline]
+    pub(crate) fn note_node_removed(graph: &DirGraph, node: NodeIndex) {
+        let Some(disk) = disk_tracking(graph) else {
+            return;
+        };
+        note_work();
+        disk.note_index_node_removed(node.index() as u32);
     }
 
     /// A covered node's property was written.
@@ -365,6 +400,14 @@ pub(crate) mod write_hooks {
         }
         note_work();
         crate::graph::text_indexes::note_property_written(graph, node, node_type, field);
+        if let Some(disk) = disk_tracking(graph) {
+            // Field-blind on the disk side: a persistent bundle is keyed on the
+            // user's spelling of the property, and `field` is the
+            // alias-resolved one, so comparing them would need a per-row
+            // re-resolve to answer a question whose wrong answer is one
+            // redundant rebuild.
+            disk.note_index_property_written(node.index() as u32, Some(node_type));
+        }
     }
 }
 

@@ -11,6 +11,15 @@ before upgrading.
 
 ### Fixed
 
+- A disk graph's persistent property indexes no longer answer for rows they do
+  not hold. `save()` builds a cross-type `title`/`nid` index on its own, so
+  after `save()` + `load()` every `name`/`title` lookup, `{name: ...}` pattern
+  and `search()` silently missed every node created or `SET` since the load,
+  and a `create_index` missed every insert or `SET` after it — with
+  `reindex()` a no-op. A bundle that can no longer prove it covers the graph
+  now declines to a scan, `reindex()` and `save()` rebuild it, a stale bundle
+  is never carried into a new generation, and `search()` scans rather than
+  reporting the rows as absent. Memory and mapped were unaffected.
 - An aggregate after `OPTIONAL MATCH` now groups. `MATCH (n:P) OPTIONAL MATCH
   (n)-[:K]->(m) RETURN count(*)` returned one plausible per-node count per row
   instead of one row over the whole expansion (and zero rows, instead of one

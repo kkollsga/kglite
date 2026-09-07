@@ -344,5 +344,8 @@
   },
   "tests/test_storage_parity.py::test_strongly_connected_components_parity": {
     "owner": "storage-parity"
+  },
+  "tests/test_storage_parity.py::test_index_freshness_parity": {
+    "owner": "storage-parity"
   }
 }

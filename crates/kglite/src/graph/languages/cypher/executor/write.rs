@@ -1713,6 +1713,13 @@ fn stamp_node_provenance(graph: &mut DirGraph, nodes_to_stamp: &HashMap<NodeInde
                     GraphWrite::set_node_property(&mut graph.graph, *node_idx, key, pval.clone());
                 }
             }
+            // A property SET reached this stamp through
+            // `finish_node_property_write`, which already notified; `SET n:Label`
+            // did not, and this is still a write to the row a disk graph's
+            // persistent bundles snapshot.
+            crate::graph::index_freshness::write_hooks::note_property_written(
+                graph, *node_idx, node_type, None,
+            );
         }
         // The catalogue entry for each provenance key is a fact about the
         // *type*, not about the node — so it is recorded once per stamped type

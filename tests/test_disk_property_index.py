@@ -276,6 +276,30 @@ class TestGlobalIndexAndSearch:
         g = self._build_multi_type_graph(disk_dir)
         assert g.search("Oslo") == []
 
+    def test_search_scans_when_the_index_can_no_longer_answer(self, disk_dir):
+        """A stale bundle is not evidence of absence.
+
+        Nothing maintains a persistent global index, so once the graph moves
+        under one it stops answering and declines to a scan. `search()` is the
+        one reader with no scan of its own: it reported `[]` for every node
+        written since the index was built — including, after a `save()` builds
+        the `title` global on its own, on a graph whose owner never called
+        `create_global_index`.
+
+        The empty-without-any-index contract above is unchanged: only a bundle
+        that exists and refuses to answer earns the scan.
+        """
+        g = self._build_multi_type_graph(disk_dir)
+        g.create_global_index("label")
+        g.cypher("CREATE (n:City {nid: 'P9', label: 'Bergen'})")
+
+        assert [hit["title"] for hit in g.search("Bergen")] == ["Bergen"]
+        assert g.search("Atlantis") == [], "a scan must not invent rows"
+
+        # …and the rebuild puts it back on the index without changing the answer.
+        g.reindex()
+        assert [hit["title"] for hit in g.search("Bergen")] == ["Bergen"]
+
 
 class TestPersistenceAcrossReload:
     def test_index_survives_save_and_reload(self, disk_dir):

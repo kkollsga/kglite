@@ -216,6 +216,10 @@ pub struct DiskGraph {
     // (via column slot, title alias, or id alias). Powers untyped
     // patterns like `MATCH (n {label: 'X'})`.
     pub(crate) global_indexes: GlobalIndexCache,
+    /// Freshness for every bundle above. A persistent bundle is an mmap
+    /// snapshot nothing maintains, so a lookup may only answer from one this
+    /// says still covers the graph — see [`super::index_freshness`].
+    pub(crate) index_freshness: super::index_freshness::DiskIndexFreshness,
     // ── Segment manifest.
     //
     // Persisted at `seg_manifest.json` alongside the CSR files. Legacy
@@ -2125,6 +2129,10 @@ impl Clone for DiskGraph {
             peer_count_offsets: snapshot("peer count offsets", &self.peer_count_offsets),
             peer_count_entries: snapshot("peer count entries", &self.peer_count_entries),
             global_indexes: std::sync::RwLock::new(HashMap::new()),
+            // Deep, and deliberately not `covering(node_slot_len)`: the caches
+            // above are emptied, so this copy re-discovers every bundle from
+            // the baseline — which still carries the writes the source made.
+            index_freshness: self.index_freshness.clone(),
             has_tombstones: self.has_tombstones,
             property_indexes: std::sync::RwLock::new(HashMap::new()),
             removed_property_indexes: self.removed_property_indexes.clone(),

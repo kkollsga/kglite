@@ -506,3 +506,92 @@ def test_strongly_connected_components_parity(tmp_path):
     assert results["memory"] == expected
     for mode in ("mapped", "disk"):
         assert results[mode] == expected, f"SCC {mode} diverged: {results[mode]}"
+
+
+def test_index_freshness_parity(tmp_path):
+    """An index must never make a mode answer differently from a scan.
+
+    Disk is the only mode whose equality indexes are persistent mmap bundles,
+    and nothing maintains one after it is built: a ``create_index``, and the
+    ``title``/``nid`` globals every disk ``save()`` builds on its own, were read
+    as authoritative forever. So after ``save()`` + ``load()`` every
+    ``name``/``title`` lookup and ``search()`` missed the rows written since,
+    and a user index missed every insert and ``SET`` after it — memory
+    maintained incrementally and mapped invalidated, so the three modes
+    disagreed on the same data (deep scan 2026-09-07, items 2+3).
+
+    The op sequence walks every way a bundle can go out of date — bulk insert,
+    Cypher ``CREATE``, ``SET`` of the indexed property, ``SET`` of the title,
+    ``DELETE``, and a save/load in the middle — and asserts absolute expected
+    values as well as cross-mode agreement, since a defect all three modes
+    shared would keep them agreeing.
+
+    ``search()`` is deliberately not probed here: it is documented as
+    disk-only (memory and mapped have no cross-type global index and return an
+    empty list), so it has no parity to assert. Its own stale-bundle case is
+    ``tests/test_disk_property_index.py``.
+    """
+    people = pd.DataFrame(
+        {
+            "uid": [1, 2, 3],
+            "name": ["nm_a", "nm_b", "nm_c"],
+            "cat": ["c0", "c1", "c0"],
+        }
+    )
+    more = pd.DataFrame({"uid": [4], "name": ["nm_d"], "cat": ["c1"]})
+
+    def probe(graph):
+        return {
+            "cat_c1": sorted(r["u"] for r in _rows(graph.cypher("MATCH (n:P) WHERE n.cat = 'c1' RETURN n.uid AS u"))),
+            "cat_c0": sorted(r["u"] for r in _rows(graph.cypher("MATCH (n:P) WHERE n.cat = 'c0' RETURN n.uid AS u"))),
+            "map_cat": sorted(r["u"] for r in _rows(graph.cypher("MATCH (n:P {cat: 'c1'}) RETURN n.uid AS u"))),
+            "by_name": sorted(
+                r["u"] for r in _rows(graph.cypher("MATCH (n:P) WHERE n.name = 'nm_e' RETURN n.uid AS u"))
+            ),
+            "map_name": sorted(r["u"] for r in _rows(graph.cypher("MATCH (n:P {name: 'nm_e'}) RETURN n.uid AS u"))),
+            "by_title": sorted(
+                r["u"] for r in _rows(graph.cypher("MATCH (n:P) WHERE n.title = 'nm_d' RETURN n.uid AS u"))
+            ),
+        }
+
+    results: dict[str, dict] = {}
+    for mode in STORAGE_MODES:
+        if mode == "memory":
+            graph = KnowledgeGraph()
+        elif mode == "mapped":
+            graph = KnowledgeGraph(storage="mapped")
+        else:
+            graph = KnowledgeGraph(storage="disk", path=str(tmp_path / "freshness-disk"))
+
+        graph.add_nodes(people, "P", "uid", "name")
+        graph.create_index("P", "cat")
+
+        snapshot = str(tmp_path / f"freshness-{mode}.kgl")
+        if mode == "disk":
+            snapshot = str(tmp_path / "freshness-disk-gen")
+        graph.save(snapshot)
+        graph = __import__("kglite").load(snapshot)
+
+        # Every write the bundles were not built over.
+        graph.add_nodes(more, "P", "uid", "name")
+        graph.cypher("CREATE (n:P {uid: 5, name: 'nm_e', cat: 'c1'})")
+        graph.cypher("MATCH (n:P) WHERE n.uid = 1 SET n.cat = 'c1'")
+        graph.cypher("MATCH (n:P) WHERE n.uid = 3 SET n.name = 'nm_e'")
+        graph.cypher("MATCH (n:P) WHERE n.uid = 2 DETACH DELETE n")
+
+        results[mode] = probe(graph)
+        # `reindex()` is the documented repair verb and must not change an answer.
+        graph.reindex()
+        assert probe(graph) == results[mode], f"{mode}: reindex() changed an answer"
+
+    expected = {
+        "cat_c1": [1, 4, 5],
+        "cat_c0": [3],
+        "map_cat": [1, 4, 5],
+        "by_name": [3, 5],
+        "map_name": [3, 5],
+        "by_title": [4],
+    }
+    assert results["memory"] == expected
+    for mode in ("mapped", "disk"):
+        assert results[mode] == expected, f"{mode} diverged: {results[mode]}"

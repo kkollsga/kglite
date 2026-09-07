@@ -468,6 +468,16 @@ impl BatchProcessor {
                     update.conflict_mode,
                     provisional_key,
                 );
+                // The disk twin of `note_bulk_update` below. It cannot be that
+                // call: this arm resolved the type off the node slot rather
+                // than through `node_weight`, which a disk graph answers out of
+                // a per-query arena.
+                crate::graph::index_freshness::write_hooks::note_property_written(
+                    graph,
+                    update.node_idx,
+                    &type_name,
+                    None,
+                );
                 stats.updates += 1;
             } else if graph.graph.node_weight(update.node_idx).is_some() {
                 Self::apply_node_update(
@@ -557,8 +567,9 @@ impl BatchProcessor {
     /// answer is only ever "refresh one document you did not have to". The
     /// over-approximation contract is stated in `index_freshness`.
     ///
-    /// The disk branch above skips this: `build_text_index` refuses a disk
-    /// graph, so a disk graph has no index to notify.
+    /// The disk branch above has its own call: `build_text_index` refuses a
+    /// disk graph, but a disk graph's persistent property-index bundles track
+    /// freshness through the same hook.
     fn note_bulk_update(graph: &mut DirGraph, node_idx: NodeIndex) {
         if !crate::graph::index_freshness::write_hooks::any_tracked_index(graph) {
             return;

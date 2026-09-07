@@ -438,6 +438,14 @@ impl DirGraph {
             // no type has a `nid` column.
             dg.build_global_property_index("nid")
                 .map_err(|e| format!("nid index build failed: {e}"))?;
+            // Every *other* bundle the next generation will carry, rebuilt if
+            // the graph has moved under it. `copy_persisted_indexes` copies
+            // bundles into the new generation verbatim, and a stale one that
+            // crosses a generation boundary re-arms the defect in the next
+            // process — where nothing remembers it was stale. Fresh bundles are
+            // skipped, so an unmutated save costs what it always did.
+            dg.refresh_persistent_indexes(false)
+                .map_err(|e| format!("property index rebuild failed: {e}"))?;
         }
         Ok(())
     }

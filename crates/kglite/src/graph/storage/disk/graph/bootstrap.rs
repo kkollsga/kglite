@@ -276,6 +276,8 @@ impl DiskGraph {
             legacy_invalidated_property_indexes: HashSet::new(),
             legacy_invalidated_global_indexes: HashSet::new(),
             global_indexes: std::sync::RwLock::new(HashMap::new()),
+            // An empty directory holds no bundle; the first build latches it.
+            index_freshness: super::index_freshness::DiskIndexFreshness::covering(0),
             segment_manifest: super::segment_summary::SegmentManifest::new(),
             // Freshly-created graph has no sealed segments yet; the
             // first save seals everything up to node_count into seg_000
@@ -417,7 +419,7 @@ impl DiskGraph {
         // on assigned indices, the same value `next_edge_idx` takes below.
         let edge_properties = edge_property_writer.finish(edge_idx)?;
 
-        Ok(DiskGraph {
+        let mut graph = DiskGraph {
             node_slots,
             node_slot_updates: HashMap::new(),
             appended_node_slots: Vec::new(),
@@ -473,10 +475,15 @@ impl DiskGraph {
             removed_property_indexes: HashSet::new(),
             legacy_invalidated_property_indexes: HashSet::new(),
             legacy_invalidated_global_indexes: HashSet::new(),
+            // Seeded below, once `node_slot_len()` can be read off the built
+            // graph: a bundle built from this state covers every slot in it.
+            index_freshness: super::index_freshness::DiskIndexFreshness::covering(0),
             segment_manifest: super::segment_summary::SegmentManifest::new(),
             // Fresh build from a petgraph: no sealed segments yet.
             // First save seals the whole graph into seg_000.
             sealed_nodes_bound: 0,
-        })
+        };
+        graph.index_freshness = super::index_freshness::DiskIndexFreshness::covering(graph.node_slot_len() as u32);
+        Ok(graph)
     }
 }

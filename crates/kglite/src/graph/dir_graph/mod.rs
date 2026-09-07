@@ -2066,6 +2066,19 @@ impl DirGraph {
         for (node_type, property) in range_keys {
             self.create_range_index(&node_type, &property);
         }
+
+        // The three maps above are empty by design on a disk graph — its
+        // equality indexes are mmap bundles, and `create_property_index_routed`
+        // never populates the heap maps there. Without this arm `reindex()` was
+        // a measured no-op on the one backend whose indexes cannot repair
+        // themselves on the read path.
+        //
+        // A rebuild failure leaves the bundle stale, which the freshness gate
+        // already answers with a scan; `reindex()` reports nothing, so raising
+        // here would only turn a slow-but-correct graph into a panic.
+        if let Some(disk) = self.graph.as_disk_mut() {
+            let _ = disk.refresh_persistent_indexes(true);
+        }
     }
 
     /// Compact the graph by removing tombstones left by deleted nodes/edges.

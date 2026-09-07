@@ -243,6 +243,53 @@ pub fn scan_data_dir(data_dir: &Path) -> std::io::Result<Vec<(String, String)>> 
     Ok(out)
 }
 
+/// Whether `name` is one of the four files of a typed or global bundle, in
+/// either the v2 or the legacy spelling.
+///
+/// The freshness gate uses this to answer "does this generation hold any
+/// bundle at all?" without opening one — see
+/// `super::index_freshness::DiskIndexFreshness::tracks_anything`.
+pub(crate) fn is_bundle_file_name(name: &str) -> bool {
+    name.starts_with(FILE_PREFIX) || name.starts_with(GLOBAL_PREFIX)
+}
+
+/// The cross-type global indexes `data_dir` holds, by property.
+///
+/// Global counterpart of [`scan_data_dir`], and legacy filenames are omitted
+/// for the same reason: sanitisation destroyed the exact property name, so a
+/// rebuild keyed on the recovered spelling would write a *different* bundle
+/// and leave the legacy one in place.
+pub fn scan_global_data_dir(data_dir: &Path) -> std::io::Result<Vec<String>> {
+    let entries = match fs::read_dir(data_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for entry in entries {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !name.starts_with(V2_GLOBAL_PREFIX) || !name.ends_with("_meta.bin") {
+            continue;
+        }
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let meta = read_v2_meta(&entry.path())?;
+        if meta.kind != 1 {
+            return Err(invalid_index("global filename contains typed metadata"));
+        }
+        if seen.insert(meta.property.clone()) {
+            out.push(meta.property);
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
 /// Like [`scan_data_dir`] but returns exact identities as
 /// `(type_hash, prop_hash)` tuples in deterministic order.
 pub fn scan_segment_hashes(segment_dir: &Path) -> std::io::Result<Vec<(u64, u64)>> {

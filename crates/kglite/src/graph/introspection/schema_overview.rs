@@ -447,9 +447,13 @@ pub(crate) struct IndexInfo {
     pub state: &'static str,
     /// Whether the graph has moved since this index last covered it, for the
     /// kinds that track it. `None` — rendered as null — for the three
-    /// property-index families, which are maintained on every write and so have
-    /// no staleness to report; a `false` there would claim a guarantee the
-    /// column does not mean.
+    /// property-index families, whose listed members are the in-memory maps,
+    /// maintained on every write and so with no staleness to report; a `false`
+    /// there would claim a guarantee the column does not mean. A disk graph's
+    /// *persistent* bundles do go stale, and are not listed here at all: those
+    /// maps are empty on disk (`create_property_index_routed`), and
+    /// `describe()`'s `indexed=` attribute is where their current
+    /// serving state shows.
     pub stale: Option<bool>,
     /// Documents the next refresh would re-read, for the kinds that track it.
     /// An upper bound (`crate::graph::index_freshness`), and `None` alongside a

@@ -343,6 +343,148 @@ impl DirGraph {
             .is_some_and(|dg| dg.has_property_index(node_type, property))
     }
 
+    /// Nodes whose `property` (or one of its aliases) matches `text`, exact
+    /// first and prefix second — the resolution behind `graph.search(text)`.
+    ///
+    /// **Empty means two different things, and only one of them is answered by
+    /// a scan.** With no cross-type global index at all this returns nothing,
+    /// deliberately: the method is disk-scale by construction and a bare
+    /// `search()` must not turn into a 124M-node traversal. But a bundle that
+    /// *exists* and declines — because the graph moved under it since it was
+    /// built — is not evidence of absence, and reporting `[]` from one is the
+    /// silent-empty-result half of the persistent-index defect. That case falls
+    /// back to a bounded scan until the next `reindex()` or `save()` rebuilds
+    /// the bundle.
+    ///
+    /// Aliases mirror the matcher's cross-type fast path, so `search` and
+    /// `MATCH (n {title: ...})` resolve the same candidate set.
+    ///
+    /// The caller holds the read pass ([`Self::begin_read_pass`]); on the disk
+    /// backend the scan reads through it.
+    pub fn search_by_property(&self, text: &str, property: &str, limit: usize) -> Vec<NodeIndex> {
+        let candidates: Vec<&str> = match property {
+            "title" => vec!["title", "label", "name"],
+            "label" => vec!["label", "title", "name"],
+            "name" => vec!["name", "title", "label"],
+            "id" => vec!["id", "nid", "qid"],
+            "nid" => vec!["nid", "id", "qid"],
+            "qid" => vec!["qid", "id", "nid"],
+            other => vec![other],
+        };
+
+        let mut answered = false;
+        for name in &candidates {
+            if let Some(hits) = self.graph.lookup_by_property_eq_any_type(name, text) {
+                answered = true;
+                if !hits.is_empty() {
+                    return truncated(hits, limit);
+                }
+            }
+        }
+        for name in &candidates {
+            if let Some(hits) = self
+                .graph
+                .lookup_by_property_prefix_any_type(name, text, limit)
+            {
+                answered = true;
+                if !hits.is_empty() {
+                    return truncated(hits, limit);
+                }
+            }
+        }
+        if answered || !self.has_declining_global_index(&candidates) {
+            return Vec::new();
+        }
+        self.scan_by_property(text, &candidates, limit)
+    }
+
+    /// Whether one of `candidates` has a persistent global bundle that exists
+    /// but is not currently serving — the only case where an empty index answer
+    /// has to be re-derived by scanning.
+    fn has_declining_global_index(&self, candidates: &[&str]) -> bool {
+        self.graph.as_disk().is_some_and(|disk| {
+            candidates
+                .iter()
+                .any(|property| disk.global_index_is_declining(property))
+        })
+    }
+
+    /// [`Self::search_by_property`]'s fallback: one pass over the graph reading
+    /// each candidate alias, exact matches preferred over prefix ones.
+    ///
+    /// Bounded by `limit` on the exact side, which is what lets it stop early;
+    /// the prefix side is only consulted when the exact side found nothing, so
+    /// a hit on a large graph does not pay for the whole traversal twice.
+    fn scan_by_property(&self, text: &str, candidates: &[&str], limit: usize) -> Vec<NodeIndex> {
+        let title_family = candidates
+            .iter()
+            .any(|name| matches!(*name, "title" | "label" | "name"));
+        let id_family = candidates
+            .iter()
+            .any(|name| matches!(*name, "id" | "nid" | "qid"));
+        let keys: Vec<InternedKey> = candidates
+            .iter()
+            .map(|name| InternedKey::from_str(name))
+            .collect();
+
+        let mut exact: Vec<NodeIndex> = Vec::new();
+        let mut prefix: Vec<NodeIndex> = Vec::new();
+        for idx in self.graph.node_indices() {
+            let mut values: Vec<Value> = keys
+                .iter()
+                .filter_map(|key| self.graph.get_node_property(idx, *key))
+                .collect();
+            if title_family {
+                values.extend(self.graph.get_node_title(idx));
+            }
+            if id_family {
+                values.extend(self.graph.get_node_id(idx));
+            }
+            let mut matched_exact = false;
+            let mut matched_prefix = false;
+            for value in &values {
+                let Value::String(candidate) = value else {
+                    continue;
+                };
+                if candidate == text {
+                    matched_exact = true;
+                    break;
+                }
+                matched_prefix |= candidate.starts_with(text);
+            }
+            if matched_exact {
+                exact.push(idx);
+                if exact.len() >= limit {
+                    return exact;
+                }
+            } else if matched_prefix && prefix.len() < limit {
+                prefix.push(idx);
+            }
+        }
+        if exact.is_empty() {
+            return prefix;
+        }
+        exact
+    }
+
+    /// Whether an equality index will actually *answer* a lookup for
+    /// `(node_type, property)` right now.
+    ///
+    /// [`Self::has_any_index`] answers "was one declared?", which is what
+    /// `DROP INDEX` and the `created` flag need. This answers what an agent
+    /// reading a `describe()` hint needs: a disk graph's persistent bundle is
+    /// an mmap snapshot that declines every lookup once the graph has moved
+    /// under it, so naming it as the accelerator for a predicate is a claim the
+    /// engine contradicts until the next `reindex()` or `save()`.
+    pub fn index_serves_lookups(&self, node_type: &str, property: &str) -> bool {
+        if self.has_index(node_type, property) {
+            return true;
+        }
+        self.graph
+            .as_disk()
+            .is_some_and(|dg| dg.property_index_is_serving(node_type, property))
+    }
+
     /// The equality indexes on this graph, built or merely declared.
     ///
     /// **A listing, never a predicate.** It is the one index surface that may
@@ -1657,3 +1799,9 @@ impl DirGraph {
 #[cfg(test)]
 #[path = "index_predicate_tests.rs"]
 mod index_predicate_tests;
+
+/// `hits`, capped at `limit`.
+fn truncated(mut hits: Vec<NodeIndex>, limit: usize) -> Vec<NodeIndex> {
+    hits.truncate(limit);
+    hits
+}

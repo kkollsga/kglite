@@ -131,18 +131,13 @@ impl KnowledgeGraph {
 
     /// Search for nodes matching ``text`` on a property (default ``title``).
     ///
-    /// Uses the cross-type global index when one has been built — see
-    /// ``create_global_index(property)``. Alias-aware: a miss on
-    /// ``title`` also tries ``label`` and ``name`` (and ``id``/``nid``/
-    /// ``qid`` for the id family), so an index built under one alias
-    /// is still hit when queried with another. Tries exact match
-    /// first; if none, falls back to prefix match.
+    /// Uses the cross-type global index when one is built and current, and
+    /// scans otherwise. Alias-aware: a miss on ``title`` also tries ``label``
+    /// and ``name`` (and ``id``/``nid``/``qid`` for the id family). Tries
+    /// exact match first, then prefix.
     ///
     /// Returns the top ``limit`` results as dicts with ``id`` (node
     /// index), ``type``, ``title``, and ``id_value``.
-    ///
-    /// Returns an empty list if no global index exists for any alias
-    /// of ``property``.
     ///
     /// Example:
     ///
@@ -166,38 +161,10 @@ impl KnowledgeGraph {
         // borrowed node weights live (arena protocol; no-op in memory/mapped).
         let _arena_guard = self.inner.begin_read_pass();
 
-        // Mirrors the matcher's cross-type fast path, so `g.search(...)` and
-        // `MATCH (n {title: ...})` resolve through the same candidate list.
-        let candidates: Vec<&str> = match property {
-            "title" => vec!["title", "label", "name"],
-            "label" => vec!["label", "title", "name"],
-            "name" => vec!["name", "title", "label"],
-            "id" => vec!["id", "nid", "qid"],
-            "nid" => vec!["nid", "id", "qid"],
-            "qid" => vec!["qid", "id", "nid"],
-            other => vec![other],
-        };
-
-        let mut hits: Vec<petgraph::graph::NodeIndex> = Vec::new();
-        for name in &candidates {
-            if let Some(v) = backend.lookup_by_property_eq_any_type(name, text) {
-                if !v.is_empty() {
-                    hits = v;
-                    break;
-                }
-            }
-        }
-        if hits.is_empty() {
-            for name in &candidates {
-                if let Some(v) = backend.lookup_by_property_prefix_any_type(name, text, limit) {
-                    if !v.is_empty() {
-                        hits = v;
-                        break;
-                    }
-                }
-            }
-        }
-        hits.truncate(limit);
+        // Index-or-scan lives in the core so every binding resolves the same
+        // candidate set the matcher does, and so a declining disk bundle
+        // cannot turn a search into a silent empty list.
+        let hits = self.inner.search_by_property(text, property, limit);
 
         let result_list = pyo3::types::PyList::empty(py);
         for idx in hits {

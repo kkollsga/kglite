@@ -143,6 +143,8 @@ impl DiskGraph {
             .write()
             .unwrap()
             .insert(index_key.clone(), Some(Arc::new(idx)));
+        self.index_freshness
+            .mark_typed_built(index_key.clone(), node_bound as u32);
         self.removed_property_indexes.remove(&index_key);
         self.legacy_invalidated_property_indexes.remove(&index_key);
         Ok(count)
@@ -166,41 +168,77 @@ impl DiskGraph {
             .write()
             .unwrap()
             .insert((node_type.to_string(), property.to_string()), None);
+        self.index_freshness
+            .forget_typed(&(node_type.to_string(), property.to_string()));
         property_index::PropertyIndex::remove_files(self.active_write_dir(), node_type, property)?;
         Ok(true)
     }
 
-    /// Exact-match lookup. Returns `None` when no index has been built
-    /// for `(node_type, property)`; returns `Some(Vec)` (possibly empty)
-    /// when an index exists. The planner uses the distinction to decide
-    /// whether to route through the fast path or fall back to scan.
+    /// The typed bundle serving `(node_type, property)`, or `None` when there
+    /// is none — cache first, then the filesystem, caching whichever answer it
+    /// finds so a repeat miss does not stat again.
+    ///
+    /// Says nothing about freshness: [`Self::serving_property_index`] is what a
+    /// lookup asks.
+    fn cached_property_index(
+        &self,
+        key: &(String, String),
+    ) -> Option<Arc<property_index::PropertyIndex>> {
+        {
+            let read = self.property_indexes.read().unwrap();
+            if let Some(slot) = read.get(key) {
+                return slot.clone();
+            }
+        }
+        let opened = property_index::PropertyIndex::open(&self.data_dir, &key.0, &key.1)
+            .ok()
+            .flatten()
+            .map(Arc::new);
+        self.property_indexes
+            .write()
+            .unwrap()
+            .insert(key.clone(), opened.clone());
+        opened
+    }
+
+    /// The typed bundle for `(node_type, property)`, **only if it still covers
+    /// the graph**.
+    ///
+    /// `None` means *unknown* — go scan — and covers three cases a caller must
+    /// not distinguish: no bundle, a masked legacy bundle, and a bundle the
+    /// graph has moved under. Nothing maintains an mmap bundle, so the third is
+    /// as unanswerable as the first: returning `Some(hits)` from it reports
+    /// "no such row" for every row written since the build (deep-scan item 3).
+    fn serving_property_index(
+        &self,
+        node_type: &str,
+        property: &str,
+    ) -> Option<Arc<property_index::PropertyIndex>> {
+        let key = (node_type.to_string(), property.to_string());
+        if self.legacy_invalidated_property_indexes.contains(&key) {
+            return None;
+        }
+        let index = self.cached_property_index(&key)?;
+        self.index_freshness
+            .typed_is_fresh(&key, self.node_slot_len() as u32)
+            .then_some(index)
+    }
+
+    /// Exact-match lookup. Returns `None` when no index can answer for
+    /// `(node_type, property)` — none built, or one the graph has moved under
+    /// since it was — and `Some(Vec)` (possibly empty) from an index that
+    /// provably covers every live row. The planner uses the distinction to
+    /// decide whether to route through the fast path or fall back to scan.
     pub fn lookup_property_eq(
         &self,
         node_type: &str,
         property: &str,
         value: &str,
     ) -> Option<Vec<NodeIndex>> {
-        let key = (node_type.to_string(), property.to_string());
-        if self.legacy_invalidated_property_indexes.contains(&key) {
-            return None;
-        }
-        // Fast path: cached handle.
-        {
-            let read = self.property_indexes.read().unwrap();
-            if let Some(slot) = read.get(&key) {
-                return slot.as_ref().map(|idx| idx.lookup_eq_str(value));
-            }
-        }
-        // Slow path: check disk. If files exist, mmap and cache.
-        let idx_opt = property_index::PropertyIndex::open(&self.data_dir, node_type, property)
-            .ok()
-            .flatten();
-        let result = idx_opt.as_ref().map(|idx| idx.lookup_eq_str(value));
-        self.property_indexes
-            .write()
-            .unwrap()
-            .insert(key, idx_opt.map(Arc::new));
-        result
+        Some(
+            self.serving_property_index(node_type, property)?
+                .lookup_eq_str(value),
+        )
     }
 
     /// Prefix lookup (STARTS WITH). Same `None`/`Some` semantics as
@@ -212,29 +250,10 @@ impl DiskGraph {
         prefix: &str,
         limit: usize,
     ) -> Option<Vec<NodeIndex>> {
-        let key = (node_type.to_string(), property.to_string());
-        if self.legacy_invalidated_property_indexes.contains(&key) {
-            return None;
-        }
-        {
-            let read = self.property_indexes.read().unwrap();
-            if let Some(slot) = read.get(&key) {
-                return slot
-                    .as_ref()
-                    .map(|idx| idx.lookup_prefix_str(prefix, limit));
-            }
-        }
-        let idx_opt = property_index::PropertyIndex::open(&self.data_dir, node_type, property)
-            .ok()
-            .flatten();
-        let result = idx_opt
-            .as_ref()
-            .map(|idx| idx.lookup_prefix_str(prefix, limit));
-        self.property_indexes
-            .write()
-            .unwrap()
-            .insert(key, idx_opt.map(Arc::new));
-        result
+        Some(
+            self.serving_property_index(node_type, property)?
+                .lookup_prefix_str(prefix, limit),
+        )
     }
 
     /// Whether an index has been built for `(node_type, property)`.
@@ -329,32 +348,53 @@ impl DiskGraph {
             .write()
             .unwrap()
             .insert(property.to_string(), Some(Arc::new(idx)));
+        self.index_freshness
+            .mark_global_built(property, node_bound as u32);
         self.legacy_invalidated_global_indexes.remove(property);
         Ok(count)
     }
 
-    /// Exact-match lookup across every node type for a cross-type
-    /// global index. Returns `None` when no index has been built for
-    /// `property`; returns `Some(Vec)` (possibly empty) otherwise.
-    pub fn lookup_global_eq(&self, property: &str, value: &str) -> Option<Vec<NodeIndex>> {
-        if self.legacy_invalidated_global_indexes.contains(property) {
-            return None;
-        }
+    /// The global bundle for `property`, cache first then filesystem.
+    /// Freshness is [`Self::serving_global_index`]'s question.
+    fn cached_global_index(&self, property: &str) -> Option<Arc<property_index::PropertyIndex>> {
         {
             let read = self.global_indexes.read().unwrap();
             if let Some(slot) = read.get(property) {
-                return slot.as_ref().map(|idx| idx.lookup_eq_str(value));
+                return slot.clone();
             }
         }
-        let idx_opt = property_index::PropertyIndex::open_global(&self.data_dir, property)
+        let opened = property_index::PropertyIndex::open_global(&self.data_dir, property)
             .ok()
-            .flatten();
-        let result = idx_opt.as_ref().map(|idx| idx.lookup_eq_str(value));
+            .flatten()
+            .map(Arc::new);
         self.global_indexes
             .write()
             .unwrap()
-            .insert(property.to_string(), idx_opt.map(Arc::new));
-        result
+            .insert(property.to_string(), opened.clone());
+        opened
+    }
+
+    /// The global bundle for `property`, only if it still covers the graph.
+    ///
+    /// Every disk `save()` auto-builds the `title` and `nid` globals, so this
+    /// gate is what a graph gets for free: without it, a save+load armed a
+    /// bundle that answered "no such node" for everything ingested since the
+    /// load (deep-scan item 2).
+    fn serving_global_index(&self, property: &str) -> Option<Arc<property_index::PropertyIndex>> {
+        if self.legacy_invalidated_global_indexes.contains(property) {
+            return None;
+        }
+        let index = self.cached_global_index(property)?;
+        self.index_freshness
+            .global_is_fresh(property, self.node_slot_len() as u32)
+            .then_some(index)
+    }
+
+    /// Exact-match lookup across every node type for a cross-type
+    /// global index. Same `None` = *unknown* contract as
+    /// [`lookup_property_eq`].
+    pub fn lookup_global_eq(&self, property: &str, value: &str) -> Option<Vec<NodeIndex>> {
+        Some(self.serving_global_index(property)?.lookup_eq_str(value))
     }
 
     /// Prefix lookup (STARTS WITH) against the cross-type global
@@ -365,28 +405,147 @@ impl DiskGraph {
         prefix: &str,
         limit: usize,
     ) -> Option<Vec<NodeIndex>> {
+        Some(
+            self.serving_global_index(property)?
+                .lookup_prefix_str(prefix, limit),
+        )
+    }
+
+    /// Whether this graph has any persistent bundle whose freshness has to be
+    /// tracked — the whole cost the write path pays when it does not.
+    #[inline]
+    pub(crate) fn tracks_index_freshness(&self) -> bool {
+        self.index_freshness.tracks_anything(&self.data_dir)
+    }
+
+    /// A node of `node_type` was created at `slot`.
+    #[inline]
+    pub(crate) fn note_index_node_created(&self, slot: u32, node_type: &str) {
+        self.index_freshness.note_created(slot, node_type);
+    }
+
+    /// A property of the node at `slot` was written; `None` for a caller that
+    /// did not resolve the node's type.
+    #[inline]
+    pub(crate) fn note_index_property_written(&self, slot: u32, node_type: Option<&str>) {
+        self.index_freshness.note_property_written(slot, node_type);
+    }
+
+    /// The node at `slot` was removed.
+    #[inline]
+    pub(crate) fn note_index_node_removed(&self, slot: u32) {
+        self.index_freshness.note_removed(slot);
+    }
+
+    /// Whether the typed bundle for `(node_type, property)` is currently
+    /// serving lookups — it exists *and* still covers the graph.
+    ///
+    /// Distinct from [`Self::has_property_index`], which answers "was one
+    /// built?". Introspection needs both: `DROP INDEX` acts on existence,
+    /// while a `describe()` hint that names an index a query will not use is
+    /// an agent-facing claim the engine contradicts.
+    pub(crate) fn property_index_is_serving(&self, node_type: &str, property: &str) -> bool {
+        self.serving_property_index(node_type, property).is_some()
+    }
+
+    /// Whether a global bundle for `property` exists but is refusing to
+    /// answer because the graph has moved under it.
+    ///
+    /// The distinction a plain `None` from [`Self::lookup_global_eq`] cannot
+    /// carry: "no index here, that answer is as good as it gets" versus "there
+    /// is an index and it cannot be trusted". Only the second is worth a scan.
+    pub(crate) fn global_index_is_declining(&self, property: &str) -> bool {
         if self.legacy_invalidated_global_indexes.contains(property) {
-            return None;
+            return false;
         }
-        {
-            let read = self.global_indexes.read().unwrap();
-            if let Some(slot) = read.get(property) {
-                return slot
-                    .as_ref()
-                    .map(|idx| idx.lookup_prefix_str(prefix, limit));
-            }
-        }
-        let idx_opt = property_index::PropertyIndex::open_global(&self.data_dir, property)
-            .ok()
-            .flatten();
-        let result = idx_opt
-            .as_ref()
-            .map(|idx| idx.lookup_prefix_str(prefix, limit));
-        self.global_indexes
-            .write()
+        self.cached_global_index(property).is_some()
+            && !self
+                .index_freshness
+                .global_is_fresh(property, self.node_slot_len() as u32)
+    }
+
+    /// Every persistent bundle reachable from this graph, as
+    /// `(typed pairs, global properties)`.
+    ///
+    /// Unions the published generation with the writer workspaces, exactly the
+    /// set [`Self::copy_persisted_indexes`] would carry into the next
+    /// generation, plus whatever the caches have opened. Legacy-named bundles
+    /// are invisible to the scanners by design (their filenames destroyed the
+    /// identity), so a rebuild cannot reach them — they stay masked by the
+    /// freshness gate instead, which is the correct answer for a bundle whose
+    /// key nothing can reconstruct.
+    pub(crate) fn persisted_index_names(&self) -> (Vec<(String, String)>, Vec<String>) {
+        let mut typed: std::collections::BTreeSet<(String, String)> = self
+            .property_indexes
+            .read()
             .unwrap()
-            .insert(property.to_string(), idx_opt.map(Arc::new));
-        result
+            .iter()
+            .filter(|(_, slot)| slot.is_some())
+            .map(|(key, _)| key.clone())
+            .collect();
+        let mut global: std::collections::BTreeSet<String> = self
+            .global_indexes
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(_, slot)| slot.is_some())
+            .map(|(property, _)| property.clone())
+            .collect();
+        let mut dirs = vec![self.data_dir.clone()];
+        dirs.extend(
+            self.parent_workspaces
+                .iter()
+                .map(|workspace| workspace.segment_dir().to_path_buf()),
+        );
+        if let Some(workspace) = &self.mutation_workspace {
+            dirs.push(workspace.segment_dir().to_path_buf());
+        }
+        for dir in dirs {
+            typed.extend(property_index::scan_data_dir(&dir).unwrap_or_default());
+            global.extend(property_index::scan_global_data_dir(&dir).unwrap_or_default());
+        }
+        typed.retain(|key| {
+            !self.removed_property_indexes.contains(key)
+                && !self.legacy_invalidated_property_indexes.contains(key)
+        });
+        global.retain(|property| !self.legacy_invalidated_global_indexes.contains(property));
+        (typed.into_iter().collect(), global.into_iter().collect())
+    }
+
+    /// Rebuild every persistent bundle the graph has moved under, so the next
+    /// lookup can serve from it again.
+    ///
+    /// `force` rebuilds even a bundle that is already current — what
+    /// `reindex()` means. Without it, only the stale ones are rewritten, which
+    /// is what keeps an unmutated `save()` at its previous cost.
+    ///
+    /// Callers: [`DirGraph::reindex`] and the pre-save consolidation. Both run
+    /// under `&mut`, which is the reason the read path can only decline: a
+    /// rebuild writes four files per bundle.
+    pub(crate) fn refresh_persistent_indexes(&mut self, force: bool) -> std::io::Result<usize> {
+        let node_bound = self.node_slot_len() as u32;
+        let (typed, global) = self.persisted_index_names();
+        let mut rebuilt = 0;
+        for (node_type, property) in typed {
+            let key = (node_type.clone(), property.clone());
+            if !force && self.index_freshness.typed_is_fresh(&key, node_bound) {
+                continue;
+            }
+            self.build_property_index(&node_type, &property)?;
+            rebuilt += 1;
+        }
+        for property in global {
+            if !force && self.index_freshness.global_is_fresh(&property, node_bound) {
+                continue;
+            }
+            self.build_global_property_index(&property)?;
+            rebuilt += 1;
+        }
+        // The baseline is deliberately left where it was. It stands in for
+        // bundles this pass could *not* reach — the legacy-named ones, whose
+        // filenames destroyed their identity — and those are still as stale as
+        // they were, so a lookup that discovers one later must still decline.
+        Ok(rebuilt)
     }
 
     /// Mask persisted lookup bundles that were built from raw legacy values.

@@ -17,6 +17,7 @@ pub mod graph_persist;
 pub mod graph_property_index;
 pub mod id_index;
 pub mod id_index_layer;
+pub(crate) mod index_freshness;
 pub mod property_index;
 pub(crate) mod query_arena;
 pub mod segment_summary;
@@ -54,5 +55,7 @@ pub(crate) fn remove_scratch_dir(path: &std::path::Path) -> std::io::Result<()> 
     }
 }
 
+#[cfg(test)]
+mod index_freshness_tests;
 #[cfg(test)]
 mod lifecycle_tests;

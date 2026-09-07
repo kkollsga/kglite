@@ -314,10 +314,17 @@ impl DiskGraph {
                     continue;
                 }
                 let name_str = name.to_string_lossy();
+                // v2 bundles only. A legacy-named bundle's filename destroyed
+                // the `(node_type, property)` identity it was built for, so
+                // nothing can rebuild it, re-validate it, or say whether the
+                // graph has moved under it — carrying one into a fresh
+                // generation is carrying a snapshot no later code can prove.
+                // The generation it came from is immutable and still reads it;
+                // in the new one the next lookup declines to a scan instead.
                 let keep = name_str.starts_with("conn_type_index_")
                     || name_str.starts_with("peer_count_")
-                    || name_str.starts_with("property_index_")
-                    || name_str.starts_with("global_index_");
+                    || name_str.starts_with("property_index_v2_")
+                    || name_str.starts_with("global_index_v2_");
                 if keep {
                     std::fs::copy(entry.path(), target.join(name))?;
                 }
@@ -1103,59 +1110,62 @@ impl DiskGraph {
 
         let sealed_nodes_bound = sealed_nodes_bound_on_load(&meta, &segment_manifest);
 
-        Ok((
-            DiskGraph {
-                node_slots,
-                node_slot_updates: HashMap::new(),
-                appended_node_slots: Vec::new(),
-                node_count: meta.node_count,
-                free_node_slots: meta.free_node_slots,
-                arenas: crate::graph::storage::disk::query_arena::QueryArenas::new(1024),
-                column_stores: rustc_hash::FxHashMap::default(),
-                out_offsets,
-                out_edges,
-                in_offsets,
-                in_edges,
-                edge_endpoints,
-                appended_edge_endpoints: Vec::new(),
-                removed_edges: std::collections::HashSet::new(),
-                edge_count: meta.edge_count,
-                next_edge_idx: meta.next_edge_idx,
-                edge_properties,
-                edge_mut_cache: HashMap::new(),
-                node_mut_cache: HashMap::new(),
-                pending_edges: UnsafeCell::new(MmapOrVec::new()),
-                overflow_out,
-                overflow_in,
-                free_edge_slots: meta.free_edge_slots,
-                data_dir: csr_dir.clone(),
-                logical_root: dir.to_path_buf(),
-                writer_lock: None,
-                lease_cell: super::graph::new_lease_cell(),
-                mutation_workspace: None,
-                parent_workspaces: Vec::new(),
-                independent_root: None,
-                csr_sorted_by_type: meta.csr_sorted_by_type,
-                defer_csr: false,
-                edge_type_counts_raw: None,
-                conn_type_index_types,
-                conn_type_index_offsets,
-                conn_type_index_sources,
-                peer_count_types,
-                peer_count_offsets,
-                peer_count_entries,
-                has_tombstones: meta.has_tombstones,
-                property_indexes: std::sync::RwLock::new(HashMap::new()),
-                removed_property_indexes: HashSet::new(),
-                legacy_invalidated_property_indexes: HashSet::new(),
-                legacy_invalidated_global_indexes: HashSet::new(),
-                global_indexes: std::sync::RwLock::new(HashMap::new()),
-                // An empty legacy manifest means "pre-segmented, don't prune".
-                segment_manifest,
-                sealed_nodes_bound,
-            },
-            temp_dir,
-        ))
+        let mut graph = DiskGraph {
+            node_slots,
+            node_slot_updates: HashMap::new(),
+            appended_node_slots: Vec::new(),
+            node_count: meta.node_count,
+            free_node_slots: meta.free_node_slots,
+            arenas: crate::graph::storage::disk::query_arena::QueryArenas::new(1024),
+            column_stores: rustc_hash::FxHashMap::default(),
+            out_offsets,
+            out_edges,
+            in_offsets,
+            in_edges,
+            edge_endpoints,
+            appended_edge_endpoints: Vec::new(),
+            removed_edges: std::collections::HashSet::new(),
+            edge_count: meta.edge_count,
+            next_edge_idx: meta.next_edge_idx,
+            edge_properties,
+            edge_mut_cache: HashMap::new(),
+            node_mut_cache: HashMap::new(),
+            pending_edges: UnsafeCell::new(MmapOrVec::new()),
+            overflow_out,
+            overflow_in,
+            free_edge_slots: meta.free_edge_slots,
+            data_dir: csr_dir.clone(),
+            logical_root: dir.to_path_buf(),
+            writer_lock: None,
+            lease_cell: super::graph::new_lease_cell(),
+            mutation_workspace: None,
+            parent_workspaces: Vec::new(),
+            independent_root: None,
+            csr_sorted_by_type: meta.csr_sorted_by_type,
+            defer_csr: false,
+            edge_type_counts_raw: None,
+            conn_type_index_types,
+            conn_type_index_offsets,
+            conn_type_index_sources,
+            peer_count_types,
+            peer_count_offsets,
+            peer_count_entries,
+            has_tombstones: meta.has_tombstones,
+            property_indexes: std::sync::RwLock::new(HashMap::new()),
+            removed_property_indexes: HashSet::new(),
+            legacy_invalidated_property_indexes: HashSet::new(),
+            legacy_invalidated_global_indexes: HashSet::new(),
+            global_indexes: std::sync::RwLock::new(HashMap::new()),
+            // Seeded below: every bundle this generation carries was built
+            // by the save that wrote these slots, so it covers all of them.
+            index_freshness: super::index_freshness::DiskIndexFreshness::covering(0),
+            // An empty legacy manifest means "pre-segmented, don't prune".
+            segment_manifest,
+            sealed_nodes_bound,
+        };
+        graph.index_freshness =
+            super::index_freshness::DiskIndexFreshness::covering(graph.node_slot_len() as u32);
+        Ok((graph, temp_dir))
     }
 }
 

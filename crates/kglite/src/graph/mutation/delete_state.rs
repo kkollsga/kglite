@@ -126,6 +126,11 @@ pub(super) fn remove_doomed_nodes(graph: &mut DirGraph, nodes_to_delete: &HashSe
     let captures_before = graph.graph.captures_before_images();
     for &node_idx in nodes_to_delete {
         let doomed_labels = captures_before.then(|| graph.secondary_label_names(node_idx));
+        // Before the removal, while the slot still names this node: a disk
+        // graph's persistent index bundles are mmap snapshots that no delete
+        // path rewrites, and the slot may be handed straight back out to a node
+        // with a different indexed value.
+        crate::graph::index_freshness::write_hooks::note_node_removed(graph, node_idx);
         GraphWrite::remove_node(&mut graph.graph, node_idx);
         if let Some(labels) = doomed_labels {
             graph.graph.backfill_node_before_labels(node_idx, labels);

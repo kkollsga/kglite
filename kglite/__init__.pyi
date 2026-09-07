@@ -6052,8 +6052,15 @@ class KnowledgeGraph:
     def create_index(self, node_type: str, property: str) -> dict[str, Any]:
         """Create an index on a property for O(1) equality filter lookups.
 
-        Indexes are automatically maintained by Cypher mutations
-        (CREATE, SET, REMOVE, DELETE, MERGE).
+        On memory and mapped graphs the index is maintained incrementally by
+        every mutation (CREATE, SET, REMOVE, DELETE, MERGE), so it always
+        answers.
+
+        On a disk graph the index is a persistent mmap bundle
+        (``persistent=True``) and is **not** maintained: any write to the graph
+        makes it stop answering, and lookups fall back to a scan — correct
+        results, at scan speed. ``reindex()`` and ``save()`` rebuild it. Results
+        never depend on whether the index answered.
 
         Idempotent — re-creating an existing index rebuilds it without error;
         ``created`` is then ``False``. It is ``True`` only when this call made
@@ -6114,7 +6121,14 @@ class KnowledgeGraph:
         ``id_value`` (the node's id-field value, e.g. a Wikidata Q-number).
 
         Requires ``create_global_index(property)`` to have been run on a
-        disk-backed graph. Returns an empty list otherwise.
+        disk-backed graph — or a ``save()``, which builds the ``title`` global
+        index on its own. Returns an empty list otherwise, rather than scanning
+        a graph sized for the disk backend.
+
+        Writes made after the index was built are still found: a persistent
+        index that can no longer prove it is complete falls back to a bounded
+        scan instead of reporting the rows as absent. ``reindex()`` puts it back
+        on the index.
 
         Example::
 

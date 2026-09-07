@@ -931,7 +931,11 @@ fn is_uninformative_false_bool(p: &PropertyStatInfo) -> bool {
 /// `prefix` for it sends an agent down a path the engine does not have.
 fn index_kinds(graph: &DirGraph, node_type: &str, prop: &PropertyStatInfo) -> Option<String> {
     let mut kinds: Vec<&str> = Vec::new();
-    if graph.has_any_index(node_type, &prop.property_name) {
+    // `index_serves_lookups`, not `has_any_index`: a disk graph's persistent
+    // bundle stops answering as soon as the graph moves under it (it declines
+    // to a scan until the next `reindex()`/`save()`), and this attribute is
+    // read as "the engine has a fast path for this predicate".
+    if graph.index_serves_lookups(node_type, &prop.property_name) {
         kinds.push("eq");
         let is_string = matches!(prop.type_string.as_str(), "str" | "String" | "string");
         if is_string && graph.has_persistent_property_index(node_type, &prop.property_name) {
