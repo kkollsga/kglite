@@ -218,6 +218,16 @@ impl fmt::Display for VariablesValidationError {
 
 impl std::error::Error for VariablesValidationError {}
 
+/// Defence in depth over *parsed* variables: reject a number serde_json kept
+/// outside `i64` (a `u64` above `i64::MAX`) and any non-finite float.
+///
+/// It cannot see an integer token serde_json already folded into an `f64` —
+/// below `i64::MIN` or above `u64::MAX` the result is byte-identical to the
+/// float of the same magnitude. What makes the contract exact is the raw-text
+/// pass the MCP stdio route runs before decoding
+/// (`kglite::api::param::validate_json_query_numbers_at` at the `variables`
+/// pointer); this walk is what still holds for a caller that arrives with
+/// values already parsed.
 pub(super) fn validate_exact_i64_recursive(
     value: &Value,
     path: &str,
@@ -438,10 +448,14 @@ mod tests {
             .any(|issue| issue.kind == VariableIssueKind::Unknown));
     }
 
+    /// A float bound is only compilable on a `number`-typed variable — an
+    /// `integer` one requires an exact i64 bound — but the value reaching it
+    /// is still an integer beyond f64's exact range, which is the comparison
+    /// under test.
     #[test]
     fn integer_bounds_above_f64_exact_range_are_compared_without_rounding() {
         let schema = compile(
-            json!({"value": {"type": "integer", "maximum": 9007199254740992.0}}),
+            json!({"value": {"type": "number", "maximum": 9007199254740992.0}}),
             json!(["value"]),
         );
         let error = schema

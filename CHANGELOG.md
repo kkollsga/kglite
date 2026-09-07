@@ -15,6 +15,17 @@ before upgrading.
   instant. Restoring a recorded aware dtype read the stored UTC time as a
   zone-local wall clock, shifting every cell in a non-UTC column by the zone
   offset.
+- `kglite::api::param::json_text_to_query_value_map` is the exact checked
+  Cypher parameter entry for a caller holding JSON text: it validates the
+  number lexemes before serde_json folds an out-of-range integer into a float.
+  The parsed-object entry `json_object_to_query_value_map` silently accepted
+  `-9223372036854775809`, `18446744073709551616` and `-18446744073709551616`
+  as `Float64`, and is now documented as exact only for the tokens serde_json
+  itself kept exact. The C ABI and MCP query routes already validated the raw
+  text and were unaffected.
+- Recipe query schemas now reject a `minimum` or `maximum` on a `type: integer`
+  variable that is not an exact signed 64-bit integer, instead of compiling a
+  rounded bound the recipe author did not write.
 
 ## [0.17.0] - 2026-09-07
 

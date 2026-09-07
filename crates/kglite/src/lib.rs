@@ -203,18 +203,24 @@ pub mod api {
     /// Parameter-shape helpers for bindings — wire-shaped values
     /// (JSON / protobuf-map / etc.) ↔ `kglite::api::Value`. The
     /// canonical converters both ways, so no binding re-implements the
-    /// JSON dispatch. `json_object_to_query_value_map` is the checked Cypher
-    /// parameter path: integer tokens must fit `i64`, decimal/exponent tokens
-    /// must fit finite `f64`, and errors retain their nested path.
+    /// JSON dispatch. `json_text_to_query_value_map` is the checked Cypher
+    /// parameter path: it validates the number lexemes in the source text
+    /// before serde_json can fold an out-of-range integer into an `f64`, so
+    /// integer tokens must fit `i64`, decimal/exponent tokens must fit finite
+    /// `f64`, and errors retain their nested path.
+    /// `json_object_to_query_value_map` is the same conversion for a caller
+    /// that only has the parsed object, and is therefore exact only for the
+    /// tokens serde_json itself kept exact.
     /// `json_value_to_kglite_value` remains the tolerant property/ingestion
     /// converter. `kglite_value_to_json` renders outbound result cells in
     /// natural untagged JSON; `kglite_value_to_csv_text` retains machine-value
     /// precision before the caller applies RFC CSV quoting.
     pub mod param {
         pub use crate::param::{
-            json_object_to_query_value_map, json_object_to_value_map, json_value_to_kglite_value,
-            kglite_value_to_csv_text, kglite_value_to_json, validate_json_query_numbers_at,
-            JsonQueryParameterError, JsonQueryParameterErrorKind,
+            json_object_to_query_value_map, json_object_to_value_map, json_text_to_query_value_map,
+            json_value_to_kglite_value, kglite_value_to_csv_text, kglite_value_to_json,
+            validate_json_query_numbers_at, JsonQueryParameterError, JsonQueryParameterErrorKind,
+            JsonQueryTextError,
         };
     }
 

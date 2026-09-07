@@ -77,6 +77,40 @@ impl std::fmt::Display for JsonQueryParameterError {
 
 impl std::error::Error for JsonQueryParameterError {}
 
+/// The reason JSON **text** cannot become a Cypher parameter map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JsonQueryTextError {
+    /// A number lexeme cannot be represented by [`Value`]; keeps its path.
+    Parameter(JsonQueryParameterError),
+    /// serde_json refused the text; carries its rendered syntax error.
+    Syntax(String),
+    /// The text is the JSON literal `null`. Reported apart from any other
+    /// non-object because a binding may publish it as "no parameters" (the
+    /// C ABI's `params_json` does).
+    TopLevelNull,
+    /// The text parsed to a value that is neither an object nor `null`.
+    TopLevelNotAnObject,
+}
+
+impl std::fmt::Display for JsonQueryTextError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Parameter(error) => error.fmt(formatter),
+            Self::Syntax(message) => {
+                write!(formatter, "Query parameters are not valid JSON: {message}")
+            }
+            Self::TopLevelNull => {
+                write!(formatter, "Query parameters are JSON null, not an object")
+            }
+            Self::TopLevelNotAnObject => {
+                write!(formatter, "Query parameters must be a JSON object")
+            }
+        }
+    }
+}
+
+impl std::error::Error for JsonQueryTextError {}
+
 enum QueryConversionError {
     IntegerOutOfRange,
     NonFiniteFloat,
@@ -128,11 +162,19 @@ impl QueryConversionError {
     }
 }
 
-/// Convert a JSON object used as a query parameter map without losing numbers.
+/// Convert an **already parsed** JSON object into a query parameter map.
 ///
-/// Integer tokens must fit `i64`. Decimal/exponent tokens must fit finite
-/// `f64`. Arrays and objects recurse; path strings are assembled only when a
-/// child is rejected.
+/// Exact only for the tokens serde_json itself kept exact: an integer it
+/// retained as `u64` above `i64::MAX` and a decimal outside finite `f64` are
+/// rejected. An integer token serde_json already folded into an `f64` —
+/// anything below `i64::MIN` or above `u64::MAX`, since this crate does not
+/// enable `arbitrary_precision` — arrives here byte-identical to the float of
+/// the same magnitude and is accepted as `Value::Float64`. A caller that still
+/// holds the source text uses [`json_text_to_query_value_map`], which checks
+/// the lexeme before serde_json can fold it.
+///
+/// Arrays and objects recurse; path strings are assembled only when a child is
+/// rejected.
 pub fn json_object_to_query_value_map(
     map: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<HashMap<String, Value>, JsonQueryParameterError> {
@@ -144,6 +186,33 @@ pub fn json_object_to_query_value_map(
         })
         .collect::<Result<HashMap<_, _>, _>>()
         .map_err(QueryConversionError::into_public)
+}
+
+/// Convert JSON **text** holding a query parameter object into a `Value` map.
+///
+/// The exact checked parameter path: number lexemes are validated in the
+/// source text ([`validate_json_query_numbers_at`]) before serde_json parses
+/// it, so an integer token outside `i64` is rejected on its spelling instead
+/// of on the `f64` serde_json would otherwise have folded it into. Integer
+/// tokens must fit `i64`, decimal/exponent tokens must fit finite `f64`, and
+/// a rejection retains its nested path.
+///
+/// The top level must be a JSON object; `null` is reported as its own
+/// variant so a binding that publishes it as "no parameters" can keep that
+/// contract.
+pub fn json_text_to_query_value_map(
+    source: &str,
+) -> Result<HashMap<String, Value>, JsonQueryTextError> {
+    validate_json_query_numbers_at(source, &[]).map_err(JsonQueryTextError::Parameter)?;
+    let parsed: serde_json::Value = serde_json::from_str(source)
+        .map_err(|error| JsonQueryTextError::Syntax(error.to_string()))?;
+    match parsed {
+        serde_json::Value::Object(object) => {
+            json_object_to_query_value_map(&object).map_err(JsonQueryTextError::Parameter)
+        }
+        serde_json::Value::Null => Err(JsonQueryTextError::TopLevelNull),
+        _ => Err(JsonQueryTextError::TopLevelNotAnObject),
+    }
 }
 
 fn convert_query_value(v: &serde_json::Value) -> Result<Value, QueryConversionError> {
@@ -205,8 +274,11 @@ fn convert_query_value(v: &serde_json::Value) -> Result<Value, QueryConversionEr
 ///
 /// This converter is intentionally tolerant for declared ingestion and
 /// non-query JSON parsing: an integer outside `i64` falls through to `f64`.
-/// Query entry points must use [`json_object_to_query_value_map`], which rejects
-/// an integer token that cannot be represented exactly.
+/// Query entry points must use [`json_text_to_query_value_map`], which rejects
+/// an integer token that cannot be represented exactly;
+/// [`json_object_to_query_value_map`] is the parsed-value entry for a caller
+/// that no longer holds the text, and is exact only for what serde_json kept
+/// exact.
 ///
 /// Agents/bindings pass JSON-shaped tool args; the executor receives
 /// `HashMap<String, Value>` parameters. Compose multiple calls via
@@ -866,6 +938,96 @@ mod strict_query_parameter_tests {
             .as_object()
             .unwrap()
             .clone()
+    }
+
+    /// The integer spellings serde_json folds into `f64` before any
+    /// converter sees them: below `i64::MIN`, and either side of `2^64`.
+    const OVERFLOW_SPELLINGS: [&str; 3] = [
+        "-9223372036854775809",
+        "18446744073709551616",
+        "-18446744073709551616",
+    ];
+
+    #[test]
+    fn integer_overflow_spellings_are_rejected_with_their_nested_path() {
+        for spelling in OVERFLOW_SPELLINGS {
+            for (source, path) in [
+                (format!(r#"{{"value":{spelling}}}"#), "$.value"),
+                (format!(r#"{{"a":[{{"b":{spelling}}}]}}"#), "$.a[0].b"),
+            ] {
+                let Err(error) = json_text_to_query_value_map(&source) else {
+                    panic!("{source} must be rejected");
+                };
+                let JsonQueryTextError::Parameter(error) = error else {
+                    panic!("{source} must fail on its number lexeme, got {error}");
+                };
+                assert_eq!(error.kind(), JsonQueryParameterErrorKind::IntegerOutOfRange);
+                assert_eq!(error.path(), path);
+            }
+        }
+    }
+
+    /// The leniency the parsed-value converter documents: serde_json has
+    /// already folded these lexemes into an `f64` indistinguishable from the
+    /// float of the same magnitude, so they arrive as floats. This is why the
+    /// text entry exists, and why the doc must not promise exactness here.
+    #[test]
+    fn parsed_value_entry_is_exact_only_for_what_serde_kept_exact() {
+        for spelling in OVERFLOW_SPELLINGS {
+            let params =
+                json_object_to_query_value_map(&parsed_object(&format!(r#"{{"v":{spelling}}}"#)))
+                    .expect("serde_json already folded the token into an f64");
+            assert!(matches!(params["v"], Value::Float64(_)), "{spelling}");
+        }
+        // The band serde_json keeps as `u64` is still rejected exactly.
+        assert!(
+            json_object_to_query_value_map(&parsed_object(r#"{"v":9223372036854775808}"#)).is_err()
+        );
+    }
+
+    #[test]
+    fn text_entry_keeps_representable_numbers_in_their_exact_variant() {
+        let params = json_text_to_query_value_map(
+            r#"{"min":-9223372036854775808,"max":9223372036854775807,"huge":1e308,"negzero":-0.0,"half":1.5}"#,
+        )
+        .unwrap();
+        assert!(matches!(params["min"], Value::Int64(i64::MIN)));
+        assert!(matches!(params["max"], Value::Int64(i64::MAX)));
+        assert!(matches!(params["huge"], Value::Float64(value) if value == 1e308));
+        assert!(
+            matches!(params["negzero"], Value::Float64(value) if value == 0.0 && value.is_sign_negative())
+        );
+        assert!(matches!(params["half"], Value::Float64(value) if value == 1.5));
+    }
+
+    #[test]
+    fn text_entry_reports_shape_and_syntax_apart_from_number_rejections() {
+        assert_eq!(
+            json_text_to_query_value_map("null").unwrap_err(),
+            JsonQueryTextError::TopLevelNull
+        );
+        for source in ["[]", "1", r#""text""#, "true"] {
+            assert_eq!(
+                json_text_to_query_value_map(source).unwrap_err(),
+                JsonQueryTextError::TopLevelNotAnObject,
+                "{source}"
+            );
+        }
+        for source in ["{", "", r#"{"a":1} trailing"#] {
+            assert!(
+                matches!(
+                    json_text_to_query_value_map(source),
+                    Err(JsonQueryTextError::Syntax(_))
+                ),
+                "{source}"
+            );
+        }
+        assert_eq!(
+            json_text_to_query_value_map(r#"{"v":1e400}"#)
+                .unwrap_err()
+                .to_string(),
+            "Query parameter $.v number is outside the finite 64-bit float range"
+        );
     }
 
     #[test]

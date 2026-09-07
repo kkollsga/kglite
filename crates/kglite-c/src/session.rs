@@ -12,8 +12,8 @@ use crate::status::KgliteStatusCode;
 use crate::strings::alloc_c_string;
 use kglite::api::mutation::{add_edges_from_specs, EdgeSpec};
 use kglite::api::param::{
-    json_object_to_query_value_map, json_object_to_value_map, json_value_to_kglite_value,
-    validate_json_query_numbers_at,
+    json_object_to_query_value_map, json_object_to_value_map, json_text_to_query_value_map,
+    json_value_to_kglite_value, validate_json_query_numbers_at, JsonQueryTextError,
 };
 use kglite::api::session::{execute_mut, execute_read, ExecuteOptions, Session};
 use kglite::api::{Embedder, Value};
@@ -825,26 +825,20 @@ fn parse_params_json(
     if s.is_empty() {
         return Ok(HashMap::new());
     }
-    validate_json_query_numbers_at(s, &[]).map_err(|error| {
-        QueryParamDecodeError::new(KgliteStatusCode::InvalidArgument, error.to_string())
-    })?;
-    let parsed: serde_json::Value = match serde_json::from_str(s) {
-        Ok(v) => v,
-        Err(error) => {
-            return Err(QueryParamDecodeError::new(
-                KgliteStatusCode::InvalidArgument,
-                format!("params_json is not valid JSON: {error}"),
-            ));
-        }
-    };
-    match parsed {
-        serde_json::Value::Object(obj) => json_object_to_query_value_map(&obj).map_err(|error| {
-            QueryParamDecodeError::new(KgliteStatusCode::InvalidArgument, error.to_string())
-        }),
-        serde_json::Value::Null => Ok(HashMap::new()),
-        _ => Err(QueryParamDecodeError::new(
+    match json_text_to_query_value_map(s) {
+        Ok(params) => Ok(params),
+        Err(JsonQueryTextError::TopLevelNull) => Ok(HashMap::new()),
+        Err(JsonQueryTextError::Syntax(message)) => Err(QueryParamDecodeError::new(
+            KgliteStatusCode::InvalidArgument,
+            format!("params_json is not valid JSON: {message}"),
+        )),
+        Err(JsonQueryTextError::TopLevelNotAnObject) => Err(QueryParamDecodeError::new(
             KgliteStatusCode::InvalidArgument,
             "params_json must be a JSON object or null",
+        )),
+        Err(error @ JsonQueryTextError::Parameter(_)) => Err(QueryParamDecodeError::new(
+            KgliteStatusCode::InvalidArgument,
+            error.to_string(),
         )),
     }
 }
@@ -1024,6 +1018,30 @@ mod tests {
         let s = CString::new("[1, 2, 3]").unwrap();
         let err = parse_params_json(s.as_ptr()).unwrap_err();
         assert_eq!(err.code, KgliteStatusCode::InvalidArgument);
+    }
+
+    /// The published `params_json` shapes, which the shared text entry
+    /// reports as separate variants: a JSON `null` document means "no
+    /// parameters", any other non-object is refused by name, and a syntax
+    /// error keeps serde_json's own diagnostic.
+    #[test]
+    fn parse_params_document_null_is_empty_and_other_shapes_keep_their_message() {
+        let null = CString::new("null").unwrap();
+        assert!(parse_params_json(null.as_ptr()).unwrap().is_empty());
+        for raw in ["[1, 2, 3]", "42", r#""text""#, "true"] {
+            let s = CString::new(raw).unwrap();
+            let err = parse_params_json(s.as_ptr()).unwrap_err();
+            assert_eq!(err.code, KgliteStatusCode::InvalidArgument);
+            assert_eq!(err.message, "params_json must be a JSON object or null");
+        }
+        let broken = CString::new("{").unwrap();
+        let err = parse_params_json(broken.as_ptr()).unwrap_err();
+        assert_eq!(err.code, KgliteStatusCode::InvalidArgument);
+        assert!(
+            err.message.starts_with("params_json is not valid JSON: "),
+            "{}",
+            err.message
+        );
     }
 
     /// The documented ownership-on-failure contract: a rejected

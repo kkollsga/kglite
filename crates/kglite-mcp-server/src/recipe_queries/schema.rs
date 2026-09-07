@@ -177,8 +177,8 @@ impl SchemaNode {
             .map(|value| SchemaNode::compile(value, &format!("{path}.items")).map(Box::new))
             .transpose()?;
         let enum_values = parse_enum(map.get("enum"), path)?;
-        let minimum = parse_number_keyword(map, "minimum", path)?;
-        let maximum = parse_number_keyword(map, "maximum", path)?;
+        let minimum = parse_number_keyword(map, "minimum", path, &types)?;
+        let maximum = parse_number_keyword(map, "maximum", path, &types)?;
         let min_items = parse_usize_keyword(map, "minItems", path)?;
         let max_items = parse_usize_keyword(map, "maxItems", path)?;
 
@@ -351,13 +351,14 @@ fn parse_number_keyword(
     map: &Map<String, Value>,
     keyword: &str,
     path: &str,
+    types: &BTreeSet<ValueType>,
 ) -> Result<Option<Number>> {
     map.get(keyword)
         .map(|value| {
             let number = value
                 .as_number()
                 .ok_or_else(|| anyhow::anyhow!("{path}.{keyword} must be a number"))?;
-            validate_numeric_bound(number, &format!("{path}.{keyword}"))?;
+            validate_numeric_bound(number, &format!("{path}.{keyword}"), types)?;
             Ok(number.clone())
         })
         .transpose()
@@ -410,8 +411,21 @@ fn validate_keyword_applicability(
     Ok(())
 }
 
-fn validate_numeric_bound(number: &Number, path: &str) -> Result<()> {
-    if number.as_i64().is_some() || number.is_f64() {
+/// A compiled bound must still be the number the recipe author wrote.
+///
+/// serde_json folds every integer token outside `[i64::MIN, u64::MAX]` into an
+/// `f64` before compilation sees it, so a `type: integer` bound that is not
+/// `as_i64()`-exact was either spelled as a float or has already been rounded
+/// — and neither can honestly bound a variable whose accepted values are
+/// exact signed 64-bit integers.
+fn validate_numeric_bound(number: &Number, path: &str, types: &BTreeSet<ValueType>) -> Result<()> {
+    if number.as_i64().is_some() {
+        return Ok(());
+    }
+    if types.contains(&ValueType::Integer) && !types.contains(&ValueType::Number) {
+        bail!("{path} must be an exact signed 64-bit integer for type integer");
+    }
+    if number.is_f64() {
         return Ok(());
     }
     if number
@@ -452,6 +466,33 @@ mod numeric_bound_tests {
             "{error}"
         );
         assert!(error.contains("signed 64-bit range"), "{error}");
+    }
+
+    /// A recipe bound spelled beyond `i64` is folded to an `f64` by
+    /// serde_json before compilation sees it, so an integer variable would
+    /// silently be bounded by a different number than the author wrote.
+    #[test]
+    fn integer_typed_bounds_outside_exact_i64_are_rejected() {
+        for bound in [
+            r#""minimum":-9223372036854775809"#,
+            r#""maximum":18446744073709551616"#,
+            r#""minimum":-18446744073709551616"#,
+        ] {
+            let raw: Value = serde_json::from_str(&format!(
+                r#"{{
+                    "type":"object",
+                    "properties":{{"value":{{"type":"integer",{bound}}}}},
+                    "required":["value"],
+                    "additionalProperties":false
+                }}"#
+            ))
+            .unwrap();
+            let error = ParameterSchema::compile_root(&raw, &["value".to_string()])
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("parameters.properties.value"), "{error}");
+            assert!(error.contains("exact signed 64-bit integer"), "{error}");
+        }
     }
 
     #[test]
