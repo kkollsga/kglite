@@ -36,10 +36,16 @@
       "sha256": "f2659cf8bdc83d314f9a63f3915a04072adab630a337c41b36fafcdeb8478555",
       "status": "accepted"
     },
-    "current.json": {
-      "evidence": "0_17_0.json plus one cell: the harness gained test_bench_hop1_deg3_memory mid-cycle (859d874d, deep-scan program), so the accepted 0.17.0 release capture no longer covers the tracked cell set. Its row is the release-shaped capture of this tree at 859d874d plus the NaT fix (.bench-current.json, 39 cells, dirty tree, min 9.692 ms), carried over unchanged apart from the per-iteration data slimming refresh_release_constants.py applies to every baseline. Every other row is byte-identical to 0_17_0.json, which stays the Darwin anchor reference.",
+    "0_17_1.json": {
+      "evidence": "Release 0.17.1, 2026-09-08: two release captures at 1e5e5127+bump (refresh-release-constants, then make bench-check repeat) agree \u2014 37 common cells, median min delta 0.0%, worst +10.0% (hop1_deg3_memory, heavy-tailed per T2-3), 8 cells >4% apart, none near 20%; gate OK. Normal desktop load 4.0/2.9/2.5 \u2192 3.9/3.6/3.0, no concurrent native build. Known accepted D2 disk_dir_reopen exception retained (+236.6% vs 0.16.19 on the anchor).",
       "platform": "Darwin/arm64",
-      "sha256": "f2659cf8bdc83d314f9a63f3915a04072adab630a337c41b36fafcdeb8478555",
+      "sha256": "166cce2ca36c37ee556e792e0789fbf2a5389e21ce699eb003fba3e11e9256e7",
+      "status": "accepted"
+    },
+    "current.json": {
+      "evidence": "Release 0.17.1, 2026-09-08: two release captures at 1e5e5127+bump (refresh-release-constants, then make bench-check repeat) agree \u2014 37 common cells, median min delta 0.0%, worst +10.0% (hop1_deg3_memory, heavy-tailed per T2-3), 8 cells >4% apart, none near 20%; gate OK. Normal desktop load 4.0/2.9/2.5 \u2192 3.9/3.6/3.0, no concurrent native build. Known accepted D2 disk_dir_reopen exception retained (+236.6% vs 0.16.19 on the anchor).",
+      "platform": "Darwin/arm64",
+      "sha256": "166cce2ca36c37ee556e792e0789fbf2a5389e21ce699eb003fba3e11e9256e7",
       "status": "accepted"
     },
     "current.linux.json": {
@@ -62,7 +68,7 @@
     }
   },
   "references": {
-    "Darwin/arm64": "0_17_0.json",
+    "Darwin/arm64": "0_17_1.json",
     "Linux/x86_64": "reference_0_17_0_cells.linux.json"
   },
   "schema_version": 1

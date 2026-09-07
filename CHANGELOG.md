@@ -9,6 +9,8 @@ before upgrading.
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-09-08
+
 ### Fixed
 
 - **An index on a structurally resolved name no longer changes a disk graph's
@@ -284,6 +286,13 @@ before upgrading.
   rounded bound the recipe author did not write.
 
 ### Changed
+
+- Rust durable capture: `kglite::api::durable::RawOp` gained the `Declaration`
+  variant carrying the replayed schema, index, constraint, ontology, spatial,
+  timeseries and embedding declarations (WAL revisions 5 → 7; older logs still
+  replay). Exhaustive `match` arms over `RawOp` need a new arm.
+  `kglite::api::introspection::compute_description` now takes a `DescribeRequest`
+  (2 parameters instead of 8) so each surface names its own callable.
 
 - **In-memory 1-hop traversal is no longer superlinear in the node count.**
   `add_connections` now inserts a load's rows grouped by source node, so a
