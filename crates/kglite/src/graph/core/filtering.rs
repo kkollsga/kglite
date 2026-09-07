@@ -197,6 +197,12 @@ fn scalar_values_equal(a: &Value, b: &Value) -> bool {
         // Single-element JSON list compared to plain string (`["Oslo"]` = 'Oslo').
         // `a == b` above already answered plain byte equality.
         (Value::String(x), Value::String(y)) => str_values_equal(x, y),
+        // A date-only value equals midnight on that date — the same rule
+        // `compare_values` applies to `<`/`>`, and the one CYPHER.md declares
+        // for the shared date/datetime rank. Without it `=` and `<=` answered
+        // differently for the same pair.
+        (Value::DateTime(date), Value::Timestamp(ts))
+        | (Value::Timestamp(ts), Value::DateTime(date)) => date.and_hms_opt(0, 0, 0) == Some(*ts),
         _ => false,
     }
 }
@@ -1555,6 +1561,83 @@ mod tests {
 
         let result = compare_values(&Value::DateTime(date), &Value::String("2024-01-01".into()));
         assert_eq!(result, Some(std::cmp::Ordering::Greater));
+    }
+
+    /// A date is midnight on that date for `=` exactly as it already is for
+    /// `<`/`>` (CYPHER.md's ordering rule). `scalar_values_equal` used to fall
+    /// through to `_ => false`, so `=` and `<>` contradicted `<=`/`>=` on the
+    /// same pair, and `IN`, the pattern matchers and `RelEdgePredicate::Eq`
+    /// inherited the contradiction.
+    #[test]
+    fn a_date_equals_midnight_on_that_date() {
+        let date = NaiveDate::from_ymd_opt(2024, 3, 15).unwrap();
+        let midnight = Value::Timestamp(date.and_hms_opt(0, 0, 0).unwrap());
+        let noon = Value::Timestamp(date.and_hms_opt(12, 0, 0).unwrap());
+        let day = Value::DateTime(date);
+
+        assert!(values_equal(&day, &midnight));
+        assert!(values_equal(&midnight, &day));
+        assert_eq!(predicate_values_equal(&day, &midnight), Some(true));
+        assert_eq!(predicate_values_equal(&midnight, &day), Some(true));
+
+        assert!(!values_equal(&day, &noon));
+        assert_eq!(predicate_values_equal(&day, &noon), Some(false));
+        assert_eq!(predicate_values_equal(&noon, &day), Some(false));
+
+        // A different date is never midnight on this one.
+        let other = Value::DateTime(NaiveDate::from_ymd_opt(2024, 3, 16).unwrap());
+        assert_eq!(predicate_values_equal(&other, &midnight), Some(false));
+
+        // A string stays unequal to a temporal: `=` across those two type
+        // families is false, and only the *ordering* comparison parses a
+        // date string (`test_compare_values_datetime_vs_string`).
+        let text = Value::String("2024-03-15".into());
+        assert_eq!(predicate_values_equal(&day, &text), Some(false));
+        assert_eq!(predicate_values_equal(&midnight, &text), Some(false));
+    }
+
+    /// The property that would have caught the class: for any two temporal
+    /// values, exactly one of `<`, `=`, `>` holds. `compare_values` and
+    /// `predicate_values_equal` must never disagree about `Equal`.
+    #[test]
+    fn temporal_equality_and_ordering_agree_on_trichotomy() {
+        let mut values = Vec::new();
+        for day in [14u32, 15, 16] {
+            let date = NaiveDate::from_ymd_opt(2024, 3, day).unwrap();
+            values.push(Value::DateTime(date));
+            for (h, m) in [(0, 0), (0, 1), (12, 0), (23, 59)] {
+                values.push(Value::Timestamp(date.and_hms_opt(h, m, 0).unwrap()));
+            }
+        }
+        for a in &values {
+            for b in &values {
+                let ordering = compare_values(a, b).unwrap_or_else(|| {
+                    panic!("temporal pair has no ordering: {a:?} vs {b:?}");
+                });
+                let equal = predicate_values_equal(a, b);
+                assert_eq!(
+                    equal,
+                    Some(ordering.is_eq()),
+                    "trichotomy broken for {a:?} vs {b:?}: ordering {ordering:?}, equality {equal:?}"
+                );
+            }
+        }
+    }
+
+    /// `total_order` is a separate function with a separate contract
+    /// (`ORDER BY`, `min`, `max`), and the equality fix must not move it: a
+    /// date and midnight already share a rank *and* compare Equal there.
+    #[test]
+    fn total_order_is_unchanged_by_temporal_equality() {
+        let date = NaiveDate::from_ymd_opt(2024, 3, 15).unwrap();
+        let day = Value::DateTime(date);
+        let midnight = Value::Timestamp(date.and_hms_opt(0, 0, 0).unwrap());
+        let noon = Value::Timestamp(date.and_hms_opt(12, 0, 0).unwrap());
+        assert_eq!(total_order(&day, &midnight), std::cmp::Ordering::Equal);
+        assert_eq!(total_order(&day, &noon), std::cmp::Ordering::Less);
+        assert_eq!(total_order(&noon, &day), std::cmp::Ordering::Greater);
+        // DISTINCT / grouping keys stay structural: the two are still two.
+        assert_ne!(day, midnight);
     }
 
     // ── matches_condition: filter operators ──

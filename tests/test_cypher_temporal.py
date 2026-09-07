@@ -283,3 +283,155 @@ class TestTemporalCombined:
         names = [r["e.title"] for r in rows]
         assert "Alice" in names  # matched via OR
         assert "Bob" in names  # matched via valid_at
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# A date is midnight on that date — for equality as well as ordering.
+#
+# CYPHER.md's ordering section declares "Dates and datetimes share one rank
+# and compare chronologically, a date counting as midnight on that date", and
+# `<`/`<=`/`>`/`>=` implemented it. `=`, `<>` and `IN` did not: they fell
+# through to structural `Value` equality, so the same pair answered
+# `<= -> true` and `= -> false` at once. These goldens pin the trichotomy.
+# ──────────────────────────────────────────────────────────────────────────
+
+MIDNIGHT = "datetime('2024-03-15T00:00:00')"
+NOON = "datetime('2024-03-15T12:00:00')"
+DAY = "date('2024-03-15')"
+
+
+@pytest.fixture
+def temporal_pair_graph():
+    graph = KnowledgeGraph()
+    graph.cypher(
+        """
+        CREATE (:T {id: 1, d: date('2024-03-15'), t: datetime('2024-03-15T00:00:00')}),
+               (:T {id: 2, d: date('2024-03-16'), t: datetime('2024-03-15T12:00:00')})
+        """
+    )
+    return graph
+
+
+@pytest.mark.parametrize("disable_optimizer", [False, True])
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        (f"{MIDNIGHT} = {DAY}", True),
+        (f"{DAY} = {MIDNIGHT}", True),
+        (f"{MIDNIGHT} <> {DAY}", False),
+        (f"{DAY} <> {MIDNIGHT}", False),
+        (f"{MIDNIGHT} < {DAY}", False),
+        (f"{MIDNIGHT} <= {DAY}", True),
+        (f"{MIDNIGHT} > {DAY}", False),
+        (f"{MIDNIGHT} >= {DAY}", True),
+        (f"{NOON} = {DAY}", False),
+        (f"{NOON} <> {DAY}", True),
+        (f"{NOON} > {DAY}", True),
+        (f"{NOON} >= {DAY}", True),
+        (f"{NOON} < {DAY}", False),
+        (f"{DAY} = date('2024-03-16')", False),
+        (f"{MIDNIGHT} IN [{DAY}]", True),
+        (f"{DAY} IN [{MIDNIGHT}]", True),
+        (f"{NOON} IN [{DAY}]", False),
+        (f"{DAY} IN [{NOON}, {MIDNIGHT}]", True),
+        (f"coalesce(null, {DAY}) = {MIDNIGHT}", True),
+        (f"CASE WHEN {MIDNIGHT} = {DAY} THEN 'y' ELSE 'n' END", "y"),
+        (f"CASE WHEN {NOON} = {DAY} THEN 'y' ELSE 'n' END", "n"),
+        # A string is a different type family: `=` stays false, and only the
+        # ordering comparison parses a date string.
+        (f"{DAY} = '2024-03-15'", False),
+        (f"{DAY} <> '2024-03-15'", True),
+        (f"{MIDNIGHT} = '2024-03-15T00:00:00'", False),
+        # Null still propagates through both.
+        (f"{DAY} = null", None),
+        (f"null = {MIDNIGHT}", None),
+    ],
+)
+def test_date_equals_midnight_on_that_date(expression, expected, disable_optimizer):
+    graph = KnowledgeGraph()
+    got = graph.cypher(f"RETURN {expression} AS value", disable_optimizer=disable_optimizer).to_list()
+    assert got == [{"value": expected}]
+
+
+@pytest.mark.parametrize("disable_optimizer", [False, True])
+@pytest.mark.parametrize(
+    ("clause", "expected"),
+    [
+        (f"WHERE n.d = {MIDNIGHT}", [1]),
+        (f"WHERE n.d <> {MIDNIGHT}", [2]),
+        (f"WHERE n.t = {DAY}", [1]),
+        (f"WHERE n.t <> {DAY}", [2]),
+        (f"WHERE n.d IN [{MIDNIGHT}]", [1]),
+        (f"WHERE n.t IN [{DAY}, {NOON}]", [1, 2]),
+        (f"WHERE NOT (n.t = {DAY})", [2]),
+        (f"WHERE n.d <= {MIDNIGHT}", [1]),
+        (f"WHERE n.d >= {MIDNIGHT}", [1, 2]),
+    ],
+)
+def test_stored_temporal_properties_equate_across_date_and_datetime(
+    temporal_pair_graph, clause, expected, disable_optimizer
+):
+    got = temporal_pair_graph.cypher(
+        f"MATCH (n:T) {clause} RETURN n.id AS id ORDER BY id",
+        disable_optimizer=disable_optimizer,
+    ).to_list()
+    assert [r["id"] for r in got] == expected
+
+
+@pytest.mark.parametrize("disable_optimizer", [False, True])
+def test_property_index_agrees_with_the_scan_on_temporal_equality(temporal_pair_graph, disable_optimizer):
+    """A property index answers `=` without re-verifying, so its key set has to
+    carry the same rule the scan does.
+    """
+    query = f"MATCH (n:T) WHERE n.d = {MIDNIGHT} RETURN n.id AS id ORDER BY id"
+    before = temporal_pair_graph.cypher(query, disable_optimizer=disable_optimizer).to_list()
+    temporal_pair_graph.create_index("T", "d")
+    after = temporal_pair_graph.cypher(query, disable_optimizer=disable_optimizer).to_list()
+    assert [r["id"] for r in before] == [1]
+    assert after == before
+
+
+@pytest.mark.parametrize("disable_optimizer", [False, True])
+def test_temporal_trichotomy_holds_for_every_pair(disable_optimizer):
+    """Exactly one of `<`, `=`, `>` is true for any date/datetime pair."""
+    graph = KnowledgeGraph()
+    values = [
+        "date('2024-03-14')",
+        "date('2024-03-15')",
+        "datetime('2024-03-14T00:00:00')",
+        "datetime('2024-03-15T00:00:00')",
+        "datetime('2024-03-15T12:00:00')",
+    ]
+    for left in values:
+        for right in values:
+            row = graph.cypher(
+                f"RETURN {left} < {right} AS lt, {left} = {right} AS eq, {left} > {right} AS gt",
+                disable_optimizer=disable_optimizer,
+            ).to_list()[0]
+            assert sum(bool(row[k]) for k in ("lt", "eq", "gt")) == 1, (
+                left,
+                right,
+                row,
+            )
+
+
+@pytest.mark.parametrize("disable_optimizer", [False, True])
+def test_order_by_min_max_and_distinct_are_unchanged(disable_optimizer):
+    """`ORDER BY`, `min`/`max` use `total_order` and `DISTINCT` uses structural
+    `Value` identity — none of them routes through predicate equality, so a
+    date and its midnight stay two distinct grouping keys while comparing
+    equal under `=`.
+    """
+    graph = KnowledgeGraph()
+    rows = graph.cypher(
+        f"UNWIND [{NOON}, {DAY}, {MIDNIGHT}] AS v "
+        "RETURN count(DISTINCT v) AS distinct_count, min(v) AS lo, max(v) AS hi",
+        disable_optimizer=disable_optimizer,
+    ).to_list()
+    assert rows[0]["distinct_count"] == 3
+    ordered = graph.cypher(
+        f"UNWIND [{NOON}, {DAY}, {MIDNIGHT}] AS v RETURN v ORDER BY v",
+        disable_optimizer=disable_optimizer,
+    ).to_list()
+    assert len(ordered) == 3
+    assert str(ordered[-1]["v"]).startswith("2024-03-15 12:00")

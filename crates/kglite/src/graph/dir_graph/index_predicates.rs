@@ -48,7 +48,20 @@ pub(crate) fn equality_keys(value: &Value) -> Option<Vec<Value>> {
                 keys.push(Value::String(inner.to_string()));
             }
         }
-        Value::Boolean(_) | Value::DateTime(_) | Value::Timestamp(_) => {}
+        Value::Boolean(_) => {}
+        // A date equals midnight on that date (`scalar_values_equal`), and the
+        // index answer is used without re-verification, so both spellings of
+        // the same instant have to be probed.
+        Value::DateTime(d) => {
+            if let Some(midnight) = d.and_hms_opt(0, 0, 0) {
+                keys.push(Value::Timestamp(midnight));
+            }
+        }
+        Value::Timestamp(t) => {
+            if t.time() == chrono::NaiveTime::MIN {
+                keys.push(Value::DateTime(t.date()));
+            }
+        }
         _ => return None,
     }
     Some(keys)

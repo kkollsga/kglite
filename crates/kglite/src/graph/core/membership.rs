@@ -33,7 +33,9 @@
 //! | `Float64(f)`, otherwise | `Float(canonical bits)` — `-0.0` folded to `0.0` |
 //! | `Float64(NaN)` | **no key** — `NaN != NaN` under `values_equal`, so a NaN element can never match and a NaN probe never matches |
 //! | `String(s)` | `Str(s)`, plus `Str(inner)` when `s` is `["inner"]` |
-//! | `Boolean` / `DateTime` / `Timestamp` | their own key (structural equality only) |
+//! | `Boolean` | its own key |
+//! | `DateTime` (a date) | `Timestamp(midnight on that date)` — a date equals midnight on that date |
+//! | `Timestamp` | `Timestamp(t)` |
 //! | `Null` | **no key** — recorded as [`MembershipSet::has_null`] for the caller's Kleene rule |
 //! | anything else (`Point`, `Duration`, `List`, `Map`, `Node`, …) | *residual*: compared with `values_equal` |
 //!
@@ -57,7 +59,7 @@ use crate::datatypes::Value;
 use crate::graph::core::filtering::{
     json_single_element_string, predicate_values_equal, values_equal,
 };
-use chrono::{NaiveDate, NaiveDateTime};
+use chrono::NaiveDateTime;
 use rustc_hash::FxHashSet;
 use std::sync::Arc;
 
@@ -79,7 +81,10 @@ enum ScalarKey {
     /// Non-integral (or out-of-range) float, by canonical bit pattern.
     Float(u64),
     Bool(bool),
-    Date(NaiveDate),
+    /// Dates and datetimes share one key space: a date is midnight on that
+    /// date under `values_equal`, so `Date(d)` would have to hash equal to
+    /// `Timestamp(d @ 00:00)` — folding the date into its midnight instant
+    /// is the same statement with one variant.
     Timestamp(NaiveDateTime),
 }
 
@@ -323,7 +328,7 @@ fn scalar_key(value: &Value) -> Option<ScalarKey> {
             }
         }
         Value::Boolean(b) => Some(ScalarKey::Bool(*b)),
-        Value::DateTime(d) => Some(ScalarKey::Date(*d)),
+        Value::DateTime(d) => d.and_hms_opt(0, 0, 0).map(ScalarKey::Timestamp),
         Value::Timestamp(t) => Some(ScalarKey::Timestamp(*t)),
         _ => None,
     }
@@ -391,6 +396,30 @@ mod tests {
         ];
         assert_agrees(&list, &probes);
         assert_agrees(&padded(&list), &probes);
+    }
+
+    /// The index must mirror `values_equal` for the cross-temporal rule too:
+    /// a date and midnight on that date are equal, so they must share a key,
+    /// or a list longer than `LINEAR_MAX` would answer differently from the
+    /// same list one element shorter.
+    #[test]
+    fn a_date_and_midnight_share_a_membership_key() {
+        let date = chrono::NaiveDate::from_ymd_opt(2024, 3, 15).unwrap();
+        let list = [
+            Value::DateTime(date),
+            Value::Timestamp(date.and_hms_opt(12, 0, 0).unwrap()),
+        ];
+        let probes = [
+            Value::Timestamp(date.and_hms_opt(0, 0, 0).unwrap()),
+            Value::Timestamp(date.and_hms_opt(12, 0, 0).unwrap()),
+            Value::Timestamp(date.and_hms_opt(23, 59, 59).unwrap()),
+            Value::DateTime(date),
+            Value::DateTime(chrono::NaiveDate::from_ymd_opt(2024, 3, 16).unwrap()),
+        ];
+        assert_agrees(&list, &probes);
+        assert_agrees(&padded(&list), &probes);
+        assert!(MembershipSet::new(padded(&list))
+            .matches(&Value::Timestamp(date.and_hms_opt(0, 0, 0).unwrap())));
     }
 
     #[test]

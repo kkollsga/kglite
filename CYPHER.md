@@ -319,7 +319,11 @@ above. Within a rank:
   integers, then all floats" — and exactly, including integers past 2⁵³ that
   no float can represent. `NaN` sorts above every other number.
 - **Dates and datetimes** share one rank and compare chronologically, a date
-  counting as midnight on that date.
+  counting as midnight on that date. The same rule governs `=`, `<>` and `IN`,
+  so `datetime('2024-03-15T00:00:00') = date('2024-03-15')` is true — a
+  deliberate divergence from openCypher, which makes every comparison between
+  a date and a datetime null. `DISTINCT` and grouping keys remain structural,
+  so the two stay separate keys there.
 - **Lists** compare element by element, then by length (`[1] < [1,1,9] <
   [1,2] < [2]`).
 - **Maps** compare entry by entry in key order, then by size.
@@ -3717,7 +3721,7 @@ claimed openCypher-compatible subset.
 | `id(entity)` | Covered | KGLite logical node identity and stable relationship identity |
 | `labels(n)` | Intentional divergence | Primary type first, then secondary labels |
 | `keys(n)` / `keys(r)` | Covered | Returns property names |
-| `date(str)` / `datetime(str)` | Partial | KGLite's temporal value model and documented arithmetic subset |
+| `date(str)` / `datetime(str)` | Partial | KGLite's temporal value model and documented arithmetic subset; a date and a datetime are intercomparable **and equatable**, a date being midnight on that date |
 | `coalesce` | Covered | |
 | `range(start, end [, step])` | Covered | Inclusive integer range |
 | `round(x [, precision])` | Covered | |

@@ -58,6 +58,34 @@ fn numeric_equality_index_admits_every_equivalent_variant() {
     }
 }
 
+/// The index answer is treated as complete (no post-verification), so its key
+/// set has to mirror predicate equality exactly. A date equals midnight on
+/// that date, so a probe for either must find both.
+#[test]
+fn temporal_equality_index_admits_the_date_and_its_midnight() {
+    let date = chrono::NaiveDate::from_ymd_opt(2024, 3, 15).unwrap();
+    let graph = indexed(vec![
+        Value::DateTime(date),
+        Value::Timestamp(date.and_hms_opt(0, 0, 0).unwrap()),
+        Value::Timestamp(date.and_hms_opt(12, 0, 0).unwrap()),
+        Value::DateTime(chrono::NaiveDate::from_ymd_opt(2024, 3, 16).unwrap()),
+    ]);
+    for probe in [
+        Value::DateTime(date),
+        Value::Timestamp(date.and_hms_opt(0, 0, 0).unwrap()),
+    ] {
+        assert_eq!(slots(graph.lookup_by_index("N", "v", &probe)), vec![0, 1]);
+    }
+    assert_eq!(
+        slots(graph.lookup_by_index(
+            "N",
+            "v",
+            &Value::Timestamp(date.and_hms_opt(12, 0, 0).unwrap())
+        )),
+        vec![2]
+    );
+}
+
 #[test]
 fn numeric_range_translates_bounds_without_losing_variants() {
     let graph = indexed(vec![

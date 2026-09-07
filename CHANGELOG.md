@@ -11,6 +11,18 @@ before upgrading.
 
 ### Fixed
 
+- A date and a datetime now compare consistently for equality. `=`, `<>` and
+  `IN` fell through to structural value equality while `<`, `<=`, `>` and `>=`
+  applied the documented "a date counts as midnight on that date" rule, so
+  `datetime('2024-03-15T00:00:00') <= date('2024-03-15')` was true and
+  `... = date('2024-03-15')` was false at the same time — for literals, stored
+  properties, `IN` lists, pattern property matchers and relationship property
+  predicates alike. The membership index and the property-index key set carry
+  the same rule, so an indexed lookup answers what a scan answers. `ORDER BY`,
+  `min`/`max` are unchanged (they already treated the pair as equal), and
+  `DISTINCT`/grouping keys stay structural — a date and its midnight are equal
+  under `=` but remain two distinct grouping keys, the same split openCypher
+  applies to `1` and `1.0`. A string is still never equal to a temporal value.
 - `x IN []` is now `false` for every operand, `null` included. `null IN []`
   answered unknown, so `NOT (n.tag IN [])` and `NOT (n.tag IN $empty)` silently
   dropped every row whose property was missing, and `n.tag IN []` returned
