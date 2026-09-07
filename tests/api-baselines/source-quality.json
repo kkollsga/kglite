@@ -46,7 +46,7 @@
       "path": "crates/kglite-py/src/datatypes/py_in.rs",
       "qualified_name": "crate::convert_pandas_series",
       "lines": 193,
-      "branches": 66,
+      "branches": 62,
       "nesting": 5
     },
     {
@@ -226,13 +226,6 @@
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/where_clause.rs",
-      "qualified_name": "crate::CypherExecutor<'a>::evaluate_predicate_tristate",
-      "lines": 173,
-      "branches": 64,
-      "nesting": 3
-    },
-    {
-      "path": "crates/kglite/src/graph/languages/cypher/executor/where_clause.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_where",
       "lines": 228,
       "branches": 27,
@@ -348,13 +341,6 @@
       "qualified_name": "crate::DiskGraph::build_csr_partitioned",
       "lines": 237,
       "branches": 33,
-      "nesting": 4
-    },
-    {
-      "path": "crates/kglite/src/graph/storage/disk/graph_persist.rs",
-      "qualified_name": "crate::DiskGraph::load_from_dir",
-      "lines": 241,
-      "branches": 24,
       "nesting": 4
     },
     {

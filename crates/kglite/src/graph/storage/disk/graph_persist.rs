@@ -935,142 +935,11 @@ impl DiskGraph {
         let serde_codec = validate_disk_format(&meta)?;
         log_stage("dg.meta_parse", t);
 
-        // CSR binaries live under seg_NNN/ when the graph was written
-        // with csr_layout_version >= 1. Legacy .kgl directories
-        // (version=0, the serde default) keep the flat layout.
-        //
-        // Multi-segment graphs are produced by ordinary saves:
-        // `save_to_dir` seals a clean tail into a new seg_NNN whenever a
-        // prior save exists (see `save_disposition`).
-        //
-        // Auxiliary per-segment data is handled unevenly in the N>1 branch
-        // — see the limitation documented on `SegmentCsr`.
-
         // Keep legacy .zst decompression staging inside the graph directory.
         let temp_dir = dir.join("_zst_cache");
 
         let t = stage_timer();
-        let (csr_dir, segment_csr): (PathBuf, SegmentCsr) = if meta.csr_layout_version >= 1 {
-            let segs = enumerate_segment_dirs(dir);
-            match segs.len() {
-                0 => {
-                    return Err(std::io::Error::other(format!(
-                        "csr_layout_version={} but no seg_NNN/ directory found under {}",
-                        meta.csr_layout_version,
-                        dir.display()
-                    )));
-                }
-                1 => {
-                    // Single-segment: stay on the direct mmap path using
-                    // the graph-level `meta.*_len` values. No allocation,
-                    // and none of the concat work the multi-segment
-                    // branch below does.
-                    let seg_dir = segs.into_iter().next().unwrap().1;
-                    let csr = SegmentCsr {
-                        node_slots: load_raw_or_zst(
-                            &seg_dir.join("node_slots"),
-                            meta.node_slots_len,
-                            &temp_dir,
-                        )?,
-                        out_offsets: load_raw_or_zst(
-                            &seg_dir.join("out_offsets"),
-                            meta.out_offsets_len,
-                            &temp_dir,
-                        )?,
-                        out_edges: load_raw_or_zst(
-                            &seg_dir.join("out_edges"),
-                            meta.out_edges_len,
-                            &temp_dir,
-                        )?,
-                        in_offsets: load_raw_or_zst(
-                            &seg_dir.join("in_offsets"),
-                            meta.in_offsets_len,
-                            &temp_dir,
-                        )?,
-                        in_edges: load_raw_or_zst(
-                            &seg_dir.join("in_edges"),
-                            meta.in_edges_len,
-                            &temp_dir,
-                        )?,
-                        edge_endpoints: load_raw_or_zst(
-                            &seg_dir.join("edge_endpoints"),
-                            meta.edge_endpoints_len,
-                            &temp_dir,
-                        )?,
-                        conn_type_index_types: load_raw_or_zst_optional(
-                            &seg_dir.join("conn_type_index_types"),
-                        ),
-                        conn_type_index_offsets: load_raw_or_zst_optional(
-                            &seg_dir.join("conn_type_index_offsets"),
-                        ),
-                        conn_type_index_sources: load_raw_or_zst_optional(
-                            &seg_dir.join("conn_type_index_sources"),
-                        ),
-                        peer_count_types: load_raw_or_zst_optional(
-                            &seg_dir.join("peer_count_types"),
-                        ),
-                        peer_count_offsets: load_raw_or_zst_optional(
-                            &seg_dir.join("peer_count_offsets"),
-                        ),
-                        peer_count_entries: load_raw_or_zst_optional(
-                            &seg_dir.join("peer_count_entries"),
-                        ),
-                    };
-                    (seg_dir, csr)
-                }
-                _ => {
-                    // Multi-segment: load each segment via the file-size-
-                    // inferring loader, then concat. The first segment's
-                    // path doubles as `data_dir` — that's where the
-                    // auxiliary-indexes limitation points.
-                    let mut loaded = Vec::with_capacity(segs.len());
-                    let first_dir = segs[0].1.clone();
-                    for (_, sdir) in &segs {
-                        loaded.push(SegmentCsr::load_from(sdir, &temp_dir)?);
-                    }
-                    let csr = concat_segment_csrs(loaded)?;
-                    (first_dir, csr)
-                }
-            }
-        } else {
-            // Legacy flat layout: load from root as one segment, using
-            // meta's *_len values.
-            let csr = SegmentCsr {
-                node_slots: load_raw_or_zst(
-                    &dir.join("node_slots"),
-                    meta.node_slots_len,
-                    &temp_dir,
-                )?,
-                out_offsets: load_raw_or_zst(
-                    &dir.join("out_offsets"),
-                    meta.out_offsets_len,
-                    &temp_dir,
-                )?,
-                out_edges: load_raw_or_zst(&dir.join("out_edges"), meta.out_edges_len, &temp_dir)?,
-                in_offsets: load_raw_or_zst(
-                    &dir.join("in_offsets"),
-                    meta.in_offsets_len,
-                    &temp_dir,
-                )?,
-                in_edges: load_raw_or_zst(&dir.join("in_edges"), meta.in_edges_len, &temp_dir)?,
-                edge_endpoints: load_raw_or_zst(
-                    &dir.join("edge_endpoints"),
-                    meta.edge_endpoints_len,
-                    &temp_dir,
-                )?,
-                conn_type_index_types: load_raw_or_zst_optional(&dir.join("conn_type_index_types")),
-                conn_type_index_offsets: load_raw_or_zst_optional(
-                    &dir.join("conn_type_index_offsets"),
-                ),
-                conn_type_index_sources: load_raw_or_zst_optional(
-                    &dir.join("conn_type_index_sources"),
-                ),
-                peer_count_types: load_raw_or_zst_optional(&dir.join("peer_count_types")),
-                peer_count_offsets: load_raw_or_zst_optional(&dir.join("peer_count_offsets")),
-                peer_count_entries: load_raw_or_zst_optional(&dir.join("peer_count_entries")),
-            };
-            (dir.to_path_buf(), csr)
-        };
+        let (csr_dir, segment_csr) = load_csr_for_layout(dir, &meta, &temp_dir)?;
         log_stage("dg.segment_csr", t);
 
         let SegmentCsr {
@@ -1642,4 +1511,125 @@ fn merge_peer_count_histogram(
     }
     out_offsets.try_push(cur_pairs)?;
     Ok((out_types, out_offsets, out_entries))
+}
+
+/// Resolve the directory the CSR binaries live in and load them as one
+/// [`SegmentCsr`].
+///
+/// CSR binaries live under `seg_NNN/` when the graph was written with
+/// `csr_layout_version >= 1`. Legacy `.kgl` directories (version=0, the serde
+/// default) keep the flat layout.
+///
+/// Multi-segment graphs are produced by ordinary saves: `save_to_dir` seals a
+/// clean tail into a new `seg_NNN` whenever a prior save exists (see
+/// `save_disposition`).
+///
+/// Auxiliary per-segment data is handled unevenly in the N>1 branch — see the
+/// limitation documented on `SegmentCsr`.
+fn load_csr_for_layout(
+    dir: &Path,
+    meta: &DiskGraphMeta,
+    temp_dir: &Path,
+) -> std::io::Result<(PathBuf, SegmentCsr)> {
+    if meta.csr_layout_version >= 1 {
+        let segs = enumerate_segment_dirs(dir);
+        match segs.len() {
+            0 => Err(std::io::Error::other(format!(
+                "csr_layout_version={} but no seg_NNN/ directory found under {}",
+                meta.csr_layout_version,
+                dir.display()
+            ))),
+            1 => {
+                // Single-segment: stay on the direct mmap path using
+                // the graph-level `meta.*_len` values. No allocation,
+                // and none of the concat work the multi-segment
+                // branch below does.
+                let seg_dir = segs.into_iter().next().unwrap().1;
+                let csr = SegmentCsr {
+                    node_slots: load_raw_or_zst(
+                        &seg_dir.join("node_slots"),
+                        meta.node_slots_len,
+                        temp_dir,
+                    )?,
+                    out_offsets: load_raw_or_zst(
+                        &seg_dir.join("out_offsets"),
+                        meta.out_offsets_len,
+                        temp_dir,
+                    )?,
+                    out_edges: load_raw_or_zst(
+                        &seg_dir.join("out_edges"),
+                        meta.out_edges_len,
+                        temp_dir,
+                    )?,
+                    in_offsets: load_raw_or_zst(
+                        &seg_dir.join("in_offsets"),
+                        meta.in_offsets_len,
+                        temp_dir,
+                    )?,
+                    in_edges: load_raw_or_zst(
+                        &seg_dir.join("in_edges"),
+                        meta.in_edges_len,
+                        temp_dir,
+                    )?,
+                    edge_endpoints: load_raw_or_zst(
+                        &seg_dir.join("edge_endpoints"),
+                        meta.edge_endpoints_len,
+                        temp_dir,
+                    )?,
+                    conn_type_index_types: load_raw_or_zst_optional(
+                        &seg_dir.join("conn_type_index_types"),
+                    ),
+                    conn_type_index_offsets: load_raw_or_zst_optional(
+                        &seg_dir.join("conn_type_index_offsets"),
+                    ),
+                    conn_type_index_sources: load_raw_or_zst_optional(
+                        &seg_dir.join("conn_type_index_sources"),
+                    ),
+                    peer_count_types: load_raw_or_zst_optional(&seg_dir.join("peer_count_types")),
+                    peer_count_offsets: load_raw_or_zst_optional(
+                        &seg_dir.join("peer_count_offsets"),
+                    ),
+                    peer_count_entries: load_raw_or_zst_optional(
+                        &seg_dir.join("peer_count_entries"),
+                    ),
+                };
+                Ok((seg_dir, csr))
+            }
+            _ => {
+                // Multi-segment: load each segment via the file-size-
+                // inferring loader, then concat. The first segment's
+                // path doubles as `data_dir` — that's where the
+                // auxiliary-indexes limitation points.
+                let mut loaded = Vec::with_capacity(segs.len());
+                let first_dir = segs[0].1.clone();
+                for (_, sdir) in &segs {
+                    loaded.push(SegmentCsr::load_from(sdir, temp_dir)?);
+                }
+                let csr = concat_segment_csrs(loaded)?;
+                Ok((first_dir, csr))
+            }
+        }
+    } else {
+        // Legacy flat layout: load from root as one segment, using
+        // meta's *_len values.
+        let csr = SegmentCsr {
+            node_slots: load_raw_or_zst(&dir.join("node_slots"), meta.node_slots_len, temp_dir)?,
+            out_offsets: load_raw_or_zst(&dir.join("out_offsets"), meta.out_offsets_len, temp_dir)?,
+            out_edges: load_raw_or_zst(&dir.join("out_edges"), meta.out_edges_len, temp_dir)?,
+            in_offsets: load_raw_or_zst(&dir.join("in_offsets"), meta.in_offsets_len, temp_dir)?,
+            in_edges: load_raw_or_zst(&dir.join("in_edges"), meta.in_edges_len, temp_dir)?,
+            edge_endpoints: load_raw_or_zst(
+                &dir.join("edge_endpoints"),
+                meta.edge_endpoints_len,
+                temp_dir,
+            )?,
+            conn_type_index_types: load_raw_or_zst_optional(&dir.join("conn_type_index_types")),
+            conn_type_index_offsets: load_raw_or_zst_optional(&dir.join("conn_type_index_offsets")),
+            conn_type_index_sources: load_raw_or_zst_optional(&dir.join("conn_type_index_sources")),
+            peer_count_types: load_raw_or_zst_optional(&dir.join("peer_count_types")),
+            peer_count_offsets: load_raw_or_zst_optional(&dir.join("peer_count_offsets")),
+            peer_count_entries: load_raw_or_zst_optional(&dir.join("peer_count_entries")),
+        };
+        Ok((dir.to_path_buf(), csr))
+    }
 }

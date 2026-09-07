@@ -221,6 +221,42 @@ impl UnparsedCells {
     }
 }
 
+/// Parse a declared temporal column cell by cell, keeping the cells that did
+/// not parse so they can be reported rather than silently nulled.
+///
+/// `declared_kind` is `Some(kind)` — "date" or "date and time" — when the
+/// column's type was declared and unparsed cells must be reported under that
+/// wording; `None` for CSV text, whose parse failures are the sniffing
+/// fallback rather than a broken declaration.
+fn parse_temporal_cells<T>(
+    py_list: &Bound<'_, PyList>,
+    null_mask: &[bool],
+    length: usize,
+    col_name: &str,
+    declared_kind: Option<&str>,
+    on_invalid: OnInvalid,
+    parse: impl Fn(&Bound<'_, PyAny>) -> Option<T>,
+) -> PyResult<Vec<Option<T>>> {
+    let mut vec = Vec::with_capacity(length);
+    let mut unparsed = UnparsedCells::default();
+    for (i, &is_null) in null_mask.iter().enumerate() {
+        if is_null {
+            vec.push(None);
+        } else {
+            let item = py_list.get_item(i)?;
+            let parsed = parse(&item);
+            if parsed.is_none() {
+                unparsed.note(i, &item);
+            }
+            vec.push(parsed);
+        }
+    }
+    if let Some(kind) = declared_kind {
+        unparsed.report(py_list.py(), col_name, kind, on_invalid)?;
+    }
+    Ok(vec)
+}
+
 fn convert_pandas_series(
     series: &Bound<'_, PyAny>,
     col_type: ColumnType,
@@ -352,47 +388,29 @@ fn convert_pandas_series(
         ColumnType::DateTime => {
             // DateTime needs custom parsing — use PyList for O(1) access
             let py_list = py_list.cast::<PyList>()?;
-            let mut vec = Vec::with_capacity(length);
-            let mut unparsed = UnparsedCells::default();
-            for (i, &is_null) in null_mask.iter().enumerate() {
-                if is_null {
-                    vec.push(None);
-                } else {
-                    let item = py_list.get_item(i)?;
-                    let parsed = to_datetime(&item, csv_text);
-                    if parsed.is_none() {
-                        unparsed.note(i, &item);
-                    }
-                    vec.push(parsed);
-                }
-            }
-            if !csv_text {
-                unparsed.report(series.py(), col_name, "date", on_invalid)?;
-            }
-            Ok(ColumnData::DateTime(vec))
+            Ok(ColumnData::DateTime(parse_temporal_cells(
+                py_list,
+                &null_mask,
+                length,
+                col_name,
+                (!csv_text).then_some("date"),
+                on_invalid,
+                |item| to_datetime(item, csv_text),
+            )?))
         }
         ColumnType::Timestamp => {
             // datetime64 (or explicit "timestamp") column → full date+time,
             // preserving the time-of-day that the date-only DateTime path drops.
             let py_list = py_list.cast::<PyList>()?;
-            let mut vec = Vec::with_capacity(length);
-            let mut unparsed = UnparsedCells::default();
-            for (i, &is_null) in null_mask.iter().enumerate() {
-                if is_null {
-                    vec.push(None);
-                } else {
-                    let item = py_list.get_item(i)?;
-                    let parsed = to_timestamp(&item);
-                    if parsed.is_none() {
-                        unparsed.note(i, &item);
-                    }
-                    vec.push(parsed);
-                }
-            }
-            if !csv_text {
-                unparsed.report(series.py(), col_name, "date and time", on_invalid)?;
-            }
-            Ok(ColumnData::Timestamp(vec))
+            Ok(ColumnData::Timestamp(parse_temporal_cells(
+                py_list,
+                &null_mask,
+                length,
+                col_name,
+                (!csv_text).then_some("date and time"),
+                on_invalid,
+                to_timestamp,
+            )?))
         }
         ColumnType::List => {
             // Object column of Python lists/tuples → native List property.

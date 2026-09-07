@@ -770,41 +770,7 @@ impl<'a> CypherExecutor<'a> {
                 let val = self.evaluate_expression(expr, row)?;
                 Ok(Some(!matches!(val, Value::Null)))
             }
-            Predicate::In { expr, list } => {
-                // openCypher three-valued IN semantics:
-                //   x IN []                           → false (any operand, NULL included)
-                //   NULL IN [..]  (non-empty)         → NULL
-                //   x IN [..]  (match present)        → true (NULLs in the list are immaterial)
-                //   x IN [..]  (no match, list has NULL) → NULL
-                //   x IN [..]  (no match, no NULL)    → false
-                let val = self.evaluate_expression(expr, row)?;
-                if list.is_empty() {
-                    return Ok(Some(false));
-                }
-                if matches!(val, Value::Null) {
-                    return Ok(None);
-                }
-                // Reaching here means the list is genuinely per-row: constant
-                // folding rewrites an all-literal (or row-independent) list to
-                // `InLiteralSet` with a prepared MembershipSet. There is no
-                // list to index — every element has to be evaluated for this
-                // row regardless — so the elements are probed one at a time,
-                // through the same shared rule, keeping the early exit.
-                let mut saw_null = false;
-                for item in list {
-                    let item_val = self.evaluate_expression(item, row)?;
-                    match membership::probe_element(&val, &item_val) {
-                        Some(true) => return Ok(Some(true)),
-                        Some(false) => {}
-                        None => saw_null = true,
-                    }
-                }
-                if saw_null {
-                    Ok(None)
-                } else {
-                    Ok(Some(false))
-                }
-            }
+            Predicate::In { expr, list } => self.evaluate_in_element_list(expr, list, row),
             Predicate::InLiteralSet { expr, values } => {
                 // Prepared scalar keys avoid rescanning scalar literals;
                 // residual containers retain recursive unknown comparisons.
@@ -850,34 +816,86 @@ impl<'a> CypherExecutor<'a> {
                 where_clause,
             } => self.evaluate_exists_subquery(patterns, pattern_groups, where_clause, row),
             Predicate::InExpression { expr, list_expr } => {
-                // Same Kleene rules as Predicate::In; the LHS and the list are
-                // both arbitrary expressions, so NULL can come from either.
-                // `parse_list_value(&Value::Null)` returns an empty vec, and an
-                // empty list is *false* rather than unknown, so a NULL list has
-                // to be lifted explicitly before the emptiness rule applies.
-                // The operand's own NULL is left to `kleene_contains_linear`,
-                // which decides emptiness first.
-                let val = self.evaluate_expression(expr, row)?;
-                let list_val = self.evaluate_expression(list_expr, row)?;
-                if matches!(list_val, Value::Null) {
-                    return Ok(None);
-                }
-                // Borrow the list where it already is a list. The previous
-                // `parse_list_value(&list_val)` cloned every element of the
-                // whole list for every row; only the string-encoded form
-                // needs parsing at all. A row-*independent* list never gets
-                // here — constant folding turns it into `InLiteralSet`.
-                let parsed;
-                let items: &[Value] = match &list_val {
-                    Value::List(items) => items,
-                    other => {
-                        parsed = parse_list_value(other);
-                        &parsed
-                    }
-                };
-                Ok(membership::kleene_contains_linear(&val, items))
+                self.evaluate_in_list_expression(expr, list_expr, row)
             }
         }
+    }
+
+    /// `x IN [<element expressions>]` under openCypher three-valued semantics:
+    ///
+    ///   x IN []                              → false (any operand, NULL included)
+    ///   NULL IN [..]  (non-empty)            → NULL
+    ///   x IN [..]  (match present)           → true (NULLs in the list are immaterial)
+    ///   x IN [..]  (no match, list has NULL) → NULL
+    ///   x IN [..]  (no match, no NULL)       → false
+    fn evaluate_in_element_list(
+        &self,
+        expr: &Expression,
+        list: &[Expression],
+        row: &ResultRow,
+    ) -> Result<Option<bool>, String> {
+        let val = self.evaluate_expression(expr, row)?;
+        if list.is_empty() {
+            return Ok(Some(false));
+        }
+        if matches!(val, Value::Null) {
+            return Ok(None);
+        }
+        // Reaching here means the list is genuinely per-row: constant
+        // folding rewrites an all-literal (or row-independent) list to
+        // `InLiteralSet` with a prepared MembershipSet. There is no
+        // list to index — every element has to be evaluated for this
+        // row regardless — so the elements are probed one at a time,
+        // through the same shared rule, keeping the early exit.
+        let mut saw_null = false;
+        for item in list {
+            let item_val = self.evaluate_expression(item, row)?;
+            match membership::probe_element(&val, &item_val) {
+                Some(true) => return Ok(Some(true)),
+                Some(false) => {}
+                None => saw_null = true,
+            }
+        }
+        if saw_null {
+            Ok(None)
+        } else {
+            Ok(Some(false))
+        }
+    }
+
+    /// `x IN <list expression>` — same Kleene rules as
+    /// [`Self::evaluate_in_element_list`], but the LHS and the list are both
+    /// arbitrary expressions, so NULL can come from either.
+    ///
+    /// `parse_list_value(&Value::Null)` returns an empty vec, and an empty
+    /// list is *false* rather than unknown, so a NULL list has to be lifted
+    /// explicitly before the emptiness rule applies. The operand's own NULL is
+    /// left to `kleene_contains_linear`, which decides emptiness first.
+    fn evaluate_in_list_expression(
+        &self,
+        expr: &Expression,
+        list_expr: &Expression,
+        row: &ResultRow,
+    ) -> Result<Option<bool>, String> {
+        let val = self.evaluate_expression(expr, row)?;
+        let list_val = self.evaluate_expression(list_expr, row)?;
+        if matches!(list_val, Value::Null) {
+            return Ok(None);
+        }
+        // Borrow the list where it already is a list. The previous
+        // `parse_list_value(&list_val)` cloned every element of the
+        // whole list for every row; only the string-encoded form
+        // needs parsing at all. A row-*independent* list never gets
+        // here — constant folding turns it into `InLiteralSet`.
+        let parsed;
+        let items: &[Value] = match &list_val {
+            Value::List(items) => items,
+            other => {
+                parsed = parse_list_value(other);
+                &parsed
+            }
+        };
+        Ok(membership::kleene_contains_linear(&val, items))
     }
 
     fn execute_vector_score_filter(

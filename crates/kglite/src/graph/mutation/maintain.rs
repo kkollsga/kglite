@@ -704,6 +704,31 @@ fn install_type_schema(
     provenance_stamps
 }
 
+/// Reserve every name this call will intern, run the refusals, and take the
+/// write lease — everything [`add_nodes`] must settle before its first write.
+///
+/// Ordering is the contract: both refusals run before `prepare_mutation`, so a
+/// rejected call never takes a lease and never leaves a partially written
+/// graph behind.
+fn preflight_add_nodes(
+    graph: &mut DirGraph,
+    df_data: &DataFrame,
+    node_type: &str,
+    unique_id_field: &str,
+    node_title_field: Option<&str>,
+) -> Result<(), String> {
+    let mut interned_names = vec![node_type, PROVISIONAL_KEY];
+    interned_names.extend(RESERVED_PROVENANCE_KEYS.iter().copied());
+    let column_names = df_data.get_column_names();
+    interned_names.extend(column_names.iter().map(String::as_str));
+    preflight_interner_names(graph, interned_names)?;
+    graph.reject_abstract_batch_type(node_type)?;
+    reject_identity_redeclaration(graph, node_type, unique_id_field, node_title_field)?;
+    graph
+        .prepare_mutation()
+        .map_err(|e| format!("disk mutation lease failed: {e}"))
+}
+
 pub fn add_nodes(
     graph: &mut DirGraph,
     mut df_data: DataFrame,
@@ -713,21 +738,13 @@ pub fn add_nodes(
     conflict_handling: Option<String>,
 ) -> Result<NodeOperationReport, String> {
     let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
-    let mut interned_names = vec![node_type.as_str(), PROVISIONAL_KEY];
-    interned_names.extend(RESERVED_PROVENANCE_KEYS.iter().copied());
-    let column_names = df_data.get_column_names();
-    interned_names.extend(column_names.iter().map(String::as_str));
-    preflight_interner_names(graph, interned_names)?;
-    graph.reject_abstract_batch_type(&node_type)?;
-    reject_identity_redeclaration(
+    preflight_add_nodes(
         graph,
+        &df_data,
         &node_type,
         &unique_id_field,
         node_title_field.as_deref(),
     )?;
-    graph
-        .prepare_mutation()
-        .map_err(|e| format!("disk mutation lease failed: {e}"))?;
     let conflict_mode = parse_conflict_mode(conflict_handling.as_deref())?;
 
     let should_update_title = node_title_field.is_some();

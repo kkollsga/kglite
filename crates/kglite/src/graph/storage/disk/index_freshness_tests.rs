@@ -260,9 +260,8 @@ fn a_save_never_carries_a_stale_bundle_into_the_new_generation() {
     drop(handle);
     let reloaded = crate::graph::io::file::load_file(destination.path().to_str().unwrap()).unwrap();
 
-    match typed_lookup(&reloaded, "tag", "c1") {
-        Some(hits) => assert_eq!(hits.len(), 2, "a carried bundle must be complete"),
-        None => {}
+    if let Some(hits) = typed_lookup(&reloaded, "tag", "c1") {
+        assert_eq!(hits.len(), 2, "a carried bundle must be complete");
     }
     assert_eq!(
         rows(&reloaded, "MATCH (n:Doc) WHERE n.tag = 'c1' RETURN n.id"),
