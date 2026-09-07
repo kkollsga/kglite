@@ -74,6 +74,23 @@ before upgrading.
 
 ### Changed
 
+- **`add_nodes` now refuses to re-declare the identity of a node type that
+  already has nodes.** A call naming a `unique_id_field` (or
+  `node_title_field`) different from the one the type's existing members were
+  keyed by raises `ArgumentError` and writes nothing. Previously it warned
+  about an unrelated property-type mismatch and installed the new spelling
+  anyway: the older nodes kept their minted ids, so `n.uid` answered `0` while
+  `properties(n).uid` still held `1300`, `WHERE n.uid = 1300` matched nothing,
+  and the next incoming row that minted the same id overwrote one of them.
+  Rebinding an already-declared field was worse — `n.uid` went to `NULL`. The
+  refusal is pre-write and mode-independent, and no `on_invalid` setting
+  softens it: this is a schema conflict, not an unusable row. Re-declaring the
+  *same* spelling (every chunked load), declaring on an empty or new type, and
+  `unique_id_field='id'` / `node_title_field='title'` (which record no alias,
+  the route `add_connections` stub vivification takes) are all unaffected.
+  Graphs already carrying the split state are not repaired by the guard —
+  reload the type with the id field the data actually used.
+
 - **An ordering comparison between values no ordering rule relates is now
   `null` instead of `false`.** `1 < 'a'`, `'a' < 1`, `true < 1`, `[1] < 2`,
   `{a: 1} < 1`, `[1] < [2]` and their `>`, `<=`, `>=` forms answered `false` in

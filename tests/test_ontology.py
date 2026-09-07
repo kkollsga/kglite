@@ -330,12 +330,9 @@ def test_create_stamps_closure(mat):
 
 
 def test_add_nodes_stamps_closure(mat):
-    mat.add_nodes(
-        pd.DataFrame({"id": [7, 8], "name": ["a", "b"]}),
-        "Teacher",
-        "id",
-        node_title_field="name",
-    )
+    # No node_title_field: the fixture's CREATE already populated Teacher, and
+    # a late title declaration is refused (see test_aliases.py).
+    mat.add_nodes(pd.DataFrame({"id": [7, 8], "name": ["a", "b"]}), "Teacher", "id")
     rows = mat.cypher("MATCH (p:Person) RETURN count(p) AS c").scalar()
     assert rows == 5
     assert mat.ontology_diff() == [{"label": "Person", "state": "closed", "extra": 0, "missing": 0}]
@@ -393,10 +390,10 @@ def test_closure_probe_sees_nodes_written_after_the_index(mat):
     mat.create_index("Student", "title")
     mat.create_index("Teacher", "title")
     mat.add_nodes(
-        pd.DataFrame({"id": [7], "name": ["Zed"]}),
+        pd.DataFrame({"id": [7], "title": ["Zed"]}),
         "Teacher",
         "id",
-        node_title_field="name",
+        node_title_field="title",
     )
     mat.cypher("CREATE (:Student {id: 8, name: 'Yin'})")
     mat.cypher("MATCH (s:Student {id: 2}) SET s.title = 'Renamed'")
@@ -412,6 +409,9 @@ def test_closure_probe_is_alias_aware(mat):
     # `title` and a type's registered title-alias spelling name one field and
     # one set of index contents, so an index built under either serves a query
     # written with the other.
+    # The alias is declared on an empty Teacher: a late title declaration on a
+    # populated type is refused (see test_aliases.py).
+    mat.cypher("MATCH (t:Teacher) DETACH DELETE t")
     mat.add_nodes(
         pd.DataFrame({"id": [20], "fullname": ["Ada"]}),
         "Teacher",

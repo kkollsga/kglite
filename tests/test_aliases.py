@@ -836,3 +836,151 @@ class TestEmbedTextsOnIdentityAliases:
         report = g.embed_texts("Sku", "code", show_progress=False)
         assert report["embedded"] == 2
         assert sorted(emb.seen) == ["aa-1", "bb-2"]
+
+
+class TestLateIdentityDeclarationRefused:
+    """A declaration that would rebind a populated type's identity or title
+    spelling is refused before anything is written.
+
+    The nodes a type already holds were keyed by whatever spelling was in
+    force when they were made. Installing a different one leaves them keyed
+    by a minted id their business key can no longer reach, and the next row
+    that mints the same id overwrites one of them (design note
+    `dev-docs/designs/id-field-after-create-2026-09.md`).
+    """
+
+    @staticmethod
+    def _graph(mode: str, tmp_path):
+        if mode == "memory":
+            return kglite.KnowledgeGraph()
+        if mode == "mapped":
+            return kglite.KnowledgeGraph(storage="mapped")
+        return kglite.KnowledgeGraph(storage="disk", path=str(tmp_path / "disk.kgl"))
+
+    @pytest.mark.parametrize("mode", ["memory", "mapped", "disk"])
+    def test_late_id_declaration_refused(self, mode, tmp_path):
+        """C1: CREATE first, then declare a different unique_id_field."""
+        g = self._graph(mode, tmp_path)
+        g.cypher("CREATE (n:A {uid: 1300, name: 'x'})")
+        df = pd.DataFrame({"uid": [1, 2], "name": ["a", "b"]})
+
+        with pytest.raises(Exception) as exc:
+            g.add_nodes(df, "A", "uid", "name")
+        message = str(exc.value)
+        assert "'A'" in message
+        assert "'uid'" in message
+        assert "'id'" in message
+        assert "1 node" in message
+        assert "Nothing was written" in message
+
+        # Nothing was written: the type still holds exactly the CREATE node,
+        # with its stored key intact, and no alias was recorded.
+        rows = g.cypher("MATCH (n:A) RETURN n.uid AS u, count(*) AS c")
+        assert len(rows) == 1
+        assert rows[0]["u"] == 1300
+        assert 'id_alias="uid"' not in g.describe()
+
+    @pytest.mark.parametrize("mode", ["memory", "mapped", "disk"])
+    def test_id_field_rebind_refused(self, mode, tmp_path):
+        """C3: rebinding an already-declared id field, both directions."""
+        g = self._graph(mode, tmp_path)
+        g.add_nodes(pd.DataFrame({"uid": [500], "name": ["a"]}), "A", "uid", "name")
+
+        with pytest.raises(Exception) as exc:
+            g.add_nodes(pd.DataFrame({"other": [8], "name": ["b"]}), "A", "other", "name")
+        assert "'other'" in str(exc.value)
+        assert "'uid'" in str(exc.value)
+
+        assert g.cypher("MATCH (n:A) RETURN n.uid AS u")[0]["u"] == 500
+        assert 'id_alias="uid"' in g.describe()
+
+    def test_merge_created_type_refused(self):
+        """C2: MERGE's create arm populates the type the same way CREATE does."""
+        g = kglite.KnowledgeGraph()
+        g.cypher("MERGE (n:A {uid: 1300}) SET n.name = 'x'")
+        with pytest.raises(Exception) as exc:
+            g.add_nodes(pd.DataFrame({"uid": [1], "name": ["a"]}), "A", "uid", "name")
+        assert "Nothing was written" in str(exc.value)
+
+    def test_late_title_declaration_refused(self):
+        """C4: the title spelling has the identical hole."""
+        g = kglite.KnowledgeGraph()
+        g.cypher("CREATE (n:A {id: 1, label2: 'zz', name: 'z'})")
+        with pytest.raises(Exception) as exc:
+            g.add_nodes(
+                pd.DataFrame({"id": [2], "label2": ["yy"], "name": ["y"]}),
+                "A",
+                "id",
+                "label2",
+            )
+        message = str(exc.value)
+        assert "node_title_field" in message
+        assert "'label2'" in message
+        assert "Nothing was written" in message
+
+    def test_from_records_refused(self):
+        """The blueprint route reaches the same declaration: two groups of one
+        type disagreeing about its id field."""
+        with pytest.raises(Exception) as exc:
+            kglite.from_records(
+                {
+                    "nodes": [
+                        {"type": "A", "id_field": "uid", "records": [{"uid": 1}]},
+                        {"type": "A", "id_field": "other", "records": [{"other": 2}]},
+                    ]
+                }
+            )
+        message = str(exc.value)
+        assert "'uid'" in message
+        assert "'other'" in message
+
+    @pytest.mark.parametrize("on_invalid", ["warn", "skip", "error"])
+    def test_refused_under_every_on_invalid_mode(self, on_invalid):
+        """A schema conflict is not an unusable row: no mode downgrades it."""
+        g = kglite.KnowledgeGraph()
+        g.cypher("CREATE (n:A {uid: 1300})")
+        with pytest.raises(Exception) as exc:
+            g.add_nodes(
+                pd.DataFrame({"uid": [1], "name": ["a"]}),
+                "A",
+                "uid",
+                "name",
+                on_invalid=on_invalid,
+            )
+        assert "Nothing was written" in str(exc.value)
+
+    def test_redeclaring_same_id_field_is_allowed(self):
+        """Every chunked load re-declares the same spelling."""
+        g = kglite.KnowledgeGraph()
+        g.add_nodes(pd.DataFrame({"uid": [1], "name": ["a"]}), "A", "uid", "name")
+        g.add_nodes(pd.DataFrame({"uid": [2], "name": ["b"]}), "A", "uid", "name")
+        assert sorted(r["u"] for r in g.cypher("MATCH (n:A) RETURN n.uid AS u")) == [1, 2]
+
+    def test_declaration_on_empty_type_allowed(self):
+        """A type whose members were all deleted is free to be re-keyed."""
+        g = kglite.KnowledgeGraph()
+        g.cypher("CREATE (n:A {uid: 1300})")
+        g.cypher("MATCH (n:A) DELETE n")
+        g.add_nodes(pd.DataFrame({"uid": [1], "name": ["a"]}), "A", "uid", "name")
+        assert g.cypher("MATCH (n:A) RETURN n.uid AS u")[0]["u"] == 1
+
+    def test_generic_id_column_on_an_aliased_type_allowed(self):
+        """`unique_id_field='id'` declares nothing, so it cannot rebind —
+        this is the route `add_connections` stub vivification takes."""
+        g = kglite.KnowledgeGraph()
+        g.add_nodes(pd.DataFrame({"uid": [1], "name": ["a"]}), "A", "uid", "name")
+        g.add_nodes(pd.DataFrame({"id": [2], "name": ["b"]}), "A", "id", "name")
+        assert sorted(r["u"] for r in g.cypher("MATCH (n:A) RETURN n.uid AS u")) == [1, 2]
+
+    def test_refusal_survives_save_load(self, tmp_path):
+        """The guard reads `type_indices`, which is rebuilt on load — prove it
+        is populated by then, or the refusal would silently fail open."""
+        path = str(tmp_path / "g.kgl")
+        g = kglite.KnowledgeGraph()
+        g.cypher("CREATE (n:A {uid: 1300})")
+        g.save(path)
+
+        reloaded = kglite.load(path)
+        with pytest.raises(Exception) as exc:
+            reloaded.add_nodes(pd.DataFrame({"uid": [1]}), "A", "uid")
+        assert "Nothing was written" in str(exc.value)

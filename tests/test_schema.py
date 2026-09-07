@@ -239,10 +239,11 @@ class TestManagedReloadGuard:
         g = KnowledgeGraph()
         g.define_schema({"nodes": {"Task": {"layer": "runtime"}}})
         g.cypher("CREATE (:Task {id: 1, status: 'old'})")
+        # No node_title_field: the CREATE already populated Task, and a late
+        # title declaration is refused (see test_aliases.py).
         g.add_nodes(
             pd.DataFrame({"id": [1], "status": ["new"]}),
             "Task",
-            "id",
             "id",
             conflict_handling="update",
         )

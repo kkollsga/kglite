@@ -293,3 +293,37 @@ fn a_large_load_violating_late_creates_no_rows_at_all() {
         "a refused load must create no rows, however large the frame"
     );
 }
+
+// ============================================================================
+// A late identity declaration is refused before anything is written
+// ============================================================================
+
+/// Declaring a different `unique_id_field` on a type that already has members
+/// refuses ahead of the write, so the alias maps and the observed metadata are
+/// byte-identical afterwards — the half the Python goldens cannot see.
+#[test]
+fn a_late_id_declaration_leaves_the_alias_maps_untouched() {
+    let mut graph = DirGraph::new();
+    load_person(&mut graph, rows_with(1, Value::Int64(30), None)).unwrap();
+    let before = observed_state(&graph);
+
+    let error = add_nodes(
+        &mut graph,
+        DataFrame::from_cypher_rows(vec!["uid".to_string()], vec![vec![Value::Int64(7)]]).unwrap(),
+        "Person".to_string(),
+        "uid".to_string(),
+        None,
+        None,
+    )
+    .expect_err("a populated type must not be re-keyed by a bulk load");
+    assert!(error.contains("'Person'"), "got: {error}");
+    assert!(error.contains("'uid'"), "got: {error}");
+    assert!(error.contains("Nothing was written"), "got: {error}");
+
+    assert_eq!(
+        observed_state(&graph),
+        before,
+        "the refused declaration still installed metadata"
+    );
+    assert_eq!(graph.graph.node_count(), 1, "no row may land");
+}

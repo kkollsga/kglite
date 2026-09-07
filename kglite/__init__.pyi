@@ -1991,7 +1991,15 @@ class KnowledgeGraph:
                 integer column holding any value outside ``0..2**32-1``
                 (negatives, snowflake ids, hashes) is stored as a full 64-bit
                 key instead, so no row is dropped for being out of range.
+
+                A type's identity spelling is fixed once it has nodes: if the
+                type already holds members and this names a different column
+                than the one they were keyed by, the call raises
+                :class:`ArgumentError` and writes nothing. Re-declaring the
+                same spelling (every chunked load) and declaring on an empty
+                or new type are unaffected.
             node_title_field: Column used as display title. Defaults to ``unique_id_field``.
+                Fixed once the type has nodes, exactly like ``unique_id_field``.
             columns: Whitelist of columns to include. ``None`` = all.
             conflict_handling: ``'update'`` (default), ``'replace'``, ``'skip'``,
                 ``'preserve'``, or ``'sum'``. ``'sum'`` acts as ``'update'`` for nodes.
@@ -2084,10 +2092,21 @@ class KnowledgeGraph:
                 ``'error'`` also refuses an object-dtype column that would be
                 stringified wholesale (see ``column_types``).
 
+                This setting governs unusable *rows* only. A schema conflict —
+                re-declaring a populated type's ``unique_id_field`` or
+                ``node_title_field`` — refuses under every setting, ``'warn'``
+                included.
+
         Returns:
             Operation report dict with keys ``nodes_created``,
             ``nodes_updated``, ``nodes_skipped``, ``processing_time_ms``,
             ``has_errors``, and optionally ``errors`` with skip reasons.
+
+        Raises:
+            ArgumentError: The type already has nodes and this call names a
+                different ``unique_id_field`` or ``node_title_field`` than the
+                one they were keyed by; nothing is written. Also raised by
+                ``on_invalid='error'`` (above).
 
         Example::
 

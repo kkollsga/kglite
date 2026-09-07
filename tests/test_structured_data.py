@@ -88,7 +88,9 @@ def test_shape_gates_add_nodes_with_indexed_path(g):
             "line_items": [[{"sku": "a", "qty": 1, "price": 2.0}]],
         }
     )
-    g.add_nodes(good, "Order", "id", node_title_field="name")
+    # No node_title_field: the fixture's CREATE already populated the type,
+    # and a late title declaration is refused (see test_aliases.py).
+    g.add_nodes(good, "Order", "id")
 
     bad = pd.DataFrame(
         {
@@ -98,7 +100,7 @@ def test_shape_gates_add_nodes_with_indexed_path(g):
         }
     )
     with pytest.raises(Exception, match=r"line_items\[1\]\.qty: expected integer"):
-        g.add_nodes(bad, "Order", "id", node_title_field="name")
+        g.add_nodes(bad, "Order", "id")
     # Whole-frame gate: nothing was written.
     assert g.cypher("MATCH (o:Order {id: 'o3'}) RETURN count(o) AS c").scalar() == 0
 

@@ -517,6 +517,90 @@ fn note_loaded_id(max_loaded_id: &mut u32, id: &Value) {
     }
 }
 
+/// Wording for a refused identity redeclaration: what the type is keyed by
+/// now, what the call asked for, and the two ways out.
+fn identity_redeclaration_message(
+    node_type: &str,
+    live_members: usize,
+    parameter: &str,
+    declared: &str,
+    incoming: &str,
+) -> String {
+    let plural = if live_members == 1 { "node" } else { "nodes" };
+    format!(
+        "add_nodes: node type '{node_type}' already has {live_members} {plural} keyed by \
+         '{declared}'; declaring '{incoming}' as its {parameter} would leave those nodes \
+         unreachable by their '{incoming}' value. Nothing was written. Reload with \
+         {parameter}='{declared}', or delete the existing nodes of type '{node_type}' first."
+    )
+}
+
+/// Refuse a declaration that would rebind a populated type's id or title
+/// spelling, before the write lease and before anything is applied.
+///
+/// The members a type already holds were keyed by whatever spelling was in
+/// force when they were made. Installing a different alias canonicalises
+/// `n.<field>` to the identity slot for *all* of them, so the older nodes'
+/// business key becomes unreachable while its value sits in a stored column
+/// nothing reads — and the next incoming row that mints the same id silently
+/// overwrites one of them. Design: `dev-docs/designs/id-field-after-create-2026-09.md`.
+///
+/// A spelling of `"id"`/`"title"` records no alias, so it cannot rebind: that
+/// is the route `add_connections` stub vivification takes, and it stays open.
+/// Re-declaring the same spelling (every chunked load) and declaring on an
+/// empty or absent type are no-ops and stay allowed. This is a schema
+/// conflict, not an unusable row, so `on_invalid` does not soften it.
+fn reject_identity_redeclaration(
+    graph: &DirGraph,
+    node_type: &str,
+    unique_id_field: &str,
+    node_title_field: Option<&str>,
+) -> Result<(), String> {
+    let live_members = graph
+        .type_indices
+        .get(node_type)
+        .map(|members| members.len())
+        .unwrap_or(0);
+    if live_members == 0 {
+        return Ok(());
+    }
+    if unique_id_field != "id" {
+        let declared = graph
+            .id_field_aliases
+            .get(node_type)
+            .map(String::as_str)
+            .unwrap_or("id");
+        if unique_id_field != declared {
+            return Err(identity_redeclaration_message(
+                node_type,
+                live_members,
+                "unique_id_field",
+                declared,
+                unique_id_field,
+            ));
+        }
+    }
+    if let Some(title_field) = node_title_field {
+        if title_field != "title" {
+            let declared = graph
+                .title_field_aliases
+                .get(node_type)
+                .map(String::as_str)
+                .unwrap_or("title");
+            if title_field != declared {
+                return Err(identity_redeclaration_message(
+                    node_type,
+                    live_members,
+                    "node_title_field",
+                    declared,
+                    title_field,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Merge this call's column types into the node type's metadata and register
 /// the id/title field aliases, appending one message to `errors` for every
 /// column whose type disagrees with the stored schema. Cold once-per-call
@@ -625,6 +709,12 @@ pub fn add_nodes(
     interned_names.extend(column_names.iter().map(String::as_str));
     preflight_interner_names(graph, interned_names)?;
     graph.reject_abstract_batch_type(&node_type)?;
+    reject_identity_redeclaration(
+        graph,
+        &node_type,
+        &unique_id_field,
+        node_title_field.as_deref(),
+    )?;
     graph
         .prepare_mutation()
         .map_err(|e| format!("disk mutation lease failed: {e}"))?;
