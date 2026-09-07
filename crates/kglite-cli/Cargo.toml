@@ -40,6 +40,13 @@ ctrlc = "3"
 # `.mode json` output via kglite::api::param::kglite_value_to_json.
 serde_json = "1.0.150"
 
+# The hand-written `Serialize` for a JSON result row. serde_json's *serializer*
+# writes `serialize_map` entries in iteration order, while its `Value::Object`
+# is a `BTreeMap` and sorts them, so an ordered row has to be serialised rather
+# than built as a `Value`. Already in the tree as serde_json's own dependency;
+# no `derive`, only the trait.
+serde = "1.0.229"
+
 # `.import <file.csv> <Type>` — parse the CSV; rows are passed as a Cypher
 # `$rows` param (values parameterized, not interpolated). Already a `kglite` dep.
 csv = "1.4"

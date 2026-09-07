@@ -2055,6 +2055,7 @@ dependencies = [
  "ctrlc",
  "kglite",
  "rustyline",
+ "serde",
  "serde_json",
  "tempfile",
 ]

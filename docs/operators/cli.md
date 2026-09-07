@@ -60,6 +60,11 @@ Run a read-only Cypher query and exit:
 kglite query app.kgl "MATCH (n:Person) RETURN n.name AS name" --format json
 ```
 
+`--format json` emits one object per row, with the keys in the query's own
+column order — `RETURN 1 AS zz, 2 AS aa` yields `{"zz": 1, "aa": 2}`, the
+same order `--format csv` writes its header in. The top-level shape is a
+plain array, so `jq '.[0].name'` addresses the first row's column.
+
 Run a write statement and save the graph:
 
 ```bash

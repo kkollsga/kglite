@@ -108,26 +108,58 @@ pub fn render_csv(columns: &[String], rows: &[Vec<Value>]) -> String {
     out
 }
 
-/// JSON: a pretty-printed array of `{column: value}` objects, values mapped
-/// through the canonical kglite→JSON converter (so ints/floats/bools/lists
-/// keep their JSON types, not stringified).
+/// One result row as an ordered JSON object.
+///
+/// `serde_json::Value::Object` is a `BTreeMap` without the crate-wide
+/// `preserve_order` feature, so a row built as a `Value` comes out
+/// alphabetised and this surface alone disagrees with CSV, Python
+/// `list(row)`, Bolt `keys()` and the MCP header about the query's column
+/// order. Turning that feature on is not an option — cargo unifies features
+/// across the build graph, so `kglite`'s own object ordering would silently
+/// depend on whether the CLI is in the graph. serde_json's *serializer*
+/// writes `serialize_map` entries in iteration order, so serialising an
+/// ordered `Vec` fixes the order here without touching the shared crate.
+struct JsonRow<'a> {
+    entries: Vec<(&'a str, serde_json::Value)>,
+}
+
+impl serde::Serialize for JsonRow<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(self.entries.len()))?;
+        for (key, value) in &self.entries {
+            map.serialize_entry(key, value)?;
+        }
+        map.end()
+    }
+}
+
+/// Pair each column with its cell, in column order. A duplicate column name
+/// keeps its first-seen position and takes the last value — the semantics
+/// `serde_json::Map::insert` gave, preserved so only the ordering changed.
+/// The linear scan is over a result's column count, which is small.
+fn json_row<'a>(columns: &'a [String], row: &[Value]) -> JsonRow<'a> {
+    let mut entries: Vec<(&'a str, serde_json::Value)> = Vec::with_capacity(columns.len());
+    for (i, col) in columns.iter().enumerate() {
+        let value = row
+            .get(i)
+            .map(kglite_value_to_json)
+            .unwrap_or(serde_json::Value::Null);
+        match entries.iter_mut().find(|(key, _)| *key == col.as_str()) {
+            Some(slot) => slot.1 = value,
+            None => entries.push((col.as_str(), value)),
+        }
+    }
+    JsonRow { entries }
+}
+
+/// JSON: a pretty-printed array of `{column: value}` objects in the query's
+/// own column order, values mapped through the canonical kglite→JSON
+/// converter (so ints/floats/bools/lists keep their JSON types, not
+/// stringified).
 pub fn render_json(columns: &[String], rows: &[Vec<Value>]) -> String {
-    let arr: Vec<serde_json::Value> = rows
-        .iter()
-        .map(|row| {
-            let mut obj = serde_json::Map::new();
-            for (i, col) in columns.iter().enumerate() {
-                let v = row
-                    .get(i)
-                    .map(kglite_value_to_json)
-                    .unwrap_or(serde_json::Value::Null);
-                obj.insert(col.clone(), v);
-            }
-            serde_json::Value::Object(obj)
-        })
-        .collect();
-    serde_json::to_string_pretty(&serde_json::Value::Array(arr))
-        .unwrap_or_else(|e| format!("json error: {e}"))
+    let arr: Vec<JsonRow<'_>> = rows.iter().map(|row| json_row(columns, row)).collect();
+    serde_json::to_string_pretty(&arr).unwrap_or_else(|e| format!("json error: {e}"))
 }
 
 /// Stringify a result cell. `Value` already implements `Display`
@@ -277,6 +309,43 @@ mod tests {
             ),
             "f,nested,empty,null\n1.23456789,[1.23456789],,"
         );
+    }
+
+    /// `--format json` must publish the query's own column order. CSV,
+    /// Python `list(row)`, Bolt `keys()` and the MCP header all say
+    /// `zz, aa, mm` for `RETURN 1 AS zz, 2 AS aa, 3 AS mm`; the JSON mode
+    /// alphabetised them because `serde_json::Map` is a `BTreeMap` without
+    /// the `preserve_order` feature. Asserted on the emitted text — the two
+    /// tests below parse, and a parse re-sorts, so they cannot see this.
+    #[test]
+    fn json_preserves_the_query_column_order() {
+        let cols = vec!["zz".to_string(), "aa".to_string(), "mm".to_string()];
+        let rows = vec![vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)]];
+        let out = render_json(&cols, &rows);
+        let zz = out.find("\"zz\"").expect("zz missing");
+        let aa = out.find("\"aa\"").expect("aa missing");
+        let mm = out.find("\"mm\"").expect("mm missing");
+        assert!(zz < aa && aa < mm, "columns were reordered: {out}");
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed[0]["zz"], serde_json::json!(1));
+        assert_eq!(parsed[0]["mm"], serde_json::json!(3));
+    }
+
+    /// A duplicate column name keeps its first-seen position with the last
+    /// value winning — the semantics `serde_json::Map::insert` gave before
+    /// the ordered writer replaced it.
+    #[test]
+    fn json_duplicate_columns_keep_first_position_and_last_value() {
+        let cols = vec!["b".to_string(), "a".to_string(), "b".to_string()];
+        let rows = vec![vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)]];
+        let out = render_json(&cols, &rows);
+        assert!(
+            out.find("\"b\"").unwrap() < out.find("\"a\"").unwrap(),
+            "duplicate column lost its first-seen position: {out}"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed[0]["b"], serde_json::json!(3));
+        assert_eq!(parsed[0]["a"], serde_json::json!(2));
     }
 
     #[test]

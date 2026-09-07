@@ -11,6 +11,17 @@ before upgrading.
 
 ### Fixed
 
+- `kglite … --format json` now emits each row's keys in the query's column
+  order instead of alphabetising them. `RETURN 1 AS zz, 2 AS aa, 3 AS mm`
+  produced `[{"aa":2,"mm":3,"zz":1}]` while the same query's CSV header,
+  Python `list(row)`, Bolt `keys()` and the MCP result header all said
+  `zz, aa, mm`: rows were assembled as a `serde_json::Map`, which sorts. The
+  rows are now serialised through an order-preserving writer. The top-level
+  shape is unchanged — still a plain array of objects, so existing
+  `jq '.[0].name'` pipelines keep working — and a duplicate column name keeps
+  its first-seen position with the last value winning, as before. The JSON
+  session protocol (`kglite session --format json`) still sorts its row keys.
+
 - The MCP server's `cypher_query` inline preview now renders list, map,
   node, relationship and path cells as natural JSON, matching every other
   JSON surface. It previously emitted serde's externally-tagged encoding of
