@@ -110,10 +110,14 @@ impl KnowledgeGraph {
     /// property, regardless of type.
     ///
     /// Enables two agent-friendly patterns:
-    ///     * ``MATCH (n {label: 'Norway'})`` — untyped lookup, routes
+    ///     * ``MATCH (n {title: 'Norway'})`` — untyped lookup, routes
     ///       through the global index in O(log N).
     ///     * ``graph.search('Norway')`` — returns the top-k nodes by
     ///       that property across all types.
+    ///
+    /// A bundle on a structurally resolved name (``name``, ``type``,
+    /// ``node_type``, ``label``) holds stored values only, so Cypher declines
+    /// it and scans; ``search()`` still reads it.
     ///
     /// Disk-backed graphs only. On memory/mapped graphs this is a
     /// no-op that returns 0 — per-type ``create_index`` already covers

@@ -162,6 +162,27 @@ fn global_alias_candidates(prop: &str, graph: &DirGraph) -> Vec<String> {
     out
 }
 
+/// [`global_alias_candidates`] restricted to the bundles that may be read as a
+/// complete answer for `prop`, per
+/// [`DirGraph::persistent_index_answers_point_lookup`]. `node_type` is `None`
+/// on the untyped arm, which has no type to resolve a spelling against.
+///
+/// The whole list drops when `prop` itself resolves structurally, which is how
+/// `MATCH (n {label: 'X'})` falls back to the scan that reads the same values
+/// the pattern compares against.
+fn servable_global_candidates(
+    prop: &str,
+    node_type: Option<&str>,
+    graph: &DirGraph,
+) -> Vec<String> {
+    global_alias_candidates(prop, graph)
+        .into_iter()
+        .filter(|index_name| {
+            graph.persistent_index_answers_point_lookup(node_type, prop, index_name)
+        })
+        .collect()
+}
+
 /// `str::ends_with` with the mismatch decided on one byte.
 ///
 /// `str::ends_with` on a runtime-length pattern lowers to a `memcmp` call
@@ -712,53 +733,8 @@ impl<'a> PatternExecutor<'a> {
                 hits.sort_unstable();
                 return Ok(hits);
             }
-            // Cross-type fast paths: for any Equals(String) or
-            // StartsWith(String), consult the persistent global index
-            // if one exists for that property. Turns `MATCH (n {label:
-            // 'Norway'})` into O(log N) without requiring a type label.
-            // Alias-aware via `global_alias_candidates`, so an index built as
-            // `create_global_index('label')` still serves `{title: 'X'}`.
-            for (prop, matcher) in props {
-                let alias_candidates = global_alias_candidates(prop, self.graph);
-                match matcher {
-                    PropertyMatcher::Equals(Value::String(s)) => {
-                        for idx_name in &alias_candidates {
-                            if let Some(candidates) = string_index_hits(s, |key| {
-                                self.graph
-                                    .graph
-                                    .lookup_by_property_eq_any_type(idx_name, key)
-                            }) {
-                                if props.len() == 1 {
-                                    return Ok(candidates);
-                                }
-                                let filtered = candidates
-                                    .into_iter()
-                                    .filter(|&idx| self.node_matches_properties(idx, props))
-                                    .collect();
-                                return Ok(filtered);
-                            }
-                        }
-                    }
-                    PropertyMatcher::StartsWith(prefix) => {
-                        for idx_name in &alias_candidates {
-                            if let Some(candidates) = self
-                                .graph
-                                .graph
-                                .lookup_by_property_prefix_any_type(idx_name, prefix, usize::MAX)
-                            {
-                                if props.len() == 1 {
-                                    return Ok(candidates);
-                                }
-                                let filtered = candidates
-                                    .into_iter()
-                                    .filter(|&idx| self.node_matches_properties(idx, props))
-                                    .collect();
-                                return Ok(filtered);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
+            if let Some(hits) = self.try_untyped_global_index_lookup(props) {
+                return Ok(hits);
             }
             // No id property, no global index — scan all nodes with property filter.
             let g = &self.graph.graph;
@@ -1224,7 +1200,7 @@ impl<'a> PatternExecutor<'a> {
     ) -> Option<Vec<NodeIndex>> {
         let expected = InternedKey::from_str(node_type);
         for (prop, matcher) in props {
-            let aliases = global_alias_candidates(prop, self.graph);
+            let aliases = servable_global_candidates(prop, Some(node_type), self.graph);
             match matcher {
                 PropertyMatcher::Equals(Value::String(s)) => {
                     for alias in &aliases {
@@ -1329,6 +1305,65 @@ impl<'a> PatternExecutor<'a> {
             }
         }
 
+        None
+    }
+
+    /// The cross-type persistent-index fast path for an **untyped** pattern:
+    /// `MATCH (n {p: 'v'})` and its `STARTS WITH` form, answered from a global
+    /// bundle in O(log N) instead of a whole-graph scan. `None` when no bundle
+    /// may answer and the caller must scan.
+    ///
+    /// Alias-aware through [`servable_global_candidates`], so an index built
+    /// as `create_global_index('original_name')` still serves `{title: 'X'}`
+    /// — but never a bundle named by a structurally-resolved spelling, which
+    /// holds stored values alone and would drop the rows resolving through the
+    /// title or the type string.
+    fn try_untyped_global_index_lookup(
+        &self,
+        props: &HashMap<String, PropertyMatcher>,
+    ) -> Option<Vec<NodeIndex>> {
+        for (prop, matcher) in props {
+            let alias_candidates = servable_global_candidates(prop, None, self.graph);
+            match matcher {
+                PropertyMatcher::Equals(Value::String(s)) => {
+                    for idx_name in &alias_candidates {
+                        if let Some(candidates) = string_index_hits(s, |key| {
+                            self.graph
+                                .graph
+                                .lookup_by_property_eq_any_type(idx_name, key)
+                        }) {
+                            if props.len() == 1 {
+                                return Some(candidates);
+                            }
+                            let filtered = candidates
+                                .into_iter()
+                                .filter(|&idx| self.node_matches_properties(idx, props))
+                                .collect();
+                            return Some(filtered);
+                        }
+                    }
+                }
+                PropertyMatcher::StartsWith(prefix) => {
+                    for idx_name in &alias_candidates {
+                        if let Some(candidates) = self
+                            .graph
+                            .graph
+                            .lookup_by_property_prefix_any_type(idx_name, prefix, usize::MAX)
+                        {
+                            if props.len() == 1 {
+                                return Some(candidates);
+                            }
+                            let filtered = candidates
+                                .into_iter()
+                                .filter(|&idx| self.node_matches_properties(idx, props))
+                                .collect();
+                            return Some(filtered);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         None
     }
 
@@ -1469,48 +1504,8 @@ impl<'a> PatternExecutor<'a> {
             }
         }
 
-        // Persistent disk-backed property index (string equality).
-        // `lookup_by_property_eq` returns `Some(Vec)` only when a
-        // persistent index for `(node_type, prop)` exists; otherwise
-        // `None` so we fall through to scan. Only Value::String values
-        // are indexable today.
-        for (prop, value) in &equality_props {
-            if let Value::String(s) = value {
-                if let Some(results) = string_index_hits(s, |key| {
-                    self.graph.graph.lookup_by_property_eq(node_type, prop, key)
-                }) {
-                    if equality_props.len() == 1 && props.len() == 1 {
-                        return Some(results);
-                    }
-                    let filtered = results
-                        .into_iter()
-                        .filter(|&idx| self.node_matches_properties(idx, props))
-                        .collect();
-                    return Some(filtered);
-                }
-            }
-        }
-
-        // Persistent disk-backed prefix index (STARTS WITH). Same `None` /
-        // `Some` semantics as the equality path. Uses `usize::MAX` as the cap;
-        // outer LIMIT pushdown is not wired into matcher state yet.
-        for (prop, matcher) in props {
-            if let PropertyMatcher::StartsWith(prefix) = matcher {
-                if let Some(results) =
-                    self.graph
-                        .graph
-                        .lookup_by_property_prefix(node_type, prop, prefix, usize::MAX)
-                {
-                    if props.len() == 1 {
-                        return Some(results);
-                    }
-                    let filtered = results
-                        .into_iter()
-                        .filter(|&idx| self.node_matches_properties(idx, props))
-                        .collect();
-                    return Some(filtered);
-                }
-            }
+        if let Some(hits) = self.try_persistent_index_lookup(node_type, props, &equality_props) {
+            return Some(hits);
         }
 
         for (prop, matcher) in props {
@@ -1553,6 +1548,83 @@ impl<'a> PatternExecutor<'a> {
             }
         }
 
+        None
+    }
+
+    /// The **persistent** (disk-backed) arms of [`Self::try_index_lookup`]:
+    /// string equality and `STARTS WITH` against an mmap bundle. Same
+    /// `Some`/`None` contract as its caller — `Some` is taken verbatim, `None`
+    /// falls through to the scan.
+    ///
+    /// Every probe is gated on
+    /// [`DirGraph::persistent_index_answers_point_lookup`], the disk mirror of
+    /// the soft-alias exclusion `lookup_by_index` applies in memory: a bundle
+    /// over a structurally-resolved name (`name`/`type`/`node_type`/`label`)
+    /// holds stored values alone and is a strict subset of what a scan
+    /// matches.
+    fn try_persistent_index_lookup(
+        &self,
+        node_type: &str,
+        props: &HashMap<String, PropertyMatcher>,
+        equality_props: &[(&String, &Value)],
+    ) -> Option<Vec<NodeIndex>> {
+        // Persistent disk-backed property index (string equality).
+        // `lookup_by_property_eq` returns `Some(Vec)` only when a
+        // persistent index for `(node_type, prop)` exists; otherwise
+        // `None` so we fall through to scan. Only Value::String values
+        // are indexable today.
+        for (prop, value) in equality_props {
+            if !self
+                .graph
+                .persistent_index_answers_point_lookup(Some(node_type), prop, prop)
+            {
+                continue;
+            }
+            if let Value::String(s) = value {
+                if let Some(results) = string_index_hits(s.as_str(), |key| {
+                    self.graph.graph.lookup_by_property_eq(node_type, prop, key)
+                }) {
+                    if equality_props.len() == 1 && props.len() == 1 {
+                        return Some(results);
+                    }
+                    let filtered = results
+                        .into_iter()
+                        .filter(|&idx| self.node_matches_properties(idx, props))
+                        .collect();
+                    return Some(filtered);
+                }
+            }
+        }
+
+        // Persistent disk-backed prefix index (STARTS WITH). Same `None` /
+        // `Some` semantics as the equality path, and the same soft-alias
+        // exclusion — a prefix bundle over `label` misses every node whose
+        // label is its type string. Uses `usize::MAX` as the cap; outer LIMIT
+        // pushdown is not wired into matcher state yet.
+        for (prop, matcher) in props {
+            if !self
+                .graph
+                .persistent_index_answers_point_lookup(Some(node_type), prop, prop)
+            {
+                continue;
+            }
+            if let PropertyMatcher::StartsWith(prefix) = matcher {
+                if let Some(results) =
+                    self.graph
+                        .graph
+                        .lookup_by_property_prefix(node_type, prop, prefix, usize::MAX)
+                {
+                    if props.len() == 1 {
+                        return Some(results);
+                    }
+                    let filtered = results
+                        .into_iter()
+                        .filter(|&idx| self.node_matches_properties(idx, props))
+                        .collect();
+                    return Some(filtered);
+                }
+            }
+        }
         None
     }
 

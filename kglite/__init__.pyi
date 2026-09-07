@@ -6169,10 +6169,21 @@ class KnowledgeGraph:
         this indexes EVERY node whose value at `property` is a non-empty
         string — regardless of node type. Enables:
 
-        - ``MATCH (n {label: 'Norway'})`` — untyped Cypher lookups, routed
+        - ``MATCH (n {title: 'Norway'})`` — untyped Cypher lookups, routed
           through the global index in O(log N).
         - ``graph.search(text)`` — top-k helper that returns the nodes
           whose label (or any indexed property) matches.
+
+        **A structurally resolved name accelerates no ``MATCH``.** An index on
+        ``name``, ``type``, ``node_type`` or ``label`` holds stored values,
+        while a node storing none of them still answers ``n.label`` with its
+        node type and ``n.name`` with its title — so the bundle is a subset of
+        what the pattern matches and Cypher scans instead of reading it (the
+        same rule :meth:`create_index` states). ``search()`` still uses such a
+        bundle; it is documented as index-driven rather than complete. When
+        ``label`` is the type's ``node_title_field``, ``{title: ...}`` names
+        the same values, is not structurally resolved, and keeps the O(log N)
+        route.
 
         Disk-backed graphs only. On memory/mapped graphs this is a no-op
         that returns ``unique_values=0`` — per-type ``create_index`` already

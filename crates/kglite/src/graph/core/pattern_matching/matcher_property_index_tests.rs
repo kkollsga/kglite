@@ -234,3 +234,99 @@ fn a_registered_title_alias_index_serves_the_canonical_spelling() {
         "and it proves a miss, being over the same field"
     );
 }
+
+/// The **disk** mirror of `a_soft_alias_index_never_proves_a_miss_or_covers_a
+/// _closure`. A persistent bundle is built from stored values exactly like the
+/// in-memory map, so reading one on a structurally-resolved name drops the
+/// rows that resolve through the title or the type string.
+///
+/// Deep-scan T2-6b: before this, `create_index('C', 'label')` turned
+/// `WHERE n.label = 'C'` from one row into zero on a disk graph — a wrong
+/// answer no reporting surface could have warned about, because the query
+/// never consulted the reporting.
+#[test]
+fn a_soft_alias_disk_bundle_never_answers_a_lookup() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut graph = DirGraph::new();
+    run(&mut graph, "CREATE (:C {id: 1, label: 'Norway'})");
+    run(&mut graph, "CREATE (:C {id: 2, label: 'Sweden'})");
+    // No stored `label`; `n.label` still resolves — to the type string 'C'.
+    run(&mut graph, "CREATE (:C {id: 3})");
+    graph.enable_disk_mode().unwrap();
+    graph.save_disk(dir.path().to_str().unwrap()).unwrap();
+
+    let probes = [
+        "MATCH (n:C) WHERE n.label = 'C' RETURN n.id",
+        "MATCH (n:C {label: 'C'}) RETURN n.id",
+        "MATCH (n:C) WHERE n.label STARTS WITH 'C' RETURN n.id",
+    ];
+    for query in probes {
+        assert_eq!(rows(&graph, query), 1, "precondition, no index: {query}");
+    }
+
+    let (_unique, persistent) = graph.create_property_index_routed("C", "label").unwrap();
+    assert!(persistent, "a disk create_index builds the mmap bundle");
+
+    for query in probes {
+        assert_eq!(
+            rows(&graph, query),
+            1,
+            "creating a disk index must not change the answer: {query}"
+        );
+    }
+    assert_eq!(
+        rows(&graph, "MATCH (n:C {label: 'Norway'}) RETURN n.id"),
+        1,
+        "and the stored-value rows are still found by the scan"
+    );
+    assert!(
+        !graph.index_serves_lookups("C", "label"),
+        "a bundle no lookup reads must not be reported as serving"
+    );
+    assert!(
+        graph.index_not_serving_reason("C", "label").is_some(),
+        "and the caller is owed the reason"
+    );
+}
+
+/// The cross-type arms consult a bundle named by an *alias family member*, so
+/// the exclusion has to test the bundle's name as well as the queried
+/// property: a global `name` bundle holds stored `name` values, and answering
+/// `{title: 'X'}` from it drops every node whose title is not also a stored
+/// `name`.
+///
+/// Reachable whenever the `name` bundle is the fresher one — here the `title`
+/// global that every disk `save()` builds has declined under a later write
+/// (see `index_freshness_tests`), so the alias loop falls through to `name`.
+#[test]
+fn a_stored_name_global_bundle_never_answers_a_title_lookup() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut graph = DirGraph::new();
+    run(
+        &mut graph,
+        "CREATE (:T {id: 1, title: 'Alpha', name: 'Alpha'})",
+    );
+    graph.enable_disk_mode().unwrap();
+    graph.save_disk(dir.path().to_str().unwrap()).unwrap();
+
+    // Written after the save, so the auto-built `title` global declines and
+    // the loop reaches the `name` bundle built next.
+    run(&mut graph, "CREATE (:T {id: 2, title: 'Beta'})");
+    match &mut graph.graph {
+        crate::api::storage::GraphBackend::Disk(disk) => {
+            disk.build_global_property_index("name").unwrap();
+        }
+        _ => panic!("disk backend"),
+    }
+
+    assert_eq!(
+        rows(&graph, "MATCH (n {title: 'Beta'}) RETURN n.id"),
+        1,
+        "the `name` bundle does not hold node 2's title and must not answer"
+    );
+    assert_eq!(
+        rows(&graph, "MATCH (n:T) WHERE n.title = 'Beta' RETURN n.id"),
+        1,
+        "same through the typed cross-type arm"
+    );
+}

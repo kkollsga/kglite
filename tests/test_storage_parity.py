@@ -595,3 +595,80 @@ def test_index_freshness_parity(tmp_path):
     assert results["memory"] == expected
     for mode in ("mapped", "disk"):
         assert results[mode] == expected, f"{mode} diverged: {results[mode]}"
+
+
+def test_soft_alias_index_parity(tmp_path):
+    """An index on a structurally-resolved name must not change any answer.
+
+    ``name``/``type``/``node_type``/``label`` resolve structurally when the
+    node stores no such property (``n.label`` on a node with no stored label
+    answers with its node type), while every index — the in-memory map and the
+    persistent disk bundle alike — is built from stored values only. The
+    in-memory arm has refused to read such an index since the ontology
+    follow-ups; the disk arm did not, so ``create_index('C', 'label')`` turned
+    ``WHERE n.label = 'C'`` from one row into zero, and
+    ``create_global_index('label')`` did the same to the untyped spelling
+    (deep scan 2026-09-07, T2-6b).
+
+    Absolute expected values as well as cross-mode agreement: the defect was
+    disk-only, but a fix that changed the scan would keep the modes agreeing
+    while breaking all three.
+    """
+    countries = pd.DataFrame(
+        {
+            "cid": [1, 2, 3],
+            # Node 3 stores no label, so `n.label` resolves to the type string.
+            "label": ["Norway", "Sweden", None],
+        }
+    )
+
+    def probe(graph):
+        def ids(query):
+            return sorted(r["c"] for r in _rows(graph.cypher(query)))
+
+        return {
+            "eq_type_string": ids("MATCH (n:C) WHERE n.label = 'C' RETURN n.cid AS c"),
+            "eq_stored": ids("MATCH (n:C) WHERE n.label = 'Norway' RETURN n.cid AS c"),
+            "map_type_string": ids("MATCH (n:C {label: 'C'}) RETURN n.cid AS c"),
+            "map_stored": ids("MATCH (n:C {label: 'Norway'}) RETURN n.cid AS c"),
+            "untyped_type_string": ids("MATCH (n {label: 'C'}) RETURN n.cid AS c"),
+            "untyped_stored": ids("MATCH (n {label: 'Norway'}) RETURN n.cid AS c"),
+            "starts_type_string": ids("MATCH (n:C) WHERE n.label STARTS WITH 'C' RETURN n.cid AS c"),
+        }
+
+    expected = {
+        "eq_type_string": [3],
+        "eq_stored": [1],
+        "map_type_string": [3],
+        "map_stored": [1],
+        "untyped_type_string": [3],
+        "untyped_stored": [1],
+        "starts_type_string": [3],
+    }
+
+    for mode in STORAGE_MODES:
+        if mode == "memory":
+            graph = KnowledgeGraph()
+        elif mode == "mapped":
+            graph = KnowledgeGraph(storage="mapped")
+        else:
+            graph = KnowledgeGraph(storage="disk", path=str(tmp_path / "soft-alias-disk"))
+        graph.add_nodes(countries, "C", "cid")
+
+        assert probe(graph) == expected, f"{mode}: wrong before any index"
+
+        info = graph.create_index("C", "label")
+        assert info["serves_lookups"] is False, f"{mode}: {info}"
+        assert "resolved structurally" in (info["not_serving"] or ""), f"{mode}: {info}"
+        assert probe(graph) == expected, f"{mode}: create_index changed an answer"
+
+        graph.create_global_index("label")
+        assert probe(graph) == expected, f"{mode}: create_global_index changed an answer"
+
+        # A save arms the auto-built persistent globals; the answers stand.
+        snapshot = str(tmp_path / f"soft-alias-{mode}")
+        if mode != "disk":
+            snapshot += ".kgl"
+        graph.save(snapshot)
+        reloaded = __import__("kglite").load(snapshot)
+        assert probe(reloaded) == expected, f"{mode}: reload changed an answer"

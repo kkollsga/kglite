@@ -530,7 +530,8 @@ Both also accelerate Cypher `WHERE` clauses. Composite indexes support multi-pro
 not the same question. An index on `name`, `type`, `node_type` or `label` is
 built but never read: those names resolve *structurally* — a node with no such
 stored property answers with its title or its node type — so the index holds a
-subset of what a `MATCH` compares against, and the matcher scans instead.
+subset of what a `MATCH` compares against, and the matcher scans instead — in
+every storage mode, a disk graph's persistent bundle included.
 `not_serving` carries the explanation, and `list_indexes()` repeats the answer
 next to each entry's `state`.
 

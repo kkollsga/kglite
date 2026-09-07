@@ -261,14 +261,25 @@ class TestGlobalIndexAndSearch:
         assert hits[0]["type"] == "City"
         assert hits[0]["id_value"] == "P1"
 
-    def test_untyped_cypher_match_uses_global_index(self, disk_dir):
+    def test_untyped_cypher_match_answers_with_no_label_on_the_pattern(self, disk_dir):
+        """`{label: …}` untyped is answered by the scan, `{title: …}` by the index.
+
+        A `label` bundle holds stored values, but `n.label` resolves to the
+        node type for a node that stores none — so the bundle is a subset of
+        what the pattern matches and the matcher declines it (T2-6b). Here
+        `label` is also every type's title field, so `{title: …}` names the
+        same values, is not structurally resolved, and keeps the O(log N)
+        route.
+        """
         g = self._build_multi_type_graph(disk_dir)
         g.create_global_index("label")
-        # No :Country / :City label on the pattern — only resolvable
-        # via the cross-type index.
+        g.create_global_index("title")
+        # No :Country / :City label on the pattern.
         r = g.cypher("MATCH (n {label: 'Stockholm'}) RETURN n.nid").to_df()
         assert len(r) == 1
         assert r["n.nid"][0] == "P2"
+        indexed = g.cypher("MATCH (n {title: 'Stockholm'}) RETURN n.nid").to_df()
+        assert list(indexed["n.nid"]) == ["P2"]
 
     def test_search_returns_empty_without_index(self, disk_dir):
         # No create_global_index call — search still works but returns

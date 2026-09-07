@@ -504,13 +504,56 @@ impl DirGraph {
     /// reported it as the accelerator would be naming a structure no query
     /// consults. It also picks up the case where an id/title *alias* index
     /// answers a lookup spelled with the canonical name, or the reverse.
+    ///
+    /// The disk arm carries the same soft-alias exclusion through
+    /// [`Self::persistent_index_answers_point_lookup`]: a persistent bundle on
+    /// a structurally-resolved name is built from stored values just like the
+    /// in-memory map, so the matcher declines it too and it accelerates
+    /// nothing.
     pub fn index_serves_lookups(&self, node_type: &str, property: &str) -> bool {
         if self.index_answers_point_lookup(node_type, property) {
             return true;
         }
-        self.graph
-            .as_disk()
-            .is_some_and(|dg| dg.property_index_is_serving(node_type, property))
+        self.persistent_index_answers_point_lookup(Some(node_type), property, property)
+            && self
+                .graph
+                .as_disk()
+                .is_some_and(|dg| dg.property_index_is_serving(node_type, property))
+    }
+
+    /// Whether a **persistent** bundle named `index_name` may be read as the
+    /// complete answer for `property` — the disk mirror of
+    /// [`Self::point_lookup_index_key`]'s soft-alias exclusion.
+    ///
+    /// `node_type` is `None` for the untyped cross-type arm, which has no type
+    /// to resolve a spelling against.
+    ///
+    /// A disk bundle is built from *stored* values (`PropertyIndex`, and the
+    /// `title`/`id` columns for the alias family), exactly like the in-memory
+    /// map. `name` / `type` / `node_type` / `label` resolve **structurally**
+    /// for a node that stores no such property (`NodeView::resolved_field`
+    /// falls back to the title or the type string), so such a bundle is a
+    /// strict subset of what a scan matches and the matcher must not read it —
+    /// reading it turned `WHERE n.label = 'Country'` from one row into zero.
+    ///
+    /// Both names are tested, because the cross-type arms consult a bundle
+    /// named by an *alias family member* rather than by the queried property:
+    /// a `name` bundle answering `{title: 'X'}` misses every node whose title
+    /// is not also a stored `name`.
+    pub(crate) fn persistent_index_answers_point_lookup(
+        &self,
+        node_type: Option<&str>,
+        property: &str,
+        index_name: &str,
+    ) -> bool {
+        let structural = |name: &str| {
+            let resolved = match node_type {
+                Some(node_type) => self.resolve_alias(node_type, name),
+                None => name,
+            };
+            crate::graph::schema::soft_alias_fallback(resolved).is_some()
+        };
+        !structural(property) && !structural(index_name)
     }
 
     /// Why a *declared* index on `(node_type, property)` will not answer a

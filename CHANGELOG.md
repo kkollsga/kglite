@@ -11,6 +11,27 @@ before upgrading.
 
 ### Fixed
 
+- **An index on a structurally resolved name no longer changes a disk graph's
+  answers.** `create_index('Country', 'label')` turned
+  `MATCH (n:Country) WHERE n.label = 'Country'` from one row into zero, and
+  `create_global_index('label')` did the same to the untyped
+  `MATCH (n {label: 'Country'})`: `name`, `type`, `node_type` and `label`
+  resolve *structurally* — a node storing no such property answers with its
+  title or its node type — while every index, the persistent disk bundle
+  included, is built from stored values alone. Memory and mapped have declined
+  to read such an index since 0.16.13; the disk arms (typed equality,
+  `STARTS WITH`, and both cross-type arms) now decline too, and
+  `create_index`/`list_indexes` report `serves_lookups: false` with the reason
+  on disk as well. A cross-type arm also stops answering a `{title: …}` lookup
+  from a `name` or `label` bundle, which dropped every node whose title was not
+  also a stored `name`.
+
+  **What this costs:** the untyped `MATCH (n {label: 'Norway'})` acceleration
+  `create_global_index` documents now scans, unless `label` is the type's
+  `node_title_field` — then the typed `MATCH (n:Country {label: …})` still uses
+  the bundle, and `{title: 'Norway'}` is the untyped spelling that does.
+  `search()` is unchanged. Completing the index instead is a parked follow-up.
+
 - **`ORDER BY` no longer silently ignores a sort key an earlier `WITH`
   produced.** `MATCH (p:Person) WITH p, p.age AS a RETURN p.name AS n ORDER BY
   a DESC` returned input order, on every plan profile: `ORDER BY` runs after
