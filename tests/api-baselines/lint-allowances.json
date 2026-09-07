@@ -369,6 +369,10 @@
       "classification": "transitional"
     },
     {
+      "identity": "crates/kglite/src/graph/languages/cypher/executor/shortest_path.rs::fn:shortest_path_row:fn shortest_path_row( prior_row: Option<&ResultRow>, source_pattern: &NodePattern, target_pattern: &NodePattern, source_idx: NodeIndex, target_idx: NodeIndex, path_variable: &str, hops: usize, path: Vec<PathHop>, ) -> ResultRow::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
       "identity": "crates/kglite/src/graph/languages/cypher/executor/tests/mod.rs::module::clippy::approx_constant",
       "classification": "test"
     },

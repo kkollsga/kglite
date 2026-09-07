@@ -189,6 +189,8 @@ impl<'a> CypherExecutor<'a> {
     ///
     /// Starts from the prior row's bindings (when a preceding MATCH supplied
     /// one) so a downstream RETURN can still see what that MATCH exposed.
+    // Row construction needs both endpoint patterns, both indices and the
+    // hop list; bundling them into a struct would only move the arity.
     #[allow(clippy::too_many_arguments)]
     fn shortest_path_row(
         prior_row: Option<&ResultRow>,
