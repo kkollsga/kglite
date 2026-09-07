@@ -206,12 +206,6 @@ fn convert_query_value(
             .map(Value::Boolean)
             .map_err(QueryConversionError::Python);
     }
-    // `pd.NaT` is a `datetime` subclass, so it reaches the datetime arm below
-    // and fails inside the conversion. It is pandas' missing value: bind it as
-    // NULL, the same normalisation NaN and ±inf already get.
-    if is_pandas_nat(value) {
-        return Ok(Value::Null);
-    }
     if value.is_instance_of::<PyInt>()
         || numpy_type
             .as_deref()
@@ -237,6 +231,20 @@ fn convert_query_value(
         return Ok(Value::String(string));
     }
     if let Ok(datetime) = value.cast::<PyDateTime>() {
+        // `pd.NaT` is a `datetime` subclass, so it arrives here and would fail
+        // inside the conversion. It is pandas' missing value: bind it as NULL,
+        // the same normalisation NaN and ±inf already get.
+        //
+        // Tested here rather than ahead of the integer arm because
+        // `is_pandas_nat` costs a type-object fetch and a `String` allocation
+        // per value, which every element of every list parameter paid for a
+        // check only a datetime can pass (+32% on
+        // `test_bench_param_list_conversion`, +17% on a 1 000-element
+        // `IN $ids`). `PyDateTime_Check` is a subclass check, so NaT reaches
+        // this arm and nothing else changes.
+        if is_pandas_nat(value) {
+            return Ok(Value::Null);
+        }
         return datetime_to_utc_naive(datetime)
             .map(Value::Timestamp)
             .map_err(QueryConversionError::Python);
