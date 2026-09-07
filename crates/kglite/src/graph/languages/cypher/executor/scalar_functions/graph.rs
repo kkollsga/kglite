@@ -72,6 +72,67 @@ impl<'a> CypherExecutor<'a> {
         Ok(Some(Value::Null))
     }
 
+    /// `keys(n)`, `keys(r)` or `keys(map)` — the argument's key names, sorted.
+    /// `None` = unresolvable → Null.
+    ///
+    /// Split out of [`Self::eval_graph_fn`]: three argument families with
+    /// three collection routes, and the dispatcher has a size ceiling.
+    ///
+    /// Emits `Value::List(Vec<Value::String>)`. For nodes it uses the shared
+    /// collector so the key set matches the map `properties(n)` returns and
+    /// `RETURN n` carries: virtual id/title/type, every user-set property, the
+    /// alias-recovered columns (non-literal `unique_id_field` /
+    /// `node_title_field`), and — on the columnar (disk/mapped) backends — the
+    /// per-type metadata columns a bare `property_keys()` walk would miss. The
+    /// materialiser omits null-valued aliases, so the key set is consistent
+    /// with what `n.<name>` resolves at query time.
+    fn eval_keys_fn(&self, args: &[Expression], row: &ResultRow) -> Option<Value> {
+        let arg = args.first()?;
+        if let Some(idx) = self.node_arg_index(arg, row) {
+            // The same collection pass `materialize_node_value` runs, through
+            // a names-only sink: sorted + unique, without cloning the values it
+            // would then drop.
+            if let Some(keys) = materialize_node_keys(idx, self.graph) {
+                return Some(Value::List(keys.into_iter().map(Value::String).collect()));
+            }
+        }
+        // Materialised node value (collect()[0] etc.) → its keys.
+        if let Ok(Value::Node(nv)) = self.evaluate_expression(arg, row) {
+            let mut keys: Vec<String> = nv.properties.keys().map(str::to_string).collect();
+            keys.sort();
+            keys.dedup();
+            return Some(Value::List(keys.into_iter().map(Value::String).collect()));
+        }
+        if let Expression::Variable(var) = arg {
+            if let Some(edge) = row.edge_bindings.get(var) {
+                if let Some(edge_data) = {
+                    let g = &self.graph.graph;
+                    g.edge_weight(edge.edge_index)
+                } {
+                    let mut keys: Vec<String> = vec!["type".to_string()];
+                    keys.extend(
+                        edge_data
+                            .property_keys(&self.graph.interner)
+                            .filter(|k| !crate::graph::schema::is_reserved_provenance_key(k))
+                            .map(String::from),
+                    );
+                    keys.sort();
+                    return Some(Value::List(keys.into_iter().map(Value::String).collect()));
+                }
+            }
+        }
+        // keys(map) — openCypher's third argument family, and the one that
+        // makes `keys(properties(n))` work. `PropMap` holds its entries sorted
+        // and de-duplicated, so the key names are a projection, not a sort.
+        // Evaluated last so a bound node or relationship never reaches it.
+        if let Ok(Value::Map(map)) = self.evaluate_expression(arg, row) {
+            return Some(Value::List(
+                map.keys().map(|k| Value::String(k.to_string())).collect(),
+            ));
+        }
+        None
+    }
+
     /// `properties(r)` for a bound relationship: its user properties plus the
     /// synthetic `type` entry, in one `PropMap`.
     ///
@@ -296,65 +357,7 @@ impl<'a> CypherExecutor<'a> {
                 }
                 Ok(Value::Null)
             }
-            "keys" => {
-                // keys(n) or keys(r) — return property names as a list.
-                //
-                // Emits `Value::List(Vec<Value::String>)`.
-                // For nodes, use the shared collector so the key set matches
-                // the map returned by `properties(n)` and carried by
-                // `RETURN n`: virtual id/title/type, every
-                // user-set property, the alias-recovered columns (non-literal
-                // `unique_id_field`/`node_title_field`), and — on the columnar
-                // (disk/mapped) backends — the per-type metadata columns that a
-                // bare `property_keys()` walk would miss. The materialiser
-                // omits null-valued aliases, so the key set is consistent with
-                // what `n.<name>` resolves at query time.
-                if let Some(arg) = args.first() {
-                    if let Some(idx) = self.node_arg_index(arg, row) {
-                        // The same collection pass `materialize_node_value`
-                        // runs, through a names-only sink: sorted + unique,
-                        // without cloning the values it would then drop.
-                        if let Some(keys) = materialize_node_keys(idx, self.graph) {
-                            return Ok(Some(Value::List(
-                                keys.into_iter().map(Value::String).collect(),
-                            )));
-                        }
-                    }
-                    // Materialised node value (collect()[0] etc.) → its keys.
-                    if let Ok(Value::Node(nv)) = self.evaluate_expression(arg, row) {
-                        let mut keys: Vec<String> =
-                            nv.properties.keys().map(str::to_string).collect();
-                        keys.sort();
-                        keys.dedup();
-                        return Ok(Some(Value::List(
-                            keys.into_iter().map(Value::String).collect(),
-                        )));
-                    }
-                    if let Expression::Variable(var) = arg {
-                        if let Some(edge) = row.edge_bindings.get(var) {
-                            if let Some(edge_data) = {
-                                let g = &self.graph.graph;
-                                g.edge_weight(edge.edge_index)
-                            } {
-                                let mut keys: Vec<String> = vec!["type".to_string()];
-                                keys.extend(
-                                    edge_data
-                                        .property_keys(&self.graph.interner)
-                                        .filter(|k| {
-                                            !crate::graph::schema::is_reserved_provenance_key(k)
-                                        })
-                                        .map(String::from),
-                                );
-                                keys.sort();
-                                return Ok(Some(Value::List(
-                                    keys.into_iter().map(Value::String).collect(),
-                                )));
-                            }
-                        }
-                    }
-                }
-                Ok(Value::Null)
-            }
+            "keys" => Ok(self.eval_keys_fn(args, row).unwrap_or(Value::Null)),
             "properties" => {
                 // properties(n) / properties(r) → native Value::Map.
                 //

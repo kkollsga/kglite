@@ -1156,6 +1156,9 @@ pub mod expression;
 pub mod helpers;
 mod identity_fields;
 mod interrupt;
+#[cfg(test)]
+#[path = "keys_map_tests.rs"]
+mod keys_map_tests;
 pub mod load_csv;
 pub mod match_clause;
 pub mod match_execution;

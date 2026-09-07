@@ -895,13 +895,42 @@ fn validate_create_pattern(pattern: &CreatePattern, graph: &DirGraph) -> Result<
     for element in &pattern.elements {
         if let CreateElement::Node(np) = element {
             if let Some(ref node_type) = np.label {
-                for (prop_name, _expr) in &np.properties {
-                    validate_property(node_type, prop_name, graph)?;
+                for (prop_name, expr) in &np.properties {
+                    validate_property(node_type, prop_name, graph)
+                        .map_err(|err| name_the_null_value(err, prop_name, expr))?;
                 }
             }
         }
     }
     Ok(())
+}
+
+/// Append the null observation to a typo refusal whose value is a literal null.
+///
+/// A property that is both undeclared *and* null is the data-driven case, not
+/// a typo — a row supplied the key with no value — and reporting only the typo
+/// misdirects the caller, because `MERGE` refuses to key on null regardless of
+/// the name. The schema error stays primary: the property genuinely does not
+/// exist.
+///
+/// Only a *literal* null is visible here. A parameter-supplied null
+/// (`{p: $v}`) is not: this pass runs before evaluation and is not given the
+/// caller's parameters, so nothing at this site can tell `$v` is null.
+fn name_the_null_value(err: SchemaError, property: &str, value: &Expression) -> SchemaError {
+    if !matches!(
+        value,
+        Expression::Literal(crate::datatypes::values::Value::Null)
+    ) {
+        return err;
+    }
+    SchemaError {
+        kind: err.kind,
+        message: format!(
+            "{}\n  The value supplied for '{}' was null. If this key came from a data row \
+             rather than a typo, MERGE cannot key on null — filter the row or supply a value.",
+            err.message, property
+        ),
+    }
 }
 
 /// Validate a read pattern's labels (locked schemas only) and its
@@ -1146,6 +1175,80 @@ mod tests {
             "{}",
             err.message
         );
+    }
+
+    /// The refusal message for a query the typo-guard must reject.
+    fn refusal(query: &CypherQuery, graph: &DirGraph, label: &str) -> String {
+        validate_schema(query, graph).expect_err(label).message
+    }
+
+    /// The typo-guard's exact reach, as CYPHER.md now states it: a `CREATE` or
+    /// `MERGE` node pattern is refused for an undeclared property on a type
+    /// whose shape is known, on an **open** schema; a type with no recorded
+    /// properties, an unlabelled pattern, and `SET` are all outside it.
+    #[test]
+    fn the_create_typo_guard_covers_merge_and_stops_at_set() {
+        let g = graph_with_schema();
+        assert!(!g.schema_locked, "the guard is active on an open schema");
+
+        for query in ["CREATE (n:Person {zzz: 1})", "MERGE (n:Person {zzz: 1})"] {
+            let q = parse_cypher(query).unwrap();
+            let err = refusal(&q, &g, query);
+            assert!(
+                err.contains("Unknown property 'zzz' on Person"),
+                "{query} -> {err}"
+            );
+        }
+
+        for query in [
+            // No recorded properties for this type — nothing to compare against.
+            "CREATE (n:Ghost {zzz: 1})",
+            "MERGE (n:Ghost {zzz: 1})",
+            // No label: property validation needs a node type.
+            "CREATE (n {zzz: 1})",
+            // `SET` is how a type grows a column, by design.
+            "MATCH (n:Person) SET n.zzz = 1",
+        ] {
+            let q = parse_cypher(query).unwrap();
+            assert!(
+                validate_schema(&q, &g).is_ok(),
+                "must be accepted: {query} -> {:?}",
+                validate_schema(&q, &g).err().map(|e| e.message)
+            );
+        }
+    }
+
+    /// A property that is *both* undeclared and null is the data-driven case,
+    /// not a typo: the row supplied a null key. The schema error stays primary
+    /// — the property really does not exist — but it must stop being the only
+    /// thing reported, because `MERGE` would have refused the null anyway.
+    #[test]
+    fn an_undeclared_null_property_names_the_null_as_well_as_the_typo() {
+        let g = graph_with_schema();
+        for query in [
+            "MERGE (n:Person {agee: null})",
+            "CREATE (n:Person {agee: null})",
+        ] {
+            let q = parse_cypher(query).unwrap();
+            let err = refusal(&q, &g, query);
+            assert!(
+                err.contains("Unknown property 'agee' on Person"),
+                "{query} -> {err}"
+            );
+            assert!(
+                err.contains("Did you mean 'age'"),
+                "the typo hint must survive: {query} -> {err}"
+            );
+            assert!(
+                err.contains("was null"),
+                "the null cause must be named: {query} -> {err}"
+            );
+        }
+
+        // A non-null value keeps the message it always had.
+        let q = parse_cypher("MERGE (n:Person {agee: 1})").unwrap();
+        let err = refusal(&q, &g, "MERGE (n:Person {agee: 1})");
+        assert!(!err.contains("was null"), "{err}");
     }
 
     #[test]

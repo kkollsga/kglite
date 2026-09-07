@@ -11,6 +11,23 @@ before upgrading.
 
 ### Fixed
 
+- `keys()` now accepts a map, not only a node or a relationship.
+  `keys({a: 1, b: 2})`, `keys($m)` and — the case where both halves are ours —
+  `keys(properties(n))` all returned a silent `null` — openCypher defines the
+  map form, and nothing in the function reference said KGLite lacked it. They
+  now return the sorted key names; `keys(null)` is still `null`, and the
+  node and relationship arms are unchanged. The registry signature reads
+  `keys(entity :: NODE | RELATIONSHIP | MAP)`.
+
+- A `CREATE` / `MERGE` property that is both undeclared *and* literally null
+  now names the null as well as the typo. `MERGE (n:P {zzz: null})` reported
+  only `Unknown property 'zzz' on P … Did you mean …?`, which misdirects the
+  data-driven case — the key came from a row rather than a keyboard, and
+  `MERGE` cannot key on null whatever it is called. The schema error stays
+  primary and now carries a second line naming the null value. A
+  parameter-supplied null is unchanged: the schema check runs before
+  evaluation and cannot see it.
+
 - Schema, index and constraint declarations now survive a crash before the
   first checkpoint. Under `durable="normal"` / `"full"`, `set_parent_type`,
   `define_ontology` / `clear_ontology`, `create_index` / `drop_index` (and the

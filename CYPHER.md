@@ -81,14 +81,17 @@ count). Two semantics to keep in mind:
   [Cypher constraint DDL](#cypher-constraint-ddl).
 - **Matching is type-exact**: `'42'` ≠ `42`. Keep id types consistent across
   writes and reads.
-- **Property typos pass silently by default** (open schema): an unknown property
-  on `CREATE`/`SET`/`MERGE` is simply stored. To catch typos (`summary` vs
-  `note`), call `lock_schema()` — a write with an unknown property is then
-  rejected with a `Valid properties: …` / "did you mean?" hint, and so is a
-  *read* of a property no node of the type has (`WHERE`, `RETURN`, `WITH`,
-  `ORDER BY`); see [Diagnostics](#diagnostics). The bulk loaders
-  (`add_nodes`/`add_connections`) deliberately bypass the lock; it gates the
-  Cypher write path.
+- **Property typos are caught where the type's shape is known.** A `CREATE` or
+  `MERGE` node pattern naming a property the type has never carried is rejected
+  with a `Valid properties: …` / "did you mean?" hint — a deliberate typo-guard,
+  active on an open schema. It applies only where KGLite knows the shape: a type
+  with no recorded properties yet, an unlabelled pattern, and relationship
+  properties are all skipped, and `SET n.newprop = …` stores a new property by
+  design (that is how a type grows a column). `lock_schema()` extends the
+  refusal to *reads* of a property no node of the type has (`WHERE`, `RETURN`,
+  `WITH`, `ORDER BY`) and to unknown labels; see
+  [Diagnostics](#diagnostics). The bulk loaders (`add_nodes`/`add_connections`)
+  deliberately bypass the lock; it gates the Cypher write path.
 
 ---
 
@@ -472,7 +475,7 @@ graph.cypher("""
 | `labels(n)` | Node labels as a list, primary type first |
 | `degree(n)` | Node's total edge count (in + out; a self-loop counts twice) — e.g. `WHERE degree(n) > 100` to find hubs |
 | `inDegree(n)` / `outDegree(n)` | Node's incoming / outgoing edge count |
-| `keys(n)` / `keys(r)` | Property names of a node or relationship (as JSON list) |
+| `keys(n)` / `keys(r)` / `keys(map)` | Sorted property names of a node or relationship, or entry names of a map — `keys(properties(n))` and `keys({a: 1, b: 2})` both work (as JSON list) |
 | `properties(n)` / `properties(r)` | Full property map of a node or relationship (as JSON map) |
 | `start_node(r)` | Source node of a bound relationship; supports dotted access: `start_node(r).name` |
 | `end_node(r)` | Target node of a bound relationship; supports dotted access: `end_node(r).name` |
@@ -3734,7 +3737,7 @@ claimed openCypher-compatible subset.
 | `type(r)` | Covered | Returns relationship type |
 | `id(entity)` | Covered | KGLite logical node identity and stable relationship identity |
 | `labels(n)` | Intentional divergence | Primary type first, then secondary labels |
-| `keys(n)` / `keys(r)` | Covered | Returns property names |
+| `keys(n)` / `keys(r)` / `keys(map)` | Covered | Returns property names, sorted; the map form covers `keys(properties(n))` |
 | `date(str)` / `datetime(str)` | Partial | KGLite's temporal value model and documented arithmetic subset; a date and a datetime are intercomparable **and equatable**, a date being midnight on that date |
 | `coalesce` | Covered | |
 | `range(start, end [, step])` | Covered | Inclusive integer range |

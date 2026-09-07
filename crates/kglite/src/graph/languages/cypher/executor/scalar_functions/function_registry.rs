@@ -500,8 +500,8 @@ pub(crate) const FUNCTIONS: &[FunctionSpec] = &[
         name: "keys",
         aliases: &[],
         category: "graph",
-        description: "Sorted property keys of a node or relationship",
-        signature: "keys(entity :: NODE | RELATIONSHIP) :: LIST<STRING>?",
+        description: "Sorted property keys of a node, relationship or map",
+        signature: "keys(entity :: NODE | RELATIONSHIP | MAP) :: LIST<STRING>?",
     },
     FunctionSpec {
         name: "properties",

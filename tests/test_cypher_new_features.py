@@ -56,6 +56,27 @@ class TestKeys:
         assert "since" in keys
         assert "weight" in keys
 
+    def test_keys_map_literal(self, graph):
+        """openCypher's third argument family: `keys(map)`, sorted."""
+        rows = graph.cypher("RETURN keys({b: 2, a: 1}) AS k").to_list()
+        assert rows[0]["k"] == ["a", "b"]
+
+    def test_keys_empty_map(self, graph):
+        assert graph.cypher("RETURN keys({}) AS k").to_list()[0]["k"] == []
+
+    def test_keys_map_parameter(self, graph):
+        rows = graph.cypher("RETURN keys($m) AS k", params={"m": {"z": 1, "y": 2}}).to_list()
+        assert rows[0]["k"] == ["y", "z"]
+
+    def test_keys_of_properties_matches_keys_of_the_node(self, graph):
+        """Both halves are ours; the composition used to answer null."""
+        via_map = graph.cypher("MATCH (n:Person {name: 'Alice'}) RETURN keys(properties(n)) AS k").to_list()[0]["k"]
+        via_node = graph.cypher("MATCH (n:Person {name: 'Alice'}) RETURN keys(n) AS k").to_list()[0]["k"]
+        assert via_map == via_node
+
+    def test_keys_null_is_null(self, graph):
+        assert graph.cypher("RETURN keys(null) AS k").to_list()[0]["k"] is None
+
 
 # ── Math functions ──────────────────────────────────────────
 
