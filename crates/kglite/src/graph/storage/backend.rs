@@ -664,6 +664,23 @@ impl GraphBackend {
         }
     }
 
+    /// Record a node type's declared identity-field spellings for the WAL
+    /// capture wrapper, for the same reason as the labels above: the alias
+    /// maps live in `DirGraph`, not in this backend, so no `GraphWrite` call
+    /// carries the declaration and a crash before the first checkpoint
+    /// recovered the values without the names they answer to.
+    #[inline]
+    pub fn note_recorded_type_field_aliases(
+        &mut self,
+        node_type: &str,
+        id_field: Option<&str>,
+        title_field: Option<&str>,
+    ) {
+        if let GraphBackend::Recording(rg) = self {
+            rg.note_type_field_aliases(node_type, id_field, title_field);
+        }
+    }
+
     /// Swap in a rebuilt heap petgraph, **preserving this backend's variant
     /// and any write-capture wrapper around it**. Returns `false` for `Disk`,
     /// whose CSR arrays are not a `StableDiGraph`; the caller must treat that

@@ -633,20 +633,30 @@ fn install_node_type_metadata(
     graph.upsert_node_type_metadata(node_type, df_column_types);
 
     // Record original field name aliases so users can query by original column name
-    if unique_id_field != "id" {
+    let declared_id = (unique_id_field != "id").then_some(unique_id_field);
+    if let Some(field) = declared_id {
         graph
             .id_field_aliases_mut()
-            .insert(node_type.to_string(), unique_id_field.to_string());
+            .insert(node_type.to_string(), field.to_string());
     }
     // Only register the title alias when the caller explicitly named one.
     // Otherwise a follow-up add_nodes(..., node_title_field=None) would
     // silently rebind the alias to unique_id_field, making `s.id` resolve
     // to the stored title.
-    if should_update_title && title_field != "title" {
+    let declared_title = (should_update_title && title_field != "title").then_some(title_field);
+    if let Some(field) = declared_title {
         graph
             .title_field_aliases_mut()
-            .insert(node_type.to_string(), title_field.to_string());
+            .insert(node_type.to_string(), field.to_string());
     }
+    // The maps above live on `DirGraph`, so the write-capture seam under the
+    // backend cannot see them; log the declaration itself or a durable graph
+    // recovers every value under `id`/`title` and none of the spellings the
+    // caller reads them by. The `None`s carry the guard above through to
+    // replay: "this call declared none", not "clear the existing one".
+    graph
+        .graph
+        .note_recorded_type_field_aliases(node_type, declared_id, declared_title);
 }
 
 /// Build the `TypeSchema` for this call's property columns plus any active

@@ -139,6 +139,17 @@ pub enum RawOp {
     /// op — idempotent on replay, not merged into one. Dropped at resolve
     /// time if the node was later removed.
     SetNodeLabels(NodeIndex, Option<Box<BeforeImage>>),
+    /// WAL-only declaration of a node type's identity-field spellings, from
+    /// the `add_nodes` choke point. Like the label op it describes state that
+    /// lives above this backend, but it is keyed by *type*, not by slot, so
+    /// it needs no index and no resolution against final state. CDC ignores
+    /// it (a declaration changes no entity); sharing the op sequence is what
+    /// makes it roll back with the statement that declared it.
+    SetTypeFieldAliases {
+        node_type: String,
+        id_field: Option<String>,
+        title_field: Option<String>,
+    },
     /// WAL-only logical identity captured before physical slots can be reused.
     /// CDC ignores these records; sharing the op sequence preserves rollback.
     WalNode {
@@ -200,7 +211,7 @@ fn op_image(op: &RawOp) -> Option<&BeforeImage> {
         | RawOp::SetNodeLabels(_, before)
         | RawOp::RemoveNode { before, .. }
         | RawOp::RemoveEdge { before, .. } => before.as_deref(),
-        RawOp::WalNode { .. } | RawOp::WalGroup { .. } => None,
+        RawOp::WalNode { .. } | RawOp::WalGroup { .. } | RawOp::SetTypeFieldAliases { .. } => None,
     }
 }
 
@@ -212,7 +223,7 @@ fn op_image_mut(op: &mut RawOp) -> Option<&mut BeforeImage> {
         | RawOp::SetNodeLabels(_, before)
         | RawOp::RemoveNode { before, .. }
         | RawOp::RemoveEdge { before, .. } => before.as_deref_mut(),
-        RawOp::WalNode { .. } | RawOp::WalGroup { .. } => None,
+        RawOp::WalNode { .. } | RawOp::WalGroup { .. } | RawOp::SetTypeFieldAliases { .. } => None,
     }
 }
 
@@ -582,6 +593,29 @@ impl<G: GraphRead> RecordingGraph<G> {
         self.ops.push(RawOp::SetNodeLabels(idx, before));
     }
 
+    /// Record that `node_type`'s identity-field spellings were declared.
+    /// `None` for either field means "this call declared none", which replay
+    /// must read as *leave the existing one alone*.
+    ///
+    /// WAL-owner-gated: a declaration changes no entity, so a CDC-only graph
+    /// would only accumulate ops it drops at resolve time.
+    #[inline]
+    pub fn note_type_field_aliases(
+        &mut self,
+        node_type: &str,
+        id_field: Option<&str>,
+        title_field: Option<&str>,
+    ) {
+        if !self.wal_owner || (id_field.is_none() && title_field.is_none()) {
+            return;
+        }
+        self.ops.push(RawOp::SetTypeFieldAliases {
+            node_type: node_type.to_string(),
+            id_field: id_field.map(str::to_string),
+            title_field: title_field.map(str::to_string),
+        });
+    }
+
     /// Drain the buffered raw ops, leaving the buffer empty. Called at
     /// each commit/flush before [`resolve_ops`].
     #[inline]
@@ -727,6 +761,18 @@ pub fn resolve_ops(
     for op in raw {
         match op {
             RawOp::WalNode { .. } | RawOp::WalGroup { .. } => unreachable!("handled above"),
+            // Type-keyed and already resolved: nothing to read back off the
+            // graph. Reachable here when a call declared a spelling but wrote
+            // no rows, so no logical-identity marker joined it in the buffer.
+            RawOp::SetTypeFieldAliases {
+                node_type,
+                id_field,
+                title_field,
+            } => out.push(MutationOp::SetTypeFieldAliases {
+                node_type: node_type.clone(),
+                id_field: id_field.clone(),
+                title_field: title_field.clone(),
+            }),
             RawOp::UpsertNode(idx, _, _) => {
                 if let Some(nd) = graph.node_view(*idx) {
                     out.push(MutationOp::UpsertNode {

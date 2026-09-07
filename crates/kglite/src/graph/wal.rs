@@ -101,7 +101,13 @@ pub const WAL_MAGIC: [u8; 4] = *b"KWAL";
 /// Prior tags and payloads are unchanged. The header is upgraded before a
 /// new writer appends, so a v2/v3-only reader refuses rather than dropping
 /// unfamiliar committed operations as an undecodable tail.
-pub const WAL_FORMAT_VERSION: u8 = 4;
+///
+/// **v4 → v5** appends [`MutationOp::SetTypeFieldAliases`] as tag 7. Same
+/// shape as every bump before it: tags 0–6 encode byte-identically, so a
+/// v2/v3/v4 WAL is a strict subset read exactly, while the header moves
+/// because a v4-writing build meeting tag 7 would treat the frame as a torn
+/// tail and silently drop committed work.
+pub const WAL_FORMAT_VERSION: u8 = 5;
 
 /// Oldest WAL format this build can replay. Frames from any version in
 /// `MIN_READABLE_WAL_FORMAT_VERSION..=WAL_FORMAT_VERSION` decode with the
@@ -280,6 +286,30 @@ pub enum MutationOp {
         tgt_type: String,
         tgt_id: Value,
         edges: Vec<Vec<(String, Value)>>,
+    },
+    /// Declare the column spellings a node type's identity fields answer to:
+    /// the `unique_id_field` / `node_title_field` an `add_nodes` call named.
+    ///
+    /// These live in `DirGraph::id_field_aliases` / `title_field_aliases`,
+    /// *above* the storage backend — the same position secondary labels
+    /// occupy — so no `GraphWrite` call describes one and the capture seam
+    /// that produces [`MutationOp::UpsertNode`] cannot infer it. Without this
+    /// op a crash before the first checkpoint recovered every value under the
+    /// canonical `id`/`title` while losing the name the caller reads them by:
+    /// `n.uid` came back null and `{uid: …}` raised a schema error, and the
+    /// recovered app's next `save()` truncated the log and made that
+    /// permanent.
+    ///
+    /// `None` means **leave the existing declaration alone**, never "clear
+    /// it". That distinction is the `should_update_title` guard at the
+    /// `add_nodes` choke point: a follow-up call with `node_title_field=None`
+    /// must not rebind the title spelling to the id column. Both fields
+    /// carry the caller's spelling only when it differs from the canonical
+    /// name, so an op naming neither is never emitted.
+    SetTypeFieldAliases {
+        node_type: String,
+        id_field: Option<String>,
+        title_field: Option<String>,
     },
 }
 
@@ -1255,12 +1285,12 @@ mod tests {
     /// every pre-existing op is on-disk format: renumbering one silently
     /// misparses every WAL ever written. A single-op frame encodes as
     /// `[lsn varint][ops len varint][variant tag varint]…`, so byte 2 is
-    /// the tag. Pinning all five keeps a future op from being *inserted*
+    /// the tag. Pinning every one keeps a future op from being *inserted*
     /// rather than appended.
     #[test]
     fn variant_tags_are_stable_on_disk_format() {
         let id = || Value::Int64(1);
-        let cases: [(u8, MutationOp); 5] = [
+        let cases: [(u8, MutationOp); 8] = [
             (
                 0,
                 MutationOp::UpsertNode {
@@ -1304,6 +1334,36 @@ mod tests {
                     node_type: "T".into(),
                     id: id(),
                     labels: vec![],
+                },
+            ),
+            (
+                5,
+                MutationOp::ReplaceNodeState {
+                    node_type: "T".into(),
+                    id: id(),
+                    title: Value::Null,
+                    properties: vec![],
+                    labels: vec![],
+                    reset: false,
+                },
+            ),
+            (
+                6,
+                MutationOp::ReplaceEdgeGroup {
+                    conn_type: "C".into(),
+                    src_type: "T".into(),
+                    src_id: id(),
+                    tgt_type: "T".into(),
+                    tgt_id: id(),
+                    edges: vec![],
+                },
+            ),
+            (
+                7,
+                MutationOp::SetTypeFieldAliases {
+                    node_type: "T".into(),
+                    id_field: Some("uid".into()),
+                    title_field: None,
                 },
             ),
         ];
@@ -1380,6 +1440,63 @@ mod tests {
         let got = recover(&p).unwrap();
         assert_eq!(got.iter().map(|f| f.lsn).collect::<Vec<_>>(), [1, 2]);
         assert_eq!(got[0], frame(1), "the pre-upgrade frame is unchanged");
+    }
+
+    /// Tag 7 must survive the file codec unchanged, `None` fields included —
+    /// a `None` that decoded as `Some("")` would clear a type's declared
+    /// spelling on replay instead of leaving it alone.
+    #[test]
+    fn type_field_alias_op_round_trips_through_the_file_codec() {
+        let ops = vec![
+            MutationOp::SetTypeFieldAliases {
+                node_type: "A".into(),
+                id_field: Some("uid".into()),
+                title_field: Some("name".into()),
+            },
+            MutationOp::SetTypeFieldAliases {
+                node_type: "B".into(),
+                id_field: Some("sku".into()),
+                title_field: None,
+            },
+            MutationOp::SetTypeFieldAliases {
+                node_type: "C".into(),
+                id_field: None,
+                title_field: Some("label".into()),
+            },
+        ];
+        let frames = vec![WalFrame { lsn: 1, ops }];
+        assert_eq!(read_frames_all(write_wal(&frames)).unwrap(), frames);
+    }
+
+    /// A v4 WAL — written before tag 7 existed — replays exactly under the
+    /// v5 schema. Tags 0–6 are unchanged, so the older log is a strict
+    /// subset, not a format this build has to mirror.
+    #[test]
+    fn v4_frames_replay_exactly_under_current_schema() {
+        let frames = vec![WalFrame {
+            lsn: 1,
+            ops: vec![
+                MutationOp::ReplaceNodeState {
+                    node_type: "Person".into(),
+                    id: Value::Int64(1),
+                    title: Value::String("Alice".into()),
+                    properties: vec![("age".into(), Value::Int64(30))],
+                    labels: vec!["Staff".into()],
+                    reset: false,
+                },
+                MutationOp::ReplaceEdgeGroup {
+                    conn_type: "KNOWS".into(),
+                    src_type: "Person".into(),
+                    src_id: Value::Int64(1),
+                    tgt_type: "Person".into(),
+                    tgt_id: Value::Int64(2),
+                    edges: vec![vec![("since".into(), Value::Int64(2020))]],
+                },
+            ],
+        }];
+        let bytes = write_wal_version(&frames, 4);
+        assert_eq!(bytes[4], 4, "fixture must carry a v4 header");
+        assert_eq!(read_frames_all(bytes).unwrap(), frames);
     }
 
     /// A WAL from a *newer* build must be refused loudly rather than

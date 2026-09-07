@@ -201,7 +201,9 @@ pub(super) fn events_from_raw(
 
     for op in raw {
         match op {
-            RawOp::WalNode { .. } | RawOp::WalGroup { .. } => {}
+            // A type-field declaration changes no entity, so it publishes
+            // no event; the rows it describes carry their own.
+            RawOp::WalNode { .. } | RawOp::WalGroup { .. } | RawOp::SetTypeFieldAliases { .. } => {}
             RawOp::UpsertNode(idx, origin, before) => stage_upsert(
                 &mut entries,
                 &mut slots,

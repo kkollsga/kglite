@@ -285,7 +285,16 @@ fn v4_appended_tags_and_legacy_header_upgrade_preserve_exact_payloads() {
         tgt_id: Value::Null,
         edges: vec![vec![], vec![]],
     };
-    for (op, tag) in [(node.clone(), 5), (group.clone(), 6)] {
+    let declaration = MutationOp::SetTypeFieldAliases {
+        node_type: "Item".into(),
+        id_field: Some("sku".into()),
+        title_field: None,
+    };
+    for (op, tag) in [
+        (node.clone(), 5),
+        (group.clone(), 6),
+        (declaration.clone(), 7),
+    ] {
         let bytes = crate::serde_codec::encode_versioned(
             crate::serde_codec::CodecVersion::PostcardV1,
             &op,
@@ -294,7 +303,10 @@ fn v4_appended_tags_and_legacy_header_upgrade_preserve_exact_payloads() {
         .unwrap();
         assert_eq!(bytes[0], tag, "append-only Postcard tag");
     }
-    for version in [2, 3] {
+    // Every readable older header upgrades in place, keeping its frames.
+    for version in
+        crate::graph::wal::MIN_READABLE_WAL_FORMAT_VERSION..crate::graph::wal::WAL_FORMAT_VERSION
+    {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("old.wal");
         let old = WalFrame {
@@ -313,11 +325,14 @@ fn v4_appended_tags_and_legacy_header_upgrade_preserve_exact_payloads() {
         let mut wal = Wal::open(path.clone(), SyncMode::PageCache).unwrap();
         let new = WalFrame {
             lsn: 2,
-            ops: vec![node.clone(), group.clone()],
+            ops: vec![node.clone(), group.clone(), declaration.clone()],
         };
         wal.append(&new).unwrap();
         drop(wal);
-        assert_eq!(std::fs::read(&path).unwrap()[4], 4);
+        assert_eq!(
+            std::fs::read(&path).unwrap()[4],
+            crate::graph::wal::WAL_FORMAT_VERSION
+        );
         assert_eq!(recover(&path).unwrap(), vec![old, new]);
     }
 }
@@ -543,7 +558,10 @@ fn v4_ambiguous_legacy_replay_refuses_without_graph_cdc_or_file_publication() {
     use crate::graph::io::file::save_graph;
     use crate::graph::storage::mode::{new_dir_graph_in_mode, StorageMode};
     for mode in [StorageMode::Memory, StorageMode::Mapped] {
-        for version in [2, 3] {
+        // Every readable older header upgrades in place, keeping its frames.
+        for version in crate::graph::wal::MIN_READABLE_WAL_FORMAT_VERSION
+            ..crate::graph::wal::WAL_FORMAT_VERSION
+        {
             for remove in [false, true] {
                 let tmp = tempfile::tempdir().unwrap();
                 let path = tmp.path().join("legacy.kgl");

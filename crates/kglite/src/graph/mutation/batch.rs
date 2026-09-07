@@ -1131,9 +1131,30 @@ mod wal_amplification_tests {
         let ops = resolve_ops(&raw, &dir.graph, &dir.interner, |idx| {
             dir.secondary_label_names(idx)
         });
-        let op_count = ops.len();
+        // The call declares `name` as the title spelling, which is one
+        // type-level op for the whole call — a constant, not amplification.
+        let declarations = ops
+            .iter()
+            .filter(|op| {
+                matches!(
+                    op,
+                    crate::graph::wal::MutationOp::SetTypeFieldAliases { .. }
+                )
+            })
+            .count();
+        assert_eq!(
+            declarations, 1,
+            "the identity-field declaration must be logged once per call, not per row"
+        );
+        let op_count = ops.len() - declarations;
         let mut ids: Vec<_> = ops
             .iter()
+            .filter(|op| {
+                !matches!(
+                    op,
+                    crate::graph::wal::MutationOp::SetTypeFieldAliases { .. }
+                )
+            })
             .map(|op| match op {
                 crate::graph::wal::MutationOp::ReplaceNodeState {
                     id: Value::Int64(id),

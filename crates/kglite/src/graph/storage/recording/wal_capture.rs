@@ -118,8 +118,22 @@ pub(super) fn resolve(
     let mut node_order = Vec::new();
     let mut groups: HashMap<GroupKey, (NodeIndex, NodeIndex)> = HashMap::new();
     let mut group_order = Vec::new();
+    // Declarations are type-keyed and carry their own payload, so they are
+    // passed through in capture order rather than normalized against final
+    // state. They lead the frame because that is where `add_nodes` issues
+    // them — a prologue ahead of the rows they describe.
+    let mut aliases = Vec::new();
     for op in raw {
         match op {
+            RawOp::SetTypeFieldAliases {
+                node_type,
+                id_field,
+                title_field,
+            } => aliases.push(MutationOp::SetTypeFieldAliases {
+                node_type: node_type.clone(),
+                id_field: id_field.clone(),
+                title_field: title_field.clone(),
+            }),
             RawOp::WalNode {
                 idx,
                 node_type,
@@ -172,7 +186,8 @@ pub(super) fn resolve(
         let idx = nodes.get(key).map_or(Some(hint), |touch| touch.idx)?;
         matches(idx, key).then_some(idx)
     };
-    let mut out = Vec::with_capacity(nodes.len() + groups.len());
+    let mut out = Vec::with_capacity(aliases.len() + nodes.len() + groups.len());
+    out.append(&mut aliases);
     for key in node_order {
         let touch = &nodes[&key];
         let idx = touch.idx.filter(|idx| matches(*idx, &key));

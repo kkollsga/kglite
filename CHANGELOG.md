@@ -11,6 +11,33 @@ before upgrading.
 
 ### Fixed
 
+- A crash under `durable="normal"`/`"full"` before the first `save()` no
+  longer loses the identity-field spellings an `add_nodes` call declared.
+  `add_nodes(df, "A", unique_id_field="uid", node_title_field="name")` records
+  that `A` is keyed by `uid`; that declaration lives above the storage backend,
+  so no write-ahead-log entry described it. Replay recovered every node and
+  every property value under the canonical `id`/`title`, but `n.uid` came back
+  null (with a warning that misdiagnosed it as a typo) and `MATCH (n:A {uid:
+  1})` raised `SchemaError` — and because the recovered app's next periodic
+  `save()` writes a checkpoint that lacks the spelling *and* truncates the log,
+  the loss became permanent at that point. The declaration is now logged as
+  `SetTypeFieldAliases` and reinstated by replay, spelling and property
+  metadata both. A call that names no `node_title_field` still declares no
+  title spelling, so a later chunk cannot rebind it.
+
+  This appends a new operation to the log's op table and moves the WAL sidecar
+  format from v4 to v5. A v2/v3/v4 sidecar left by an older build still
+  replays exactly — the older tags are unchanged, so an old log is a strict
+  subset — and its header is upgraded in place before this build appends. A v5
+  sidecar handed to an older build is refused with the existing "unsupported
+  WAL format version" message rather than being silently truncated. No `.kgl`
+  checkpoint format changed.
+
+  Still checkpoint-only, unchanged by this release and now stated exactly in
+  the durability guides: `set_parent_type`, ontology declarations,
+  `CREATE CONSTRAINT`, `create_index`, `set_spatial`, `set_schema_version`,
+  embeddings, and timeseries.
+
 - A column declared ``column_types={'v': 'datetime'}`` now parses text that
   carries a time, and an unparseable cell is no longer silent. Given
   `'2024-03-15 08:30:00'` in a string column, `'datetime'` stored NULL for

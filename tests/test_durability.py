@@ -2013,3 +2013,134 @@ def test_logged_dematerialize_replays(tmp_path, storage):
     g = _open(tmp_path / "app.kgl", storage)
     assert g.cypher("MATCH (p:Person) RETURN count(p) AS c").scalar() == 0
     assert g.cypher("MATCH (n:Student) RETURN labels(n) AS l").scalar() == ["Student"]
+
+
+# ── identity field aliases (add_nodes declarations) ──────────────────
+#
+# `add_nodes(unique_id_field="uid")` records `uid` as type `A`'s id spelling in
+# `DirGraph::id_field_aliases`, which lives *above* the storage backend — the
+# same position secondary labels occupy. Every value written under it survives
+# replay under the canonical `id`, but without a log entry the *name* did not,
+# so `n.uid` read null on a recovered graph and `{uid: 1}` raised SchemaError.
+# Design: dev-docs/designs/durable-precheckpoint-2026-09.md.
+
+_ALIAS_LOAD = """
+        import pandas as pd
+        g = open_durable()
+        g.add_nodes(
+            pd.DataFrame({"uid": [1, 2], "name": ["a", "b"], "score": [1.5, 2.5]}),
+            "A",
+            unique_id_field="uid",
+            node_title_field="name",
+        )
+"""
+
+
+def _assert_alias_reads(g):
+    """Every read shape the declaration promised, on a recovered graph."""
+    assert g.cypher("MATCH (n:A) WHERE n.uid = 1 RETURN n.name AS t").to_list() == [{"t": "a"}]
+    assert g.cypher("MATCH (n:A {uid: 2}) RETURN n.name AS t").to_list() == [{"t": "b"}]
+    props = g.cypher("MATCH (n:A) WHERE n.uid = 1 RETURN properties(n) AS p").scalar()
+    assert props["uid"] == 1 and props["name"] == "a" and props["score"] == 1.5
+    assert g.node("A", 1)["title"] == "a"
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+@pytest.mark.parametrize("level", LOGGING_LEVELS)
+def test_add_nodes_identity_alias_survives_hard_crash(tmp_path, storage, level):
+    """The declaration is part of the committed write, not checkpoint-only
+    metadata: after a crash before any `save()`, the type is still keyed by
+    the spelling the loader declared."""
+    _crash_child(tmp_path, _ALIAS_LOAD, storage, durable=level)
+    assert not (tmp_path / "app.kgl").exists()
+    g = _open(tmp_path / "app.kgl", storage, durable=level)
+    _assert_alias_reads(g)
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_recovered_identity_alias_survives_the_next_checkpoint(tmp_path, storage):
+    """The permanence case. A recovered app's next periodic `save()` writes a
+    checkpoint *and truncates the log*, so an alias missing at that moment is
+    lost for good — no later re-declaration can be assumed."""
+    _crash_child(tmp_path, _ALIAS_LOAD, storage)
+    g = _open(tmp_path / "app.kgl", storage)
+    g.save(str(tmp_path / "saved.kgl"))
+    del g
+    _assert_alias_reads(kglite.load(str(tmp_path / "saved.kgl")))
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_string_identity_alias_survives_hard_crash(tmp_path, storage):
+    """A string business key takes the same path; nothing here is numeric."""
+    _crash_child(
+        tmp_path,
+        """
+        import pandas as pd
+        g = open_durable()
+        g.add_nodes(
+            pd.DataFrame({"sku": ["A-1", "A-2"], "label": ["one", "two"]}),
+            "P",
+            unique_id_field="sku",
+            node_title_field="label",
+        )
+        """,
+        storage,
+    )
+    g = _open(tmp_path / "app.kgl", storage)
+    assert g.cypher("MATCH (n:P {sku: 'A-2'}) RETURN n.label AS l").to_list() == [{"l": "two"}]
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_undeclared_title_field_stays_undeclared_after_replay(tmp_path, storage):
+    """`node_title_field=None` declares no title spelling, and replay must not
+    invent one. Logging the title field unconditionally would rebind the title
+    alias to the id column, making `n.uid` resolve to the stored title — the
+    exact bug the `should_update_title` guard prevents on the live path."""
+    _crash_child(
+        tmp_path,
+        """
+        import pandas as pd
+        g = open_durable()
+        g.add_nodes(
+            pd.DataFrame({"uid": [1, 2], "note": ["x", "y"]}),
+            "A",
+            unique_id_field="uid",
+        )
+        """,
+        storage,
+    )
+    import pandas as pd
+
+    g = _open(tmp_path / "app.kgl", storage)
+    assert g.cypher("MATCH (n:A {uid: 1}) RETURN n.note AS n").to_list() == [{"n": "x"}]
+    props = g.cypher("MATCH (n:A) WHERE n.uid = 2 RETURN properties(n) AS p").scalar()
+
+    # The same load, never crashed: the recovered graph must expose exactly the
+    # same identity vocabulary, no more and no less. An unconditionally logged
+    # title field would show up here as a second spelling of `title`.
+    live = kglite.KnowledgeGraph()
+    live.add_nodes(pd.DataFrame({"uid": [1, 2], "note": ["x", "y"]}), "A", unique_id_field="uid")
+    expected = live.cypher("MATCH (n:A) WHERE n.uid = 2 RETURN properties(n) AS p").scalar()
+    assert props == expected
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_alias_declared_after_a_checkpoint_replays(tmp_path, storage):
+    """Replay folds over an existing checkpoint: a type first declared in the
+    logged tail must arrive with its spelling, beside a type the checkpoint
+    already holds."""
+    g = _open(tmp_path / "app.kgl", storage)
+    import pandas as pd
+
+    g.add_nodes(
+        pd.DataFrame({"eid": [9], "nm": ["old"]}),
+        "E",
+        unique_id_field="eid",
+        node_title_field="nm",
+    )
+    g.save()
+    del g
+    _crash_child(tmp_path, _ALIAS_LOAD, storage)
+    g = _open(tmp_path / "app.kgl", storage)
+    _assert_alias_reads(g)
+    assert g.cypher("MATCH (n:E {eid: 9}) RETURN n.nm AS t").to_list() == [{"t": "old"}]

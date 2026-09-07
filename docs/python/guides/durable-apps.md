@@ -374,11 +374,14 @@ model.
   it deleted underneath them — but there is no retention policy yet, so
   checkpoint on a schedule you have the disk budget for, and prune old
   `generations/gen_*` directories yourself once no reader is using them.
-- **Some state is checkpoint-only.** The log describes nodes, edges, and
-  labels. Schema and config metadata, user-created indexes, embeddings, and
-  timeseries have no log entry, so they are persisted by `save()` rather than
-  recovered by replay. Call `save()` after changing them if a crash must not
-  lose them.
+- **Some state is checkpoint-only.** The log describes nodes, edges, labels,
+  and the identity-field spellings an `add_nodes` call declares
+  (`unique_id_field` / `node_title_field`), so a recovered graph is still
+  queryable by your own column names. What has *no* log entry — persisted by
+  `save()` rather than recovered by replay — is `set_parent_type`, ontology
+  declarations, `CREATE CONSTRAINT`, `create_index`, `set_spatial`,
+  `set_schema_version`, embeddings, and timeseries. Call `save()` after
+  changing any of those if a crash must not lose them.
 - **A `with` block is not a transaction.** Each mutation commits as it runs, so
   an exception inside the block does not undo mutations that already returned —
   they are recovered on the next `open()`. Use `begin()` when you want

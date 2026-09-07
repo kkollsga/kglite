@@ -121,9 +121,11 @@ fn mutation_op_has_legacy_reference(op: &MutationOp) -> bool {
         MutationOp::ReplaceEdgeGroup { edges, .. } => edges
             .iter()
             .any(|properties| values_contain_reference(properties)),
+        // Identity and declaration ops carry no user values at all.
         MutationOp::RemoveNode { .. }
         | MutationOp::RemoveEdge { .. }
-        | MutationOp::SetNodeLabels { .. } => false,
+        | MutationOp::SetNodeLabels { .. }
+        | MutationOp::SetTypeFieldAliases { .. } => false,
     }
 }
 

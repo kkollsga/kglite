@@ -751,3 +751,130 @@ fn replaying_twice_is_idempotent() {
     assert_eq!(g.graph.node_count(), 2, "idempotent — no duplicate nodes");
     assert_eq!(g.graph.edge_count(), 1, "idempotent — no duplicate edge");
 }
+
+// ── type-level identity-field declarations ───────────────────────────
+
+fn declare(node_type: &str, id_field: Option<&str>, title_field: Option<&str>) -> MutationOp {
+    MutationOp::SetTypeFieldAliases {
+        node_type: node_type.into(),
+        id_field: id_field.map(str::to_string),
+        title_field: title_field.map(str::to_string),
+    }
+}
+
+fn aliases(g: &DirGraph, node_type: &str) -> (Option<String>, Option<String>) {
+    (
+        g.id_field_aliases.get(node_type).cloned(),
+        g.title_field_aliases.get(node_type).cloned(),
+    )
+}
+
+#[test]
+fn declaration_replays_beside_the_rows_it_describes() {
+    let mut g = DirGraph::new();
+    let frames = vec![frame(
+        1,
+        vec![
+            declare("Person", Some("uid"), Some("name")),
+            upsert_node(1, "Alice", vec![("age", Value::Int64(30))]),
+        ],
+    )];
+    apply_frames(&mut g, &frames, 0).unwrap();
+    assert_eq!(
+        aliases(&g, "Person"),
+        (Some("uid".into()), Some("name".into()))
+    );
+    assert_eq!(prop(&mut g, 1, "age"), Some(Value::Int64(30)));
+}
+
+#[test]
+fn a_declaration_only_frame_is_not_folded_away_as_empty() {
+    // The plan has no node and no edge slot, so an emptiness test that only
+    // counted those would skip the whole replay and silently drop the op.
+    let mut g = DirGraph::new();
+    let frames = vec![frame(1, vec![declare("Person", Some("uid"), None)])];
+    assert_eq!(apply_frames(&mut g, &frames, 0).unwrap(), 1);
+    assert_eq!(aliases(&g, "Person"), (Some("uid".into()), None));
+}
+
+#[test]
+fn a_later_declaration_wins_per_field() {
+    let mut g = DirGraph::new();
+    let frames = vec![
+        frame(1, vec![declare("Person", Some("uid"), Some("name"))]),
+        frame(2, vec![declare("Person", Some("pid"), Some("label"))]),
+    ];
+    apply_frames(&mut g, &frames, 0).unwrap();
+    assert_eq!(
+        aliases(&g, "Person"),
+        (Some("pid".into()), Some("label".into()))
+    );
+}
+
+#[test]
+fn an_undeclared_field_leaves_an_earlier_declaration_standing() {
+    // `None` is "this call named no spelling", never "clear it". Reading it
+    // as a clear would rebind the title spelling to the id column on the
+    // very next chunk of a chunked load — the bug `should_update_title`
+    // prevents on the live path.
+    let mut g = DirGraph::new();
+    let frames = vec![
+        frame(1, vec![declare("Person", Some("uid"), Some("name"))]),
+        frame(2, vec![declare("Person", Some("uid"), None)]),
+    ];
+    apply_frames(&mut g, &frames, 0).unwrap();
+    assert_eq!(
+        aliases(&g, "Person"),
+        (Some("uid".into()), Some("name".into()))
+    );
+
+    // Same within one frame, where the fold sees both ops back to back.
+    let mut g = DirGraph::new();
+    apply_frames(
+        &mut g,
+        &[frame(
+            1,
+            vec![
+                declare("Person", Some("uid"), Some("name")),
+                declare("Person", None, None),
+            ],
+        )],
+        0,
+    )
+    .unwrap();
+    assert_eq!(
+        aliases(&g, "Person"),
+        (Some("uid".into()), Some("name".into()))
+    );
+}
+
+#[test]
+fn declarations_for_several_types_are_independent() {
+    let mut g = DirGraph::new();
+    let frames = vec![frame(
+        1,
+        vec![
+            declare("Person", Some("uid"), None),
+            declare("Company", Some("orgnr"), Some("nm")),
+        ],
+    )];
+    apply_frames(&mut g, &frames, 0).unwrap();
+    assert_eq!(aliases(&g, "Person"), (Some("uid".into()), None));
+    assert_eq!(
+        aliases(&g, "Company"),
+        (Some("orgnr".into()), Some("nm".into()))
+    );
+}
+
+#[test]
+fn a_frame_at_or_below_the_checkpoint_lsn_declares_nothing() {
+    // The checkpoint already holds the declaration; a frame it consumed must
+    // not be re-applied over a spelling a later frame changed.
+    let mut g = DirGraph::new();
+    let frames = vec![
+        frame(1, vec![declare("Person", Some("stale"), None)]),
+        frame(2, vec![declare("Person", Some("uid"), None)]),
+    ];
+    apply_frames(&mut g, &frames, 1).unwrap();
+    assert_eq!(aliases(&g, "Person"), (Some("uid".into()), None));
+}
