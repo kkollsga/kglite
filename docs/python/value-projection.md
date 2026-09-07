@@ -275,7 +275,8 @@ Bolt PackStream analogue. For other targets:
   [`docs/rust/c-abi.md`](../rust/c-abi.md).
 
   Every JSON consumer — the C ABI, the CLI's `--mode json`, the MCP
-  server's recipe results — shares one converter,
+  server's recipe results and the `cypher_query` inline preview —
+  shares one converter,
   `kglite::api::param::kglite_value_to_json`, and that converter's
   object shapes deliberately mirror the Python binding's, so the same
   query read two ways has the same field names:

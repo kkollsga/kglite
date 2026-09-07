@@ -11,6 +11,22 @@ before upgrading.
 
 ### Fixed
 
+- The MCP server's `cypher_query` inline preview now renders list, map,
+  node, relationship and path cells as natural JSON, matching every other
+  JSON surface. It previously emitted serde's externally-tagged encoding of
+  the internal `Value` enum — `{"Relationship":{"rel_type":"LINK",
+  "properties":{"w":{"Float64":1.5}}}}` where the C ABI, the CLI's
+  `--format json` and the server's own recipe results all say
+  `{"end":2,"id":0,"properties":{"w":1.5},"start":1,"type":"LINK"}` — and a
+  nested null reached the agent as the string `"Null"` while a top-level one
+  was `null`. The preview now goes through the shared
+  `kglite::api::param::kglite_value_to_json`, the converter
+  [`docs/python/value-projection.md`](docs/python/value-projection.md)
+  already declares for this shape. Agents parsing the preview text see
+  different field names than before (`start`/`end`/`type` rather than
+  `start_id`/`end_id`/`rel_type`, unwrapped scalars); `FORMAT CSV` output is
+  unchanged.
+
 - A crash under `durable="normal"`/`"full"` before the first `save()` no
   longer loses the identity-field spellings an `add_nodes` call declared.
   `add_nodes(df, "A", unique_id_field="uid", node_title_field="name")` records

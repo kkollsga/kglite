@@ -443,21 +443,20 @@ pub(crate) fn push_value_repr(out: &mut String, val: &Value) {
         Value::NodeRef(idx) => {
             let _ = write!(out, "node[{idx}]");
         }
-        // Collection / graph-entity variants. Render as compact JSON
-        // for the MCP text surface; the structured form is already
-        // what agents consume via `to_dicts()` / `to_list()`. Falls
-        // back to `?` on serialisation failure (shouldn't happen —
-        // these all derive Serialize).
+        // Collection / graph-entity variants go through the shared
+        // converter, so this text surface publishes the same object shape as
+        // the C ABI, the CLI's `--format json` and MCP recipe results — the
+        // one `docs/python/value-projection.md` documents. Serialising the
+        // `Value` enum directly would emit serde's externally-tagged
+        // persistence encoding (`{"Relationship":{...,"w":{"Float64":1.5}}}`,
+        // nested null as the string `"Null"`), which an agent reading this
+        // preview has no accessor to undo.
         Value::List(_)
         | Value::Map(_)
         | Value::Node(_)
         | Value::Relationship(_)
         | Value::Path(_) => {
-            let _ = write!(
-                out,
-                "{}",
-                serde_json::to_string(val).unwrap_or_else(|_| "?".to_string())
-            );
+            let _ = write!(out, "{}", kglite::api::param::kglite_value_to_json(val));
         }
     }
 }
@@ -481,5 +480,98 @@ mod fractional_timestamp_contract_tests {
             push_value_repr(&mut actual, &stamp(text));
             assert_eq!(actual, text);
         }
+    }
+}
+
+#[cfg(test)]
+mod natural_json_contract_tests {
+    use super::*;
+    use kglite::api::{NodeValue, PathValue, PropMap, RelValue};
+
+    fn repr(val: &Value) -> String {
+        let mut out = String::new();
+        push_value_repr(&mut out, val);
+        out
+    }
+
+    fn props(pairs: Vec<(&str, Value)>) -> PropMap {
+        PropMap::from_pairs(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+    }
+
+    fn node(id: u32, label: &str, name: &str) -> NodeValue {
+        NodeValue {
+            id,
+            labels: vec![label.to_string()],
+            properties: props(vec![("name", Value::String(name.to_string()))]),
+        }
+    }
+
+    fn rel() -> RelValue {
+        RelValue {
+            id: 0,
+            start_id: 1,
+            end_id: 2,
+            rel_type: "LINK".to_string(),
+            properties: props(vec![("w", Value::Float64(1.5))]),
+        }
+    }
+
+    /// The inline preview publishes the same object shape as the C ABI, the
+    /// CLI's `--format json` and the MCP recipe results — the shape
+    /// `docs/python/value-projection.md` documents. A serde-derived
+    /// externally-tagged rendering (`{"Relationship":{…}}`, `{"Float64":1.5}`,
+    /// `"Null"`) is a different wire, and an agent has no accessor to undo it.
+    #[test]
+    fn list_of_scalars_renders_as_a_bare_json_array() {
+        let val = Value::List(vec![Value::Int64(1), Value::String("a".to_string())]);
+        assert_eq!(repr(&val), r#"[1,"a"]"#);
+    }
+
+    #[test]
+    fn a_nested_null_renders_as_json_null_not_the_string_null() {
+        let val = Value::List(vec![Value::List(vec![Value::Int64(1), Value::Null])]);
+        let text = repr(&val);
+        assert_eq!(text, "[[1,null]]");
+        assert!(!text.contains(r#""Null""#), "tagged null leaked: {text}");
+        assert!(!text.contains("Int64"), "tagged scalar leaked: {text}");
+    }
+
+    #[test]
+    fn a_map_renders_as_a_json_object_with_a_null_member() {
+        let val = Value::Map(props(vec![("a", Value::Int64(1)), ("b", Value::Null)]));
+        assert_eq!(repr(&val), r#"{"a":1,"b":null}"#);
+    }
+
+    #[test]
+    fn a_node_renders_with_the_published_field_names() {
+        let val = Value::Node(Box::new(node(7, "P", "x")));
+        let text = repr(&val);
+        assert_eq!(text, r#"{"id":7,"labels":["P"],"properties":{"name":"x"}}"#);
+        assert!(!text.contains(r#""Node""#), "tagged node leaked: {text}");
+    }
+
+    #[test]
+    fn a_relationship_renders_with_the_published_field_names_and_a_bare_float() {
+        let text = repr(&Value::Relationship(Box::new(rel())));
+        assert_eq!(
+            text,
+            r#"{"end":2,"id":0,"properties":{"w":1.5},"start":1,"type":"LINK"}"#
+        );
+        assert!(!text.contains("rel_type"), "internal field leaked: {text}");
+        assert!(!text.contains("Float64"), "tagged scalar leaked: {text}");
+    }
+
+    #[test]
+    fn a_path_renders_as_nodes_and_relationships() {
+        let val = Value::Path(Box::new(PathValue {
+            nodes: vec![node(1, "P", "a"), node(2, "P", "b")],
+            rels: vec![rel()],
+        }));
+        let text = repr(&val);
+        assert_eq!(
+            text,
+            r#"{"nodes":[{"id":1,"labels":["P"],"properties":{"name":"a"}},{"id":2,"labels":["P"],"properties":{"name":"b"}}],"relationships":[{"end":2,"id":0,"properties":{"w":1.5},"start":1,"type":"LINK"}]}"#
+        );
+        assert!(!text.contains(r#""Path""#), "tagged path leaked: {text}");
     }
 }
