@@ -65,3 +65,48 @@ def test_parse_json_predicate_over_parameters() -> None:
         )
     }
     assert hits == {"takes_dataset"}, hits
+
+
+def test_parse_json_non_finite_number_nulls_the_whole_document() -> None:
+    """A number token outside finite f64 fails the *parse*, not one field.
+
+    Under the shipped serde_json features (no ``arbitrary_precision``) the
+    token ``1e400`` is refused with "number out of range" before any value is
+    built, so parse_json() takes its invalid-JSON branch and returns NULL for
+    the entire document. The sibling keys are gone with it — this is
+    deliberately *not* a per-number NULL, and the assertions below fail if
+    anyone converts it into one.
+    """
+    g = kglite.KnowledgeGraph()
+
+    rows = list(g.cypher("RETURN parse_json('{\"a\": 1e400}') AS r"))
+    assert rows[0]["r"] is None
+
+    rows = list(g.cypher("RETURN parse_json('[1e400]') AS r"))
+    assert rows[0]["r"] is None
+
+    # The surviving-siblings shape is what a per-number NULL would produce.
+    rows = list(g.cypher('RETURN parse_json(\'{"a": 1, "b": 1e400}\') AS r'))
+    assert rows[0]["r"] is None, "a non-finite token nulls the document, not just its own key"
+
+
+def test_parse_json_number_typing_at_the_f64_and_i64_edges() -> None:
+    """Every number serde_json *accepts* keeps the tolerant converter's typing.
+
+    ``1e308`` is finite, so it stays Float64; ``2**63 - 1`` fits i64 and stays
+    Int64; ``2**63`` does not, so the converter folds it to the nearest f64
+    (9.223372036854776e18) rather than nulling it. Query *parameters* are the
+    strict path — this one is documented as tolerant.
+    """
+    g = kglite.KnowledgeGraph()
+    rows = list(
+        g.cypher(
+            'RETURN parse_json(\'{"a": 1e308, "b": -1e308, "c": 9223372036854775807, "d": 9223372036854775808}\') AS r'
+        )
+    )
+    parsed = rows[0]["r"]
+    assert parsed is not None
+    assert parsed["a"] == 1e308 and isinstance(parsed["a"], float)
+    assert parsed["b"] == -1e308 and isinstance(parsed["b"], float)
+    assert parsed["c"] == 9223372036854775807 and isinstance(parsed["c"], int)
+    assert parsed["d"] == 9.223372036854776e18 and isinstance(parsed["d"], float)

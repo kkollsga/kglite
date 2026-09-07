@@ -71,8 +71,20 @@ geom, or wkt for WKT; latitude+longitude or lat+lon for points).";
 
 /// Recursively convert a parsed `serde_json::Value` into a kglite `Value`.
 /// Objects become `Value::Map`, arrays `Value::List`; integers that fit i64
-/// stay `Int64`, finite other numbers become `Float64`, and numbers outside
-/// finite `f64` become `Null`. Backs the `parse_json()` Cypher function.
+/// stay `Int64`, and every other number becomes `Float64` — including one
+/// past i64 (`9223372036854775808` folds to `9.223372036854776e18`). This is
+/// the tolerant policy; query parameters are the strict path.
+///
+/// **A number outside finite `f64` never reaches here under the shipped
+/// features.** Without `arbitrary_precision`, serde_json refuses `1e400` at
+/// parse time ("number out of range"), so `parse_json()` takes its
+/// invalid-JSON branch and yields `Null` for the *whole document*, not for
+/// the one field — pinned by `non_finite_number_token_fails_the_parse` below
+/// and by `tests/test_cypher_parse_json.py`. The `is_finite` filter guards
+/// the case where a downstream crate turns `arbitrary_precision` on through
+/// feature unification and such a token does get parsed.
+///
+/// Backs the `parse_json()` Cypher function.
 pub(super) fn json_to_value(j: &serde_json::Value) -> Value {
     match j {
         serde_json::Value::Null => Value::Null,
@@ -238,5 +250,39 @@ pub(super) fn coerce_naive_datetime(v: &Value) -> Option<chrono::NaiveDateTime> 
         Value::Timestamp(dt) => Some(*dt),
         Value::DateTime(d) => d.and_hms_opt(0, 0, 0),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::json_to_value;
+    use crate::datatypes::values::Value;
+
+    /// The premise of `json_to_value`'s doc: a non-finite number token is
+    /// refused by the parser, so the `is_finite` filter is unreachable and
+    /// `parse_json()` nulls the whole document. A red here means
+    /// `arbitrary_precision` got unified in and the filter is live again —
+    /// the doc, not the filter, is what has to change.
+    #[test]
+    fn non_finite_number_token_fails_the_parse() {
+        for text in [r#"{"a": 1e400}"#, "[1e400]", "-1e400"] {
+            let parsed = serde_json::from_str::<serde_json::Value>(text);
+            assert!(parsed.is_err(), "{text} unexpectedly parsed: {parsed:?}");
+        }
+    }
+
+    #[test]
+    fn parse_json_numbers_keep_int64_only_when_exact() {
+        let parsed: serde_json::Value = serde_json::from_str(
+            r#"{"a": 1e308, "c": 9223372036854775807, "d": 9223372036854775808}"#,
+        )
+        .expect("finite tokens parse");
+        let Value::Map(map) = json_to_value(&parsed) else {
+            panic!("object must convert to a map");
+        };
+        assert_eq!(map.get("a"), Some(&Value::Float64(1e308)));
+        assert_eq!(map.get("c"), Some(&Value::Int64(i64::MAX)));
+        // Past i64 the tolerant converter folds to f64 rather than nulling.
+        assert_eq!(map.get("d"), Some(&Value::Float64(9.223372036854776e18)));
     }
 }
