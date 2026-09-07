@@ -434,6 +434,20 @@ before upgrading.
   with a type test, e.g. `WHERE NOT (n.v < 5) OR toInteger(n.v) IS NULL`.
   Positive filters (`WHERE n.v < 5`) return exactly the rows they did before.
 
+- **`to_df` hands pandas a numpy array for a column whose cells are all
+  integers, all floats or all booleans**, instead of a Python list of boxed
+  scalars pandas then re-infers cell by cell. Measured over 100k rows × 10
+  integer columns (release build, `min` of 25 rounds, two agreeing runs):
+  **125.4 ms → 46.0/47.5 ms (2.7x)**, with pandas' share of the call falling
+  from 38% to 1.3% (`cProfile`: `maybe_convert_platform` 65 ms → 0). A mixed
+  frame of 8 numeric and 2 string columns went 100.9 ms → 59.9/62.6 ms
+  (1.6x); the all-string and integer-plus-NULL frames are unchanged controls
+  (within ±11% across the same runs, against a query control that itself moved
+  +8%). Column dtypes, values and mutability are identical: one NULL, one cell
+  of another type, one short row or zero rows and the column takes the boxed
+  path exactly as before, so `Int64` for integers with NULLs and `object` for
+  mixed columns are unchanged.
+
 ## [0.17.0] - 2026-09-07
 
 ### Fixed

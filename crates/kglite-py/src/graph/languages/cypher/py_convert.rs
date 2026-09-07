@@ -61,7 +61,28 @@ pub fn rows_to_dataframe(
         .map(|col| col.clone().into_py_any(py))
         .collect::<PyResult<_>>()?;
 
+    let numpy = ColumnBuffer::numpy(py);
+
     for (i, key) in col_keys.iter().enumerate() {
+        let buffer = numpy.as_ref().and_then(|_| ColumnBuffer::of(rows, i));
+        if let (Some(numpy), Some(buffer)) = (numpy.as_ref(), buffer) {
+            // Every cell of this column is the same unboxed numeric kind, so
+            // the exact dtype pandas would infer from the boxed list is known
+            // here and the whole column travels as raw bytes: no per-cell
+            // Python object, and no per-cell dtype inference on arrival.
+            dict.set_item(
+                key,
+                crate::datatypes::pandas_out::numeric_column(
+                    py,
+                    numpy,
+                    &buffer.bytes(rows, i),
+                    buffer.numpy_dtype(),
+                )?,
+            )?;
+            native_dtypes.set_item(key, None::<&str>)?;
+            col_order.append(key)?;
+            continue;
+        }
         let col_list = PyList::empty(py);
         let mut kinds = 0_u8;
         for row in rows {
@@ -102,6 +123,86 @@ fn dataframe_value_kind(value: Option<&Value>) -> u8 {
         Some(Value::Int64(_) | Value::UniqueId(_) | Value::NodeRef(_)) => 1,
         Some(Value::Null) | None => 2,
         _ => 4,
+    }
+}
+
+/// The fixed-width numpy layout a whole column can travel in.
+///
+/// Only the three kinds whose boxed-list form pandas infers to exactly this
+/// dtype qualify, and only when **every** cell is that kind: one NULL, one
+/// short row, or one cell of another type and the column stays on the boxed
+/// path, where `dataframe_integer_dtype` decides between `Int64`, `object` and
+/// pandas' own inference. So the frame is value- and dtype-identical either
+/// way — this is a transport change, not a policy one.
+#[derive(Clone, Copy)]
+enum ColumnBuffer {
+    Int64,
+    Float64,
+    Bool,
+}
+
+impl ColumnBuffer {
+    /// numpy, or `None` when it cannot be imported — then every column takes
+    /// the boxed path. pandas requires numpy, so this is unreachable in
+    /// practice; it costs one cached import per frame to not depend on that.
+    fn numpy(py: Python<'_>) -> Option<Bound<'_, PyModule>> {
+        py.import("numpy").ok()
+    }
+
+    /// The layout column `i` shares, or `None` for a mixed, nullable, ragged
+    /// or empty column. Empty is excluded deliberately: a zero-length typed
+    /// array would fix a dtype the boxed path leaves to pandas.
+    fn of(rows: &[Vec<Value>], i: usize) -> Option<Self> {
+        let mut kind: Option<Self> = None;
+        for row in rows {
+            let cell = match row.get(i)? {
+                Value::Int64(_) | Value::UniqueId(_) | Value::NodeRef(_) => Self::Int64,
+                Value::Float64(_) => Self::Float64,
+                Value::Boolean(_) => Self::Bool,
+                _ => return None,
+            };
+            match kind {
+                None => kind = Some(cell),
+                Some(seen) if seen.numpy_dtype() == cell.numpy_dtype() => {}
+                Some(_) => return None,
+            }
+        }
+        kind
+    }
+
+    /// Native-endian, matching the dtype name below — the bytes never leave
+    /// this machine, so there is nothing to byte-swap for.
+    fn bytes(self, rows: &[Vec<Value>], i: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(rows.len() * self.width());
+        for row in rows {
+            match (self, row.get(i)) {
+                (Self::Int64, Some(Value::Int64(v))) => out.extend_from_slice(&v.to_ne_bytes()),
+                (Self::Int64, Some(Value::UniqueId(v) | Value::NodeRef(v))) => {
+                    out.extend_from_slice(&i64::from(*v).to_ne_bytes());
+                }
+                (Self::Float64, Some(Value::Float64(v))) => out.extend_from_slice(&v.to_ne_bytes()),
+                (Self::Bool, Some(Value::Boolean(v))) => out.push(u8::from(*v)),
+                // `of` proved every cell above; a mismatch here would be a
+                // classifier/writer disagreement, not user data.
+                _ => unreachable!("column layout was proven by ColumnBuffer::of"),
+            }
+        }
+        out
+    }
+
+    fn width(self) -> usize {
+        match self {
+            Self::Int64 | Self::Float64 => 8,
+            Self::Bool => 1,
+        }
+    }
+
+    fn numpy_dtype(self) -> &'static str {
+        match self {
+            Self::Int64 => "int64",
+            Self::Float64 => "float64",
+            Self::Bool => "bool",
+        }
     }
 }
 

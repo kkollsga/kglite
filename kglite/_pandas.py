@@ -8,6 +8,11 @@ def dataframe(data, columns=None, dtypes=None, native_dtypes=None):
     use object, preserving numeric types and values. Other columns keep pandas
     inference. Unsupported recorded table dtypes retain the safe inferred form.
     pandas remains optional and is imported only when a caller requests a frame.
+
+    A column may arrive as a numpy array instead of a list: native hands one
+    over when every cell shares an unboxed numeric layout, which is the dtype
+    pandas would have inferred from the boxed list anyway. Treat column values
+    as a sequence — never as a truth value — so both forms flow through here.
     """
     import pandas as pd
 
@@ -24,7 +29,7 @@ def dataframe(data, columns=None, dtypes=None, native_dtypes=None):
             native_dtypes[name] if native_dtypes is not None and name in native_dtypes else _integer_dtype(values)
         )
         target = (dtypes or {}).get(name, inferred)
-        if target is None and values:
+        if target is None and len(values):
             prepared[name] = values
             continue
         try:

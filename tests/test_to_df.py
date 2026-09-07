@@ -160,3 +160,46 @@ class TestCypherToDF:
         assert isinstance(df, pd.DataFrame)
         assert len(df) == 3  # Alice->Bob, Bob->Charlie, Alice->Charlie
         assert set(df.columns) == {"person", "friend"}
+
+
+class TestNumericColumnTransport:
+    """A column whose every cell shares one unboxed numeric layout crosses the
+    boundary as raw bytes rather than as boxed Python scalars. The frame must be
+    indistinguishable from the boxed one — same dtype, same exact values, and
+    still writable, which a read-only buffer view would refuse."""
+
+    def test_homogeneous_columns_keep_their_boxed_dtypes(self, small_graph):
+        df = small_graph.cypher(
+            "MATCH (n:Person) RETURN n.age AS age, n.age * 1.5 AS scaled, n.age > 0 AS grown",
+            to_df=True,
+        )
+        assert str(df.age.dtype) == "int64"
+        assert str(df.scaled.dtype) == "float64"
+        assert str(df.grown.dtype) == "bool"
+        assert df.grown.tolist() == [True, True, True]
+
+    def test_int64_extremes_survive_the_byte_transport(self):
+        graph = kglite.KnowledgeGraph()
+        extremes = [-(2**63), 2**63 - 1, 9007199254740993, 0]
+        df = graph.cypher("UNWIND $v AS x RETURN x", params={"v": extremes}, to_df=True)
+        assert str(df.x.dtype) == "int64"
+        assert df.x.tolist() == extremes
+
+    def test_transported_column_is_writable_and_owns_its_cells(self):
+        graph = kglite.KnowledgeGraph()
+        df = graph.cypher("UNWIND [1, 2, 3] AS x RETURN x", to_df=True)
+        df.loc[0, "x"] = 99
+        assert df.x.tolist() == [99, 2, 3]
+        assert graph.cypher("UNWIND [1, 2, 3] AS x RETURN x", to_df=True).x.tolist() == [1, 2, 3]
+
+    def test_one_null_or_one_other_type_keeps_the_boxed_policy(self):
+        graph = kglite.KnowledgeGraph()
+        nullable = graph.cypher("UNWIND [1, null, 3] AS x RETURN x", to_df=True)
+        assert str(nullable.x.dtype) == "Int64"
+        assert nullable.x.tolist()[0] == 1 and pd.isna(nullable.x.tolist()[1])
+        mixed = graph.cypher("UNWIND [1, 1.5] AS x RETURN x", to_df=True)
+        assert str(mixed.x.dtype) == "object"
+        assert [type(v) for v in mixed.x.tolist()] == [int, float]
+        boolean_mix = graph.cypher("UNWIND [true, 1] AS x RETURN x", to_df=True)
+        assert str(boolean_mix.x.dtype) == "object"
+        assert [type(v) for v in boolean_mix.x.tolist()] == [bool, int]
