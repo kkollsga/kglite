@@ -2030,7 +2030,13 @@ class KnowledgeGraph:
                 full time-of-day when any value has a nonzero time (stored as a
                 ``Timestamp``); a pure-midnight column stays date-only
                 (``'datetime'``). Pass ``'timestamp'`` to force full date+time,
-                ``'datetime'`` to force date-only.
+                ``'datetime'`` to force date-only. Both accept text spelled
+                ``YYYY-MM-DD`` with an optional ``HH:MM[:SS[.fff]]`` after a
+                space or a ``T`` — ``'datetime'`` keeps the date part and drops
+                the time. A cell that parses as neither is stored as NULL and
+                reported through ``on_invalid`` (a ``UserWarning`` by default,
+                a refusal under ``'error'``), naming the column, the count and
+                the first offending row.
                 Also supports spatial types: ``'location.lat'``, ``'location.lon'``,
                 ``'geometry'``, ``'point.<name>.lat'``, ``'point.<name>.lon'``,
                 ``'shape.<name>'``.

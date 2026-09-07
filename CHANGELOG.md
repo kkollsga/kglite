@@ -11,6 +11,22 @@ before upgrading.
 
 ### Fixed
 
+- A column declared ``column_types={'v': 'datetime'}`` now parses text that
+  carries a time, and an unparseable cell is no longer silent. Given
+  `'2024-03-15 08:30:00'` in a string column, `'datetime'` stored NULL for
+  every row — `nodes_created` was right, `has_errors` was false, no warning was
+  emitted and `on_invalid='error'` did not fire — while `'timestamp'` parsed
+  the same text and the blueprint CSV grammar had always taken the date part.
+  Both declarations now accept `YYYY-MM-DD` with an optional
+  `HH:MM[:SS[.fff]]` after a space or a `T` (minute precision and fractional
+  seconds included, which `'timestamp'` also used to reject), `'datetime'`
+  keeping the date and dropping the time as documented. A cell that parses as
+  neither is still stored as NULL, but now reports through `on_invalid`,
+  naming the column, how many cells failed and the first offending row.
+  Blueprint-declared cells keep their documented NULL-on-invalid behaviour and
+  their audit census. A `datetime64` column under `'datetime'` is unchanged —
+  forcing date-only is what the declaration means.
+
 - `to_subgraph()` now carries the caller's captured query defaults. It was the
   one derived handle that reset them, so a graph under
   `set_default_row_limit(10)` answered every row through

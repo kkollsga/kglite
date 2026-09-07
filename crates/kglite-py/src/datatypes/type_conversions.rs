@@ -104,10 +104,35 @@ pub fn to_datetime(value: &Bound<'_, PyAny>, csv_text: bool) -> Option<NaiveDate
                     return Some(date);
                 }
             }
+            // A declared date-only column may be fed text that carries a time:
+            // `column_types={'v': 'datetime'}` means "force date-only", so the
+            // time is dropped rather than the value. The CSV grammar
+            // (`scalar::parse_date`) has always done this; the direct loader
+            // used to store NULL for the whole column instead.
+            return parse_datetime_text(text).map(|dt| dt.date());
         }
 
         None
     })
+}
+
+/// Text spellings of a date+time accepted by both temporal column paths.
+/// One list, so `'datetime'` and `'timestamp'` cannot disagree about which
+/// text is a timestamp — they differ only in what they keep of it.
+const DATETIME_TEXT_FORMATS: [&str; 6] = [
+    "%Y-%m-%dT%H:%M:%S%.f",
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%dT%H:%M",
+    "%Y-%m-%d %H:%M:%S%.f",
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+];
+
+fn parse_datetime_text(text: &str) -> Option<NaiveDateTime> {
+    let text = text.trim();
+    DATETIME_TEXT_FORMATS
+        .iter()
+        .find_map(|format| NaiveDateTime::parse_from_str(text, format).ok())
 }
 
 /// Convert a Python/pandas datetime-like value to a full-precision
@@ -154,18 +179,11 @@ pub fn to_timestamp(value: &Bound<'_, PyAny>) -> Option<NaiveDateTime> {
 
         // ISO string fallback (with and without fractional seconds / 'T').
         if let Ok(st) = value.extract::<String>() {
-            for fmt in [
-                "%Y-%m-%dT%H:%M:%S%.f",
-                "%Y-%m-%dT%H:%M:%S",
-                "%Y-%m-%d %H:%M:%S%.f",
-                "%Y-%m-%d %H:%M:%S",
-            ] {
-                if let Ok(dt) = NaiveDateTime::parse_from_str(&st, fmt) {
-                    return Some(dt);
-                }
+            if let Some(dt) = parse_datetime_text(&st) {
+                return Some(dt);
             }
             // Date-only string → midnight.
-            if let Ok(date) = NaiveDate::parse_from_str(&st, "%Y-%m-%d") {
+            if let Ok(date) = NaiveDate::parse_from_str(st.trim(), "%Y-%m-%d") {
                 return date.and_hms_opt(0, 0, 0);
             }
         }

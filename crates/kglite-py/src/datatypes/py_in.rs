@@ -162,10 +162,71 @@ fn parse_in_condition(val: &Bound<'_, PyAny>) -> PyResult<FilterCondition> {
     }
 }
 
+/// The cells of a declared temporal column that could not be parsed.
+///
+/// A cell that does not parse is stored as NULL — the load is not refused over
+/// one bad date. What the caller must never lose is the *knowledge*: a column
+/// declared `'datetime'` whose text carried a time used to empty itself in
+/// full, silently, with `has_errors` false. `on_invalid` decides the channel.
+///
+/// Blueprint-declared text is exempt: `from_blueprint` documents "invalid
+/// declared cells become NULL" and reports them through its own per-property
+/// audit census, so a second channel there would turn a documented outcome
+/// into a refusal.
+#[derive(Default)]
+struct UnparsedCells {
+    count: usize,
+    first: Option<(usize, String)>,
+}
+
+impl UnparsedCells {
+    fn note(&mut self, row: usize, cell: &Bound<'_, PyAny>) {
+        self.count += 1;
+        if self.first.is_none() {
+            let shown = cell
+                .repr()
+                .map(|repr| repr.to_string())
+                .unwrap_or_else(|_| "<unprintable>".to_string());
+            self.first = Some((row, shown));
+        }
+    }
+
+    /// `kind` names what the declared type wanted — "date" or "date and time".
+    fn report(
+        self,
+        py: Python<'_>,
+        col_name: &str,
+        kind: &str,
+        on_invalid: OnInvalid,
+    ) -> PyResult<()> {
+        let Some((row, value)) = self.first else {
+            return Ok(());
+        };
+        let count = self.count;
+        let (plural, verb) = if count == 1 {
+            ("value", "is")
+        } else {
+            ("values", "are")
+        };
+        on_invalid::report(
+            py,
+            on_invalid,
+            format!(
+                "Column '{col_name}': {count} {plural} could not be parsed as a {kind} \
+                 (row {row} holds {value}) and {verb} stored as NULL. Accepted text is \
+                 'YYYY-MM-DD' with an optional 'HH:MM[:SS[.fff]]' after a space or 'T'; \
+                 declare the column 'string' to keep the text as written."
+            ),
+        )
+    }
+}
+
 fn convert_pandas_series(
     series: &Bound<'_, PyAny>,
     col_type: ColumnType,
     csv_text: bool,
+    col_name: &str,
+    on_invalid: OnInvalid,
 ) -> PyResult<ColumnData> {
     let length = series.len()?;
 
@@ -292,13 +353,21 @@ fn convert_pandas_series(
             // DateTime needs custom parsing — use PyList for O(1) access
             let py_list = py_list.cast::<PyList>()?;
             let mut vec = Vec::with_capacity(length);
+            let mut unparsed = UnparsedCells::default();
             for (i, &is_null) in null_mask.iter().enumerate() {
                 if is_null {
                     vec.push(None);
                 } else {
                     let item = py_list.get_item(i)?;
-                    vec.push(to_datetime(&item, csv_text));
+                    let parsed = to_datetime(&item, csv_text);
+                    if parsed.is_none() {
+                        unparsed.note(i, &item);
+                    }
+                    vec.push(parsed);
                 }
+            }
+            if !csv_text {
+                unparsed.report(series.py(), col_name, "date", on_invalid)?;
             }
             Ok(ColumnData::DateTime(vec))
         }
@@ -307,13 +376,21 @@ fn convert_pandas_series(
             // preserving the time-of-day that the date-only DateTime path drops.
             let py_list = py_list.cast::<PyList>()?;
             let mut vec = Vec::with_capacity(length);
+            let mut unparsed = UnparsedCells::default();
             for (i, &is_null) in null_mask.iter().enumerate() {
                 if is_null {
                     vec.push(None);
                 } else {
                     let item = py_list.get_item(i)?;
-                    vec.push(to_timestamp(&item));
+                    let parsed = to_timestamp(&item);
+                    if parsed.is_none() {
+                        unparsed.note(i, &item);
+                    }
+                    vec.push(parsed);
                 }
+            }
+            if !csv_text {
+                unparsed.report(series.py(), col_name, "date and time", on_invalid)?;
             }
             Ok(ColumnData::Timestamp(vec))
         }
@@ -520,7 +597,13 @@ fn pandas_to_dataframe_with_text_policy(
                     .map(|types| types.contains(col_name))
                     .transpose()?
                     .unwrap_or(false);
-            let data = convert_pandas_series(&series, col_type.clone(), declared_text)?;
+            let data = convert_pandas_series(
+                &series,
+                col_type.clone(),
+                declared_text,
+                col_name,
+                on_invalid,
+            )?;
             // Optional: downcast Float64 columns whose non-null values are
             // all integer-valued. Pandas turns nullable int columns into
             // float64 when nulls are present; this restores the integer
