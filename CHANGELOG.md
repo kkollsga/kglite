@@ -448,6 +448,31 @@ before upgrading.
   path exactly as before, so `Int64` for integers with NULLs and `object` for
   mixed columns are unchanged.
 
+- **A BM25 top-k no longer falls back to per-row scoring when fewer documents
+  match than the `LIMIT` asks for.** `text_bm25(…) … ORDER BY score DESC LIMIT
+  k` with `k` above the number of matching documents threw away a complete,
+  correctly ranked postings answer and replayed the whole corpus through the
+  scalar — so the *most* selective queries were the most expensive ones. The
+  operator now completes the answer from the population it has already proven
+  equal to the index corpus: every remaining document shares no term with the
+  query and scores exactly `0.0`, tie-broken by slot ascending, which is the
+  scalar path's own order. Measured over 200,000 documents with a term in 20 of
+  them (release build, `min` of 25 rounds, two agreeing runs, the same binary
+  with and without the fusion pass): `LIMIT 100` **35.5 ms → 0.75 / 0.76 ms
+  (47x)**, landing on the 0.72 ms the same query costs at `LIMIT 10`; a term
+  matching nothing at `LIMIT 100` costs 0.71 ms. Rows, order and scores are
+  bit-identical to the scalar ranking. The type-scan control held at
+  1.72/1.77 ms across both runs.
+
+- `CYPHER.md` and the text-search guide no longer present
+  `WHERE text_bm25(…) > 0 … ORDER BY text_bm25(…) DESC` as the ranking idiom.
+  A `WHERE` makes the matched rows a subset of the corpus, which disqualifies
+  the postings top-k: measured over 50,000 documents with a term in 0.1% of
+  them, that shape costs **53x** the same query without the `WHERE` (6.1 ms vs
+  114 µs), and it filters nothing a `0.0` score was not already sorting last.
+  Both documents now show the filterless shape and say to filter on the graph
+  instead.
+
 ## [0.17.0] - 2026-09-07
 
 ### Fixed

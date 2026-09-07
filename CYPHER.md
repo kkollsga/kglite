@@ -641,9 +641,20 @@ ORDER BY score DESC LIMIT 10
 ```cypher
 // It is an ordinary scalar: filter first, then rank the survivors.
 MATCH (a:Article)-[:WRITTEN_BY]->(p:Person {name: 'Vera'})
-WHERE a.year >= 2020 AND text_bm25(a, 'body', 'low light') > 0
-RETURN a.title ORDER BY text_bm25(a, 'body', 'low light') DESC LIMIT 5
+WHERE a.year >= 2020
+RETURN a.title, text_bm25(a, 'body', 'low light') AS score
+ORDER BY score DESC LIMIT 5
 ```
+
+Filter on the **graph** (a year, an author, a hop), never on the score. The
+first form above — a bare `MATCH` over the whole indexed type, with the score
+projected and ordered — is the only shape the postings top-k operator can
+claim; a `WHERE` makes the rows a subset of the corpus and sends the query
+back to scoring every document. Measured over 50,000 documents with a term in
+0.1% of them, `WHERE text_bm25(…) > 0 … ORDER BY score DESC LIMIT 10` cost
+**53×** the same query without the `WHERE` (6.1 ms vs 114 µs). The filter also
+buys nothing: a document sharing no word with the query scores `0.0` and is
+already last.
 
 Semantics:
 

@@ -166,3 +166,56 @@ def test_bm25_entry_empty_and_zero_limit_preserve_argument_evaluation(empty, exp
         else:
             with pytest.raises(Exception, match="(?i)(text index|query string)"):
                 graph.cypher(prefix + query)
+
+
+UNDERFILL_DOCS = 40
+UNDERFILL_HITS = {7: "needle needle needle f f f", 3: "needle needle f f f f", 11: "needle f f f f f"}
+#: Descending by term frequency; every body is six tokens long, so length
+#: normalisation is identical and only `tf` separates the three.
+UNDERFILL_RANKING = [7, 3, 11]
+
+
+def underfill_graph():
+    """A corpus whose planted term matches three documents of one type, all of
+    them indexed, so a `LIMIT` above three is an underfilled postings top-k."""
+    graph = kglite.KnowledgeGraph()
+    bodies = [UNDERFILL_HITS.get(i, "f f f f f f") for i in range(UNDERFILL_DOCS)]
+    graph.cypher(
+        "UNWIND range(0, $n - 1) AS i CREATE (:Doc {id: i, body: $bodies[i]})",
+        params={"n": UNDERFILL_DOCS, "bodies": bodies},
+    )
+    assert graph.build_text_index("Doc", "body")["indexed"] == UNDERFILL_DOCS
+    return graph
+
+
+@pytest.mark.parametrize("k", [2, 3, 4, 20])
+def test_underfilled_top_k_fills_the_tail_from_the_proven_population(k):
+    graph = underfill_graph()
+    query = f"MATCH (d:Doc) RETURN d.id AS id, text_bm25(d, 'body', 'needle') AS score ORDER BY score DESC LIMIT {k}"
+    result = bm25_routes(graph, query)
+
+    head = UNDERFILL_RANKING[:k]
+    tail = [i for i in range(UNDERFILL_DOCS) if i not in UNDERFILL_RANKING][: k - len(head)]
+    assert [row["id"] for row in result] == head + tail
+    scores = [row["score"] for row in result]
+    assert scores[: len(head)] == sorted(scores[: len(head)], reverse=True)
+    assert all(score > 0.0 for score in scores[: len(head)])
+    assert scores[len(head) :] == [0.0] * len(tail)
+
+
+@pytest.mark.parametrize("k", [1, 3, 4, 20])
+def test_a_term_matching_nothing_answers_the_whole_fill_tail(k):
+    graph = underfill_graph()
+    query = (
+        f"MATCH (d:Doc) RETURN d.id AS id, text_bm25(d, 'body', 'absentterm') AS score ORDER BY score DESC LIMIT {k}"
+    )
+    result = bm25_routes(graph, query)
+    assert result == [{"id": i, "score": 0.0} for i in range(k)]
+
+
+def test_underfilled_scores_are_bit_identical_to_the_scalar_ranking():
+    graph = underfill_graph()
+    query = "MATCH (d:Doc) RETURN d.id AS id, text_bm25(d, 'body', 'needle') AS score ORDER BY score DESC LIMIT 6"
+    fused = graph.cypher(query).to_list()
+    scalar = graph.cypher(query, disable_optimizer=True).to_list()
+    assert [row["score"].hex() for row in fused] == [row["score"].hex() for row in scalar]

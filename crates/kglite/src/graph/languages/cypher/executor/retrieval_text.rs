@@ -70,9 +70,11 @@ impl CypherExecutor<'_> {
     /// population. Missing documents score NULL and outrank positives under
     /// DESC, so count equality alone cannot authorize this shortcut.
     ///
-    /// Row-dependent arguments, ASC and underfilled postings retain scalar
-    /// ranking, including zero/NULL fill. Whole-type trials additionally leave
-    /// stale-index refresh and warnings to the established materialized route.
+    /// Row-dependent arguments and ASC retain scalar ranking, including
+    /// zero/NULL fill. Fewer postings than `limit` do not: the proven
+    /// population supplies the zero-scoring tail directly (see the fill
+    /// below). Whole-type trials additionally leave stale-index refresh and
+    /// warnings to the established materialized route.
     pub(super) fn try_text_index_fused_top_k(
         &self,
         score_expr: &Expression,
@@ -125,16 +127,12 @@ impl CypherExecutor<'_> {
             return Ok(None);
         }
         let hits = view.top_k(&cache.prepared, limit);
-        // Actual underfill is known only after query preparation/search. Bail
-        // before the population walk; scalar ranking supplies rows scoring zero.
-        if hits.len() < limit {
-            return Ok(None);
-        }
+        let hit_count = hits.len();
         let Some(lookup) = self.text_population_coverage(variable, node_type, population, &view)?
         else {
             return Ok(None);
         };
-        let scored: Vec<_> = hits
+        let mut scored: Vec<_> = hits
             .into_iter()
             .filter_map(|(node, score)| {
                 lookup
@@ -143,6 +141,10 @@ impl CypherExecutor<'_> {
             })
             .collect();
         drop(view);
+        if scored.len() < hit_count {
+            return Ok(None);
+        }
+        fill_underfilled_tail(&mut scored, population.len(), limit);
         if scored.len() < limit {
             return Ok(None);
         }
@@ -232,5 +234,81 @@ impl CypherExecutor<'_> {
             previous = Some(slot);
         }
         Ok(true)
+    }
+}
+
+/// Complete a short postings top-k from the population itself.
+///
+/// Fewer matching documents than `limit` used to send the whole query back to
+/// per-row scalar ranking — the most selective queries paying the highest
+/// price, 64x the same query one `k` lower on a 200k corpus. Nothing about the
+/// tail needs re-deriving: the caller has already proven the population equals
+/// the index corpus, so no row scores NULL, every non-hit shares no term with
+/// the query and therefore scores exactly `0.0` (`TextIndex::score` returns it
+/// for a document whose term frequencies are all zero, and the smoothed IDF
+/// keeps every *hit* strictly positive, so no hit can tie with the tail). The
+/// coverage walk also proved the population strictly ascending by slot, so
+/// position order **is** slot order — the scalar path's own tie order for
+/// equal scores.
+///
+/// `scored` therefore gains the lowest-position rows the hits did not claim,
+/// in ascending order, until it holds `limit` of them. Left short only when
+/// the population itself is smaller than `limit`, which the caller rejects.
+fn fill_underfilled_tail(scored: &mut Vec<(usize, Value)>, population: usize, limit: usize) {
+    if scored.len() >= limit {
+        return;
+    }
+    let mut claimed: Vec<usize> = scored.iter().map(|(position, _)| *position).collect();
+    claimed.sort_unstable();
+    let mut claimed = claimed.into_iter().peekable();
+    for position in 0..population {
+        if scored.len() >= limit {
+            break;
+        }
+        if claimed.peek() == Some(&position) {
+            claimed.next();
+            continue;
+        }
+        scored.push((position, Value::Float64(0.0)));
+    }
+}
+
+#[cfg(test)]
+mod underfill_fill_tests {
+    use super::*;
+
+    fn positions(scored: &[(usize, Value)]) -> Vec<usize> {
+        scored.iter().map(|(position, _)| *position).collect()
+    }
+
+    #[test]
+    fn tail_takes_the_lowest_unclaimed_positions_at_zero() {
+        let mut scored = vec![(3, Value::Float64(2.5)), (0, Value::Float64(1.0))];
+        fill_underfilled_tail(&mut scored, 8, 5);
+        assert_eq!(positions(&scored), vec![3, 0, 1, 2, 4]);
+        assert!(scored[2..]
+            .iter()
+            .all(|(_, score)| matches!(score, Value::Float64(v) if *v == 0.0)));
+    }
+
+    #[test]
+    fn no_hits_fills_the_whole_answer_in_slot_order() {
+        let mut scored = Vec::new();
+        fill_underfilled_tail(&mut scored, 6, 4);
+        assert_eq!(positions(&scored), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn a_full_or_over_full_top_k_is_untouched() {
+        let mut scored = vec![(5, Value::Float64(1.0)), (2, Value::Float64(0.5))];
+        fill_underfilled_tail(&mut scored, 9, 2);
+        assert_eq!(positions(&scored), vec![5, 2]);
+    }
+
+    #[test]
+    fn a_population_smaller_than_the_limit_is_left_short_for_the_caller() {
+        let mut scored = vec![(1, Value::Float64(1.0))];
+        fill_underfilled_tail(&mut scored, 3, 5);
+        assert_eq!(positions(&scored), vec![1, 0, 2]);
     }
 }

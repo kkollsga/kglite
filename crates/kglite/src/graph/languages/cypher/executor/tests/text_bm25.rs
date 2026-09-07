@@ -422,11 +422,12 @@ fn the_fused_top_k_returns_the_same_rows_in_the_same_order_as_the_scan() {
 }
 
 #[test]
-fn the_fused_top_k_declines_when_fewer_documents_match_than_the_limit_asks_for() {
-    // Only one document shares a term with the query. The scan fills the rest
-    // of the top-5 with documents scoring exactly 0.0; the postings never yield
-    // those, so answering from the index alone would return one row where the
-    // unoptimised pipeline returns five.
+fn the_fused_top_k_completes_a_short_answer_with_zero_scoring_documents() {
+    // Only one document shares a term with the query, and the postings never
+    // yield the other four — they score exactly 0.0. Answering from the
+    // postings alone would return one row where the unoptimised pipeline
+    // returns five, so the operator completes the answer from the population
+    // it proved equal to the corpus.
     let mut graph = docs(&[
         ("a", "alpha"),
         ("b", "beta"),
@@ -627,14 +628,59 @@ fn whole_type_bm25_entry_preserves_exact_scores_ties_and_budget() {
     assert!(cancelled.try_retrieval_entry(&query.clauses).is_err());
 }
 
+/// The two underfilled shapes this test used to list among the declines —
+/// more `LIMIT` than matching documents, and a term matching none at all —
+/// are exactly what the tail fill now serves. Engagement is asserted here
+/// because `EXPLAIN` cannot see it: the planner claims the shape either way
+/// and the executor is where the decision is made.
 #[test]
-fn whole_type_bm25_entry_declines_underfill_unsupported_and_reordered_populations() {
+fn whole_type_bm25_entry_fills_a_short_top_k_from_the_population() {
+    let mut graph = docs(&[("a", "needle"), ("b", "needle"), ("c", "other")]);
+    build_text_index(&mut graph, "Doc", "body", None).unwrap();
+    for (term, limit, expected) in [
+        ("needle", 3, vec!["a", "b", "c"]),
+        ("unknown", 1, vec!["a"]),
+        ("unknown", 3, vec!["a", "b", "c"]),
+    ] {
+        let statement = format!(
+            "MATCH (d:Doc) RETURN d.title AS t, text_bm25(d, 'body', '{term}') AS s \
+             ORDER BY s DESC LIMIT {limit}"
+        );
+        let (fused, scalar) = ranked_both_ways(&graph, &statement);
+        assert_eq!(fused, scalar, "{statement}");
+        assert_eq!(
+            fused.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>(),
+            expected,
+            "{statement}"
+        );
+        let zeros = fused.len() - if term == "needle" { 2 } else { 0 };
+        assert!(
+            fused[fused.len() - zeros..]
+                .iter()
+                .all(|(_, score)| matches!(score, Value::Float64(v) if *v == 0.0)),
+            "the fill tail must be exactly 0.0: {fused:?}"
+        );
+    }
+    let query = bm25_entry_plan(
+        &graph,
+        "MATCH (d:Doc) RETURN d.title AS t, text_bm25(d, 'body', 'unknown') AS s \
+         ORDER BY s DESC LIMIT 2",
+    );
+    assert!(
+        CypherExecutor::with_params(&graph, &HashMap::new(), None)
+            .try_retrieval_entry(&query.clauses)
+            .unwrap()
+            .is_some(),
+        "a term matching nothing must still run through the operator"
+    );
+}
+
+#[test]
+fn whole_type_bm25_entry_declines_unsupported_and_reordered_populations() {
     let mut graph = docs(&[("a", "needle"), ("b", "needle"), ("c", "other")]);
     build_text_index(&mut graph, "Doc", "body", None).unwrap();
     let params = HashMap::new();
     for (prefix, property, term, ordering, limit) in [
-        ("MATCH (d:Doc)", "'body'", "'needle'", "DESC", 3),
-        ("MATCH (d:Doc)", "'body'", "'unknown'", "DESC", 1),
         ("MATCH (d:Doc)", "'absent'", "'needle'", "DESC", 1),
         ("MATCH (d:Doc)", "'body'", "d.title", "DESC", 1),
         ("MATCH (d:Doc)", "'body'", "'needle'", "ASC", 1),

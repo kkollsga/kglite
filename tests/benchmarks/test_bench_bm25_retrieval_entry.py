@@ -129,3 +129,76 @@ def test_bench_bm25_entry_missing_document(benchmark, bm25_entry_corpus):
     result = benchmark.pedantic(run, rounds=200, iterations=1, warmup_rounds=20)
     assert result == expected
     benchmark.extra_info.update(documents=corpus.docs, route="missing_document", statistic="min unless heavy tailed")
+
+
+def _min_seconds(run, rounds=40, warmup=5):
+    """Min of `rounds` timed calls — the statistic this file's other cells use,
+    taken by hand because one test needs two shapes measured against each
+    other rather than against a stored baseline."""
+    import time
+
+    for _ in range(warmup):
+        run()
+    return min(_timed(run, time) for _ in range(rounds))
+
+
+def _timed(run, time):
+    start = time.perf_counter()
+    run()
+    return time.perf_counter() - start
+
+
+#: The underfilled top-k may cost this much more than the filled one. The
+#: shapes differ by a single `k`, so anything beyond a small constant is the
+#: operator having declined and replayed the corpus per row — 43-64x before
+#: the tail was filled from the proven population.
+UNDERFILL_RATIO_CEILING = 2.0
+
+
+@pytest.mark.benchmark
+def test_bench_bm25_underfilled_top_k_costs_what_the_filled_one_costs():
+    # Its own corpus, not the module fixture: the missing-document cell adds an
+    # unindexed Doc to that one, which makes the population a superset of the
+    # index and takes every route here off the operator being measured.
+    corpus = _build_corpus(20_000, CORPUS_SEED)
+    corpus.ensure_index(auto_refresh_limit=100)
+    params = {"q": "w07999"}
+    ranked = sorted(
+        corpus.graph.cypher(
+            "MATCH (d:Doc) RETURN d.id AS id, text_bm25(d, 'body', $q) AS score",
+            params=params,
+            disable_optimizer=True,
+        ).to_list(),
+        key=lambda row: -row["score"],
+    )
+    positives = sum(row["score"] > 0 for row in ranked)
+    assert 0 < positives < 100, f"the gate needs a rare term, not {positives} of {corpus.docs}"
+
+    def route(k, fused=True):
+        statement = QUERY.replace("$k", str(k))
+        expected = ranked[:k]
+        passes = {} if fused else {"disabled_passes": ["fuse_text_bm25_order_limit"]}
+
+        def run():
+            return corpus.graph.cypher(statement, params=params, **passes).to_list()
+
+        # Non-vacuity: a cell that answered nothing, or answered from a
+        # different ranking, would be fast for the wrong reason.
+        assert run() == expected
+        return _min_seconds(run)
+
+    filled = route(positives)
+    underfilled = route(positives + 1)
+    assert underfilled <= UNDERFILL_RATIO_CEILING * filled, (
+        f"underfilled top-k (k={positives + 1}) cost {underfilled * 1e3:.2f} ms against "
+        f"{filled * 1e3:.2f} ms for the filled one (k={positives}) — "
+        f"{underfilled / filled:.1f}x, ceiling {UNDERFILL_RATIO_CEILING}x"
+    )
+    # The ceiling above can only fail if the operator declines, so pin that the
+    # instrument can still see a decline: the same query with the fusion pass
+    # off is the pre-fill cost, and it must stay far above what we just timed.
+    declined = route(positives + 1, fused=False)
+    assert declined >= 5 * underfilled, (
+        f"per-row ranking of the same query cost {declined * 1e3:.2f} ms against "
+        f"{underfilled * 1e3:.2f} ms fused — the ratio ceiling above cannot go red"
+    )

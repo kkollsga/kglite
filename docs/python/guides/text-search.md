@@ -178,14 +178,17 @@ same summation order, so the rows and their order are identical either way.
 
 The operator hands the query back to ordinary per-row scoring whenever the index
 cannot answer it alone — a `WHERE` that makes the rows a subset of the corpus,
-`ORDER BY … ASC`, a per-row property or query argument, an index that has fallen
-behind, or fewer matching documents than the `LIMIT` asks for. Those queries
-answer *exactly* the same, just without the shortcut:
+`ORDER BY … ASC`, a per-row property or query argument, or an index that has
+fallen behind. Those queries answer *exactly* the same, just without the
+shortcut. **Fewer matching documents than the `LIMIT` asks for is not one of
+them**: the operator keeps the documents it found and completes the answer from
+the corpus, since every remaining document scores `0.0`. That case used to fall
+back, which made the most selective queries the most expensive ones — 39.7 ms
+against 0.62 ms for the same query one `k` lower, on a 200,000-document corpus.
 
 ```python
 rows = graph.cypher("""
     MATCH (a:Article)
-    WHERE text_bm25(a, 'body', $q) > 0
     RETURN a.title AS title, text_bm25(a, 'body', $q) AS score
     ORDER BY score DESC
     LIMIT 5
@@ -195,7 +198,15 @@ print(rows.to_df())
 #                       title     score
 # 0        Chlorophyll assays  0.763694
 # 1  Low-light photosynthesis  0.684119
+# 2         A history of moss  0.000000
+# 3          Alpine transects  0.000000
+# 4        Bogs of the Baltic  0.000000
 ```
+
+`LIMIT k` means *k rows*: two documents mention chlorophyll, so the answer is
+those two followed by three that do not, at `0.0`. Ask for fewer rows, or drop
+the ones scoring zero after the fact — a `WHERE` on the score costs the
+postings shortcut and buys nothing, since a zero already sorts last.
 
 Filter first when the filter is what makes the query fast (a year, an author, a
 one-hop traversal); leave the `WHERE` off and let the postings do the work when
