@@ -285,6 +285,42 @@ before upgrading.
 
 ### Changed
 
+- **In-memory 1-hop traversal is no longer superlinear in the node count.**
+  `add_connections` now inserts a load's rows grouped by source node, so a
+  node's edges sit contiguously in the petgraph edge arena instead of wherever
+  the input frame happened to scatter them. The expansion walks that arena
+  through an intrusive linked list, so with uncorrelated row order every hop
+  landed on an unrelated cache line once the arena outgrew last-level cache —
+  and in-memory ended up **slower than mapped**, which the storage doctrine
+  says must never happen. Measured on 100k/300k `Person` nodes with degree 3
+  and random endpoints (release build, `min` of 40 rounds, three agreeing runs
+  at 300k, whole-scan control carried in every process):
+
+  | cells | before | after | mapped |
+  |---|---|---|---|
+  | 100k nodes / 300k edges | 19.6 ms (65.2 ns/edge) | **9.35 ms (31.2)** | 12.7 ms (42.2) |
+  | 300k nodes / 900k edges | 95.8 ms (106.4 ns/edge) | **30.4 ms (33.8)** | 40.6 ms (45.1) |
+
+  The scaling exponent from 10k to 300k nodes falls from **1.40 to 1.10**,
+  against the same machine's 1.10 whole-scan floor — the superlinearity is
+  gone rather than reduced — and in-memory is now the faster mode at every
+  size. Ingest is unchanged (`add_connections` −0.7% to −1.2% across three
+  runs). One cell moved the other way: `exists_fixed_hop`, which stops at the
+  first witness it finds, measures +17.6%/+18.4% against controls at
+  +2.8%..+9.0% on a cache-resident fixture — the reorder changes which edge is
+  visited first, not how much work there is.
+
+  Two consequences worth knowing. Relationship ids (`id(r)`) are assigned in
+  the new insertion order, so a bulk load numbers its relationships
+  differently than before — they remain dense, unique, and stable across
+  `save()`/`load()`/`copy()`, which is what the published contract covers.
+  And `.kgl` bytes written for a given graph differ from a 0.17.0 save: the
+  format, its version and every section are unchanged, only the order edges
+  occupy in the topology section. Relationships created one at a time through
+  Cypher `CREATE` are not reordered, and neither is an arena that already
+  holds edges — `save()`/`load()` reproduces whatever order it was given, so
+  the grouping is established at bulk load or not at all.
+
 - **A `WHERE` written behind a `WITH` now reaches the pattern matcher.**
   `WHERE` has three homes in the AST and the pushdown passes read only two of
   them, so `MATCH (n:Person) WITH n WHERE n.age > 30 RETURN count(*)`

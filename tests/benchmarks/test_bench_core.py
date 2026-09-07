@@ -368,6 +368,85 @@ def test_bench_grouped_count_top_k_source_property(benchmark, grouped_count_grap
     assert all(row["uses"] == 300 for row in result)
 
 
+HOP1_NODES = 100_000
+HOP1_DEGREE = 3
+
+
+def _hop1_frames():
+    """100k `Person` nodes and 300k `KNOWS` edges with **uncorrelated** endpoints.
+
+    The endpoint draw is an inlined LCG rather than `random`, for the same
+    reason `_scale_free_edges` uses one: the fixture must be byte-identical on
+    every interpreter this harness runs under. Uncorrelated endpoints are the
+    point of the cell — a row order that already groups by source is the
+    fast case, and would measure nothing.
+    """
+    src: list[int] = []
+    dst: list[int] = []
+    state = 20_260_907
+    for _ in range(HOP1_NODES * HOP1_DEGREE):
+        state = (state * 1_103_515_245 + 12_345) & 0x7FFF_FFFF
+        src.append(state % HOP1_NODES)
+        state = (state * 1_103_515_245 + 12_345) & 0x7FFF_FFFF
+        dst.append(state % HOP1_NODES)
+    nodes = pd.DataFrame(
+        {
+            "pid": list(range(HOP1_NODES)),
+            "name": [f"P{i}" for i in range(HOP1_NODES)],
+            "city": [f"city{i % 50}" for i in range(HOP1_NODES)],
+        }
+    )
+    return nodes, pd.DataFrame({"s": src, "d": dst})
+
+
+def _hop1_graph(mode: str) -> KnowledgeGraph:
+    nodes, edges = _hop1_frames()
+    graph = KnowledgeGraph() if mode == "memory" else KnowledgeGraph(storage=mode)
+    graph.add_nodes(nodes, "Person", "pid", "name")
+    graph.add_connections(edges, "KNOWS", "Person", "s", "Person", "d")
+    return graph
+
+
+@pytest.fixture(scope="module")
+def hop1_graph_memory():
+    return _hop1_graph("memory")
+
+
+@pytest.fixture(scope="module")
+def hop1_graph_mapped():
+    return _hop1_graph("mapped")
+
+
+@pytest.mark.benchmark
+def test_bench_hop1_deg3_memory(benchmark, hop1_graph_memory):
+    """Whole-graph 1-hop expansion, in-memory — the doctrine cell.
+
+    Nothing measured whole-graph 1-hop across storage modes before 0.17.1,
+    which is how a 2.3x *cross-mode inversion* reached 0.17.0 unnoticed: the
+    expansion dereferences petgraph's edge arena in insertion order, so with
+    uncorrelated row order it went superlinear in the node count while Mapped
+    stayed flat. Read this cell next to `hop1_deg3_mapped`: in-memory is the
+    core product and must not be the slower of the two.
+    """
+
+    def query_and_consume():
+        return hop1_graph_memory.cypher("MATCH (a:Person)-[:KNOWS]->(b) RETURN count(*) AS c").to_list()
+
+    result = benchmark(query_and_consume)
+    assert result == [{"c": HOP1_NODES * HOP1_DEGREE}]
+
+
+@pytest.mark.benchmark
+def test_bench_hop1_deg3_mapped(benchmark, hop1_graph_mapped):
+    """`hop1_deg3_memory`'s cross-mode control, on the identical fixture."""
+
+    def query_and_consume():
+        return hop1_graph_mapped.cypher("MATCH (a:Person)-[:KNOWS]->(b) RETURN count(*) AS c").to_list()
+
+    result = benchmark(query_and_consume)
+    assert result == [{"c": HOP1_NODES * HOP1_DEGREE}]
+
+
 @pytest.mark.benchmark
 def test_bench_untyped_edge_count_1m(benchmark, wide_edge_count_graph):
     """Wide `MATCH ()-[r]->()` count used by graph inventory interfaces."""

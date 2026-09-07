@@ -441,3 +441,92 @@ def test_two_match_spelling_agrees_with_the_unwind_one():
         "MATCH (p:P) WHERE p.id IN [0, 4] MATCH (p)-[:K*1..3]->(f:P) "
         "RETURN p.id AS pid, count(DISTINCT f) AS c ORDER BY pid"
     ).to_list() == [{"pid": 0, "c": 6}, {"pid": 4, "c": 3}]
+
+
+# ---------------------------------------------------------------------------
+# Bulk-load relationship identity
+#
+# `add_connections` inserts a load's rows grouped by source node so a 1-hop
+# expansion reads the edge arena sequentially (T2-3). That reorders *insertion*,
+# which is what assigns `id(r)` and what the `.kgl` topology stores, so these
+# pin the two things the reordering must not touch: each row's properties stay
+# on the row's own relationship, and a relationship id survives save/load/copy.
+# ---------------------------------------------------------------------------
+
+
+def _interleaved_bulk_graph():
+    """Six `K` edges whose rows arrive in an order uncorrelated with the source.
+
+    Every row carries a `w` that names its own `(source, target)` pair, so an
+    edge holding the wrong `w` is a permutation bug rather than a reordering.
+    """
+    import pandas as pd
+
+    graph = KnowledgeGraph()
+    graph.add_nodes(pd.DataFrame({"pid": [1, 2, 3, 4, 5]}), "P", "pid")
+    pairs = [(1, 2), (3, 4), (1, 3), (5, 1), (2, 5), (4, 2)]
+    graph.add_connections(
+        pd.DataFrame(
+            {
+                "s": [a for a, _ in pairs],
+                "d": [b for _, b in pairs],
+                "w": [a * 10 + b for a, b in pairs],
+            }
+        ),
+        "K",
+        "P",
+        "s",
+        "P",
+        "d",
+    )
+    return graph
+
+
+def _edge_rows(graph):
+    return sorted(
+        (row["a"], row["b"], row["w"], row["rid"])
+        for row in graph.cypher(
+            "MATCH (a:P)-[r:K]->(b:P) RETURN a.pid AS a, b.pid AS b, r.w AS w, id(r) AS rid"
+        ).to_list()
+    )
+
+
+def test_a_bulk_load_keeps_every_row_property_on_its_own_relationship():
+    """Each `w` names its own endpoints — nothing may drift onto a sibling."""
+    rows = _edge_rows(_interleaved_bulk_graph())
+
+    assert [(a, b, w) for a, b, w, _ in rows] == [
+        (1, 2, 12),
+        (1, 3, 13),
+        (2, 5, 25),
+        (3, 4, 34),
+        (4, 2, 42),
+        (5, 1, 51),
+    ]
+
+
+def test_a_bulk_load_assigns_one_dense_relationship_id_per_row():
+    rows = _edge_rows(_interleaved_bulk_graph())
+    assert sorted(rid for *_, rid in rows) == list(range(6))
+
+
+def test_bulk_relationship_ids_survive_save_load_and_copy(tmp_path):
+    """`id(r)` is a stable relationship identity (CYPHER.md's conformance row).
+
+    The `.kgl` topology carries the edge arena as it stands, so a load
+    reproduces the ids the save wrote — and a `copy()` keeps them too. This is
+    what confines the T2-3 insertion reordering to the one moment no id has
+    been published yet.
+    """
+    graph = _interleaved_bulk_graph()
+    live = _edge_rows(graph)
+
+    path = str(tmp_path / "ids.kgl")
+    graph.save(path)
+
+    import kglite
+
+    assert _edge_rows(kglite.load(path)) == live
+    assert _edge_rows(graph.copy()) == live
+    # And the save did not renumber the graph it was taken from.
+    assert _edge_rows(graph) == live

@@ -129,7 +129,7 @@ def _parity_query(kg: KnowledgeGraph) -> list[tuple]:
 # Changing this digest without a format bump is a refactor bug — the
 # whole point of this test is to trip loudly when the `.kgl` byte layout
 # silently drifts.
-GOLDEN_V3_DIGEST = "8a36631316f9f9b8588bddbe45ecc4ca05f3e3c1d5b581f9a4d29165dcebb05f"
+GOLDEN_V3_DIGEST = "bc9b8992d2ad94a7c8e69af724840f0f2ebe3f8ff259d7bb0a249610783ee203"
 
 # The v3 → v4 format break cleared this set. The
 # v4 loader rejects v3 files (per the user-decided hard break
@@ -144,6 +144,15 @@ GOLDEN_V3_DIGEST = "8a36631316f9f9b8588bddbe45ecc4ca05f3e3c1d5b581f9a4d29165dceb
 # back to a working v4 era.
 ACCEPTABLE_DIGESTS: frozenset[str] = frozenset(
     {
+        # Demoted from GOLDEN_V3_DIGEST by T2-3 (deep scan 2026-09-07):
+        # `add_connections` now inserts a load's rows grouped by source node,
+        # so the fixture's edges occupy the petgraph arena — and therefore the
+        # topology section — in a different order. **No format change**: every
+        # tag, section and version is identical and the bytes differ only in
+        # which edge sits in which arena slot, so every previously written
+        # `.kgl` still loads and this build's output still loads everywhere a
+        # v6 file does.
+        "8a36631316f9f9b8588bddbe45ecc4ca05f3e3c1d5b581f9a4d29165dcebb05f",
         # Demoted from GOLDEN_V3_DIGEST by the shape-convergence program's
         # Phase 6b, which bumps the container to `.kgl` **v6**. Two things move
         # the bytes: the magic (`RGF\x05` -> `RGF\x06`) and the per-column

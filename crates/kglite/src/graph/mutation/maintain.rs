@@ -7,7 +7,7 @@ use crate::graph::mutation::batch::{
 };
 use crate::graph::mutation::batch_title_admission::{
     node_property_columns, prepare_connection_admission, snapshot_node_titles,
-    ConnectionAdmissionFields,
+    ConnectionAdmissionFields, ConnectionTitles,
 };
 use crate::graph::mutation::delete_state::remove_doomed_nodes;
 use crate::graph::mutation::edge_props::{
@@ -1187,7 +1187,7 @@ pub(crate) fn add_connections_with_initial_load(
         },
     )?;
     let ResolvedEndpoints {
-        matched,
+        mut matched,
         deferred,
         missing_sources,
         missing_targets,
@@ -1239,14 +1239,14 @@ pub(crate) fn add_connections_with_initial_load(
     .run(graph)?;
 
     // Pass A — connect the rows whose endpoints both exist (resolved above).
+    apply_titles_then_order_by_source(
+        graph,
+        &titles,
+        (&source_type, &target_type),
+        &df_data,
+        &mut matched,
+    );
     for (row_idx, source_idx, target_idx) in matched {
-        titles.apply(
-            graph,
-            (&source_type, &target_type),
-            (source_idx, target_idx),
-            row_idx,
-            &df_data,
-        );
         if let Err(e) = batch.add_connection(
             source_idx,
             target_idx,
@@ -1352,6 +1352,57 @@ pub(crate) fn add_connections_with_initial_load(
 
     graph.bump_version();
     Ok(report)
+}
+
+/// Order a bulk load's rows so each source node's edges land **contiguously**
+/// in the petgraph edge arena.
+///
+/// A 1-hop expansion walks a node's outgoing edges through petgraph's
+/// intrusive linked list — `edges[e].next[0]` — so it dereferences the arena
+/// in *insertion* order. With rows arriving in an order uncorrelated with the
+/// source (a join output, a shuffled export, random endpoints), each hop lands
+/// on an unrelated cache line once the arena outgrows last-level cache, and
+/// `MATCH (a:Person)-[:KNOWS]->(b) RETURN count(*)` goes superlinear in the
+/// *node* count at a fixed edge count — measured 27.5 ns/edge at 10k nodes and
+/// 106.4 ns/edge at 300k, exponent 1.40 against the same machine's 1.11
+/// whole-scan floor (`dev-docs/designs/inmem-1hop-scaling-2026-09.md`).
+/// Grouping by source turns the pointer chase into a sequential read: 32.1
+/// ns/edge at 300k, exponent 1.09.
+///
+/// **This is the one place the reordering is free.** The edges do not exist
+/// yet, so no `EdgeIndex` has been published: nothing to remap in the undo
+/// journal, the WAL, CDC, edge-property stores or a held snapshot, and
+/// `id(r)` still survives save/load unchanged (the `.kgl` topology carries the
+/// arena as-is). Reordering an arena that already holds edges would renumber
+/// every one of them.
+///
+/// Ties break on the original row index, so the relative order of two rows
+/// sharing a source — which is what the chunk-local `(source, target)`
+/// consolidation and the last-writer-wins conflict modes read — is exactly
+/// what row order gave.
+fn sort_source_major(matched: &mut [(usize, NodeIndex, NodeIndex)]) {
+    matched.sort_unstable_by_key(|(row, source, _)| (source.index(), *row));
+}
+
+/// Pass A's preamble: write the frame's title columns, then put the rows in
+/// the order the edges will be inserted in.
+///
+/// The two run in **different** orders, deliberately. Titles are applied in
+/// row order because two rows naming the same node with different titles
+/// resolve last-writer-wins, and which row wins must not depend on an
+/// insertion order chosen for cache locality. The edges then go in grouped by
+/// source ([`sort_source_major`]).
+fn apply_titles_then_order_by_source(
+    graph: &mut DirGraph,
+    titles: &ConnectionTitles,
+    node_types: (&str, &str),
+    frame: &DataFrame,
+    matched: &mut [(usize, NodeIndex, NodeIndex)],
+) {
+    for &(row_idx, source_idx, target_idx) in matched.iter() {
+        titles.apply(graph, node_types, (source_idx, target_idx), row_idx, frame);
+    }
+    sort_source_major(matched);
 }
 
 /// Auto-vivify missing edge endpoints as provisional stub nodes.
