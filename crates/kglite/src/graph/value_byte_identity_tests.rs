@@ -474,23 +474,64 @@ fn kgl_fixture_bytes() -> Vec<u8> {
 /// fixed-width placeholder before hashing. Caught live: the 0.16.5 release
 /// bump turned this golden red with zero code changes.
 fn mask_version_bytes(bytes: &[u8]) -> Vec<u8> {
-    let version = env!("CARGO_PKG_VERSION").as_bytes();
+    mask_version_fields(bytes, env!("CARGO_PKG_VERSION").as_bytes())
+}
+
+fn mask_version_fields(bytes: &[u8], version: &[u8]) -> Vec<u8> {
+    const PINNED_VERSION_WIDTH: u32 = 7; // `0.16.24`, which established the digest below.
+    const METADATA_LEN_START: usize = 4 + 1 + std::mem::size_of::<u32>();
+    const METADATA_LEN_END: usize = METADATA_LEN_START + std::mem::size_of::<u32>();
+
+    assert!(bytes.starts_with(&crate::graph::io::magic::V6_MAGIC));
+    let mut normalized = bytes.to_vec();
+    let metadata_len = u32::from_le_bytes(
+        normalized[METADATA_LEN_START..METADATA_LEN_END]
+            .try_into()
+            .unwrap(),
+    );
+    let normalized_len = metadata_len
+        .checked_sub(version.len() as u32)
+        .and_then(|len| len.checked_add(PINNED_VERSION_WIDTH))
+        .expect("metadata length covers its library version");
+    normalized[METADATA_LEN_START..METADATA_LEN_END].copy_from_slice(&normalized_len.to_le_bytes());
+
     // Splice the version bytes OUT rather than overwriting in place: an
     // in-place mask is length-preserving, so the digest still moved whenever
     // the version string changed length (0.16.9 -> 0.16.10 was the first
-    // such boundary and it broke every CI leg on main, 2026-08-25).
-    let mut out = Vec::with_capacity(bytes.len());
+    // such boundary and it broke every CI leg on main, 2026-08-25). The header
+    // length is normalized to the pinned digest's version width for the same
+    // reason: it counts the version bytes even though this mask removes them.
+    let mut out = Vec::with_capacity(normalized.len());
     let mut i = 0;
-    while i < bytes.len() {
-        if i + version.len() <= bytes.len() && &bytes[i..i + version.len()] == version {
+    while i < normalized.len() {
+        if i + version.len() <= normalized.len() && &normalized[i..i + version.len()] == version {
             out.push(b'#');
             i += version.len();
         } else {
-            out.push(bytes[i]);
+            out.push(normalized[i]);
             i += 1;
         }
     }
     out
+}
+
+#[test]
+fn version_mask_is_independent_of_the_version_string_length() {
+    fn container(version: &str) -> Vec<u8> {
+        let metadata = format!(r#"{{"library_version":"{version}"}}"#);
+        let mut bytes = crate::graph::io::magic::V6_MAGIC.to_vec();
+        bytes.push(CURRENT_CODEC.tag());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&(metadata.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(metadata.as_bytes());
+        bytes.extend_from_slice(b"same section payload");
+        bytes
+    }
+
+    assert_eq!(
+        mask_version_fields(&container("0.16.24"), b"0.16.24"),
+        mask_version_fields(&container("0.17.0"), b"0.17.0"),
+    );
 }
 
 /// **The N2 instrument.** The bytes a fresh save writes for a graph carrying
