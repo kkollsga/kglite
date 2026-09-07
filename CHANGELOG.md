@@ -11,6 +11,17 @@ before upgrading.
 
 ### Fixed
 
+- A `*0..` variable-length pattern now yields its zero-length path when the
+  relationship type is unknown to the graph. `MATCH (a)-[:ABSENT*0..2]->(b)`
+  returned no rows at all instead of `b = a`, and the same pattern inside
+  `OPTIONAL MATCH` produced a null-padded row rather than the real one — a
+  relationship type constrains relationships, and a zero-length path has none.
+  `*1..` shapes are unchanged, and the unknown-type warning now says what the
+  zero-hop shape actually does instead of claiming no rows.
+- `shortestPath` now answers the zero-length path between a node and itself.
+  `MATCH (a) MATCH p = shortestPath((a)-[:K*0..]-(a)) RETURN length(p)`
+  returned nothing even for a relationship type the graph holds; its endpoint
+  loop skipped equal endpoints before the hop bound was consulted.
 - A date and a datetime now compare consistently for equality. `=`, `<>` and
   `IN` fell through to structural value equality while `<`, `<=`, `>` and `>=`
   applied the documented "a date counts as midnight on that date" rule, so

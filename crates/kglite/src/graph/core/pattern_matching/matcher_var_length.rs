@@ -482,6 +482,13 @@ impl<'a> PatternExecutor<'a> {
         if cap_reached(results.len(), max_results) {
             return Ok(Some(results));
         }
+        // The zero-length path (pushed above) is the only thing a segment
+        // naming an absent relationship type can produce; the BFS below would
+        // sweep adjacency for every source to conclude the same. This is the
+        // perf guard `expand_from_node` skips for zero-hop-capable segments.
+        if self.connection_types_absent(edge_pattern) {
+            return Ok(Some(results));
+        }
 
         visited.begin(self.graph.graph.node_bound(), max_results.is_some());
         if !leave_source_unvisited {
@@ -638,6 +645,12 @@ impl<'a> PatternExecutor<'a> {
             if cap_reached(results.len(), max_results) {
                 return Ok(results);
             }
+        }
+        // See `expand_var_length_fast`: an absent type can add nothing past
+        // the zero-length path, and the trail BFS would pay a per-source
+        // adjacency sweep to find that out.
+        if self.connection_types_absent(edge_pattern) {
+            return Ok(results);
         }
 
         let mut vlp_count: usize = 0;

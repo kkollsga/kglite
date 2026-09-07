@@ -185,6 +185,42 @@ impl<'a> CypherExecutor<'a> {
     }
 
     /// Execute a shortestPath MATCH: find shortest path between anchored endpoints
+    /// One output row for a found path.
+    ///
+    /// Starts from the prior row's bindings (when a preceding MATCH supplied
+    /// one) so a downstream RETURN can still see what that MATCH exposed.
+    #[allow(clippy::too_many_arguments)]
+    fn shortest_path_row(
+        prior_row: Option<&ResultRow>,
+        source_pattern: &NodePattern,
+        target_pattern: &NodePattern,
+        source_idx: NodeIndex,
+        target_idx: NodeIndex,
+        path_variable: &str,
+        hops: usize,
+        path: Vec<PathHop>,
+    ) -> ResultRow {
+        let mut row = match prior_row {
+            Some(pr) => pr.clone(),
+            None => ResultRow::new(),
+        };
+        if let Some(ref var) = source_pattern.variable {
+            row.node_bindings.insert(var.clone(), source_idx);
+        }
+        if let Some(ref var) = target_pattern.variable {
+            row.node_bindings.insert(var.clone(), target_idx);
+        }
+        row.path_bindings.insert(
+            path_variable.to_string(),
+            PathBinding {
+                source: source_idx,
+                hops,
+                path,
+            },
+        );
+        row
+    }
+
     pub(super) fn execute_shortest_path_match(
         &self,
         clause: &MatchClause,
@@ -212,8 +248,10 @@ impl<'a> CypherExecutor<'a> {
             _ => return Err("shortestPath pattern must end with a node".to_string()),
         };
 
-        // Extract edge direction and connection type from the pattern
-        let (edge_direction, connection_types_vec) = elements
+        // Extract edge direction, connection type and hop bounds from the
+        // pattern. `min_hops == 0` is what makes a path from a node to itself
+        // an answer rather than a skip.
+        let (edge_direction, connection_types_vec, min_hops) = elements
             .iter()
             .find_map(|elem| {
                 if let PatternElement::Edge(ep) = elem {
@@ -221,12 +259,13 @@ impl<'a> CypherExecutor<'a> {
                         .connection_types
                         .clone()
                         .or_else(|| ep.connection_type.clone().map(|name| vec![name]));
-                    Some((ep.direction, types))
+                    Some((ep.direction, types, ep.var_length.map(|(min, _)| min)))
                 } else {
                     None
                 }
             })
-            .unwrap_or((EdgeDirection::Both, None));
+            .unwrap_or((EdgeDirection::Both, None, None));
+        let includes_zero_length = min_hops == Some(0);
 
         let connection_types: Option<&[String]> = connection_types_vec.as_deref();
 
@@ -237,6 +276,23 @@ impl<'a> CypherExecutor<'a> {
         for (source_idx, target_idx, prior_row) in pairs {
             {
                 if source_idx == target_idx {
+                    // A `*0..` segment includes the zero-length path: both
+                    // endpoints are the same node and the path holds no
+                    // relationship, so the segment's type and direction say
+                    // nothing about it. Every other bound has no trail from a
+                    // node back to itself that the BFS below could shorten.
+                    if includes_zero_length {
+                        all_rows.push(Self::shortest_path_row(
+                            prior_row,
+                            source_pattern,
+                            target_pattern,
+                            source_idx,
+                            target_idx,
+                            &path_assignment.variable,
+                            0,
+                            Vec::new(),
+                        ));
+                    }
                     continue;
                 }
 
@@ -332,35 +388,16 @@ impl<'a> CypherExecutor<'a> {
                 }
 
                 for (path_cost, path_nodes) in exact_paths {
-                    // Start from the prior row's bindings (if any) so
-                    // downstream RETURN can see fields the prior MATCH
-                    // exposed (e.g. `RETURN start.foo`).
-                    let mut row = match prior_row {
-                        Some(pr) => pr.clone(),
-                        None => ResultRow::new(),
-                    };
-
-                    // Bind source variable
-                    if let Some(ref var) = source_pattern.variable {
-                        row.node_bindings.insert(var.clone(), source_idx);
-                    }
-
-                    // Bind target variable
-                    if let Some(ref var) = target_pattern.variable {
-                        row.node_bindings.insert(var.clone(), target_idx);
-                    }
-
-                    // Store path binding
-                    row.path_bindings.insert(
-                        path_assignment.variable.clone(),
-                        PathBinding {
-                            source: source_idx,
-                            hops: path_cost,
-                            path: path_nodes,
-                        },
-                    );
-
-                    all_rows.push(row);
+                    all_rows.push(Self::shortest_path_row(
+                        prior_row,
+                        source_pattern,
+                        target_pattern,
+                        source_idx,
+                        target_idx,
+                        &path_assignment.variable,
+                        path_cost,
+                        path_nodes,
+                    ));
                 }
             }
         }

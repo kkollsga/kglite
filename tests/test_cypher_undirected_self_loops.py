@@ -101,3 +101,87 @@ def test_endpoint_predicates_use_entity_slots_across_representations(storage, di
         "RETURN startNode(missing)=a AS eq,a=endNode(missing) AS reversed",
         disable_optimizer=disabled,
     ).to_list() == [{"eq": None, "reversed": None}]
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# T0-7 regression pins (2026-09-07). A deep-scan report claimed an undirected
+# self-loop produced two rows; ten constructions were probed on 0.17.0 and
+# every one produced exactly one — the claim is refuted, no code changed.
+# The guard is a `continue` in three separate expansion loops
+# (`matcher.rs:1829` and `:1944`, `match_clause.rs:1066` and `:1243`), which
+# is exactly the shape that regrows when a fourth expansion site is added, so
+# the constructions are pinned rather than discarded.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _one_loop_graph(storage, tmp_path):
+    graph = kglite.KnowledgeGraph(storage=storage, path=str(tmp_path / "disk") if storage == "disk" else None)
+    graph.cypher("CREATE (a:P {id: 1}), (a)-[:K]->(a)")
+    return graph
+
+
+@pytest.mark.parametrize("disabled", [False, True])
+@pytest.mark.parametrize("storage", ["memory", "mapped"])
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "(a:P)-[r:K]-(b:P)",
+        "(a)-[r:K]-(b)",
+        "(a:P)-[r]-(b:P)",
+        "(a:P)-[:K]-(b:P)",
+        "(a:P)-[r:K*1..1]-(b:P)",
+        "(a:P)-[:K*1..1]-(b:P)",
+        "p = (a:P)-[:K]-(b:P)",
+        "p = (a:P)-[r:K]-(b:P)",
+        "(a:P {id: 1})-[r:K]-(b:P)",
+        "(a:P)-[r:K]-(b:P {id: 1})",
+    ],
+)
+def test_every_undirected_self_loop_construction_binds_one_row(pattern, storage, disabled, tmp_path):
+    graph = _one_loop_graph(storage, tmp_path)
+    assert graph.cypher(f"MATCH {pattern} RETURN count(*)", disable_optimizer=disabled).scalar() == 1
+
+
+@pytest.mark.parametrize("disabled", [False, True])
+def test_undirected_self_loop_binds_one_relationship_identity(disabled):
+    graph = kglite.KnowledgeGraph()
+    graph.cypher("CREATE (a:P {id: 1}), (a)-[:K]->(a)")
+    rows = graph.cypher(
+        "MATCH (a:P)-[r:K]-(b:P) RETURN id(r) AS r, a.id AS a, b.id AS b",
+        disable_optimizer=disabled,
+    ).to_list()
+    assert len(rows) == 1
+    assert rows[0]["a"] == 1 and rows[0]["b"] == 1
+
+
+@pytest.mark.parametrize("disabled", [False, True])
+def test_undirected_self_loop_built_by_add_connections_binds_one_row(disabled):
+    """The columnar build path, not the Cypher CREATE path."""
+    import pandas as pd
+
+    graph = kglite.KnowledgeGraph()
+    graph.add_nodes(pd.DataFrame({"id": [1]}), node_type="P", unique_id_field="id")
+    graph.add_connections(
+        pd.DataFrame({"src": [1], "dst": [1]}),
+        connection_type="K",
+        source_type="P",
+        target_type="P",
+        source_id_field="src",
+        target_id_field="dst",
+    )
+    assert graph.cypher("MATCH (a:P)-[r:K]-(b:P) RETURN count(*)", disable_optimizer=disabled).scalar() == 1
+
+
+@pytest.mark.parametrize("disabled", [False, True])
+def test_a_self_loop_beside_an_ordinary_edge_keeps_both_orientations(disabled):
+    graph = kglite.KnowledgeGraph()
+    graph.cypher("CREATE (a:P {id: 1}), (b:P {id: 2}), (a)-[:K {k: 0}]->(a), (a)-[:K {k: 1}]->(b)")
+    rows = graph.cypher(
+        "MATCH (a:P)-[r:K]-(b:P) RETURN a.id AS a, r.k AS k, b.id AS b ORDER BY a, k, b",
+        disable_optimizer=disabled,
+    ).to_list()
+    assert rows == [
+        {"a": 1, "k": 0, "b": 1},
+        {"a": 1, "k": 1, "b": 2},
+        {"a": 2, "k": 1, "b": 1},
+    ]

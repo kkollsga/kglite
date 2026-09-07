@@ -1854,6 +1854,22 @@ impl<'a> PatternExecutor<'a> {
         results
     }
 
+    /// True when every relationship type the segment names is absent from the
+    /// graph, so no relationship can satisfy it. An untyped segment is never
+    /// absent.
+    ///
+    /// The perf guard behind the unknown-type early exits: without it an
+    /// unknown type costs one adjacency sweep per source.
+    pub(super) fn connection_types_absent(&self, edge_pattern: &EdgePattern) -> bool {
+        if let Some(ref types) = edge_pattern.connection_types {
+            !types.iter().any(|t| self.graph.has_connection_type(t))
+        } else if let Some(ref conn_type) = edge_pattern.connection_type {
+            !self.graph.has_connection_type(conn_type)
+        } else {
+            false
+        }
+    }
+
     fn expand_from_node(
         &self,
         source: NodeIndex,
@@ -1872,15 +1888,15 @@ impl<'a> PatternExecutor<'a> {
         // graph becomes a stamp bump. Unused by every other expansion shape.
         visited: &mut VisitedStamps,
     ) -> Result<Vec<(NodeIndex, MatchBinding)>, String> {
-        // Early exit: if the specified connection type doesn't exist in the graph, skip all iteration
-        if let Some(ref types) = edge_pattern.connection_types {
-            if !types.iter().any(|t| self.graph.has_connection_type(t)) {
-                return Ok(Vec::new());
-            }
-        } else if let Some(ref conn_type) = edge_pattern.connection_type {
-            if !self.graph.has_connection_type(conn_type) {
-                return Ok(Vec::new());
-            }
+        // Early exit: a type the graph does not hold can never be traversed,
+        // so skip all iteration. Not for a zero-hop-capable segment — a
+        // `*0..` pattern also yields the zero-length path, which has no
+        // relationship for the type to constrain. `expand_var_length` runs
+        // its own short-circuit after emitting that path.
+        if !matches!(edge_pattern.var_length, Some((0, _)))
+            && self.connection_types_absent(edge_pattern)
+        {
+            return Ok(Vec::new());
         }
 
         // `max_results` reaches a variable-length expansion only when every row
@@ -2116,3 +2132,7 @@ mod ceiling_tests;
 #[cfg(test)]
 #[path = "matcher_property_index_tests.rs"]
 mod property_index_tests;
+
+#[cfg(test)]
+#[path = "matcher_zero_length_tests.rs"]
+mod zero_length_tests;

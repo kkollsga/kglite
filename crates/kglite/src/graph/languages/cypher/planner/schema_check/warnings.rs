@@ -574,7 +574,10 @@ pub(crate) fn collect_query_warnings(
     // surviving branches decide the wording: a relationship alternation
     // (`-[:A|B]->`) matches through *any* branch, so one unknown branch only
     // means "returns no rows" when every branch is unknown.
-    let mut unknown_rels: Vec<(String, Vec<String>)> = Vec::new();
+    // (unknown type, surviving alternation branches, the segment can match a
+    // zero-length path) — the last two decide which of the three claims the
+    // warning may truthfully make.
+    let mut unknown_rels: Vec<(String, Vec<String>, bool)> = Vec::new();
 
     for_each_query_pattern(query, &mut |site| {
         // Write patterns are deliberately skipped: on an open schema
@@ -637,9 +640,10 @@ pub(crate) fn collect_query_warnings(
                         continue;
                     }
                     let surviving: Vec<String> = branches().filter(|r| known(r)).cloned().collect();
+                    let zero_hop = matches!(ep.var_length, Some((0, _)));
                     for rel in branches().filter(|r| !known(r)) {
                         if seen.insert(format!("R:{rel}")) {
-                            unknown_rels.push((rel.clone(), surviving.clone()));
+                            unknown_rels.push((rel.clone(), surviving.clone(), zero_hop));
                         }
                     }
                 }
@@ -694,9 +698,18 @@ pub(crate) fn collect_query_warnings(
             .keys()
             .map(|s| s.as_str())
             .collect();
-        for (rel, surviving) in &unknown_rels {
+        for (rel, surviving, zero_hop) in &unknown_rels {
             let hint = did_you_mean(rel, &candidates);
-            out.push(if surviving.is_empty() {
+            out.push(if surviving.is_empty() && *zero_hop {
+                // A `*0..` segment still yields the zero-length path, whose
+                // endpoints are one node and which holds no relationship for
+                // the type to constrain — so the no-rows claim would be false.
+                format!(
+                    "MATCH references unknown relationship type '{rel}' — the graph has no such \
+                     edge type, so no relationship matches; the pattern can still return its \
+                     zero-length path.{hint}"
+                )
+            } else if surviving.is_empty() {
                 format!(
                     "MATCH references unknown relationship type '{rel}' — the graph has no such \
                      edge type, so this pattern returns no rows.{hint}"
