@@ -121,6 +121,20 @@ before upgrading.
   terms; an affected file can therefore pass that estimate and still be
   refused on the additional decoded term.
 
+- Complete-snapshot normalization adds load-time work. In release measurements,
+  ordinary disk fixtures loaded 61–84% slower and ordinary portable fixtures
+  12–15% slower than before the change; a broader disk reopen control was
+  284–306% slower, with a confirming retake at 292%. The unchanged disk format
+  has no marker proving that an edge-property heap is reference-free, so every
+  nonempty blob is visited during complete-snapshot load, including blobs saved
+  by this release. This does not add work to ordinary query execution, and the
+  small fixtures do not establish large-graph scaling.
+- End-to-end output measurements cover all intervening 0.17.0 changes and do
+  not isolate formatter speed. Equivalent CLI ordinary output was
+  +1.44%/-0.05% across two pairs; equivalent MCP ordinary output was
+  12.88–13.10% faster. Precision and multiline cases produce corrected output
+  and are recorded as correctness costs rather than speed comparisons.
+
 - Rust `load_rdf` now requires a fresh empty in-memory destination without
   schema, indexes, constraints, identity aliases or mutation capture. Load into
   a separate `DirGraph::new()` instead of appending into an existing graph.

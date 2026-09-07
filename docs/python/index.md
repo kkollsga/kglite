@@ -63,6 +63,8 @@ guides/recipes
 
 ## Migrations
 
+- **[0.16.24 → 0.17.0](migrations/0.16-to-0.17.md)** — tightened ownership,
+  numeric, view identity, persistence, binding-output, and MCP-skill contracts.
 - **[Neo4j → KGLite](migrations/neo4j-to-kglite.md)** — evaluate or
   adopt KGLite from an existing Neo4j database / driver code.
 - **[0.13 → 0.14](migrations/0.13-to-0.14.md)** — the handover release:
@@ -83,6 +85,7 @@ transactions
 error-handling
 value-projection
 platform-support
+migrations/0.16-to-0.17
 migrations/neo4j-to-kglite
 migrations/0.13-to-0.14
 migrations/mcp-0.6-to-0.9
