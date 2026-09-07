@@ -14,6 +14,28 @@ impl<'a> CypherExecutor<'a> {
         clause: &ReturnClause,
         result_set: ResultSet,
     ) -> Result<ResultSet, String> {
+        self.execute_return_retaining(clause, result_set, &[])
+    }
+
+    /// `execute_return`, plus the names a following `ORDER BY` still needs
+    /// out of the *pre-projection* scope.
+    ///
+    /// A projection replaces the row's `projected` map, and `ORDER BY` runs
+    /// after it — so `WITH p, p.age AS a RETURN p.name AS n ORDER BY a DESC`
+    /// sorted on a null key for every row and silently returned input order.
+    /// The retained entries are added to the projected map only when the
+    /// projection did not define a column of the same name, which is the
+    /// Cypher precedence (`RETURN p.name AS a ORDER BY a` sorts on the
+    /// projected `a`), and they are never added to `columns`, so no output
+    /// shape changes. `WITH` passes an empty list: a `WITH` is a scope
+    /// barrier and retaining there would re-expose a dropped variable to
+    /// `RETURN *`.
+    pub(super) fn execute_return_retaining(
+        &self,
+        clause: &ReturnClause,
+        result_set: ResultSet,
+        retain: &[String],
+    ) -> Result<ResultSet, String> {
         // Expand RETURN * to individual items for each bound variable (BUG-05)
         let expanded;
         let clause = if clause.items.len() == 1
@@ -75,7 +97,7 @@ impl<'a> CypherExecutor<'a> {
         } else if has_aggregation {
             self.execute_return_with_aggregation(clause, result_set)?
         } else {
-            self.execute_return_projection(clause, result_set)?
+            self.execute_return_projection(clause, result_set, retain)?
         };
 
         // Apply HAVING filter (post-aggregation)
@@ -97,6 +119,7 @@ impl<'a> CypherExecutor<'a> {
         &self,
         clause: &ReturnClause,
         mut result_set: ResultSet,
+        retain: &[String],
     ) -> Result<ResultSet, String> {
         let columns: Vec<String> = clause.items.iter().map(return_item_column_name).collect();
 
@@ -122,11 +145,21 @@ impl<'a> CypherExecutor<'a> {
         // In-place projection: overwrite each row's `projected` field without
         // cloning node_bindings / edge_bindings / path_bindings.
         let project_row = |row: &mut ResultRow| -> Result<(), String> {
-            let mut projected = Bindings::with_capacity(clause.items.len());
+            let mut projected = Bindings::with_capacity(clause.items.len() + retain.len());
             for (i, item) in clause.items.iter().enumerate() {
                 let key = return_item_column_name(item);
                 let val = self.evaluate_expression(&folded_exprs[i], row)?;
                 projected.insert(key, val);
+            }
+            // Carry the pre-projection values a following ORDER BY reads.
+            // A projected column of the same name wins, so this only ever
+            // fills a hole the projection left.
+            for name in retain {
+                if !projected.contains_key(name) {
+                    if let Some(value) = row.projected.get(name) {
+                        projected.insert(name.clone(), value.clone());
+                    }
+                }
             }
             row.projected = projected;
             Ok(())

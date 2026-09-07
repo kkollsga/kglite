@@ -57,7 +57,10 @@ fn lazy_eligibility_corpus() {
         // Ordering, dedup and multi-stage pipelines all disqualify.
         "MATCH (u:User) RETURN u.name ORDER BY u.name",
         "MATCH (u:User) RETURN DISTINCT u.name",
-        "MATCH (u:User) WITH u.name AS n RETURN n",
+        // NOTE: `MATCH (u:User) WITH u.name AS n RETURN n` used to live here.
+        // `fold_aliasing_with` now substitutes the WITH away, so it *is* the
+        // eligible `MATCH (u:User) RETURN u.name AS n` — the convergence this
+        // corpus's closing pair asks for, arriving from the other direction.
         "UNWIND [1, 2] AS x RETURN x",
     ] {
         assert!(!is_lazy(q), "expected NOT lazy-eligible: {q}");
@@ -687,9 +690,12 @@ fn test_top_k_bails_when_a_sort_key_reads_an_alias_it_is_not_equal_to() {
         "a matched RETURN item whose expression reads a sibling alias must bail"
     );
     // But an alias bound *upstream* by WITH is a real binding on the row, so
-    // that shape stays fusable.
+    // that shape stays fusable. `fold_aliasing_with` substitutes the WITH away
+    // first, so the query reaches the *node-scan* top-K rather than the
+    // generic one — a better plan, and the point of the assertion (this shape
+    // fuses) is unchanged.
     assert!(
-        order_by_top_k_keys("MATCH (n:Item) WITH n.p0 AS x RETURN x AS y ORDER BY y LIMIT 5")
+        node_scan_top_k_keys("MATCH (n:Item) WITH n.p0 AS x RETURN x AS y ORDER BY y LIMIT 5")
             .is_some(),
         "an upstream WITH alias is bound before RETURN and must still fuse"
     );

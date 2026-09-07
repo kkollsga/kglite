@@ -135,8 +135,9 @@ pub(crate) fn fuse_node_scan_top_k(
             continue;
         }
 
-        // RETURN must have no aggregation, no DISTINCT, and no function calls
-        // (function calls like ts_sum need special evaluation context)
+        // RETURN must have no aggregation, no DISTINCT, no function calls
+        // (function calls like ts_sum need special evaluation context) and no
+        // `RETURN *` (see `return_star_is_unfusable`).
         let return_ok = if let Clause::Return(r) = &query.clauses[return_idx] {
             !r.distinct
                 && !r
@@ -147,6 +148,7 @@ pub(crate) fn fuse_node_scan_top_k(
                     .items
                     .iter()
                     .any(|item| matches!(item.expression, Expression::FunctionCall { .. }))
+                && !return_star_is_unfusable(&r.items)
         } else {
             false
         };
@@ -396,6 +398,21 @@ fn take_fused_shape(query: &mut CypherQuery, i: usize) -> ReturnClause {
     }
 }
 
+/// True when a RETURN carries a `*`, which no top-K fusion can project.
+///
+/// `RETURN *` names no item in the AST: the executor expands it from the
+/// *runtime row's* bindings (`executor/return_clause.rs`), which a fused
+/// operator's own projection never builds. Fusing it projected the literal
+/// `Star` expression instead, so `MATCH (p:Person) RETURN * ORDER BY p.age
+/// DESC LIMIT 2` answered `[{'*': 1}, {'*': 1}]` while the same query
+/// without the LIMIT answered the rows. The unoptimised plan was right, so
+/// the differential corpus is the detector and now carries the shape.
+fn return_star_is_unfusable(items: &[ReturnItem]) -> bool {
+    items
+        .iter()
+        .any(|item| matches!(item.expression, Expression::Star))
+}
+
 /// Column name for a return item (mirrors executor's return_item_column_name).
 pub(crate) fn return_item_column_name(item: &ReturnItem) -> String {
     if let Some(ref alias) = item.alias {
@@ -487,6 +504,11 @@ pub(crate) fn fuse_order_by_top_k(query: &mut CypherQuery) {
                 .iter()
                 .any(|item| matches!(item.expression, Expression::WindowFunction { .. }))
             {
+                i += 1;
+                continue;
+            }
+            // Don't fuse `RETURN *` — see `return_star_is_unfusable`.
+            if return_star_is_unfusable(&r.items) {
                 i += 1;
                 continue;
             }

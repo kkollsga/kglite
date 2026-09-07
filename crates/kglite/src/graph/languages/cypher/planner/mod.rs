@@ -40,7 +40,9 @@ use join_order::{
 use node_anchor::anchor_element_id;
 use rel_predicate_pushdown::extract_pushable_rel_predicates_with_params;
 use var_length_lowering::lower_fixed_var_length_hops;
-use with_boundary::pass_hoist_with_where;
+use with_boundary::{
+    pass_fold_aliasing_with, pass_hoist_terminal_return_over_with_top_k, pass_hoist_with_where,
+};
 
 use simplification::{
     desugar_multi_match_return_aggregate, fold_or_to_in, fold_pass_through_with,
@@ -129,6 +131,15 @@ pub const PASSES: &[(&str, PassFn)] = &[
     // strip pass-through WITH BEFORE cross-clause MATCH reorder so the
     // latter sees a contiguous Match-Match span when a `WITH p` sat between.
     ("fold_pass_through_with", pass_fold_pass_through_with),
+    // Substitute an aliasing WITH away, so the top-K fusion window can form
+    // across the boundary it was holding. Runs immediately after
+    // `fold_pass_through_with` (which owns the bare-variable case) and well
+    // before the fusion block that consumes the result.
+    ("fold_aliasing_with", pass_fold_aliasing_with),
+    (
+        "hoist_terminal_return_over_with_top_k",
+        pass_hoist_terminal_return_over_with_top_k,
+    ),
     // Runs AFTER fold_pass_through_with: folding a pass-through WITH changes
     // which clauses sit downstream of an UNWIND, and this pass's whole job is
     // to read that downstream set. Running it first would decide against a

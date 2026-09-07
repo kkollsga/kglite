@@ -172,8 +172,11 @@ def test_order_by_an_expression_over_an_alias_does_not_fuse(rank_graph):
 
 
 def test_order_by_alias_over_a_with_binding_still_fuses(rank_graph):
+    # `fold_aliasing_with` substitutes the WITH away before the fusion block,
+    # so this reaches the node-scan top-K rather than the generic one. Same
+    # rows, one operator earlier; the assertion is that it fuses at all.
     q = "MATCH (x:N) WITH x.name AS n, x.grp AS g, x.score AS s RETURN n, g, s ORDER BY g, s LIMIT 3"
-    assert _names(rank_graph, q, fused="FusedOrderByTopK") == ["A", "B", "G"]
+    assert _names(rank_graph, q, fused="FusedNodeScanTopK") == ["A", "B", "G"]
 
 
 # ── the generic (non-node-scan) fused path ───────────────────────────

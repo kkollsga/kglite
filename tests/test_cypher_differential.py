@@ -849,6 +849,129 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(q) WITH p, q WHERE q.age > 30 RETURN count(*) AS n",
         None,
     ),
+    # ── fold_aliasing_with / hoist_terminal_return_over_with_top_k ──
+    # An aliasing WITH is not a pass-through, so the existing fold declines it
+    # and the top-k fusion window never forms. These two passes substitute the
+    # aliases away instead. One trigger per arm, one entry per bail.
+    (
+        "aliasing_with_top_k",
+        "social_graph",
+        "MATCH (p:Person) WITH p, p.age AS a RETURN p.name AS n ORDER BY a DESC LIMIT 3",
+        None,
+    ),
+    (
+        "aliasing_with_scalar_top_k",
+        "social_graph",
+        "MATCH (p:Person) WITH p.name AS n, p.age AS a RETURN n ORDER BY a DESC LIMIT 3",
+        None,
+    ),
+    (
+        # Folds to the `push_limit_into_match` shape — pins that the interaction
+        # is the one that pass's own single-MATCH guard already covers.
+        "aliasing_with_no_orderby",
+        "social_graph",
+        "MATCH (p:Person) WITH p, p.age AS a RETURN p.name AS n LIMIT 3",
+        None,
+    ),
+    (
+        # F1 — an aggregating WITH is not 1:1.
+        "aliasing_with_agg_bail",
+        "social_graph",
+        "MATCH (p:Person) WITH p.city AS c, count(*) AS k RETURN c, k ORDER BY k DESC LIMIT 3",
+        None,
+    ),
+    (
+        # F1 — DISTINCT changes the row set.
+        "aliasing_with_distinct_bail",
+        "social_graph",
+        "MATCH (p:Person) WITH DISTINCT p.city AS c RETURN c ORDER BY c LIMIT 3",
+        None,
+    ),
+    (
+        # F5 — a clause downstream that is not part of the terminal
+        # `RETURN [ORDER BY] [SKIP] [LIMIT]` tail. (A write clause is the same
+        # bail; it is not spelled here because this corpus is replayed against
+        # the Bolt server, which refuses auto-commit mutations.)
+        "aliasing_with_match_downstream_bail",
+        "social_graph",
+        "MATCH (p:Person) WITH p, p.age AS a MATCH (p)-[:KNOWS]->(q:Person) RETURN a, q.name AS n",
+        None,
+    ),
+    (
+        # F6 — the RETURN re-binds one of the WITH's names, which shadows it
+        # for the ORDER BY that follows. Substituting would have sorted by
+        # `p.age` where Cypher sorts by `p.title`.
+        "aliasing_with_return_rebinds_alias_bail",
+        "social_graph",
+        "MATCH (p:Person) WITH p, p.age AS a RETURN p.name AS a ORDER BY a DESC LIMIT 3",
+        None,
+    ),
+    (
+        # F7 — the alias shadows a pre-WITH variable, so substitution would
+        # capture.
+        "aliasing_with_shadow_bail",
+        "social_graph",
+        "MATCH (p:Person) WITH p.name AS p RETURN p LIMIT 3",
+        None,
+    ),
+    (
+        # Independent trigger arm: ascending, so a gate regression cannot hide
+        # behind the descending shape. (F4 — an ORDER BY reading a variable the
+        # WITH hides — is not corpus-testable: it is a validation error, and is
+        # pinned as a golden instead.)
+        "aliasing_with_top_k_ascending",
+        "social_graph",
+        "MATCH (p:Person) WITH p, p.age AS a RETURN p.name AS n ORDER BY a ASC LIMIT 3",
+        None,
+    ),
+    (
+        "with_order_limit_then_return",
+        "social_graph",
+        "MATCH (p:Person) WITH p, p.age AS a ORDER BY a DESC LIMIT 3 RETURN p.name AS n",
+        None,
+    ),
+    (
+        "with_order_limit_skip_return",
+        "social_graph",
+        "MATCH (p:Person) WITH p, p.age AS a ORDER BY a DESC SKIP 1 LIMIT 2 RETURN p.name AS n",
+        None,
+    ),
+    (
+        # E2 — a DISTINCT terminal RETURN is not order-preserving 1:1.
+        "with_order_limit_distinct_return_bail",
+        "social_graph",
+        "MATCH (p:Person) WITH p, p.city AS c ORDER BY c LIMIT 5 RETURN DISTINCT c",
+        None,
+    ),
+    (
+        # E2 — an aggregating terminal RETURN changes the row count.
+        "with_order_limit_agg_return_bail",
+        "social_graph",
+        "MATCH (p:Person) WITH p, p.city AS c ORDER BY c LIMIT 5 RETURN c, count(*) AS k",
+        None,
+    ),
+    (
+        # E1 — a clause other than the terminal RETURN follows the window.
+        "with_order_limit_then_match_bail",
+        "social_graph",
+        "MATCH (p:Person) WITH p ORDER BY p.age DESC LIMIT 5 MATCH (p)-[:KNOWS]->(q) RETURN count(*) AS n",
+        None,
+    ),
+    (
+        # `RETURN *` names no item in the AST, so the top-K fusions projected
+        # the literal `Star` and answered `[{'*': 1}, {'*': 1}]` where the
+        # unoptimised plan answered the rows. Both fusions now decline it.
+        "return_star_order_by_limit",
+        "social_graph",
+        "MATCH (p:Person) RETURN * ORDER BY p.age DESC LIMIT 2",
+        None,
+    ),
+    (
+        "return_star_order_by_limit_after_with",
+        "social_graph",
+        "MATCH (p:Person) WITH p, p.age AS a RETURN * ORDER BY a DESC LIMIT 2",
+        None,
+    ),
     # ── desugar_multi_match_return_aggregate ──
     # Regression test for the bug found by this harness on first run:
     # `MATCH (p) MATCH (c) RETURN p.city, count(c)` was over-finely
@@ -5481,6 +5604,8 @@ PASS_TRIGGER_CASES: dict[str, tuple[str, str]] = {
     "push_where_into_match.2": ("differential", "or_chain_to_in"),
     "extract_pushable_rel_predicates": ("differential", "rel_property_filter"),
     "fold_pass_through_with": ("differential", "pass_through_with"),
+    "fold_aliasing_with": ("differential", "aliasing_with_top_k"),
+    "hoist_terminal_return_over_with_top_k": ("differential", "with_order_limit_then_return"),
     "narrow_unwind_source": ("differential", "narrow_unwind_source_dead"),
     "desugar_multi_match_return_aggregate": ("differential", "multi_match_group_agg"),
     "fuse_spatial_join": ("specialized", "spatial_join"),
@@ -5531,6 +5656,7 @@ PASS_SECONDARY_TRIGGER_CASES: dict[str, str] = {
     "push_limit_into_aggregate": "trigger_push_limit_into_aggregate_with",
     "fuse_anchored_edge_count": "trigger_anchored_edge_count_reverse",
     "fuse_match_with_aggregate_top_k": "trigger_match_with_top_k_ascending",
+    "fold_aliasing_with": "aliasing_with_top_k_ascending",
     "reorder_predicates_by_cost": "trigger_predicate_reorder_or",
 }
 

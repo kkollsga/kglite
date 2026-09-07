@@ -75,7 +75,7 @@ fn parallel_projection_observes_the_cancel_flag() {
     let executor = CypherExecutor::with_params(&graph, &params, None).with_cancel(Some(&CANCELLED));
 
     let cancelled = executor
-        .execute_return_projection(clause, bound_rows(&graph, gate_rows()))
+        .execute_return_projection(clause, bound_rows(&graph, gate_rows()), &[])
         .unwrap_err();
     assert_eq!(cancelled, "Query cancelled");
 
@@ -85,7 +85,7 @@ fn parallel_projection_observes_the_cancel_flag() {
     // parallel branch and this file needs a new probe.
     assert!(
         executor
-            .execute_return_projection(clause, bound_rows(&graph, gate_rows() - 1))
+            .execute_return_projection(clause, bound_rows(&graph, gate_rows() - 1), &[])
             .is_ok(),
         "below-threshold projection must still take the unpolled sequential branch"
     );
@@ -101,7 +101,7 @@ fn parallel_projection_observes_the_deadline() {
     let executor = CypherExecutor::with_params(&graph, &params, Some(past));
 
     let timed_out = executor
-        .execute_return_projection(clause, bound_rows(&graph, gate_rows()))
+        .execute_return_projection(clause, bound_rows(&graph, gate_rows()), &[])
         .unwrap_err();
     assert!(
         timed_out.starts_with("Query timed out."),
@@ -110,7 +110,7 @@ fn parallel_projection_observes_the_deadline() {
 
     assert!(
         executor
-            .execute_return_projection(clause, bound_rows(&graph, gate_rows() - 1))
+            .execute_return_projection(clause, bound_rows(&graph, gate_rows() - 1), &[])
             .is_ok(),
         "below-threshold projection must still take the unpolled sequential branch"
     );

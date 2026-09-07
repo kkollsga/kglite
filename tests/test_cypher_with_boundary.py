@@ -119,3 +119,93 @@ def test_an_aggregate_inside_the_predicate_is_still_refused(boundary_graph) -> N
     for kwargs in ({}, {"disable_optimizer": True}):
         with pytest.raises(kglite.CypherExecutionError, match="cannot be used outside of RETURN/WITH"):
             boundary_graph.cypher(query, **kwargs).to_list()
+
+
+# ── fold_aliasing_with / hoist_terminal_return_over_with_top_k (T2-2) ──
+
+
+def test_column_names_survive_the_substitution(boundary_graph) -> None:
+    """`RETURN i` after `i := p.id` must still be column `i`.
+
+    The corpus compares two plans against each other, so a column both
+    plans renamed identically would stay green. These are the names.
+    """
+    for rows in both_profiles(boundary_graph, "MATCH (p:P) WITH p.title AS n RETURN n"):
+        assert list(rows[0]) == ["n"]
+        assert rows == [{"n": t} for t in "abcde"]
+    for rows in both_profiles(boundary_graph, "MATCH (p:P) WITH p, p.age AS a RETURN p.title ORDER BY a DESC LIMIT 2"):
+        assert rows == [{"p.title": "e"}, {"p.title": "d"}]
+
+
+def test_the_reorder_keeps_tie_order_and_null_placement(boundary_graph) -> None:
+    """Three rows share the sort key and one carries no key at all.
+
+    `hoist_terminal_return_over_with_top_k` moves the RETURN ahead of the
+    ORDER BY / LIMIT it followed. That is only an identity if the projection
+    is order-preserving, so ties must still resolve by input order and the
+    NULL must still land where its direction's default puts it (DESC →
+    NULLS FIRST, ASC → NULLS LAST).
+    """
+    descending = "MATCH (p:P) WITH p, p.age AS a ORDER BY a DESC LIMIT 3 RETURN p.title"
+    for rows in both_profiles(boundary_graph, descending):
+        # e has no age (NULLS FIRST), d is 55, then the 30-tie in input order.
+        assert rows == [{"p.title": "e"}, {"p.title": "d"}, {"p.title": "a"}]
+    ascending = "MATCH (p:P) WITH p, p.age AS a ORDER BY a ASC LIMIT 3 RETURN p.title"
+    for rows in both_profiles(boundary_graph, ascending):
+        # NULLS LAST, so the whole 30-tie comes first, in input order.
+        assert rows == [{"p.title": "a"}, {"p.title": "b"}, {"p.title": "c"}]
+    skipped = "MATCH (p:P) WITH p, p.age AS a ORDER BY a DESC SKIP 1 LIMIT 2 RETURN p.title"
+    for rows in both_profiles(boundary_graph, skipped):
+        assert rows == [{"p.title": "d"}, {"p.title": "a"}]
+
+
+def test_a_hidden_order_key_is_still_a_scope_error(boundary_graph) -> None:
+    """F4: substitution must not re-expose what the WITH dropped.
+
+    `WITH p.id AS i, …` drops `p`, so `ORDER BY p.city` is undefined. The
+    fold could make it evaluable, and must not.
+    """
+    query = "MATCH (p:P) WITH p.id AS i, p.age AS a RETURN i ORDER BY p.city LIMIT 2"
+    for kwargs in ({}, {"disable_optimizer": True}):
+        with pytest.raises(kglite.SchemaError, match="Undefined variable 'p'"):
+            boundary_graph.cypher(query, **kwargs).to_list()
+
+
+def test_order_by_reads_a_with_alias_the_return_does_not_project(boundary_graph) -> None:
+    """A sort key naming a WITH value the RETURN drops must still sort.
+
+    ORDER BY runs after the projection, and the projection replaced the
+    row's projected map — so this sorted on a null key for every row and
+    silently returned input order, on *both* plan profiles. The LIMIT form
+    was right only because a top-K fusion happened to claim it.
+    """
+    unlimited = "MATCH (p:P) WITH p, p.age AS a RETURN p.title AS t ORDER BY a DESC"
+    for rows in both_profiles(boundary_graph, unlimited):
+        assert [row["t"] for row in rows] == ["e", "d", "a", "b", "c"]
+    limited = "MATCH (p:P) WITH p, p.age AS a RETURN p.title AS t ORDER BY a DESC LIMIT 3"
+    for rows in both_profiles(boundary_graph, limited):
+        assert [row["t"] for row in rows] == ["e", "d", "a"]
+
+
+def test_a_projected_column_wins_over_the_carried_scope(boundary_graph) -> None:
+    """`RETURN p.title AS a ORDER BY a` sorts by the projected `a`.
+
+    The carried pre-projection value only fills a hole; a column the RETURN
+    defines shadows it, which is the Cypher precedence.
+    """
+    query = "MATCH (p:P) WITH p, p.age AS a RETURN p.title AS a ORDER BY a DESC LIMIT 3"
+    for rows in both_profiles(boundary_graph, query):
+        assert [row["a"] for row in rows] == ["e", "d", "c"]
+
+
+def test_return_star_is_not_fused_into_a_top_k(boundary_graph) -> None:
+    """`RETURN *` expands from the runtime row, which no fused operator builds.
+
+    The top-K fusions projected the literal `Star` instead, so the same
+    query answered `[{'*': 1}, …]` with a LIMIT and the real rows without
+    one.
+    """
+    with_limit = boundary_graph.cypher("MATCH (p:P) RETURN * ORDER BY p.age DESC LIMIT 2").to_list()
+    without = boundary_graph.cypher("MATCH (p:P) RETURN * ORDER BY p.age DESC").to_list()
+    assert list(with_limit[0]) == ["p"]
+    assert with_limit == without[:2]

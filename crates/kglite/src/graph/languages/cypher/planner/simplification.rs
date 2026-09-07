@@ -1441,7 +1441,7 @@ fn pass_through_projection(clause: &Clause) -> Option<HashSet<String>> {
 /// fused shapes contribute nothing, so a caller that needs "this variable is
 /// definitely unreferenced" must first check
 /// [`unwind_scope_refs_are_enumerable`].
-fn collect_clause_variables(clause: &Clause, out: &mut HashSet<String>) {
+pub(super) fn collect_clause_variables(clause: &Clause, out: &mut HashSet<String>) {
     match clause {
         Clause::Match(m) | Clause::OptionalMatch(m) => {
             collect_pattern_refs(&m.patterns, out);

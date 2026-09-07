@@ -1519,10 +1519,17 @@ fn test_fold_pass_through_with_keeps_useful_with() {
         query.clauses
     );
 
-    // The converse needs a WITH that *renames* a variable.
+    // The converse needs a WITH that *renames* a variable. THIS pass must not
+    // fold it: `pass_through_projection` refuses an alias that differs from
+    // its source, because dropping the clause outright would drop the rename
+    // with it. (`fold_aliasing_with` does remove it, by substituting
+    // `person` back to `p` and keeping `person` as the column name — a
+    // different rewrite, asserted in `with_boundary_tests`. It is disabled
+    // here so this assertion measures the pass it names.)
     let mut renaming =
         parse_cypher("MATCH (p)-[r]->(q) WITH p AS person RETURN person LIMIT 10").unwrap();
-    optimize(&mut renaming, &graph, &params);
+    let disabled: HashSet<String> = ["fold_aliasing_with".to_string()].into_iter().collect();
+    optimize_with_disabled(&mut renaming, &graph, &params, &disabled);
     let has_with = renaming
         .clauses
         .iter()

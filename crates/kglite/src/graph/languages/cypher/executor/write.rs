@@ -505,7 +505,15 @@ fn run_clause_pipeline(
                     .with_cancel(interrupt.cancel)
                     .with_budget(budget.clone())
                     .with_csv_import(ctx.csv_import.clone());
-                result_set = executor.execute_single_clause(clause, result_set)?;
+                result_set = if let Clause::Return(r) = clause {
+                    // Same ORDER BY scope carry as the read loop: the write
+                    // engine dispatches read clauses one at a time and would
+                    // otherwise lose a WITH alias the sort key reads.
+                    let retain = super::order_by_scope_after(clauses, i);
+                    executor.execute_return_retaining(r, result_set, &retain)?
+                } else {
+                    executor.execute_single_clause(clause, result_set)?
+                };
                 ctx.absorb_runtime(&executor);
             }
         }

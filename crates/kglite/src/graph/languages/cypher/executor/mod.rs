@@ -704,6 +704,9 @@ impl<'a> CypherExecutor<'a> {
                         &query.clauses[..i],
                     );
                     self.execute_call_subquery(import, body, result_set, &declared)?
+                } else if let Clause::Return(r) = clause {
+                    let retain = order_by_scope_after(&query.clauses, i);
+                    self.execute_return_retaining(r, result_set, &retain)?
                 } else {
                     self.execute_single_clause(clause, result_set)?
                 };
@@ -729,6 +732,9 @@ impl<'a> CypherExecutor<'a> {
                         &query.clauses[..i],
                     );
                     self.execute_call_subquery(import, body, result_set, &declared)?
+                } else if let Clause::Return(r) = clause {
+                    let retain = order_by_scope_after(&query.clauses, i);
+                    self.execute_return_retaining(r, result_set, &retain)?
                 } else {
                     self.execute_single_clause(clause, result_set)?
                 };
@@ -1215,6 +1221,32 @@ fn single_count_result(alias: &str, count: i64) -> ResultSet {
 }
 
 /// Best-effort declared-variable set derived from the bindings present on
+/// The variable names an `ORDER BY` immediately following `clauses[i]`
+/// reads.
+///
+/// `ORDER BY` executes after the projection that precedes it, and a
+/// projection replaces the row's `projected` map — so a sort key naming a
+/// value an earlier `WITH` produced but the `RETURN` does not project
+/// evaluated to null for every row, and the sort silently became a no-op
+/// (`WITH p, p.age AS a RETURN p.name AS n ORDER BY a DESC` returned input
+/// order). The names collected here are handed to
+/// `execute_return_retaining`, which carries exactly those values across
+/// the projection. Empty when the next clause is not an `ORDER BY`, so
+/// every other RETURN pays nothing.
+pub(super) fn order_by_scope_after(clauses: &[Clause], i: usize) -> Vec<String> {
+    let Some(Clause::OrderBy(order_by)) = clauses.get(i + 1) else {
+        return Vec::new();
+    };
+    let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for item in &order_by.items {
+        crate::graph::languages::cypher::planner::simplification::collect_expression_refs(
+            &item.expression,
+            &mut names,
+        );
+    }
+    names.into_iter().collect()
+}
+
 /// a result set's rows. Used only by the index-less `execute_single_clause`
 /// dispatch fallback for `CALL { }` (the index-aware loops compute the
 /// declared scope statically from the preceding clauses). Probing every

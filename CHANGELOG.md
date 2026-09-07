@@ -11,6 +11,24 @@ before upgrading.
 
 ### Fixed
 
+- **`ORDER BY` no longer silently ignores a sort key an earlier `WITH`
+  produced.** `MATCH (p:Person) WITH p, p.age AS a RETURN p.name AS n ORDER BY
+  a DESC` returned input order, on every plan profile: `ORDER BY` runs after
+  the projection, and the projection replaced the row's value map, so the key
+  evaluated to null for every row and the stable sort left the rows where they
+  were. The pre-projection values a following `ORDER BY` reads are now carried
+  across the projection; a column the `RETURN` defines still wins
+  (`RETURN p.name AS a ORDER BY a` sorts by the name), and nothing is added to
+  the result's columns. The `LIMIT` spelling of the same query was already
+  right, because a top-K fusion claimed it — which is why the two disagreed.
+
+- **`RETURN *` with `ORDER BY … LIMIT` returned a `*` column of `1`s.**
+  `MATCH (p:Person) RETURN * ORDER BY p.age DESC LIMIT 2` answered
+  `[{'*': 1}, {'*': 1}]` while the same query without the `LIMIT` answered the
+  rows. `RETURN *` names no item in the query: the executor expands it from
+  the row's own bindings, which a fused top-K operator never builds. Both
+  top-K fusions now decline a starred `RETURN`.
+
 - **The MCP server now applies a query deadline.** It had none of any kind, so
   a runaway `cypher_query` held the active graph's read lock — which stalls the
   single-flight rebuild gate every later tool call enters — and an agent has no
@@ -262,6 +280,34 @@ before upgrading.
   reading an alias the `WITH` introduces or a variable it hides (which is a
   scope error and stays one), and an `OPTIONAL MATCH` before the `WITH`.
   Disable with `cypher(..., disabled_passes=['hoist_with_where'])`.
+
+- **An aliasing `WITH` no longer blocks top-k fusion.**
+  `fold_pass_through_with` only removes a `WITH` whose items are bare
+  variables, so `WITH p, p.x AS s` survived — and with it the projection
+  barrier that keeps the top-k operator from ever seeing its
+  `MATCH … RETURN … ORDER BY … LIMIT` window, materialising every row for a
+  `LIMIT 10`. Two new optimizer passes substitute the aliases away instead:
+  `fold_aliasing_with` for the `WITH … RETURN … ORDER BY … LIMIT` spelling and
+  `hoist_terminal_return_over_with_top_k` for the `WITH … ORDER BY … LIMIT …
+  RETURN` one. Measured over 50k nodes (release build, `min` of 40 rounds, two
+  agreeing runs, the same binary with and without the passes): **11.9 ms →
+  0.94 ms (12.7x)**, **4.7 ms → 0.94 ms (5.0x)** for the all-scalar
+  projection, and **27.5 ms → 0.94 ms (29x)** for the `ORDER BY`-before-
+  `RETURN` spelling — the 0.95 ms the same query costs written without the
+  `WITH`. Column names, tie order and NULL placement are unchanged. The
+  passes decline an aggregating or `DISTINCT` `WITH`, an item outside the
+  substitutable algebra (any function call, so a non-deterministic one cannot
+  be duplicated), a downstream reference to a variable the `WITH` hides (a
+  scope error, which stays one), a `RETURN` that re-binds one of the `WITH`'s
+  names, `RETURN *`, and anything downstream but the terminal `RETURN` and its
+  ordering clauses. Disable with
+  `cypher(..., disabled_passes=['fold_aliasing_with',
+  'hoist_terminal_return_over_with_top_k'])`.
+
+  One visible consequence: `MATCH (u:User) WITH u.name AS n RETURN n` now
+  folds to `MATCH (u:User) RETURN u.name AS n`, which is *lazy-eligible* — its
+  result is returned deferred and holds the graph until it is consumed, the
+  same as the `WITH`-less spelling always did.
 
 - **Query deadlines are declared per surface, and two surfaces gained a knob.**
   Only the Python API had a default or a way to set one; the divergence was
