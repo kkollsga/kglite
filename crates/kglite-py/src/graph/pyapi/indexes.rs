@@ -38,6 +38,7 @@ impl KnowledgeGraph {
         node_type: &str,
         property: &str,
     ) -> PyResult<Py<PyAny>> {
+        self.check_durable_owner()?;
         let graph = get_graph_mut(&mut self.inner);
         // Raised here as ValueError so the refusal isn't wrapped in the
         // IOError below, whose message assumes a disk build failure.
@@ -69,6 +70,7 @@ impl KnowledgeGraph {
         result_dict.set_item("unique_values", unique_values)?;
         result_dict.set_item("persistent", persistent_disk)?;
         result_dict.set_item("created", !already_existed)?;
+        self.commit_wal()?;
 
         Ok(result_dict.into())
     }
@@ -82,9 +84,11 @@ impl KnowledgeGraph {
     /// Returns:
     ///     True if index existed and was removed, False otherwise
     fn drop_index(&mut self, node_type: &str, property: &str) -> PyResult<bool> {
+        self.check_durable_owner()?;
         let removed = get_graph_mut(&mut self.inner)
             .drop_index(node_type, property)
             .map_err(PyErr::new::<pyo3::exceptions::PyIOError, _>)?;
+        self.commit_wal()?;
         Ok(removed)
     }
 
@@ -294,11 +298,13 @@ impl KnowledgeGraph {
         node_type: &str,
         property: &str,
     ) -> PyResult<Py<PyAny>> {
+        self.check_durable_owner()?;
         let graph = get_graph_mut(&mut self.inner);
         graph
             .reject_secondary_only_index_type(node_type)
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
-        let unique_values = graph.create_range_index(node_type, property);
+        let unique_values = graph.declare_range_index(node_type, property);
+        self.commit_wal()?;
 
         let result_dict = PyDict::new(py);
         result_dict.set_item("node_type", node_type)?;
@@ -318,7 +324,9 @@ impl KnowledgeGraph {
     /// Returns:
     ///     True if index existed and was removed, False otherwise.
     fn drop_range_index(&mut self, node_type: &str, property: &str) -> PyResult<bool> {
+        self.check_durable_owner()?;
         let removed = get_graph_mut(&mut self.inner).drop_range_index(node_type, property);
+        self.commit_wal()?;
         Ok(removed)
     }
 
@@ -375,12 +383,14 @@ impl KnowledgeGraph {
         node_type: &str,
         properties: Vec<String>,
     ) -> PyResult<Py<PyAny>> {
+        self.check_durable_owner()?;
         let graph = get_graph_mut(&mut self.inner);
         graph
             .reject_secondary_only_index_type(node_type)
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         let props_refs: Vec<&str> = properties.iter().map(|s| s.as_str()).collect();
-        let unique_values = graph.create_composite_index(node_type, &props_refs);
+        let unique_values = graph.declare_composite_index(node_type, &props_refs);
+        self.commit_wal()?;
         let result_dict = PyDict::new(py);
         result_dict.set_item("node_type", node_type)?;
         result_dict.set_item("properties", properties)?;
@@ -398,7 +408,9 @@ impl KnowledgeGraph {
     /// Returns:
     ///     True if index existed and was dropped, False otherwise
     fn drop_composite_index(&mut self, node_type: &str, properties: Vec<String>) -> PyResult<bool> {
+        self.check_durable_owner()?;
         let removed = get_graph_mut(&mut self.inner).drop_composite_index(node_type, &properties);
+        self.commit_wal()?;
         Ok(removed)
     }
 

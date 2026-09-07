@@ -14,6 +14,8 @@ use crate::datatypes::Value;
 use crate::graph::schema::DirGraph;
 use crate::graph::wal::{MutationOp, WalFrame};
 
+#[path = "wal_replay/declarations.rs"]
+mod declarations;
 #[path = "wal_replay/install.rs"]
 mod install;
 #[path = "wal_replay/plan.rs"]
@@ -79,6 +81,11 @@ pub(crate) fn prepare_replay(
     for node_type in plan.node_types() {
         working.build_id_index(&node_type);
     }
+    // After the comparison above, and after the rows are indexed: a replayed
+    // `CREATE CONSTRAINT` is a rule the log declared, not a violation the
+    // replay introduced, and its own declarer is what checks it against the
+    // recovered rows. A replayed `CREATE INDEX` is rebuilt from those rows.
+    plan.declarations.install_schema(&mut working)?;
     working.bump_version();
     Ok((Some(working), plan.max_lsn))
 }
@@ -125,7 +132,13 @@ fn mutation_op_has_legacy_reference(op: &MutationOp) -> bool {
         MutationOp::RemoveNode { .. }
         | MutationOp::RemoveEdge { .. }
         | MutationOp::SetNodeLabels { .. }
-        | MutationOp::SetTypeFieldAliases { .. } => false,
+        | MutationOp::SetTypeFieldAliases { .. }
+        | MutationOp::SetTypeParent { .. }
+        | MutationOp::SetOntology { .. }
+        | MutationOp::SetSchemaVersion { .. }
+        | MutationOp::SetSpatialConfig { .. }
+        | MutationOp::SetPropertyIndex { .. }
+        | MutationOp::SetConstraint { .. } => false,
     }
 }
 

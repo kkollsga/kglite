@@ -301,6 +301,7 @@ impl DirGraph {
                 ));
             }
         }
+        self.note_ontology_declaration(&store);
         self.ontology = std::sync::Arc::new(store);
         self.rebuild_ontology_closures();
         Ok(warnings)
@@ -315,6 +316,10 @@ impl DirGraph {
         }
         self.ontology = std::sync::Arc::default();
         self.rebuild_ontology_closures();
+        // An empty store *is* "no ontology declared", so the withdrawal needs
+        // no tombstone shape of its own — replaying this converges on the
+        // same cleared state as replaying the declaration it replaces.
+        self.note_ontology_declaration(&crate::graph::ontology::OntologyStore::default());
     }
 
     /// The declared structured shapes for `node_type`, as

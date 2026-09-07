@@ -374,14 +374,18 @@ model.
   it deleted underneath them — but there is no retention policy yet, so
   checkpoint on a schedule you have the disk budget for, and prune old
   `generations/gen_*` directories yourself once no reader is using them.
-- **Some state is checkpoint-only.** The log describes nodes, edges, labels,
-  and the identity-field spellings an `add_nodes` call declares
-  (`unique_id_field` / `node_title_field`), so a recovered graph is still
-  queryable by your own column names. What has *no* log entry — persisted by
-  `save()` rather than recovered by replay — is `set_parent_type`, ontology
-  declarations, `CREATE CONSTRAINT`, `create_index`, `set_spatial`,
-  `set_schema_version`, embeddings, and timeseries. Call `save()` after
-  changing any of those if a crash must not lose them.
+- **Declarations are logged; two kinds of bulk payload are not.** The log
+  describes nodes, edges, labels, and the declarations you make about them:
+  the identity-field spellings an `add_nodes` call names (`unique_id_field` /
+  `node_title_field`), `set_parent_type`, `define_ontology` /
+  `clear_ontology`, `create_index` / `drop_index` and their range and
+  composite siblings, `CREATE CONSTRAINT` / `DROP CONSTRAINT`, `set_spatial`,
+  and `set_schema_version`. A recovered graph is queryable by your own column
+  names, with your indexes built and your constraints enforced. What still has
+  *no* log entry — persisted by `save()` rather than recovered by replay — is
+  **embeddings** and **timeseries channels**, because each is bulk numeric
+  data rather than a declaration and would put the whole payload in a log
+  frame. Call `save()` after loading either if a crash must not lose it.
 - **A `with` block is not a transaction.** Each mutation commits as it runs, so
   an exception inside the block does not undo mutations that already returned —
   they are recovered on the next `open()`. Use `begin()` when you want

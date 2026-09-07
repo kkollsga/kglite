@@ -20,7 +20,9 @@ use super::super::ast::{ConstraintRequirement, CreateConstraint};
 use super::super::result::MutationStats;
 use super::schema_ddl::{constraints_added, reject_name_collision};
 use crate::graph::algorithms::Interrupt;
-use crate::graph::constraints::{descriptor, ConstraintKind, EntityKind, NamedConstraint};
+use crate::graph::constraints::{
+    descriptor, ConstraintDeclaration, ConstraintKind, EntityKind, NamedConstraint,
+};
 use crate::graph::dir_graph::rel_constraints::RelDeclarationError;
 use crate::graph::dir_graph::DirGraph;
 use crate::graph::property_types::DeclaredType;
@@ -37,6 +39,15 @@ enum RelConstraintPlan {
 }
 
 impl RelConstraintPlan {
+    /// The type a `PropertyType` plan declares, for the log entry that has to
+    /// reinstall it without re-parsing the statement.
+    fn declared_type(self) -> Option<DeclaredType> {
+        match self {
+            RelConstraintPlan::PropertyType(declared) => Some(declared),
+            RelConstraintPlan::NotNull => None,
+        }
+    }
+
     fn kind(self) -> ConstraintKind {
         match self {
             RelConstraintPlan::NotNull => ConstraintKind::NotNull,
@@ -130,6 +141,17 @@ pub(super) fn execute_create_rel_constraint(
             },
         );
     }
+    graph.note_constraint_declaration(
+        ConstraintDeclaration {
+            name: create.name.as_deref(),
+            entity: EntityKind::Relationship,
+            kind: plan.kind(),
+            entity_type: rel_type,
+            properties: &create.properties,
+            declared_type: plan.declared_type(),
+        },
+        true,
+    );
     Ok(constraints_added(1))
 }
 

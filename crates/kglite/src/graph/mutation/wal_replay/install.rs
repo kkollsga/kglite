@@ -43,55 +43,12 @@ pub(super) fn apply(graph: &mut DirGraph, plan: &ReplayPlan) -> Result<Created, 
         .collect();
     upsert_rows(graph, rows, &mut identities, &mut created)?;
     vivify_legacy_endpoints(graph, plan, &mut identities, &mut created)?;
-    apply_type_field_aliases(graph, plan);
+    plan.declarations.install_metadata(graph);
     apply_labels(graph, plan, &identities);
     apply_edges(graph, plan, &identities, &mut created)?;
     graph.graph.flush_pending_writes();
     graph.ensure_disk_edges_built()?;
     Ok(created)
-}
-
-/// Reinstate the identity-field spellings the log declared, and mirror them
-/// into the type's property metadata exactly as `add_nodes` does.
-///
-/// Both halves are needed. The alias maps are what resolve `n.uid` to the
-/// identity slot; the metadata entry is what the planner's schema check reads,
-/// so without it `MATCH (n:A {uid: 1})` is refused as a typo on a graph whose
-/// `WHERE n.uid = 1` works. Runs *after* the rows so the canonical field's
-/// declared type is known — the alias names the same column, so it reports the
-/// same type — and so `declare_rows` cannot overwrite what this installs.
-fn apply_type_field_aliases(graph: &mut DirGraph, plan: &ReplayPlan) {
-    for (node_type, aliases) in &plan.aliases {
-        let mut mirrored = HashMap::new();
-        for (field, canonical, map) in [
-            (&aliases.id_field, "id", true),
-            (&aliases.title_field, "title", false),
-        ] {
-            let Some(field) = field else { continue };
-            if map {
-                graph
-                    .id_field_aliases_mut()
-                    .insert(node_type.clone(), field.clone());
-            } else {
-                graph
-                    .title_field_aliases_mut()
-                    .insert(node_type.clone(), field.clone());
-            }
-            // Absent only when this frame declared a spelling without writing
-            // a row of that type; whatever the checkpoint holds already
-            // describes those rows.
-            if let Some(kind) = graph
-                .get_node_type_metadata(node_type)
-                .and_then(|meta| meta.get(canonical))
-                .cloned()
-            {
-                mirrored.insert(field.clone(), kind);
-            }
-        }
-        if !mirrored.is_empty() {
-            graph.upsert_node_type_metadata(node_type, mirrored);
-        }
-    }
 }
 
 fn declare_rows(graph: &mut DirGraph, node_type: &str, rows: &[Row]) {

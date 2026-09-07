@@ -246,7 +246,7 @@ pub(super) fn load_node_specs(
             .or_insert(0) += count;
 
         if let Some(cfg) = node.spatial_config {
-            graph.spatial_configs.insert(node.node_type.clone(), cfg);
+            graph.set_spatial_config(&node.node_type, cfg);
         }
 
         if let Some((raw, resolved)) = node.timeseries {

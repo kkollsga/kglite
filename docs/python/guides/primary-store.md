@@ -116,13 +116,14 @@ explaining that, since the blocker is the commit boundary rather than barrier
 strength; only `durable="off"` is supported. The *default* does not raise, so
 disk callers are unaffected by the default being on elsewhere.
 
-**Not everything is logged.** The log carries nodes, edges, labels, and the
-`unique_id_field` / `node_title_field` spellings `add_nodes` declares. State it
-cannot express is *checkpoint-only* and is persisted by `save()` rather than by
-the log: `set_parent_type`, ontology declarations, constraints, user-created
-indexes, `set_spatial`, `set_schema_version`, embeddings, and timeseries. If
-those matter to you, a `save()` is still part of your durability story, not an
-optimisation.
+**Not everything is logged.** The log carries nodes, edges, labels, and every
+declaration you make about them — identity-field spellings, `set_parent_type`,
+ontologies, constraints, user-created indexes, `set_spatial` and
+`set_schema_version`. Two things it deliberately does not carry are
+**embeddings** and **timeseries channels**: both are bulk numeric payloads
+rather than declarations, so they stay *checkpoint-only* and are persisted by
+`save()`. If either matters to you, a `save()` after loading it is still part
+of your durability story, not an optimisation.
 
 Three consequences worth internalising before you rely on this:
 

@@ -654,9 +654,15 @@ fn install_node_type_metadata(
     // recovers every value under `id`/`title` and none of the spellings the
     // caller reads them by. The `None`s carry the guard above through to
     // replay: "this call declared none", not "clear the existing one".
-    graph
-        .graph
-        .note_recorded_type_field_aliases(node_type, declared_id, declared_title);
+    if declared_id.is_some() || declared_title.is_some() {
+        graph
+            .graph
+            .note_recorded_declaration(crate::graph::wal::MutationOp::SetTypeFieldAliases {
+                node_type: node_type.to_string(),
+                id_field: declared_id.map(str::to_string),
+                title_field: declared_title.map(str::to_string),
+            });
+    }
 }
 
 /// Build the `TypeSchema` for this call's property columns plus any active

@@ -1087,6 +1087,7 @@ pub fn kglite::api::durable::DurableOpenError::fmt(&self, f: &mut core::fmt::For
 impl core::fmt::Display for kglite::api::durable::DurableOpenError
 pub fn kglite::api::durable::DurableOpenError::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub enum kglite::api::durable::RawOp
+pub kglite::api::durable::RawOp::Declaration(alloc::boxed::Box<kglite::graph::wal::MutationOp>)
 pub kglite::api::durable::RawOp::RemoveEdge
 pub kglite::api::durable::RawOp::RemoveEdge::before: core::option::Option<alloc::boxed::Box<kglite::api::durable::BeforeImage>>
 pub kglite::api::durable::RawOp::RemoveEdge::conn_type: kglite::api::InternedKey
@@ -1099,10 +1100,6 @@ pub kglite::api::durable::RawOp::RemoveNode::before: core::option::Option<alloc:
 pub kglite::api::durable::RawOp::RemoveNode::id: kglite::datatypes::values::Value
 pub kglite::api::durable::RawOp::RemoveNode::node_type: kglite::api::InternedKey
 pub kglite::api::durable::RawOp::SetNodeLabels(petgraph::graph_impl::NodeIndex, core::option::Option<alloc::boxed::Box<kglite::api::durable::BeforeImage>>)
-pub kglite::api::durable::RawOp::SetTypeFieldAliases
-pub kglite::api::durable::RawOp::SetTypeFieldAliases::id_field: core::option::Option<alloc::string::String>
-pub kglite::api::durable::RawOp::SetTypeFieldAliases::node_type: alloc::string::String
-pub kglite::api::durable::RawOp::SetTypeFieldAliases::title_field: core::option::Option<alloc::string::String>
 pub kglite::api::durable::RawOp::UpsertEdge(petgraph::graph_impl::EdgeIndex, kglite::api::durable::CaptureOrigin, core::option::Option<alloc::boxed::Box<kglite::api::durable::BeforeImage>>)
 pub kglite::api::durable::RawOp::UpsertNode(petgraph::graph_impl::NodeIndex, kglite::api::durable::CaptureOrigin, core::option::Option<alloc::boxed::Box<kglite::api::durable::BeforeImage>>)
 pub kglite::api::durable::RawOp::WalGroup
@@ -1157,10 +1154,10 @@ pub fn kglite::api::durable::RecordingGraph<G>::inner_mut(&mut self) -> &mut G
 pub fn kglite::api::durable::RecordingGraph<G>::is_wal_owner(&self) -> bool
 pub fn kglite::api::durable::RecordingGraph<G>::needs_node_before(&self, idx: petgraph::graph_impl::NodeIndex) -> bool
 pub fn kglite::api::durable::RecordingGraph<G>::new(inner: G) -> Self
+pub fn kglite::api::durable::RecordingGraph<G>::note_declaration(&mut self, op: kglite::graph::wal::MutationOp)
 pub fn kglite::api::durable::RecordingGraph<G>::note_node_before(&mut self, idx: petgraph::graph_impl::NodeIndex, image: kglite::api::durable::BeforeImage)
 pub fn kglite::api::durable::RecordingGraph<G>::note_node_labels(&mut self, idx: petgraph::graph_impl::NodeIndex)
 pub fn kglite::api::durable::RecordingGraph<G>::note_node_upsert(&mut self, idx: petgraph::graph_impl::NodeIndex)
-pub fn kglite::api::durable::RecordingGraph<G>::note_type_field_aliases(&mut self, node_type: &str, id_field: core::option::Option<&str>, title_field: core::option::Option<&str>)
 pub fn kglite::api::durable::RecordingGraph<G>::ops_len(&self) -> usize
 pub fn kglite::api::durable::RecordingGraph<G>::take_ops(&mut self) -> alloc::vec::Vec<kglite::api::durable::RawOp>
 impl<'de, G> serde_core::de::Deserialize<'de> for kglite::api::durable::RecordingGraph<G> where G: kglite::api::GraphRead + serde_core::de::Deserialize<'de>
@@ -2218,9 +2215,9 @@ pub fn kglite::api::storage::GraphBackend::is_forked(&self) -> bool
 pub fn kglite::api::storage::GraphBackend::needs_node_before_image(&self, idx: petgraph::graph_impl::NodeIndex) -> bool
 pub fn kglite::api::storage::GraphBackend::new() -> Self
 pub fn kglite::api::storage::GraphBackend::note_node_before_image(&mut self, idx: petgraph::graph_impl::NodeIndex, image: kglite::api::durable::BeforeImage)
+pub fn kglite::api::storage::GraphBackend::note_recorded_declaration(&mut self, op: kglite::graph::wal::MutationOp)
 pub fn kglite::api::storage::GraphBackend::note_recorded_node_labels(&mut self, idx: petgraph::graph_impl::NodeIndex)
 pub fn kglite::api::storage::GraphBackend::note_recorded_node_upsert(&mut self, idx: petgraph::graph_impl::NodeIndex)
-pub fn kglite::api::storage::GraphBackend::note_recorded_type_field_aliases(&mut self, node_type: &str, id_field: core::option::Option<&str>, title_field: core::option::Option<&str>)
 impl core::clone::Clone for kglite::api::storage::GraphBackend
 pub fn kglite::api::storage::GraphBackend::clone(&self) -> Self
 impl core::fmt::Debug for kglite::api::storage::GraphBackend
@@ -3327,6 +3324,12 @@ pub fn kglite::api::DirGraph::search_by_property(&self, text: &str, property: &s
 pub fn kglite::api::DirGraph::update_property_indices_for_add(&mut self, node_type: &str, node_idx: petgraph::graph_impl::NodeIndex)
 pub fn kglite::api::DirGraph::update_property_indices_for_remove(&mut self, node_type: &str, node_idx: petgraph::graph_impl::NodeIndex, property: &str, old_value: &kglite::datatypes::values::Value)
 pub fn kglite::api::DirGraph::update_property_indices_for_set(&mut self, node_type: &str, node_idx: petgraph::graph_impl::NodeIndex, property: &str, old_value: core::option::Option<&kglite::datatypes::values::Value>, new_value: &kglite::datatypes::values::Value)
+impl kglite::api::DirGraph
+pub fn kglite::api::DirGraph::declare_composite_index(&mut self, node_type: &str, properties: &[&str]) -> usize
+pub fn kglite::api::DirGraph::declare_range_index(&mut self, node_type: &str, property: &str) -> usize
+pub fn kglite::api::DirGraph::set_parent_type(&mut self, node_type: &str, parent_type: core::option::Option<&str>)
+pub fn kglite::api::DirGraph::set_spatial_config(&mut self, node_type: &str, config: kglite::api::SpatialConfig)
+pub fn kglite::api::DirGraph::set_user_schema_version(&mut self, version: u32)
 impl kglite::api::DirGraph
 pub fn kglite::api::DirGraph::dematerialize_ontology(&mut self) -> usize
 pub fn kglite::api::DirGraph::materialize_ontology(&mut self, adopt: bool) -> core::result::Result<alloc::vec::Vec<kglite::api::MaterializedLabel>, alloc::string::String>

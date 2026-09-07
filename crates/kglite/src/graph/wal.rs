@@ -107,7 +107,17 @@ pub const WAL_MAGIC: [u8; 4] = *b"KWAL";
 /// v2/v3/v4 WAL is a strict subset read exactly, while the header moves
 /// because a v4-writing build meeting tag 7 would treat the frame as a torn
 /// tail and silently drop committed work.
-pub const WAL_FORMAT_VERSION: u8 = 5;
+///
+/// **v5 → v6** appends the remaining above-the-backend *declarations* as tags
+/// 8–13: [`MutationOp::SetTypeParent`], [`MutationOp::SetOntology`],
+/// [`MutationOp::SetSchemaVersion`], [`MutationOp::SetSpatialConfig`],
+/// [`MutationOp::SetPropertyIndex`] and [`MutationOp::SetConstraint`]. Tag 7
+/// closed the identity-spelling half of that class; these close the rest, so a
+/// pre-checkpoint crash no longer silently drops a parent-type map, an
+/// ontology, a schema stamp, a spatial declaration, a user index or a
+/// constraint. Tags 0–7 are untouched and every older WAL stays a strict
+/// subset; the header moves for the same reason as every bump before it.
+pub const WAL_FORMAT_VERSION: u8 = 6;
 
 /// Oldest WAL format this build can replay. Frames from any version in
 /// `MIN_READABLE_WAL_FORMAT_VERSION..=WAL_FORMAT_VERSION` decode with the
@@ -311,6 +321,87 @@ pub enum MutationOp {
         id_field: Option<String>,
         title_field: Option<String>,
     },
+    /// Declare `node_type` a supporting child of `parent_type`, or withdraw
+    /// the declaration when `parent_type` is `None`.
+    ///
+    /// `DirGraph::parent_types` is presentation ownership — it decides which
+    /// types `describe()` hides behind a `<supporting>` section — and lives
+    /// above the storage backend, so nothing in the capture seam describes it.
+    SetTypeParent {
+        node_type: String,
+        parent_type: Option<String>,
+    },
+    /// Replace the declared semantic layer wholesale. An empty store is
+    /// `clear_ontology`, which is why this carries no `Option`: "no ontology"
+    /// is a value the store can hold, and a whole-store replace is what
+    /// `define_ontology` does, so replaying it twice converges.
+    ///
+    /// The payload is the serialized `OntologyStore`, not the user's
+    /// declaration document, so it replays through the load-time install
+    /// (assign + `rebuild_ontology_closures`) rather than through
+    /// `define_ontology`'s graph-aware checks — see the install site for why
+    /// re-running those against recovered rows would refuse a valid log.
+    ///
+    /// **JSON, not the struct.** Frames are postcard, which is not
+    /// self-describing: it deserializes a fixed field sequence, so a struct
+    /// whose fields carry `skip_serializing_if` — as every level of the
+    /// ontology store does — writes fewer fields than it reads back and the
+    /// whole frame decodes as a torn tail. JSON also keeps the WAL's on-disk
+    /// shape independent of the store's field list, which is what
+    /// [`WAL_FORMAT_VERSION`] would otherwise have to move for.
+    SetOntology { document: String },
+    /// Stamp the caller's own data-model revision (`set_schema_version`).
+    /// The engine never interprets it, so replay is an unconditional
+    /// last-writer-wins assignment.
+    SetSchemaVersion { version: u32 },
+    /// Replace `node_type`'s spatial field declaration — which columns hold
+    /// lat/lon pairs and WKT geometries. Whole-config replace, matching
+    /// `set_spatial`, which is insert-or-replace per type.
+    ///
+    /// JSON for the same reason [`MutationOp::SetOntology`] is.
+    SetSpatialConfig { node_type: String, config: String },
+    /// Declare (`present`) or withdraw a user index on `node_type`.
+    ///
+    /// `properties` carries one name for an equality or range index and the
+    /// declared tuple for a composite one. Only the *declaration* travels:
+    /// replay rebuilds the structure from the recovered rows through the same
+    /// routed builders the `.kgl` loader uses, so the frame stays small
+    /// however large the type is.
+    SetPropertyIndex {
+        node_type: String,
+        properties: Vec<String>,
+        kind: PropertyIndexKind,
+        present: bool,
+    },
+    /// Declare (`present`) or withdraw a `CREATE CONSTRAINT` declaration.
+    ///
+    /// One op carries the whole family — node and relationship, all four
+    /// kinds — because `DROP CONSTRAINT` withdraws by name and has to name
+    /// exactly what the declaration installed. `declared_type` is set only for
+    /// [`ConstraintKind::PropertyType`]; `name` only when the author gave one.
+    SetConstraint {
+        name: Option<String>,
+        entity: crate::graph::constraints::EntityKind,
+        kind: crate::graph::constraints::ConstraintKind,
+        entity_type: String,
+        properties: Vec<String>,
+        declared_type: Option<crate::graph::property_types::DeclaredType>,
+        present: bool,
+    },
+}
+
+/// Which user-index structure a [`MutationOp::SetPropertyIndex`] declares.
+///
+/// **Variant order is on-disk format**, for the same reason [`MutationOp`]'s
+/// is: postcard tags by declaration index. Append only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PropertyIndexKind {
+    /// `create_index` — hash equality lookup on one property.
+    Equality,
+    /// `create_range_index` — ordered lookup on one property.
+    Range,
+    /// `create_composite_index` — one index over a property tuple.
+    Composite,
 }
 
 /// One committed mutation operation: the ops it produced, tagged with a
@@ -1290,7 +1381,7 @@ mod tests {
     #[test]
     fn variant_tags_are_stable_on_disk_format() {
         let id = || Value::Int64(1);
-        let cases: [(u8, MutationOp); 8] = [
+        let cases: [(u8, MutationOp); 14] = [
             (
                 0,
                 MutationOp::UpsertNode {
@@ -1364,6 +1455,48 @@ mod tests {
                     node_type: "T".into(),
                     id_field: Some("uid".into()),
                     title_field: None,
+                },
+            ),
+            (
+                8,
+                MutationOp::SetTypeParent {
+                    node_type: "T".into(),
+                    parent_type: Some("P".into()),
+                },
+            ),
+            (
+                9,
+                MutationOp::SetOntology {
+                    document: "{}".into(),
+                },
+            ),
+            (10, MutationOp::SetSchemaVersion { version: 7 }),
+            (
+                11,
+                MutationOp::SetSpatialConfig {
+                    node_type: "T".into(),
+                    config: "{}".into(),
+                },
+            ),
+            (
+                12,
+                MutationOp::SetPropertyIndex {
+                    node_type: "T".into(),
+                    properties: vec!["k".into()],
+                    kind: PropertyIndexKind::Equality,
+                    present: true,
+                },
+            ),
+            (
+                13,
+                MutationOp::SetConstraint {
+                    name: None,
+                    entity: crate::graph::constraints::EntityKind::Node,
+                    kind: crate::graph::constraints::ConstraintKind::NotNull,
+                    entity_type: "T".into(),
+                    properties: vec!["k".into()],
+                    declared_type: None,
+                    present: true,
                 },
             ),
         ];
@@ -1496,6 +1629,83 @@ mod tests {
         }];
         let bytes = write_wal_version(&frames, 4);
         assert_eq!(bytes[4], 4, "fixture must carry a v4 header");
+        assert_eq!(read_frames_all(bytes).unwrap(), frames);
+    }
+
+    /// Tags 8-13 must survive the file codec unchanged, nested payloads
+    /// included: a `SetOntology` that decoded with a dropped class, or a
+    /// `SetConstraint` that lost its declared type, would reinstate a
+    /// *different* declaration from the one that was committed.
+    #[test]
+    fn declaration_ops_round_trip_through_the_file_codec() {
+        let ops = vec![
+            MutationOp::SetTypeParent {
+                node_type: "B".into(),
+                parent_type: Some("A".into()),
+            },
+            MutationOp::SetTypeParent {
+                node_type: "C".into(),
+                parent_type: None,
+            },
+            MutationOp::SetOntology {
+                document: r#"{"classes":{"Thing":{"abstract":true}}}"#.into(),
+            },
+            MutationOp::SetSchemaVersion { version: 7 },
+            MutationOp::SetSpatialConfig {
+                node_type: "A".into(),
+                config: r#"{"location":["lat","lon"],"shapes":{"hull":"wkt"}}"#.into(),
+            },
+            MutationOp::SetPropertyIndex {
+                node_type: "A".into(),
+                properties: vec!["city".into(), "age".into()],
+                kind: PropertyIndexKind::Composite,
+                present: true,
+            },
+            MutationOp::SetPropertyIndex {
+                node_type: "A".into(),
+                properties: vec!["k".into()],
+                kind: PropertyIndexKind::Range,
+                present: false,
+            },
+            MutationOp::SetConstraint {
+                name: Some("c1".into()),
+                entity: crate::graph::constraints::EntityKind::Relationship,
+                kind: crate::graph::constraints::ConstraintKind::PropertyType,
+                entity_type: "KNOWS".into(),
+                properties: vec!["since".into()],
+                declared_type: Some(crate::graph::property_types::DeclaredType::Integer),
+                present: true,
+            },
+        ];
+        let frames = vec![WalFrame { lsn: 1, ops }];
+        assert_eq!(read_frames_all(write_wal(&frames)).unwrap(), frames);
+    }
+
+    /// A v5 WAL — written before the declaration tags existed — replays
+    /// exactly under the v6 schema, the same strict-subset property every
+    /// earlier bump kept.
+    #[test]
+    fn v5_frames_replay_exactly_under_current_schema() {
+        let frames = vec![WalFrame {
+            lsn: 1,
+            ops: vec![
+                MutationOp::SetTypeFieldAliases {
+                    node_type: "A".into(),
+                    id_field: Some("uid".into()),
+                    title_field: None,
+                },
+                MutationOp::ReplaceNodeState {
+                    node_type: "A".into(),
+                    id: Value::Int64(1),
+                    title: Value::String("Alice".into()),
+                    properties: vec![("age".into(), Value::Int64(30))],
+                    labels: vec![],
+                    reset: false,
+                },
+            ],
+        }];
+        let bytes = write_wal_version(&frames, 5);
+        assert_eq!(bytes[4], 5, "fixture must carry a v5 header");
         assert_eq!(read_frames_all(bytes).unwrap(), frames);
     }
 

@@ -35,6 +35,25 @@ pub fn normalize_properties(properties: &[String]) -> Vec<String> {
     sorted
 }
 
+/// One constraint declaration, as the statement that made it described it.
+///
+/// Exists so the choke point that logs a declaration and the replay that
+/// reinstates one name the same seven things in the same order, rather than
+/// each spelling them out as a positional argument list nothing checks.
+pub(crate) struct ConstraintDeclaration<'a> {
+    /// The author's name for it, when the statement gave one. `DROP
+    /// CONSTRAINT <name>` resolves through this, so a recovered declaration
+    /// without it is enforced but not droppable by name.
+    pub name: Option<&'a str>,
+    pub entity: EntityKind,
+    pub kind: ConstraintKind,
+    /// The node label or relationship type it is declared on.
+    pub entity_type: &'a str,
+    pub properties: &'a [String],
+    /// Set only for [`ConstraintKind::PropertyType`].
+    pub declared_type: Option<crate::graph::property_types::DeclaredType>,
+}
+
 /// Which kind of graph entity a constraint is declared on.
 ///
 /// Persisted as part of [`NamedConstraint`], so the variant names are part of
@@ -127,7 +146,7 @@ impl EntityKind {
 /// Serialized as part of [`NamedConstraint`] in the `.kgl` JSON metadata, so the
 /// variant names are part of the persisted format — rename one and older files
 /// stop resolving their constraint names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ConstraintKind {
     /// No two entities of the type may share the property tuple.
     Unique,

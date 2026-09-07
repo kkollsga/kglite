@@ -248,13 +248,24 @@ impl DirGraph {
         property: &str,
     ) -> Result<(usize, bool), String> {
         self.reject_secondary_only_index_type(node_type)?;
-        if let Some(disk) = self.graph.as_disk_mut() {
+        // Noted here rather than in `create_index`, which is also the *rebuild*
+        // path a load and every `reindex()` take from an already-recorded
+        // declaration. See `DirGraph::declare_range_index`.
+        let outcome = if let Some(disk) = self.graph.as_disk_mut() {
             let count = disk
                 .build_property_index(node_type, property)
                 .map_err(|error| error.to_string())?;
-            return Ok((count, true));
-        }
-        Ok((self.create_index(node_type, property), false))
+            (count, true)
+        } else {
+            (self.create_index(node_type, property), false)
+        };
+        self.note_index_declaration(
+            node_type,
+            vec![property.to_string()],
+            crate::graph::wal::PropertyIndexKind::Equality,
+            true,
+        );
+        Ok(outcome)
     }
 
     /// Property, range, and composite indexes are keyed by **primary type**
@@ -302,13 +313,22 @@ impl DirGraph {
         // Re-entrant-safe: the flag is cleared before the rebuild, so the
         // rebuild's own `create_*` calls see a non-deferred graph.
         self.materialize_indexes();
-        if let Some(disk) = self.graph.as_disk_mut() {
-            return disk
-                .drop_property_index(node_type, property)
-                .map_err(|error| format!("persistent index removal failed: {error}"));
+        let removed = if let Some(disk) = self.graph.as_disk_mut() {
+            disk.drop_property_index(node_type, property)
+                .map_err(|error| format!("persistent index removal failed: {error}"))?
+        } else {
+            let key = (node_type.to_string(), property.to_string());
+            self.property_indices.remove(&key).is_some()
+        };
+        if removed {
+            self.note_index_declaration(
+                node_type,
+                vec![property.to_string()],
+                crate::graph::wal::PropertyIndexKind::Equality,
+                false,
+            );
         }
-        let key = (node_type.to_string(), property.to_string());
-        Ok(self.property_indices.remove(&key).is_some())
+        Ok(removed)
     }
 
     /// Whether an **in-memory hash equality** index exists — not the range or
@@ -684,7 +704,16 @@ impl DirGraph {
         // rebuild's own `create_*` calls see a non-deferred graph.
         self.materialize_indexes();
         let key = (node_type.to_string(), property.to_string());
-        self.range_indices.remove(&key).is_some()
+        let removed = self.range_indices.remove(&key).is_some();
+        if removed {
+            self.note_index_declaration(
+                node_type,
+                vec![property.to_string()],
+                crate::graph::wal::PropertyIndexKind::Range,
+                false,
+            );
+        }
+        removed
     }
 
     pub fn lookup_range(
@@ -794,7 +823,16 @@ impl DirGraph {
         // rebuild's own `create_*` calls see a non-deferred graph.
         self.materialize_indexes();
         let key = Self::composite_key(node_type, properties);
-        self.composite_indices.remove(&key).is_some()
+        let removed = self.composite_indices.remove(&key).is_some();
+        if removed {
+            self.note_index_declaration(
+                node_type,
+                properties.to_vec(),
+                crate::graph::wal::PropertyIndexKind::Composite,
+                false,
+            );
+        }
+        removed
     }
 
     /// Property order is not significant — both spellings name one index.

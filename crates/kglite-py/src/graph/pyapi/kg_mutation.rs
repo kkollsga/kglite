@@ -742,7 +742,7 @@ fn register_feature_configs(
     temporal_cfg: Option<kglite_core::api::TemporalConfig>,
 ) {
     if let Some(cfg) = spatial_cfg {
-        graph.spatial_configs.insert(node_type.to_string(), cfg);
+        graph.set_spatial_config(node_type, cfg);
     }
     if let Some(cfg) = temporal_cfg {
         graph

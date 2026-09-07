@@ -1243,9 +1243,11 @@ impl KnowledgeGraph {
             ontology_dict.as_any(),
         )?)
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        self.check_durable_owner()?;
         let warnings = get_graph_mut(&mut self.inner)
             .define_ontology(store)
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        self.commit_wal()?;
         let out = pyo3::types::PyList::empty(py);
         for w in warnings {
             out.append(w)?;

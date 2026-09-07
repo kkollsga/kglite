@@ -570,9 +570,14 @@ impl KnowledgeGraph {
     /// graph.set_schema_version(1).save("graph.kgl")
     /// ```
     #[pyo3(signature = (version))]
-    fn set_schema_version(mut slf: PyRefMut<'_, Self>, version: u32) -> PyRefMut<'_, Self> {
-        get_graph_mut(&mut slf.inner).user_schema_version = version;
-        slf
+    fn set_schema_version(
+        mut slf: PyRefMut<'_, Self>,
+        version: u32,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        slf.check_durable_owner()?;
+        get_graph_mut(&mut slf.inner).set_user_schema_version(version);
+        slf.commit_wal()?;
+        Ok(slf)
     }
 
     /// Returns a dict of {node_type: count} using the type index (O(type_count)).
@@ -1585,9 +1590,9 @@ impl KnowledgeGraph {
                 crate::error::KgError::Argument(format!("Parent type '{}' not found", parent_type)),
             ));
         }
-        let graph = get_graph_mut(&mut self.inner);
-        graph.parent_types_mut().insert(node_type, parent_type);
-        Ok(())
+        self.check_durable_owner()?;
+        get_graph_mut(&mut self.inner).set_parent_type(&node_type, Some(&parent_type));
+        self.commit_wal()
     }
 
     /// Return an XML description of this graph for AI agents (progressive disclosure).

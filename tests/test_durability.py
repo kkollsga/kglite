@@ -2144,3 +2144,233 @@ def test_alias_declared_after_a_checkpoint_replays(tmp_path, storage):
     g = _open(tmp_path / "app.kgl", storage)
     _assert_alias_reads(g)
     assert g.cypher("MATCH (n:E {eid: 9}) RETURN n.nm AS t").to_list() == [{"t": "old"}]
+
+
+# ── schema, index and constraint declarations ───────────────────────
+#
+# Everything below lived only in the `.kgl` checkpoint before WAL v6: a crash
+# before the first `save()` recovered every row and none of what had been
+# declared about them, and the recovered app's next periodic `save()` then
+# truncated the log and made the loss permanent. Each case runs the same
+# declaration in a crashing child and in a `save()`ing control, and requires
+# the two to agree — the divergence *is* the defect.
+# Design: dev-docs/designs/durable-precheckpoint-2026-09.md.
+
+_SEED = """
+        import pandas as pd
+        g = open_durable()
+        g.add_nodes(
+            pd.DataFrame({"id": [1, 2], "title": ["a", "b"], "k": [10, 20],
+                          "lat": [1.0, 2.0], "lon": [3.0, 4.0]}),
+            "A",
+            unique_id_field="id",
+        )
+        g.add_nodes(
+            pd.DataFrame({"id": [1], "title": ["s"]}), "B", unique_id_field="id"
+        )
+"""
+
+
+def _saved_arm(tmp_path, body: str, read):
+    """The control: the same declarations, then a clean `save()`."""
+    control = tmp_path / "control"
+    control.mkdir()
+    _crash_child(control, body, "memory", durable=True)
+    return read(_open(control / "app.kgl", "memory"))
+
+
+def _declaration_case(tmp_path, storage, level, body: str, read):
+    """Crash before any checkpoint, reopen, and require the recovered answer
+    to equal the one a `save()` would have produced."""
+    _crash_child(tmp_path, _SEED + body, storage, durable=level)
+    assert not (tmp_path / "app.kgl").exists(), "the case must have no checkpoint to lean on"
+    recovered = read(_open(tmp_path / "app.kgl", storage, durable=level))
+    expected = _saved_arm(tmp_path, _SEED + body + "\n        g.save()\n", read)
+    assert recovered == expected
+    return recovered
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+@pytest.mark.parametrize("level", LOGGING_LEVELS)
+def test_parent_type_declaration_survives_hard_crash(tmp_path, storage, level):
+    got = _declaration_case(
+        tmp_path,
+        storage,
+        level,
+        '\n        g.set_parent_type("B", "A")\n',
+        lambda g: "<supporting>" in g.describe(),
+    )
+    assert got, "B must come back a supporting type, not a core one"
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+@pytest.mark.parametrize("level", LOGGING_LEVELS)
+def test_ontology_declaration_survives_hard_crash(tmp_path, storage, level):
+    got = _declaration_case(
+        tmp_path,
+        storage,
+        level,
+        '\n        g.define_ontology({"classes": {"Thing": {"abstract": True}, "A": {"is_a": "Thing"}}})\n',
+        lambda g: g.ontology(),
+    )
+    assert got["classes"]["A"]["is_a"] == "Thing"
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_cleared_ontology_replays_as_cleared(tmp_path, storage):
+    """An empty store *is* "no ontology". A withdrawal that did not reach the
+    log would resurrect the declaration it replaced."""
+    got = _declaration_case(
+        tmp_path,
+        storage,
+        "normal",
+        '\n        g.define_ontology({"classes": {"Thing": {"abstract": True}}})\n        g.clear_ontology()\n',
+        lambda g: g.ontology(),
+    )
+    assert got is None
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+@pytest.mark.parametrize("level", LOGGING_LEVELS)
+def test_index_declaration_survives_hard_crash(tmp_path, storage, level):
+    got = _declaration_case(
+        tmp_path,
+        storage,
+        level,
+        '\n        g.create_index("A", "k")\n',
+        lambda g: g.indexes(),
+    )
+    assert [(i["node_type"], i["property"]) for i in got] == [("A", "k")]
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_dropped_index_replays_as_dropped(tmp_path, storage):
+    got = _declaration_case(
+        tmp_path,
+        storage,
+        "normal",
+        '\n        g.create_index("A", "k")\n        g.drop_index("A", "k")\n',
+        lambda g: g.indexes(),
+    )
+    assert got == []
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+@pytest.mark.parametrize("level", LOGGING_LEVELS)
+def test_constraint_declaration_survives_hard_crash(tmp_path, storage, level):
+    got = _declaration_case(
+        tmp_path,
+        storage,
+        level,
+        '\n        g.cypher("CREATE CONSTRAINT nn FOR (n:A) REQUIRE n.k IS NOT NULL")\n',
+        lambda g: [(c["name"], c["type"]) for c in g.cypher("SHOW CONSTRAINTS").to_list()],
+    )
+    assert got == [("nn", "NODE_PROPERTY_EXISTENCE")]
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_recovered_constraint_is_enforced_and_droppable_by_name(tmp_path, storage):
+    """A declaration is not recovered until it *does* something: the rule has
+    to reject the write it was declared against, and `DROP CONSTRAINT nn` has
+    to resolve — which needs the name registry, not just the rule."""
+    _crash_child(
+        tmp_path,
+        _SEED + '\n        g.cypher("CREATE CONSTRAINT nn FOR (n:A) REQUIRE n.k IS NOT NULL")\n',
+        storage,
+    )
+    g = _open(tmp_path / "app.kgl", storage)
+    with pytest.raises(Exception):
+        g.cypher("CREATE (:A {id: 9, title: 'c'})")
+    g.cypher("DROP CONSTRAINT nn")
+    assert g.cypher("SHOW CONSTRAINTS").to_list() == []
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_dropped_constraint_replays_as_dropped(tmp_path, storage):
+    got = _declaration_case(
+        tmp_path,
+        storage,
+        "normal",
+        '\n        g.cypher("CREATE CONSTRAINT nn FOR (n:A) REQUIRE n.k IS NOT NULL")'
+        '\n        g.cypher("DROP CONSTRAINT nn")\n',
+        lambda g: g.cypher("SHOW CONSTRAINTS").to_list(),
+    )
+    assert got == []
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+@pytest.mark.parametrize("level", LOGGING_LEVELS)
+def test_schema_version_survives_hard_crash(tmp_path, storage, level):
+    got = _declaration_case(
+        tmp_path,
+        storage,
+        level,
+        "\n        g.set_schema_version(7)\n",
+        lambda g: g.schema_version,
+    )
+    assert got == 7
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+@pytest.mark.parametrize("level", LOGGING_LEVELS)
+def test_spatial_declaration_survives_hard_crash(tmp_path, storage, level):
+    got = _declaration_case(
+        tmp_path,
+        storage,
+        level,
+        '\n        g.set_spatial("A", location=("lat", "lon"))\n',
+        lambda g: g.spatial(),
+    )
+    assert got == {"A": {"location": ("lat", "lon")}}
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_recovered_declarations_survive_the_next_checkpoint(tmp_path, storage):
+    """The permanence case. A recovered app's next periodic `save()` writes a
+    checkpoint *and truncates the log*, so a declaration missing at that
+    moment is lost for good."""
+    _crash_child(
+        tmp_path,
+        _SEED + '\n        g.set_parent_type("B", "A")'
+        "\n        g.set_schema_version(7)"
+        '\n        g.create_index("A", "k")'
+        '\n        g.set_spatial("A", location=("lat", "lon"))\n',
+        storage,
+    )
+    g = _open(tmp_path / "app.kgl", storage)
+    g.save(str(tmp_path / "saved.kgl"))
+    del g
+    reloaded = kglite.load(str(tmp_path / "saved.kgl"))
+    assert reloaded.schema_version == 7
+    assert reloaded.spatial() == {"A": {"location": ("lat", "lon")}}
+    assert [(i["node_type"], i["property"]) for i in reloaded.indexes()] == [("A", "k")]
+    assert "<supporting>" in reloaded.describe()
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_replayed_constraint_does_not_revalidate_the_checkpoint(tmp_path, storage):
+    """Replay compares the constraint state before and after installing the
+    rows, and refuses a replay that *introduces* a violation. A constraint the
+    log declares is not such an introduction: it is a rule the writer already
+    had satisfied, so installing it must not make that comparison read every
+    existing row as newly violating."""
+    g = _open(tmp_path / "app.kgl", storage)
+    import pandas as pd
+
+    g.add_nodes(pd.DataFrame({"id": [1, 2], "title": ["a", "b"], "k": [1, 2]}), "A", unique_id_field="id")
+    g.save()
+    del g
+    _crash_child(
+        tmp_path,
+        """
+        import pandas as pd
+        g = open_durable()
+        g.add_nodes(pd.DataFrame({"id": [3], "title": ["c"], "k": [3]}), "A",
+                    unique_id_field="id")
+        g.cypher("CREATE CONSTRAINT u FOR (n:A) REQUIRE n.k IS UNIQUE")
+        """,
+        storage,
+    )
+    g = _open(tmp_path / "app.kgl", storage)
+    assert g.cypher("MATCH (n:A) RETURN count(n) AS c").scalar() == 3
+    assert [c["name"] for c in g.cypher("SHOW CONSTRAINTS").to_list()] == ["u"]

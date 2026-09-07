@@ -56,6 +56,7 @@ pub(crate) fn next_graph_id() -> u64 {
 pub(crate) mod caches;
 mod columnar_rebuild;
 pub mod constraints;
+mod declarations;
 mod disk_persistence;
 mod id_index_reuse;
 mod independent_copy;

@@ -3,6 +3,8 @@ use std::collections::{HashMap, HashSet};
 use crate::datatypes::Value;
 use crate::graph::wal::{MutationOp, WalFrame};
 
+use super::declarations::Declarations;
+
 pub(super) type NodeKey = (String, Value);
 pub(super) type EdgeKey = (String, String, Value, String, Value);
 pub(super) type Properties = Vec<(String, Value)>;
@@ -24,28 +26,17 @@ pub(super) struct EdgeState {
     target_generation: u64,
 }
 
-/// A node type's declared identity-field spellings, folded across frames.
-/// Each field is last-writer-wins **among the frames that declared it**: a
-/// `None` in a later op means that call named no spelling, which must leave
-/// an earlier declaration standing rather than clear it.
-#[derive(Default)]
-pub(super) struct TypeAliases {
-    pub id_field: Option<String>,
-    pub title_field: Option<String>,
-}
-
 #[derive(Default)]
 pub(super) struct ReplayPlan {
     pub nodes: Vec<(NodeKey, NodeState)>,
     node_slots: HashMap<NodeKey, usize>,
     pub edges: Vec<(EdgeKey, EdgeState)>,
     edge_slots: HashMap<EdgeKey, usize>,
-    /// Type-level slots. Deliberately *not* folded into `nodes`: a
-    /// declaration has no id, so an identity-keyed slot would either drop it
-    /// or coalesce it into some node's state, and the op would be logged but
-    /// never applied — indistinguishable from not logging it at all.
-    pub aliases: Vec<(String, TypeAliases)>,
-    alias_slots: HashMap<String, usize>,
+    /// Declarations. Deliberately *not* folded into `nodes`: a declaration
+    /// has no id, so an identity-keyed slot would either drop it or coalesce
+    /// it into some node's state, and the op would be logged but never
+    /// applied — indistinguishable from not logging it at all.
+    pub declarations: Declarations,
     pub max_lsn: u64,
 }
 
@@ -64,19 +55,6 @@ impl ReplayPlan {
         plan
     }
 
-    fn alias_mut(&mut self, node_type: &str) -> &mut TypeAliases {
-        let slot = *self
-            .alias_slots
-            .entry(node_type.to_string())
-            .or_insert_with(|| {
-                let slot = self.aliases.len();
-                self.aliases
-                    .push((node_type.to_string(), TypeAliases::default()));
-                slot
-            });
-        &mut self.aliases[slot].1
-    }
-
     fn node_mut(&mut self, key: NodeKey) -> &mut NodeState {
         let slot = *self.node_slots.entry(key.clone()).or_insert_with(|| {
             let slot = self.nodes.len();
@@ -87,6 +65,11 @@ impl ReplayPlan {
     }
 
     fn fold_op(&mut self, op: &MutationOp) {
+        // Declarations key on what they declare, not on an identity, so they
+        // fold in their own structure — see `declarations`.
+        if self.declarations.fold(op) {
+            return;
+        }
         match op {
             MutationOp::ReplaceNodeState {
                 node_type,
@@ -149,19 +132,6 @@ impl ReplayPlan {
             } => {
                 self.node_mut((node_type.clone(), id.clone())).labels = Some(labels.clone());
             }
-            MutationOp::SetTypeFieldAliases {
-                node_type,
-                id_field,
-                title_field,
-            } => {
-                let aliases = self.alias_mut(node_type);
-                if id_field.is_some() {
-                    aliases.id_field = id_field.clone();
-                }
-                if title_field.is_some() {
-                    aliases.title_field = title_field.clone();
-                }
-            }
             MutationOp::UpsertEdge {
                 conn_type,
                 src_type,
@@ -199,6 +169,14 @@ impl ReplayPlan {
                     None,
                 );
             }
+            // Declarations are handled above, before this match runs.
+            MutationOp::SetTypeFieldAliases { .. }
+            | MutationOp::SetTypeParent { .. }
+            | MutationOp::SetOntology { .. }
+            | MutationOp::SetSchemaVersion { .. }
+            | MutationOp::SetSpatialConfig { .. }
+            | MutationOp::SetPropertyIndex { .. }
+            | MutationOp::SetConstraint { .. } => {}
         }
     }
 
@@ -244,7 +222,7 @@ impl ReplayPlan {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty() && self.edges.is_empty() && self.aliases.is_empty()
+        self.nodes.is_empty() && self.edges.is_empty() && self.declarations.is_empty()
     }
 
     pub fn node_types(&self) -> HashSet<String> {

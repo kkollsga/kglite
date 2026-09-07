@@ -69,7 +69,8 @@ use super::rel_constraint_ddl;
 use crate::datatypes::values::Value;
 use crate::graph::algorithms::Interrupt;
 use crate::graph::constraints::{
-    descriptor, normalize_properties, ConstraintKind, EntityKind, NamedConstraint,
+    descriptor, normalize_properties, ConstraintDeclaration, ConstraintKind, EntityKind,
+    NamedConstraint,
 };
 use crate::graph::dir_graph::DirGraph;
 use crate::graph::introspection::schema_overview::{
@@ -376,7 +377,7 @@ fn create_single_property_index(
     if wants_range {
         // Neo4j's RANGE index serves equality *and* range, so honouring the
         // keyword takes both KGLite structures. See the module doc.
-        graph.create_range_index(label, property);
+        graph.declare_range_index(label, property);
     }
     Ok(indexes_added(if wants_range { 2 } else { 1 }))
 }
@@ -410,7 +411,7 @@ fn create_composite_index(
 
     graph.reject_secondary_only_index_type(label)?;
     let property_refs: Vec<&str> = properties.iter().map(String::as_str).collect();
-    graph.create_composite_index(label, &property_refs);
+    graph.declare_composite_index(label, &property_refs);
     Ok(indexes_added(1))
 }
 
@@ -730,6 +731,15 @@ enum ConstraintPlan {
 impl ConstraintPlan {
     /// The `ConstraintKind` this plan registers under, so a name resolves back
     /// to the same shape it was declared as.
+    /// The type a `PropertyType` plan declares, for the log entry that has to
+    /// reinstall it without re-parsing the statement.
+    fn declared_type(self) -> Option<DeclaredType> {
+        match self {
+            ConstraintPlan::PropertyType(declared) => Some(declared),
+            _ => None,
+        }
+    }
+
     fn kind(self) -> ConstraintKind {
         match self {
             ConstraintPlan::Unique => ConstraintKind::Unique,
@@ -835,6 +845,17 @@ fn execute_create_constraint(
             },
         );
     }
+    graph.note_constraint_declaration(
+        ConstraintDeclaration {
+            name: create.name.as_deref(),
+            entity: EntityKind::Node,
+            kind: plan.kind(),
+            entity_type: &label,
+            properties: &create.properties,
+            declared_type: plan.declared_type(),
+        },
+        true,
+    );
     Ok(constraints_added(1))
 }
 
@@ -1191,6 +1212,22 @@ fn execute_drop_constraint(
         }
     }
     graph.forget_constraint_name(name);
+    if dropped {
+        graph.note_constraint_declaration(
+            ConstraintDeclaration {
+                name: Some(name),
+                entity,
+                kind,
+                entity_type: &label,
+                properties: &properties,
+                // The withdrawal reaches every property-type declaration on
+                // the tuple whatever type each was declared as, so replay
+                // needs none.
+                declared_type: None,
+            },
+            false,
+        );
+    }
 
     if !dropped && !if_exists {
         // Not "unknown": the name resolved a moment ago, so denying it exists

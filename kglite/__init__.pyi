@@ -1147,8 +1147,12 @@ def open(
 
     Note:
         Mutations that the log cannot express are **checkpoint-only**, and are
-        persisted by ``save()`` rather than by the log: schema and config
-        metadata, user-created indexes, embeddings, and timeseries. A
+        persisted by ``save()`` rather than by the log: **embeddings** and
+        **timeseries channels**, both bulk numeric payloads rather than
+        declarations. Everything else is logged, including the declarations
+        made by :meth:`set_parent_type`, :meth:`define_ontology`,
+        :meth:`create_index`, ``CREATE CONSTRAINT``, :meth:`set_spatial` and
+        :meth:`set_schema_version`. A
         ``Session`` also refuses write queries on a durable graph, because its
         writes land on a working copy that neither the log nor ``save()`` can
         reach — use ``cypher()`` or ``begin()``.
@@ -3247,7 +3251,9 @@ class KnowledgeGraph:
     def set_schema_version(self, version: int) -> KnowledgeGraph:
         """Stamp your data-model revision on the graph.
 
-        Persisted on the next :meth:`save`.
+        Persisted on the next :meth:`save`, and recorded in the write-ahead
+        log of a graph opened with ``durable=``, so a crash before that save
+        does not lose the stamp.
 
         Args:
             version: The revision number. ``0`` marks the graph unversioned.
@@ -5000,7 +5006,9 @@ class KnowledgeGraph:
         name. It takes no parameters. ``SHOW ONTOLOGY`` exposes
         ``required_properties``, ``property_types`` and class enforcement.
 
-        Replaces any previously declared ontology. Persisted by ``save()``.
+        Replaces any previously declared ontology. Persisted by ``save()``,
+        and recorded in the write-ahead log of a graph opened with
+        ``durable=``, so a crash before that save does not lose it.
 
         Args:
             ontology_dict: The declaration document.

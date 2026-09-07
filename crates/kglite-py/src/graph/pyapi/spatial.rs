@@ -631,9 +631,9 @@ impl KnowledgeGraph {
             }
         }
 
-        let graph = get_graph_mut(&mut self.inner);
-        graph.spatial_configs.insert(node_type, config);
-        Ok(())
+        self.check_durable_owner()?;
+        get_graph_mut(&mut self.inner).set_spatial_config(&node_type, config);
+        self.commit_wal()
     }
 
     /// Get spatial configuration for a node type, or all types.

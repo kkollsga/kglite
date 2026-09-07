@@ -878,3 +878,219 @@ fn a_frame_at_or_below_the_checkpoint_lsn_declares_nothing() {
     apply_frames(&mut g, &frames, 1).unwrap();
     assert_eq!(aliases(&g, "Person"), (Some("uid".into()), None));
 }
+
+// ── schema, index and constraint declarations ────────────────────────
+//
+// Everything below lived only in the `.kgl` checkpoint before v6: a crash
+// before the first `save()` recovered every row and none of what had been
+// declared about them. Each case asserts the declaration is back, because the
+// live-vs-recovered divergence is what the Python crash tests measure.
+
+use crate::graph::constraints::{ConstraintKind, EntityKind};
+use crate::graph::wal::PropertyIndexKind;
+
+fn index_op(properties: &[&str], kind: PropertyIndexKind, present: bool) -> MutationOp {
+    MutationOp::SetPropertyIndex {
+        node_type: "Person".into(),
+        properties: properties.iter().map(|p| (*p).to_string()).collect(),
+        kind,
+        present,
+    }
+}
+
+fn not_null(properties: &[&str], present: bool) -> MutationOp {
+    MutationOp::SetConstraint {
+        name: Some("nn".into()),
+        entity: EntityKind::Node,
+        kind: ConstraintKind::NotNull,
+        entity_type: "Person".into(),
+        properties: properties.iter().map(|p| (*p).to_string()).collect(),
+        declared_type: None,
+        present,
+    }
+}
+
+#[test]
+fn metadata_declarations_replay_from_a_declaration_only_frame() {
+    // No node and no edge slot: an emptiness test counting only those would
+    // skip the whole replay and drop every op here.
+    let mut g = DirGraph::new();
+    let frames = vec![frame(
+        1,
+        vec![
+            MutationOp::SetTypeParent {
+                node_type: "Well".into(),
+                parent_type: Some("Field".into()),
+            },
+            MutationOp::SetSchemaVersion { version: 7 },
+            MutationOp::SetSpatialConfig {
+                node_type: "Well".into(),
+                config: r#"{"location":["lat","lon"]}"#.into(),
+            },
+            MutationOp::SetOntology {
+                document: r#"{"classes":{"Thing":{"abstract":true}}}"#.into(),
+            },
+        ],
+    )];
+    assert_eq!(apply_frames(&mut g, &frames, 0).unwrap(), 1);
+    assert_eq!(g.parent_types.get("Well"), Some(&"Field".to_string()));
+    assert_eq!(g.user_schema_version, 7);
+    assert_eq!(
+        g.get_spatial_config("Well")
+            .and_then(|c| c.location.clone()),
+        Some(("lat".into(), "lon".into()))
+    );
+    assert!(g.ontology.classes.contains_key("Thing"));
+}
+
+#[test]
+fn a_withdrawn_parent_type_replays_as_a_withdrawal() {
+    let mut g = DirGraph::new();
+    let frames = vec![
+        frame(
+            1,
+            vec![MutationOp::SetTypeParent {
+                node_type: "Well".into(),
+                parent_type: Some("Field".into()),
+            }],
+        ),
+        frame(
+            2,
+            vec![MutationOp::SetTypeParent {
+                node_type: "Well".into(),
+                parent_type: None,
+            }],
+        ),
+    ];
+    apply_frames(&mut g, &frames, 0).unwrap();
+    assert_eq!(g.parent_types.get("Well"), None);
+}
+
+#[test]
+fn a_declared_index_is_rebuilt_from_the_replayed_rows() {
+    let mut g = DirGraph::new();
+    let frames = vec![frame(
+        1,
+        vec![
+            upsert_node(1, "Alice", vec![("age", Value::Int64(30))]),
+            upsert_node(2, "Bob", vec![("age", Value::Int64(31))]),
+            index_op(&["age"], PropertyIndexKind::Equality, true),
+            index_op(&["age"], PropertyIndexKind::Range, true),
+        ],
+    )];
+    apply_frames(&mut g, &frames, 0).unwrap();
+    // Rebuilt from the rows the same frame carried, so the structure must be
+    // populated rather than merely declared.
+    assert!(g.has_index("Person", "age"));
+    assert!(g
+        .range_indices
+        .contains_key(&("Person".to_string(), "age".to_string())));
+}
+
+#[test]
+fn an_index_created_and_dropped_replays_as_dropped() {
+    // The fold keeps the last decision about one index, not both events: an
+    // ordered replay of create-then-drop that lost the ordering would leave a
+    // structure the writer had removed.
+    let mut g = DirGraph::new();
+    let frames = vec![
+        frame(
+            1,
+            vec![
+                upsert_node(1, "Alice", vec![("age", Value::Int64(30))]),
+                index_op(&["age"], PropertyIndexKind::Equality, true),
+            ],
+        ),
+        frame(
+            2,
+            vec![index_op(&["age"], PropertyIndexKind::Equality, false)],
+        ),
+    ];
+    apply_frames(&mut g, &frames, 0).unwrap();
+    assert!(!g.has_index("Person", "age"));
+
+    // …and the reverse order is a live index, not a dropped one.
+    let mut g = DirGraph::new();
+    let frames = vec![
+        frame(
+            1,
+            vec![
+                upsert_node(1, "Alice", vec![("age", Value::Int64(30))]),
+                index_op(&["age"], PropertyIndexKind::Equality, false),
+            ],
+        ),
+        frame(
+            2,
+            vec![index_op(&["age"], PropertyIndexKind::Equality, true)],
+        ),
+    ];
+    apply_frames(&mut g, &frames, 0).unwrap();
+    assert!(g.has_index("Person", "age"));
+}
+
+#[test]
+fn a_declared_constraint_replays_over_the_rows_it_constrains() {
+    let mut g = DirGraph::new();
+    let frames = vec![frame(
+        1,
+        vec![
+            upsert_node(1, "Alice", vec![("email", Value::String("a@x".into()))]),
+            upsert_node(2, "Bob", vec![("email", Value::String("b@x".into()))]),
+            not_null(&["email"], true),
+            MutationOp::SetConstraint {
+                name: Some("u".into()),
+                entity: EntityKind::Node,
+                kind: ConstraintKind::Unique,
+                entity_type: "Person".into(),
+                properties: vec!["email".into()],
+                declared_type: None,
+                present: true,
+            },
+        ],
+    )];
+    apply_frames(&mut g, &frames, 0).unwrap();
+    // Declared *and* named: `DROP CONSTRAINT u` on a recovered graph has to
+    // resolve, which needs the registry as well as the enforcement structure.
+    assert!(g.constraint_by_name("u").is_some());
+    assert!(g.constraint_by_name("nn").is_some());
+    assert!(g.has_ddl_unique_declaration("Person", &["email".to_string()]));
+}
+
+#[test]
+fn a_dropped_constraint_replays_as_a_withdrawal() {
+    let mut g = DirGraph::new();
+    let frames = vec![
+        frame(
+            1,
+            vec![
+                upsert_node(1, "Alice", vec![("email", Value::String("a@x".into()))]),
+                not_null(&["email"], true),
+            ],
+        ),
+        frame(2, vec![not_null(&["email"], false)]),
+    ];
+    apply_frames(&mut g, &frames, 0).unwrap();
+    assert!(g.constraint_by_name("nn").is_none());
+}
+
+#[test]
+fn a_constraint_the_recovered_rows_violate_refuses_replay_loudly() {
+    // The writer that logged the declaration had it satisfied. Recovering rows
+    // that violate it means the replayed state is not the committed state, and
+    // a silently unenforced rule is the worse of the two failures.
+    let mut g = DirGraph::new();
+    let frames = vec![frame(
+        1,
+        vec![upsert_node(1, "Alice", vec![]), not_null(&["email"], true)],
+    )];
+    let error = apply_frames(&mut g, &frames, 0).unwrap_err();
+    assert!(
+        error.contains("could not reinstate a logged constraint"),
+        "{error}"
+    );
+    assert_eq!(
+        g.graph.node_count(),
+        0,
+        "a refused replay publishes nothing"
+    );
+}

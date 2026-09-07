@@ -284,9 +284,7 @@ pub fn build(
             if graph.type_indices.contains_key(&sub.node_type)
                 && graph.type_indices.contains_key(parent)
             {
-                graph
-                    .parent_types_mut()
-                    .insert(sub.node_type.clone(), parent.clone());
+                graph.set_parent_type(&sub.node_type, Some(parent));
             }
         }
     }

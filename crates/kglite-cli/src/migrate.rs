@@ -173,7 +173,7 @@ fn apply(graph: &mut Arc<DirGraph>, migration: &Migration) -> Result<usize> {
             )
         })?;
     }
-    make_dir_graph_mut(graph).user_schema_version = migration.version;
+    make_dir_graph_mut(graph).set_user_schema_version(migration.version);
     Ok(statements.len())
 }
 
@@ -254,7 +254,7 @@ pub(crate) fn print_version(graph_path: &Path) -> Result<()> {
 pub(crate) fn set_version(graph_path: &Path, version: u32) -> Result<()> {
     let (mut graph, mut ownership) = crate::open_owned(graph_path, None)?;
     let previous = graph.user_schema_version;
-    make_dir_graph_mut(&mut graph).user_schema_version = version;
+    make_dir_graph_mut(&mut graph).set_user_schema_version(version);
     ownership
         .publish(&mut graph)
         .map_err(|refusal| crate::write_refusal(graph_path, refusal))?;

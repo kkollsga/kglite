@@ -664,20 +664,17 @@ impl GraphBackend {
         }
     }
 
-    /// Record a node type's declared identity-field spellings for the WAL
-    /// capture wrapper, for the same reason as the labels above: the alias
-    /// maps live in `DirGraph`, not in this backend, so no `GraphWrite` call
-    /// carries the declaration and a crash before the first checkpoint
-    /// recovered the values without the names they answer to.
+    /// Record a declaration made above this backend for the WAL capture
+    /// wrapper, for the same reason as the labels above: identity-field
+    /// spellings, parent types, the ontology, the schema stamp, spatial
+    /// configs, user indexes and constraints all live in `DirGraph`, not in
+    /// this backend, so no `GraphWrite` call carries them and a crash before
+    /// the first checkpoint recovered the rows without what was declared
+    /// about them.
     #[inline]
-    pub fn note_recorded_type_field_aliases(
-        &mut self,
-        node_type: &str,
-        id_field: Option<&str>,
-        title_field: Option<&str>,
-    ) {
+    pub fn note_recorded_declaration(&mut self, op: crate::graph::wal::MutationOp) {
         if let GraphBackend::Recording(rg) = self {
-            rg.note_type_field_aliases(node_type, id_field, title_field);
+            rg.note_declaration(op);
         }
     }
 

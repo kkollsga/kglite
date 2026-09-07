@@ -11,6 +11,26 @@ before upgrading.
 
 ### Fixed
 
+- Schema, index and constraint declarations now survive a crash before the
+  first checkpoint. Under `durable="normal"` / `"full"`, `set_parent_type`,
+  `define_ontology` / `clear_ontology`, `create_index` / `drop_index` (and the
+  range and composite siblings), `CREATE CONSTRAINT` / `DROP CONSTRAINT`,
+  `set_spatial` and `set_schema_version` all wrote state that lived above the
+  storage backend, so no write-capture call described it and the log carried
+  nothing: a recovered graph came back with every row and none of what had
+  been declared about it — `ontology()` `None` instead of the declared
+  classes, `indexes()` and `SHOW CONSTRAINTS` empty, no supporting types, no
+  spatial extension, `schema_version` `0` — and the recovered app's next
+  periodic `save()` truncated the log and made that permanent. Each
+  declaration is now captured at its own choke point and replayed: indexes are
+  rebuilt from the recovered rows through the same routed builders a `.kgl`
+  load uses, and constraints are reinstalled through their own declarers, so a
+  recovered constraint both enforces and resolves by name for `DROP
+  CONSTRAINT`. The WAL header moves 5→6 (tags 0–7 unchanged, so every older
+  log still replays exactly). **Embeddings and timeseries channels remain
+  checkpoint-only** — both are bulk numeric payloads rather than declarations
+  — and both durability guides now say so exactly.
+
 - `kglite … --format json` now emits each row's keys in the query's column
   order instead of alphabetising them. `RETURN 1 AS zz, 2 AS aa, 3 AS mm`
   produced `[{"aa":2,"mm":3,"zz":1}]` while the same query's CSV header,
@@ -32,8 +52,7 @@ before upgrading.
   nested null reached the agent as the string `"Null"` while a top-level one
   was `null`. The preview now goes through the shared
   `kglite::api::param::kglite_value_to_json`, the converter
-  [`docs/python/value-projection.md`](docs/python/value-projection.md)
-  already declares for this shape. Agents parsing the preview text see
+  `docs/python/value-projection.md` already declares for this shape. Agents parsing the preview text see
   different field names than before (`start`/`end`/`type` rather than
   `start_id`/`end_id`/`rel_type`, unwrapped scalars); `FORMAT CSV` output is
   unchanged.
