@@ -322,7 +322,7 @@ def test_index_ddl_is_blocked_on_a_read_only_graph(graph) -> None:
         "CREATE INDEX FOR (p:Person) ON (p.city)",
         "DROP INDEX Person.city",
     ):
-        with pytest.raises(kglite.CypherExecutionError, match="read-only mode"):
+        with pytest.raises(kglite.ArgumentError, match="read-only mode"):
             graph.cypher(statement)
     graph.read_only(False)
     assert not graph.has_index("Person", "city")

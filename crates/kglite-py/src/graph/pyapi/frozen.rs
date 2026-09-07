@@ -82,9 +82,12 @@ impl FrozenGraph {
         // than execute_read's generic "use execute_mut").
         let pre_parsed = cypher::parse_cypher(query).map_err(crate::error_py::kg_to_pyerr)?;
         if cypher::is_mutation_query(&pre_parsed) {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "FrozenGraph is an immutable snapshot — CREATE/SET/DELETE/REMOVE/MERGE are \
-                 not allowed. Mutate the source KnowledgeGraph, then take a fresh freeze().",
+            return Err(crate::error_py::kg_to_pyerr(
+                crate::error::KgError::Argument(
+                    "FrozenGraph is an immutable snapshot — CREATE/SET/DELETE/REMOVE/MERGE are \
+                     not allowed. Mutate the source KnowledgeGraph, then take a fresh freeze()."
+                        .to_string(),
+                ),
             ));
         }
 

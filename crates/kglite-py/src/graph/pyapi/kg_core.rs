@@ -129,6 +129,47 @@ pub(crate) fn concurrent_access_pyerr() -> PyErr {
 /// Format an integer with comma thousands separators ("1234567" → "1,234,567").
 /// Used by `KnowledgeGraph::__repr__` — keeps large-graph summaries legible
 /// without pulling a dep just for `num-format`.
+/// Refuse a Cypher mutation on a graph put into read-only mode by
+/// `kg.read_only(True)` — the graph-wide flag, separate from a transaction's
+/// per-tx `read_only`.
+///
+/// `Argument`, not `CypherExecution`: the query did not fail to execute, it was
+/// refused for the handle it was aimed at — the same policy `Session`,
+/// `FrozenGraph` and a read-only `Transaction` refuse under, and one a caller
+/// routes on by class. `CypherExecution` also publishes as
+/// `Neo.DatabaseError.Statement.ExecutionFailed` on the Bolt wire, i.e. a
+/// client mistake dressed as a server fault.
+fn refuse_mutation_on_a_read_only_graph(slf: &Bound<'_, KnowledgeGraph>) -> PyResult<()> {
+    let this = slf.try_borrow().map_err(|_| concurrent_access_pyerr())?;
+    if this.inner.read_only {
+        return Err(crate::error_py::kg_to_pyerr(
+            crate::error::KgError::Argument(
+                "Graph is in read-only mode — CREATE, SET, DELETE, REMOVE, \
+                 MERGE, and schema DDL (CREATE INDEX / DROP INDEX) are \
+                 disabled. Use kg.read_only(False) to re-enable mutations."
+                    .to_string(),
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a `sample()` row count, naming the parameter and the offending
+/// value. A count is a size, so a negative one is an argument mistake — and
+/// one the caller has to be told about by name, not through PyO3's own
+/// unsigned-conversion overflow.
+fn non_negative_sample_count(parameter: &str, value: Option<i64>) -> PyResult<Option<usize>> {
+    match value {
+        None => Ok(None),
+        Some(count) if count >= 0 => Ok(Some(count as usize)),
+        Some(count) => Err(crate::error_py::kg_to_pyerr(
+            crate::error::KgError::Argument(format!(
+                "sample() {parameter}={count} is negative; a sample count must be 0 or more"
+            )),
+        )),
+    }
+}
+
 fn fmt_with_commas(n: usize) -> String {
     let s = n.to_string();
     let bytes = s.as_bytes();
@@ -333,9 +374,14 @@ impl KnowledgeGraph {
         } else {
             Some(500)
         };
+        // An unknown node type is an argument mistake, not a missing mapping
+        // key: `KeyError` is reserved for a missing result column or dict key
+        // (docs/python/error-handling.md), which a type name is not.
         let stats =
             introspection::compute_property_stats(&self.inner, node_type, max_values, sample)
-                .map_err(PyErr::new::<pyo3::exceptions::PyKeyError, _>)?;
+                .map_err(|message| {
+                    crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(message))
+                })?;
         Python::attach(|py| {
             let result = PyDict::new(py);
             for prop in &stats {
@@ -361,8 +407,10 @@ impl KnowledgeGraph {
 
     /// Return connection topology for a node type (outgoing and incoming).
     fn neighbors_schema(&self, node_type: &str) -> PyResult<Py<PyAny>> {
-        let ns = introspection::compute_neighbors_schema(&self.inner, node_type)
-            .map_err(PyErr::new::<pyo3::exceptions::PyKeyError, _>)?;
+        let ns =
+            introspection::compute_neighbors_schema(&self.inner, node_type).map_err(|message| {
+                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(message))
+            })?;
         Python::attach(|py| {
             let result = PyDict::new(py);
 
@@ -398,19 +446,25 @@ impl KnowledgeGraph {
     ///   - ``sample(3)`` — sample 3 nodes from the current selection
     ///   - ``sample()`` — sample 5 nodes from the current selection
     #[pyo3(signature = (node_type=None, n=None))]
-    fn sample(
-        &self,
-        node_type: Option<&Bound<'_, PyAny>>,
-        n: Option<usize>,
-    ) -> PyResult<Py<PyAny>> {
+    fn sample(&self, node_type: Option<&Bound<'_, PyAny>>, n: Option<i64>) -> PyResult<Py<PyAny>> {
         let default_n = 5usize;
 
+        // `i64`, not `usize`: PyO3 rejects a negative `usize` argument before
+        // any kglite code runs, and the caller sees `OverflowError: can't
+        // convert negative int to unsigned` — an interpreter detail naming
+        // neither the parameter nor the value.
         let (node_type, count) = match node_type {
             Some(arg) => {
                 if let Ok(s) = arg.extract::<String>() {
-                    (Some(s), n.unwrap_or(default_n))
-                } else if let Ok(i) = arg.extract::<usize>() {
-                    (None, i)
+                    (
+                        Some(s),
+                        non_negative_sample_count("n", n)?.unwrap_or(default_n),
+                    )
+                } else if let Ok(i) = arg.extract::<i64>() {
+                    (
+                        None,
+                        non_negative_sample_count("node_type", Some(i))?.unwrap_or(default_n),
+                    )
                 } else {
                     return Err(crate::error_py::kg_to_pyerr(
                         crate::error::KgError::Argument(
@@ -420,7 +474,10 @@ impl KnowledgeGraph {
                     ));
                 }
             }
-            None => (None, n.unwrap_or(default_n)),
+            None => (
+                None,
+                non_negative_sample_count("n", n)?.unwrap_or(default_n),
+            ),
         };
 
         if let Some(nt) = node_type {
@@ -1693,21 +1750,8 @@ impl KnowledgeGraph {
         let pre_parsed = cypher::parse_cypher(query).map_err(crate::error_py::kg_to_pyerr)?;
         let is_mutation = cypher::is_mutation_query(&pre_parsed);
 
-        // The graph-wide flag set via kg.read_only(True), separate from a
-        // transaction's per-tx read_only.
         if is_mutation {
-            let this = slf.try_borrow().map_err(|_| concurrent_access_pyerr())?;
-            if this.inner.read_only {
-                return Err(crate::error_py::kg_to_pyerr(
-                    crate::error::KgError::CypherExecution {
-                        message: "Graph is in read-only mode — CREATE, SET, DELETE, REMOVE, \
-                                  MERGE, and schema DDL (CREATE INDEX / DROP INDEX) are \
-                                  disabled. Use kg.read_only(False) to re-enable mutations."
-                            .to_string(),
-                        position: None,
-                    },
-                ));
-            }
+            refuse_mutation_on_a_read_only_graph(slf)?;
         }
 
         let query_started = std::time::Instant::now();

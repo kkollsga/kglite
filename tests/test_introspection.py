@@ -146,7 +146,9 @@ class TestProperties:
         assert props["email"]["non_null"] == 10
 
     def test_unknown_type_raises(self, small_graph):
-        with pytest.raises(KeyError):
+        # An unknown node type is an argument mistake, not a missing mapping
+        # key — the same class every sibling introspection method raises.
+        with pytest.raises(kglite.ArgumentError):
             small_graph.properties("NonExistent")
 
     def test_has_type_info(self, small_graph):
@@ -239,7 +241,7 @@ class TestNeighborsSchema:
         assert works_at[0]["count"] == 20
 
     def test_unknown_type_raises(self, small_graph):
-        with pytest.raises(KeyError):
+        with pytest.raises(kglite.ArgumentError):
             small_graph.neighbors_schema("NonExistent")
 
 

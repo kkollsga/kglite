@@ -56,9 +56,16 @@ def test_runtime_error_summary_matches_the_stubs_engine_boundary():
     # Only the short class summary is shared; the stub owns the full contract.
     summary = _stub_class_doc("KgError").splitlines()[0]
     assert kglite.KgError.__doc__ == summary
+    # The boundary the docs draw: a Python-side protocol failure keeps its
+    # conventional built-in class. A missing result column is the row
+    # docs/python/error-handling.md reserves `KeyError` for — and note that a
+    # *write on a read handle* is no longer an example of this, because that is
+    # an engine policy refusal and now raises the coded `ArgumentError`.
     graph = kglite.KnowledgeGraph()
-    with pytest.raises(ValueError) as raised:
-        graph.freeze().cypher("CREATE (:Person {id: 1})")
+    graph.cypher("CREATE (:Person {id: 1})")
+    rows = graph.cypher("MATCH (n:Person) RETURN n.id AS id")
+    with pytest.raises(KeyError) as raised:
+        rows.column("no_such_column")
     assert not isinstance(raised.value, kglite.KgError)
 
 

@@ -62,7 +62,7 @@ def test_freeze_rejects_mutations():
         "MATCH (n:Doc) DELETE n",
         "MERGE (n:Doc {id: 1})",
     ]:
-        with pytest.raises(ValueError, match="immutable|frozen|snapshot"):
+        with pytest.raises(kglite.ArgumentError, match="immutable|frozen|snapshot"):
             fz.cypher(q)
 
 

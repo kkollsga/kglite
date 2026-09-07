@@ -133,7 +133,7 @@ def test_frozen_snapshot_many_concurrent_readers_mixed_queries():
 def test_frozen_rejects_every_mutation_path():
     fz = _docs().freeze()
     for q in ["CREATE (n:Doc {id: 5})", "MATCH (n) SET n.x = 1", "MATCH (n) DELETE n", "MERGE (n:Doc {id: 1})"]:
-        with pytest.raises(ValueError):
+        with pytest.raises(kglite.ArgumentError):
             fz.cypher(q)
 
 

@@ -14,6 +14,7 @@ top of the Rust build.
 
 from __future__ import annotations
 
+import datetime as _datetime
 import json
 from pathlib import Path
 from typing import Any, Mapping, Optional, Union
@@ -122,6 +123,36 @@ def from_blueprint(
     return graph
 
 
+def _json_scalar(value: Any) -> Any:
+    """Refuse a record value JSON cannot carry, by name.
+
+    ``json.dumps`` raised ``TypeError: Object of type datetime is not JSON
+    serializable`` — true, but it named neither the value nor the field, and it
+    read as a wrapper bug rather than a spec one. The refusal itself is the
+    contract (``tests/test_property_roundtrip_matrix.py``): a records spec is
+    JSON, JSON has no temporal type, and silently writing ``datetime`` as
+    ISO-8601 text would demote a temporal to a string property — a silent
+    degradation, which is the one outcome that matrix exists to keep out. Load
+    temporals through ``add_nodes``/``add_connections``, which type them, or
+    pass the ISO-8601 string yourself and convert with Cypher ``datetime()``.
+
+    Missing values are the exception: ``pd.NaT`` carries no temporal value to
+    degrade, so it becomes ``null`` like any other absent field.
+    """
+    if isinstance(value, (_datetime.datetime, _datetime.date, _datetime.time)):
+        if value.isoformat() == "NaT":  # pandas' missing timestamp
+            return None
+        raise TypeError(
+            f"from_records: a {type(value).__name__} value ({value!r}) cannot be carried in a "
+            "JSON records spec — JSON has no temporal type. Pass an ISO-8601 string and convert "
+            "with Cypher datetime()/date(), or load the column through add_nodes()."
+        )
+    raise TypeError(
+        f"from_records: a record value of type {type(value).__name__!r} ({value!r}) cannot be "
+        "carried in a JSON records spec"
+    )
+
+
 def from_records(
     spec: Union[dict, str],
     *,
@@ -174,7 +205,7 @@ def from_records(
             itself defaults to ``"vivify"``; passing the argument overrides
             whatever the spec carries.
     """
-    records_json = spec if isinstance(spec, str) else json.dumps(spec)
+    records_json = spec if isinstance(spec, str) else json.dumps(spec, default=_json_scalar)
     graph = _from_records_rs(
         records_json,
         storage=storage if storage else "default",

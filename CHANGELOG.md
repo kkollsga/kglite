@@ -237,6 +237,51 @@ before upgrading.
 
 ### Changed
 
+- **A client mistake is now published as a client error, with one class per
+  cause.** Six exception classes changed, all of them narrowing a Python-side
+  or wire-side misclassification:
+  - Writing through a read handle raises `ArgumentError` (`code`
+    `'InvalidArgument'`) from **all four** handles. `Session.cypher()` and
+    `FrozenGraph.cypher()` raised a bare `ValueError` with no `.code` at all,
+    and a graph under `read_only(True)` raised `CypherExecutionError` — one
+    policy answered by three classes, so no caller could route on the refusal.
+    `CypherExecution` also publishes as
+    `Neo.DatabaseError.Statement.ExecutionFailed` over Bolt, i.e. a client
+    mistake dressed as a server fault; `InvalidArgument` maps to
+    `Neo.ClientError.Statement.ArgumentError`.
+  - `properties('Nope')` and `neighbors_schema('Nope')` raise `ArgumentError`
+    instead of `KeyError`, matching `sample`, `describe`, `set_parent_type`
+    and `set_temporal`. `KeyError` stays reserved for a missing result column
+    or mapping key.
+  - `sample('P', -1)` raises `ArgumentError` naming the parameter and the
+    value, instead of leaking PyO3's `OverflowError: can't convert negative
+    int to unsigned`.
+  - The Bolt auto-commit mutation refusal is
+    `Neo.ClientError.Request.Invalid`, not
+    `Neo.DatabaseError.General.UnknownError`. Its message already names a
+    client-side remedy ("wrap CREATE/SET/DELETE in an explicit transaction"),
+    so a driver was being told the server had broken. It is deliberately not
+    `Neo.ClientError.Security.Forbidden`, which this server reserves for
+    permission refusals (`--readonly`, disk-mode graphs).
+  - Nine `Raises:` lines in `kglite/__init__.pyi` named a class the runtime
+    does not raise; they now name the measured one.
+
+- `kglite.from_records` names the value it cannot carry. A Python `datetime`
+  in a record spec surfaced `json.dumps`' own `TypeError: Object of type
+  datetime is not JSON serializable`, naming neither the value, the field, nor
+  a way forward. The refusal itself stands — JSON has no temporal type, and
+  writing one as ISO-8601 text would silently demote a temporal to a string
+  property — but it now names the value and points at the two routes that do
+  work (an ISO-8601 string plus Cypher `datetime()`, or `add_nodes`, which
+  types the column). `pd.NaT` carries no value to demote and becomes `null`.
+
+- Query parameters: `np.bool_` is accepted like every other numpy scalar (it
+  was rejected with a message naming `'bool'`, a type that *is* supported),
+  `pd.NaT` binds as NULL like NaN and `±inf`, an unsupported numpy scalar is
+  named with its module (`numpy.complex128`, not `complex128`), and a nested
+  conversion failure of *any* kind now carries the `$v.a[0]` parameter path
+  the two typed failures already carried.
+
 - Two stub corrections where the *documentation* was the wrong half.
   `embeddings()` now declares its first parameter as
   `node_type_or_text_column` in both overloads — it is the only keyword the

@@ -1241,7 +1241,11 @@ impl KgliteBackend {
                     "server is read-only — mutations rejected (--readonly flag)".into(),
                 ));
             }
-            return Err(BoltError::Backend(
+            // `Session` (`Neo.ClientError.Request.Invalid`), not `Forbidden`:
+            // the remedy below is a client-side rewrite, so this is a
+            // request-shape limitation rather than the permission refusal
+            // `--readonly` and disk-mode graphs publish.
+            return Err(BoltError::Session(
                 "auto-commit mutations not supported by kglite-bolt-server — \
                  wrap CREATE/SET/DELETE in an explicit transaction \
                  (session.begin_transaction)"
@@ -2207,6 +2211,38 @@ mod tests {
             "unexpected error: {err:?}"
         );
         assert!(!path.exists(), "a refused checkpoint writes nothing");
+    }
+
+    /// The auto-commit mutation refusal names a client-side remedy, so it is a
+    /// client error. `Forbidden` — what `--readonly` and disk-mode graphs use —
+    /// is the *permission* class, where no client rewrite helps; this is a
+    /// request-shape limitation, which is what `Session` publishes.
+    #[tokio::test]
+    async fn auto_commit_mutation_is_refused_as_a_client_request_error() {
+        let backend = memory_backend();
+        let session = SessionHandle("auto-commit".into());
+
+        let err = backend
+            .execute(
+                &session,
+                "CREATE (:Person {id: 1})",
+                &HashMap::new(),
+                &BoltDict::new(),
+                None,
+            )
+            .await
+            .expect_err("auto-commit mutations are not supported");
+        assert!(
+            matches!(&err, BoltError::Session(msg) if msg.contains("explicit transaction")),
+            "unexpected error: {err:?}"
+        );
+        assert_eq!(
+            err.to_failure_metadata().get("code"),
+            Some(&BoltValue::String(
+                "Neo.ClientError.Request.Invalid".to_string()
+            )),
+            "a refusal with a client-side remedy must not be a DatabaseError"
+        );
     }
 
     /// Disk graphs are excluded: every disk save publishes a generation and

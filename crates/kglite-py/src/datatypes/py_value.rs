@@ -126,7 +126,25 @@ impl QueryConversionError {
                     ));
                 }
                 Self::Limit(limit) => return limit.into(),
-                Self::Python(error) => return error,
+                // Re-raise the inner failure under the path the typed arms
+                // build, so the stub's promise ("both errors identify the
+                // nested parameter path") holds for *any* nested failure and
+                // not only the two typed ones. The class is preserved: a
+                // caller routing on `TypeError` still sees `TypeError`.
+                Self::Python(error) => {
+                    return Python::attach(|py| {
+                        let detail = error
+                            .value(py)
+                            .str()
+                            .ok()
+                            .and_then(|text| text.extract::<String>().ok())
+                            .unwrap_or_else(|| error.to_string());
+                        PyErr::from_type(
+                            error.get_type(py),
+                            format!("Query parameter {path} could not be converted: {detail}"),
+                        )
+                    });
+                }
             };
         }
     }
@@ -151,6 +169,17 @@ fn numpy_scalar_type_name(value: &Bound<'_, PyAny>) -> Option<String> {
     ty.name().ok()?.extract::<String>().ok()
 }
 
+/// Whether `value` is pandas' `NaT` singleton, identified by its type rather
+/// than by importing pandas (which the wheel does not depend on).
+fn is_pandas_nat(value: &Bound<'_, PyAny>) -> bool {
+    value
+        .get_type()
+        .name()
+        .ok()
+        .and_then(|name| name.extract::<String>().ok())
+        .is_some_and(|name| name == "NaTType")
+}
+
 fn convert_query_value(
     value: &Bound<'_, PyAny>,
     state: &mut ConversionState,
@@ -170,6 +199,19 @@ fn convert_query_value(
         });
     }
     let numpy_type = numpy_scalar_type_name(value);
+    // `np.bool_` is not a `PyBool`, and every other numpy scalar converts.
+    if matches!(numpy_type.as_deref(), Some("bool_" | "bool")) {
+        return value
+            .extract::<bool>()
+            .map(Value::Boolean)
+            .map_err(QueryConversionError::Python);
+    }
+    // `pd.NaT` is a `datetime` subclass, so it reaches the datetime arm below
+    // and fails inside the conversion. It is pandas' missing value: bind it as
+    // NULL, the same normalisation NaN and ±inf already get.
+    if is_pandas_nat(value) {
+        return Ok(Value::Null);
+    }
     if value.is_instance_of::<PyInt>()
         || numpy_type
             .as_deref()
@@ -243,11 +285,17 @@ fn convert_query_value(
                 .map(Value::List)
         });
     }
-    let type_name = value
-        .get_type()
-        .name()
-        .and_then(|name| name.extract::<String>())
-        .unwrap_or_else(|_| "<unknown>".to_string());
+    // A numpy scalar's bare `__name__` ('complex128') is not a type anyone can
+    // look up; qualify it with the module it came from.
+    let type_name = numpy_type
+        .map(|name| format!("numpy.{name}"))
+        .unwrap_or_else(|| {
+            value
+                .get_type()
+                .name()
+                .and_then(|name| name.extract::<String>())
+                .unwrap_or_else(|_| "<unknown>".to_string())
+        });
     Err(QueryConversionError::Unsupported(type_name))
 }
 

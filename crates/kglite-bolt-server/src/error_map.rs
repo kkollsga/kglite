@@ -26,6 +26,20 @@
 //! Codes that don't have an exact Neo4j equivalent reuse the closest
 //! ClientError-class fallback (matches what most Neo4j servers do for
 //! their own unmapped extensions).
+//!
+//! ## The server's own policy refusals
+//!
+//! Not every FAILURE comes from a `KgError`: the backend refuses some requests
+//! before the engine sees them, using `BoltError` variants directly (boltr's
+//! `to_failure_metadata` owns those codes). Three classes are in use, and the
+//! split is deliberate — a driver routes on the class, so a refusal a client
+//! can fix must never arrive as a `DatabaseError`.
+//!
+//! | Refusal                                                        | `BoltError`  | Neo4j status code                       | Driver class |
+//! |----------------------------------------------------------------|--------------|------------------------------------------|--------------|
+//! | Permission: `--readonly`, disk-mode `db.checkpoint()`           | `Forbidden`  | `Neo.ClientError.Security.Forbidden`     | ClientError  |
+//! | Request shape: auto-commit mutation, `tx_timeout`, zoned params | `Session` / `Protocol` | `Neo.ClientError.Request.Invalid` | ClientError  |
+//! | Server fault: a commit the WAL rejected, an unreachable outcome | `Backend`    | `Neo.DatabaseError.General.UnknownError` | DatabaseError |
 
 use boltr::error::BoltError;
 use kglite::api::KgError;

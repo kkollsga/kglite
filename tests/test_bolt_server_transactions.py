@@ -345,6 +345,25 @@ def test_auto_commit_reads_are_independently_visible(bolt_server):
             assert c3 == 5
 
 
+def test_auto_commit_mutation_is_refused_as_a_client_error(bolt_server):
+    """The refusal names a client-side remedy — "wrap it in an explicit
+    transaction" — so it must be published in the ClientError class. It used to
+    arrive as `Neo.DatabaseError.General.UnknownError`, which tells a driver the
+    *server* broke and makes the refusal retriable-looking to a routing layer.
+
+    `Neo.ClientError.Security.Forbidden`, which `--readonly` and disk-mode
+    graphs use, would be the wrong client code here: those are permission
+    refusals no client rewrite helps. This is a request-shape limitation."""
+    with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
+        with driver.session() as session:
+            with pytest.raises(neo4j.exceptions.ClientError) as excinfo:
+                session.run("CREATE (:Person {id: 1300, title: 'AutoCommit'})").consume()
+    error = excinfo.value
+    assert error.code == "Neo.ClientError.Request.Invalid"
+    assert not isinstance(error, neo4j.exceptions.DatabaseError)
+    assert "explicit transaction" in str(error)
+
+
 def test_multi_statement_in_one_run_pinned_behavior(bolt_server):
     """Multiple statements in one RUN — kglite's parser handles one
     statement per RUN, so `CREATE ...; CREATE ...` either parses only

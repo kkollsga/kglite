@@ -307,3 +307,216 @@ def test_retry_on_conflict_rejects_a_nonsense_attempt_count():
     kg = _two_node_graph()
     with pytest.raises(ValueError, match="attempts must be >= 1"):
         kglite.retry_on_conflict(kg, lambda tx: None, attempts=0)
+
+
+# ─── C. One cause, one class: client mistakes are client errors ─────────────
+#
+# The three sections below are a *table*, deliberately. Each row names a cause
+# and the (class, code) pair every surface that can produce it must answer
+# with, so a future divergence fails by the name of the diverging row rather
+# than as a message-substring surprise somewhere downstream.
+
+
+@pytest.fixture
+def people() -> kglite.KnowledgeGraph:
+    kg = kglite.KnowledgeGraph()
+    kg.add_nodes(pd.DataFrame([{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]), "P", "id")
+    return kg
+
+
+def _write_on_session(kg):
+    kg.session().cypher("CREATE (n:P {id: 9})")
+
+
+def _write_on_frozen(kg):
+    kg.freeze().cypher("CREATE (n:P {id: 9})")
+
+
+def _write_on_read_transaction(kg):
+    tx = kg.begin_read()
+    try:
+        tx.cypher("CREATE (n:P {id: 9})")
+    finally:
+        tx.rollback()
+
+
+def _write_on_read_only_graph(kg):
+    kg.read_only(True)
+    try:
+        kg.cypher("CREATE (n:P {id: 9})")
+    finally:
+        kg.read_only(False)
+
+
+@pytest.mark.parametrize(
+    "handle",
+    [
+        pytest.param(_write_on_session, id="Session.cypher"),
+        pytest.param(_write_on_frozen, id="FrozenGraph.cypher"),
+        pytest.param(_write_on_read_transaction, id="read-only Transaction"),
+        pytest.param(_write_on_read_only_graph, id="read-only KnowledgeGraph"),
+    ],
+)
+def test_a_write_on_a_read_handle_is_one_class_on_every_handle(people, handle):
+    """Four handles, one policy — "this handle does not take writes" — so one
+    class and one code. Before this test they answered `ValueError` (twice,
+    with no `.code` at all), `ArgumentError` and `CypherExecutionError`, and no
+    caller could route on the refusal without matching four things."""
+    with pytest.raises(kglite.ArgumentError) as excinfo:
+        handle(people)
+
+    exc = excinfo.value
+    assert exc.code == "InvalidArgument"
+    assert isinstance(exc, kglite.KgError)
+    # A client mistake must not be published as an execution failure: that code
+    # maps to Neo.DatabaseError.Statement.ExecutionFailed on the Bolt wire.
+    assert not isinstance(exc, kglite.CypherExecutionError)
+    # The refusal still names the remedy it always named.
+    assert "CREATE" in str(exc)
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        pytest.param(lambda kg: kg.properties("Nope"), id="properties"),
+        pytest.param(lambda kg: kg.neighbors_schema("Nope"), id="neighbors_schema"),
+        pytest.param(lambda kg: kg.sample("Nope"), id="sample"),
+        pytest.param(lambda kg: kg.describe(types=["Nope"]), id="describe"),
+        pytest.param(lambda kg: kg.set_parent_type("Nope", "P"), id="set_parent_type"),
+        pytest.param(lambda kg: kg.set_temporal("Nope", "a", "b"), id="set_temporal"),
+    ],
+)
+def test_an_unknown_node_type_is_one_class_on_every_method(people, call):
+    """`KeyError` is reserved by docs/python/error-handling.md for a missing
+    result column or mapping key. A node type is neither, so an unknown one is
+    an argument mistake — on every method that takes a type name."""
+    with pytest.raises(kglite.ArgumentError) as excinfo:
+        call(people)
+    assert excinfo.value.code == "InvalidArgument"
+    assert "Nope" in str(excinfo.value)
+
+
+def test_an_unknown_node_type_is_not_a_key_error(people):
+    """The two methods that used to raise it, pinned by their old class."""
+    for call in (people.properties, people.neighbors_schema):
+        with pytest.raises(kglite.ArgumentError):
+            call("Nope")
+
+
+# ─── D. No leaked interpreter errors from a validated argument ──────────────
+
+
+def test_a_negative_sample_count_is_an_argument_error(people):
+    """`n: usize` made PyO3 refuse before any kglite code ran, so the caller
+    saw `OverflowError: can't convert negative int to unsigned` — an
+    interpreter detail naming neither the parameter nor the value."""
+    with pytest.raises(kglite.ArgumentError) as excinfo:
+        people.sample("P", -1)
+    message = str(excinfo.value)
+    assert "n" in message and "-1" in message
+    assert excinfo.value.code == "InvalidArgument"
+
+
+def test_a_negative_positional_sample_count_is_an_argument_error(people):
+    """`sample(-1)` takes the count-only call shape and must refuse the same way."""
+    with pytest.raises(kglite.ArgumentError):
+        people.select("P").sample(-1)
+
+
+def test_from_records_names_the_value_it_cannot_carry():
+    """The refusal is the contract (a JSON spec has no temporal type, and
+    writing one as text would demote it to a string property — see
+    `test_property_roundtrip_matrix.py`). What was broken is the *message*:
+    `json.dumps` answered "Object of type datetime is not JSON serializable",
+    naming neither the value, the field, nor a way forward."""
+    import datetime
+
+    spec = {
+        "nodes": [
+            {
+                "type": "Event",
+                "id_field": "id",
+                "records": [{"id": 1, "at": datetime.datetime(2024, 3, 9, 14, 30, 5)}],
+            }
+        ]
+    }
+    with pytest.raises(TypeError) as excinfo:
+        kglite.from_records(spec)
+    message = str(excinfo.value)
+    assert "from_records" in message
+    assert "datetime" in message
+    assert "2024" in message, "the refusal must name the offending value"
+    assert "ISO-8601" in message and "add_nodes" in message, "and a way forward"
+
+
+def test_from_records_treats_a_missing_timestamp_as_null():
+    """`pd.NaT` is a datetime subclass, so it reached the same refusal — but a
+    missing value carries no temporal to demote."""
+    kg = kglite.from_records(
+        {
+            "nodes": [
+                {
+                    "type": "Event",
+                    "id_field": "id",
+                    "records": [{"id": 1, "at": pd.NaT}],
+                }
+            ]
+        }
+    )
+    assert kg.cypher("MATCH (n:Event) RETURN n.at AS at").to_list() == [{"at": None}]
+
+
+def test_a_pandas_nat_parameter_is_null():
+    """`pd.NaT` is a `datetime` subclass, so it reached `datetime_to_utc_naive`
+    and failed inside with `'float' object cannot be interpreted as an
+    integer`. It is pandas' missing value and binds as NULL, like NaN."""
+    kg = kglite.KnowledgeGraph()
+    rows = kg.cypher("RETURN $v AS v", params={"v": pd.NaT}).to_list()
+    assert rows == [{"v": None}]
+
+
+def test_a_nested_conversion_failure_names_the_parameter_path():
+    """Every typed arm builds the `$v.a[0]` path; the arm that wraps a raw
+    Python error used to return it unwrapped, discarding the path the stub
+    promises for *any* nested failure."""
+
+    import datetime
+
+    class ExplodingZone(datetime.tzinfo):
+        """A tzinfo whose `utcoffset` raises — the shortest route to a raw
+        `PyErr` from inside the datetime arm, which is where the unwrapping
+        happened."""
+
+        def utcoffset(self, dt):
+            raise ValueError("this zone refuses to answer")
+
+        def tzname(self, dt):
+            return "BOOM"
+
+        def dst(self, dt):
+            return None
+
+    kg = kglite.KnowledgeGraph()
+    aware = datetime.datetime(2024, 3, 9, 14, 30, tzinfo=ExplodingZone())
+    with pytest.raises(Exception) as excinfo:
+        kg.cypher("RETURN $v AS v", params={"v": {"a": [aware]}})
+    assert "$v.a[0]" in str(excinfo.value)
+    assert "this zone refuses to answer" in str(excinfo.value)
+
+
+def test_a_numpy_bool_parameter_is_accepted():
+    """Every other numpy scalar converts; `np.bool_` was rejected with a
+    message naming `'bool'` — a type that *is* supported."""
+    np = pytest.importorskip("numpy")
+    kg = kglite.KnowledgeGraph()
+    rows = kg.cypher("RETURN $v AS v", params={"v": np.bool_(True)}).to_list()
+    assert rows == [{"v": True}]
+
+
+def test_an_unsupported_numpy_type_is_named_with_its_module():
+    """`'complex128'` alone is not a Python type name anyone can look up."""
+    np = pytest.importorskip("numpy")
+    kg = kglite.KnowledgeGraph()
+    with pytest.raises(TypeError) as excinfo:
+        kg.cypher("RETURN $v AS v", params={"v": np.complex128(1 + 2j)})
+    assert "numpy.complex128" in str(excinfo.value)

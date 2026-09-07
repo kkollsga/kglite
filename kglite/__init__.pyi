@@ -1593,6 +1593,14 @@ def from_records(
     Raises:
         ValueError: If the spec JSON is malformed, a required field is missing,
             or any key is not one this loader reads.
+        TypeError: If a record value is of a type a JSON records spec cannot
+            carry, naming the value and its type. Python ``datetime`` / ``date``
+            / ``time`` are in that set — JSON has no temporal type, and writing
+            them as text would silently demote a temporal to a string property.
+            Pass an ISO-8601 string and convert with Cypher ``datetime()``, or
+            load the column through :meth:`KnowledgeGraph.add_nodes`, which
+            types it. ``pd.NaT`` carries no value to demote and becomes
+            ``null``.
     """
     ...
 
@@ -2634,7 +2642,7 @@ class KnowledgeGraph:
             A new KnowledgeGraph with only connected nodes.
 
         Raises:
-            ValueError: If *direction* is not one of the valid values.
+            ArgumentError: If *direction* is not one of the valid values.
         """
         ...
 
@@ -3129,9 +3137,11 @@ class KnowledgeGraph:
         """Set or query read-only mode for the Cypher layer.
 
         When enabled, all Cypher mutation queries (CREATE, SET, DELETE, REMOVE,
-        MERGE) are rejected, and ``describe()`` announces the restriction in a
-        ``<read-only>`` element (the Cypher reference it renders is unchanged).
-        Read-only queries (MATCH, RETURN, CALL, etc.) are unaffected.
+        MERGE) are rejected with :class:`ArgumentError` (``code``
+        ``'InvalidArgument'``), and ``describe()`` announces the restriction in
+        a ``<read-only>`` element (the Cypher reference it renders is
+        unchanged). Read-only queries (MATCH, RETURN, CALL, etc.) are
+        unaffected.
 
         Args:
             enabled: If ``True``, enable read-only mode. If ``False``, disable.
@@ -3884,7 +3894,7 @@ class KnowledgeGraph:
             parent_type: The core (parent) node type.
 
         Raises:
-            ValueError: If either type does not exist in the graph.
+            ArgumentError: If either type does not exist in the graph.
 
         Example::
 
@@ -3980,7 +3990,7 @@ class KnowledgeGraph:
                 Has no effect on stored data; only the rendered XML.
 
         Raises:
-            ValueError: If any type/connection/topic is not found.
+            ArgumentError: If any type/connection/topic is not found.
             TypeError: If connections, cypher, or fluent has wrong type.
         """
         ...
@@ -4202,7 +4212,7 @@ class KnowledgeGraph:
                   are scanned in full and report exact stats (``approx`` False).
 
         Raises:
-            KeyError: If node_type does not exist.
+            ArgumentError: If ``node_type`` does not exist.
         """
         ...
 
@@ -4218,7 +4228,7 @@ class KnowledgeGraph:
                 - ``incoming``: list of ``{connection_type, source_type, count}``
 
         Raises:
-            KeyError: If node_type does not exist.
+            ArgumentError: If ``node_type`` does not exist.
         """
         ...
 
@@ -4242,8 +4252,9 @@ class KnowledgeGraph:
             :class:`ResultView` with sampled node rows.
 
         Raises:
-            KeyError: If the given node type does not exist.
-            ValueError: If no selection and no node type given.
+            ArgumentError: If the given node type does not exist, if ``n`` (or
+                a positional count) is negative, or if there is no selection
+                and no node type given.
         """
         ...
     @overload
@@ -6378,7 +6389,9 @@ class KnowledgeGraph:
         differs from Neo4j (KGLite has separate equality, composite, and
         B-tree range structures) and index names are canonical rather than
         user-assigned; see the "Cypher index DDL" section of ``CYPHER.md``.
-        Index DDL counts as a mutation, so it is blocked on a read-only graph.
+        Index DDL counts as a mutation, so it is blocked on a read-only graph
+        (:class:`ArgumentError`, ``code`` ``'InvalidArgument'`` — the same
+        refusal every read-only handle raises).
 
         Constraint DDL — ``CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:L)
         REQUIRE n.p IS UNIQUE | IS NOT NULL | IS NODE KEY | IS :: TYPE``,
@@ -6666,7 +6679,8 @@ class KnowledgeGraph:
             valid_to: Property name holding the end date.
 
         Raises:
-            ValueError: If *type_name* is not a known node or connection type.
+            ArgumentError: If *type_name* is not a known node or connection
+                type.
         """
         ...
 
@@ -7935,7 +7949,9 @@ class Session:
 
         Read semantics match :meth:`KnowledgeGraph.cypher`. A mutation query
         (``CREATE`` / ``SET`` / ``DELETE`` / ``REMOVE`` / ``MERGE``) raises
-        ``ValueError`` — use :meth:`execute` for writes.
+        :class:`ArgumentError` (``code`` ``'InvalidArgument'``) — use
+        :meth:`execute` for writes. Every handle that does not take writes
+        refuses with that one class and code.
 
         ``row_limit`` caps the rows the call **retains** — the query still runs
         in full and only retention stops at the cap, so the rows kept are the
@@ -8097,8 +8113,9 @@ class FrozenGraph:
         ``MATCH`` / ``WHERE`` / ``RETURN`` / aggregations, and semantic search
         via ``text_score()`` / ``vector_score()``. A mutation query
         (``CREATE`` / ``SET`` / ``DELETE`` / ``REMOVE`` / ``MERGE``) raises
-        ``ValueError`` — a frozen snapshot is immutable; mutate the source graph
-        and take a fresh :meth:`KnowledgeGraph.freeze`.
+        :class:`ArgumentError` (``code`` ``'InvalidArgument'``) — a frozen
+        snapshot is immutable; mutate the source graph and take a fresh
+        :meth:`KnowledgeGraph.freeze`.
 
         Safe to call concurrently from many threads on the same snapshot.
 

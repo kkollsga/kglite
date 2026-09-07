@@ -92,6 +92,40 @@ except kglite.TransactionConflictError:
     ...  # rebuild the transaction and try again
 ```
 
+## A write on a read handle
+
+Four handles refuse writes, and all four refuse with the same class and the
+same code — `ArgumentError` / `InvalidArgument`:
+
+| Handle | Refuses |
+|---|---|
+| `Session.cypher()` | use `Session.execute()` for serialized writes |
+| `FrozenGraph.cypher()` | an immutable snapshot; mutate the source graph and re-`freeze()` |
+| A transaction from `begin_read()` | use `begin()` for read-write |
+| A graph under `read_only(True)` | `read_only(False)` re-enables mutations |
+
+One policy gets one class, so an application routes on the refusal without
+matching four things:
+
+```python
+try:
+    session.cypher(statement)
+except kglite.ArgumentError as exc:
+    assert exc.code == "InvalidArgument"
+```
+
+The refusal is deliberately *not* `CypherExecutionError`: the query did not
+fail to execute, it was aimed at a handle that does not take it. That
+distinction is visible on the wire too — `CypherExecution` maps to
+`Neo.DatabaseError.Statement.ExecutionFailed`, which tells a Bolt driver the
+server broke, while `InvalidArgument` maps to
+`Neo.ClientError.Statement.ArgumentError`.
+
+The same rule covers an **unknown node type**: `properties()`,
+`neighbors_schema()`, `sample()`, `describe(types=[...])`, `set_parent_type()`
+and `set_temporal()` all raise `ArgumentError` for a type the graph does not
+have.
+
 ## Catching errors
 
 ```python
@@ -135,6 +169,7 @@ protocols retain conventional exceptions:
 | Missing result column or mapping key | `KeyError` |
 | Invalid Python-side value or unsupported wrapper mode | `ValueError` |
 | Wrong Python object or argument shape | `TypeError` |
+| A query parameter outside the signed 64-bit integer range | `OverflowError` |
 | Wrapper-side path opening | `FileNotFoundError` where documented |
 | Borrow or object-lifecycle conflict | `RuntimeError` |
 | User cancellation with Ctrl-C | `KeyboardInterrupt` |

@@ -106,9 +106,12 @@ an auto-commit `CREATE`/`SET`/`DELETE`/`MERGE` is rejected rather than run
 commit, and a transaction committing against a stale snapshot conflicts with a
 retriable status code, so driver-managed transactions (`execute_write` and its
 per-language equivalents) retry the unit of work by themselves; hand-rolled
-`begin_transaction` code needs its own retry loop. KGLite typed errors map to
-Neo4j status codes for syntax, schema, timeout, access-mode, conflict, and
-execution failures.
+`begin_transaction` code needs its own retry loop. The auto-commit refusal is
+published as `Neo.ClientError.Request.Invalid` — a client error with a
+client-side remedy, not the `Neo.ClientError.Security.Forbidden` a `--readonly`
+server or a disk-mode graph answers with, where no rewrite of the request
+helps. KGLite typed errors map to Neo4j status codes for syntax, schema,
+timeout, access-mode, conflict, and execution failures.
 
 KGLite does not yet implement Bolt transaction timeouts. A top-level
 `tx_timeout` of zero, NULL, or absent means no timeout; any nonzero value is
