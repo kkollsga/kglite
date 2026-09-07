@@ -383,22 +383,39 @@ impl RelEdgePredicate {
                         return crate::graph::core::filtering::predicate_values_equal(&v, value)
                             .map(|v| !v)
                     }
-                    PropOp::Gt => matches!(
-                        crate::graph::core::filtering::compare_values(&v, value),
-                        Some(std::cmp::Ordering::Greater)
-                    ),
-                    PropOp::Ge => matches!(
-                        crate::graph::core::filtering::compare_values(&v, value),
-                        Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
-                    ),
-                    PropOp::Lt => matches!(
-                        crate::graph::core::filtering::compare_values(&v, value),
-                        Some(std::cmp::Ordering::Less)
-                    ),
-                    PropOp::Le => matches!(
-                        crate::graph::core::filtering::compare_values(&v, value),
-                        Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
-                    ),
+                    // Three-valued, through the same helper the executor's
+                    // `evaluate_comparison_tristate` uses: an edge property a
+                    // literal has no ordering rule against is `null`, so
+                    // `WHERE NOT (r.w < 1)` drops it exactly as
+                    // `WHERE NOT (n.w < 1)` drops the node.
+                    PropOp::Gt => {
+                        return crate::graph::core::filtering::ordering_matches(
+                            &v,
+                            value,
+                            |ordering| ordering == std::cmp::Ordering::Greater,
+                        )
+                    }
+                    PropOp::Ge => {
+                        return crate::graph::core::filtering::ordering_matches(
+                            &v,
+                            value,
+                            |ordering| ordering != std::cmp::Ordering::Less,
+                        )
+                    }
+                    PropOp::Lt => {
+                        return crate::graph::core::filtering::ordering_matches(
+                            &v,
+                            value,
+                            |ordering| ordering == std::cmp::Ordering::Less,
+                        )
+                    }
+                    PropOp::Le => {
+                        return crate::graph::core::filtering::ordering_matches(
+                            &v,
+                            value,
+                            |ordering| ordering != std::cmp::Ordering::Greater,
+                        )
+                    }
                     PropOp::StartsWith => matches!(
                         (&v, value),
                         (Value::String(text), Value::String(prefix)) if text.starts_with(prefix)
@@ -686,6 +703,77 @@ mod tests {
             &RelEdgePredicate::And(vec![RelEdgePredicate::False, property(PropOp::Eq),]),
             &|_| Some(Value::Null)
         ));
+    }
+
+    /// A relationship-property ordering comparison must answer `null` for a
+    /// pair of types no ordering rule relates, exactly as the executor's
+    /// `evaluate_comparison_tristate` does. When this collapsed to `false`,
+    /// `WHERE NOT (r.w < 1)` kept string-valued edges that
+    /// `WHERE NOT (n.w < 1)` dropped.
+    #[test]
+    fn relationship_ordering_without_a_rule_is_null() {
+        for op in [PropOp::Gt, PropOp::Ge, PropOp::Lt, PropOp::Le] {
+            for (stored, literal) in [
+                (Value::String("foo".to_string()), Value::Int64(1)),
+                (Value::Int64(1), Value::String("foo".to_string())),
+                (Value::Boolean(true), Value::Int64(1)),
+                (Value::List(vec![Value::Int64(1)]), Value::Int64(2)),
+            ] {
+                let predicate = RelEdgePredicate::Property {
+                    prop: "w".to_string(),
+                    op,
+                    value: literal,
+                };
+                let read = |_: &str| Some(stored.clone());
+                assert_eq!(
+                    predicate.eval_nullable(
+                        InternedKey::from_str("R"),
+                        true,
+                        NodeIndex::new(0),
+                        NodeIndex::new(1),
+                        &read
+                    ),
+                    None,
+                    "{stored:?} {op:?} must be null"
+                );
+                // Unknown rejects the edge in both the positive and the
+                // negated form — that is what `null` buys over `false`.
+                assert!(!eval_with(&predicate, &read));
+                assert!(!eval_with(
+                    &RelEdgePredicate::Not(Box::new(predicate)),
+                    &read
+                ));
+            }
+        }
+    }
+
+    /// NaN is a number, not an incomparable type: every ordering comparison
+    /// against it is `false`, so `NOT (r.w < 1)` keeps the edge.
+    #[test]
+    fn relationship_ordering_against_nan_is_false_not_null() {
+        for op in [PropOp::Gt, PropOp::Ge, PropOp::Lt, PropOp::Le] {
+            let predicate = RelEdgePredicate::Property {
+                prop: "w".to_string(),
+                op,
+                value: Value::Int64(1),
+            };
+            let read = |_: &str| Some(Value::Float64(f64::NAN));
+            assert_eq!(
+                predicate.eval_nullable(
+                    InternedKey::from_str("R"),
+                    true,
+                    NodeIndex::new(0),
+                    NodeIndex::new(1),
+                    &read
+                ),
+                Some(false),
+                "NaN {op:?} 1 must be false"
+            );
+            assert!(eval_with(
+                &RelEdgePredicate::Not(Box::new(predicate)),
+                &read
+            ));
+        }
     }
 
     #[test]

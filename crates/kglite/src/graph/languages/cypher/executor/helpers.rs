@@ -369,18 +369,37 @@ pub(super) fn evaluate_comparison_tristate(
                 crate::graph::core::filtering::predicate_values_equal(left, right).map(|v| !v),
             );
         }
-        ComparisonOp::LessThan => Ok(crate::graph::core::filtering::compare_values(left, right)
-            == Some(std::cmp::Ordering::Less)),
-        ComparisonOp::LessThanEq => Ok(matches!(
-            crate::graph::core::filtering::compare_values(left, right),
-            Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal)
-        )),
-        ComparisonOp::GreaterThan => Ok(crate::graph::core::filtering::compare_values(left, right)
-            == Some(std::cmp::Ordering::Greater)),
-        ComparisonOp::GreaterThanEq => Ok(matches!(
-            crate::graph::core::filtering::compare_values(left, right),
-            Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal)
-        )),
+        // Three-valued, like the equality arms above: a pair of types no
+        // ordering rule relates is `null`, not `false`. See
+        // `filtering::ordering_matches` for the NaN carve-out.
+        ComparisonOp::LessThan => {
+            return Ok(crate::graph::core::filtering::ordering_matches(
+                left,
+                right,
+                |ordering| ordering == std::cmp::Ordering::Less,
+            ));
+        }
+        ComparisonOp::LessThanEq => {
+            return Ok(crate::graph::core::filtering::ordering_matches(
+                left,
+                right,
+                |ordering| ordering != std::cmp::Ordering::Greater,
+            ));
+        }
+        ComparisonOp::GreaterThan => {
+            return Ok(crate::graph::core::filtering::ordering_matches(
+                left,
+                right,
+                |ordering| ordering == std::cmp::Ordering::Greater,
+            ));
+        }
+        ComparisonOp::GreaterThanEq => {
+            return Ok(crate::graph::core::filtering::ordering_matches(
+                left,
+                right,
+                |ordering| ordering != std::cmp::Ordering::Less,
+            ));
+        }
         ComparisonOp::RegexMatch => match (left, right) {
             (Value::String(text), Value::String(pattern)) => {
                 // Anchored: `=~` is a full-string match (openCypher), not a

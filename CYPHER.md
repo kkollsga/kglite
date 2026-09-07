@@ -324,9 +324,11 @@ above. Within a rank:
   deliberate divergence from openCypher, which makes every comparison between
   a date and a datetime null. `DISTINCT` and grouping keys remain structural,
   so the two stay separate keys there.
-- **Lists** compare element by element, then by length (`[1] < [1,1,9] <
-  [1,2] < [2]`).
-- **Maps** compare entry by entry in key order, then by size.
+- **Lists** rank element by element, then by length — ascending, `[1]`,
+  `[1,1,9]`, `[1,2]`, `[2]`. This is the *sort* rank; the `<` operator has no
+  rule for two lists (see below).
+- **Maps** rank entry by entry in key order, then by size, with the same
+  sort-only caveat.
 
 ```python
 graph.cypher("UNWIND [3, 'b', 1, 'a'] AS v RETURN v ORDER BY v")
@@ -342,6 +344,18 @@ order everywhere, so `min(x)` always equals `x ORDER BY x ASC LIMIT 1`.
 
 The same total order governs the fluent API's `sort=` fields, where a node
 missing the sort property is ordered as NULL.
+
+**Sorting is total; comparing is not.** This ranking exists so `ORDER BY`,
+`min` and `max` can place every pair. The `<`, `<=`, `>` and `>=` *operators*
+answer `null` when no ordering rule relates the two values' types — openCypher's
+rule — so `'a' < 1`, `true < 1`, `[1] < 2`, `{a: 1} < 1` and a list against
+another list are all `null`, in both directions, even though `ORDER BY` places
+those same values confidently. A `null` keeps no row in either direction:
+`WHERE n.v < 5` and `WHERE NOT (n.v < 5)` both drop a string-valued `n.v`.
+Cross-type `=` is still `false` and `<>` still `true`. The one number that
+declines every ordering comparison without being cross-type is `NaN`, which
+answers `false` (never `null`) for all four operators — including against
+itself — while still sorting above every other number.
 
 ## HAVING
 
@@ -3689,7 +3703,7 @@ claimed openCypher-compatible subset.
 |---------|--------|-------|
 | Arithmetic (`+`, `-`, `*`, `/`) | Covered | Numeric arithmetic plus list/list and element/list composition |
 | String concat (`\|\|`) | Extension | Auto-converts non-strings |
-| Comparison (`=`, `<>`, `<`, `>`, `<=`, `>=`) | Partial | Core scalar comparisons and null propagation are covered; composite and cross-type ordering are not a complete openCypher implementation |
+| Comparison (`=`, `<>`, `<`, `>`, `<=`, `>=`) | Partial | Scalar comparisons, null propagation and cross-type ordering follow openCypher: `<`/`<=`/`>`/`>=` are `null` between values no ordering rule relates, `=` is `false` and `<>` is `true`. Two deliberate divergences: a date equals midnight on that date (see Sort order), and lists and maps have no ordering rule of their own, so `[1] < [2]` is `null` rather than element-wise |
 | Boolean (`AND`, `OR`, `XOR`, `NOT`) | Covered | Predicate and expression positions preserve three-valued results |
 | `IS NULL` / `IS NOT NULL` | Covered | Also works as expressions in RETURN/WITH |
 | `IN [list]` | Covered | Null operands and null-containing no-match lists preserve unknown; an **empty** list is `false` for every operand, `null` included |

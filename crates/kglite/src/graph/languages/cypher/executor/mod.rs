@@ -1146,6 +1146,9 @@ pub mod call_subquery;
 mod cdc_procedures;
 mod centrality_procedures;
 mod columnar_write;
+#[cfg(test)]
+#[path = "comparison_tristate_tests.rs"]
+mod comparison_tristate_tests;
 pub mod dead_code;
 mod edge_property_write;
 mod execution_support;

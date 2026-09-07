@@ -280,6 +280,48 @@ pub fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
     }
 }
 
+/// Cypher's three-valued answer for `a <op> b`, where `keep` names the
+/// orderings the operator accepts.
+///
+/// `compare_values` returns `None` for two unrelated reasons and every caller
+/// used to read both as `false`:
+///
+/// * **No ordering rule relates these two types** (`1 < 'a'`, `[1] < 2`, a list
+///   against a list). openCypher makes that `null`, so `NOT (a < b)` is `null`
+///   too and keeps no row. Collapsing it to `false` made `NOT` manufacture
+///   `true` and `AND` absorb to `false`.
+/// * **A NaN operand.** The pair *has* an ordering rule — both sides are
+///   numbers — and IEEE/Neo4j answer `false` for every comparison against NaN,
+///   not `null`. CYPHER.md's ordering section already declares NaN a sortable
+///   number, and `total_order` places it above every other one.
+///
+/// Both operands being numeric is exactly the second case: `compare_values`
+/// orders every other numeric pairing, so a NaN is the only thing that can
+/// have declined it.
+///
+/// Sorting does not come through here — `ORDER BY`, `min`/`max` and grouping
+/// use the *total* order below, which must place every pair. See the module
+/// note under "Total ordering".
+#[inline]
+pub fn ordering_matches(
+    a: &Value,
+    b: &Value,
+    keep: impl Fn(std::cmp::Ordering) -> bool,
+) -> Option<bool> {
+    match compare_values(a, b) {
+        Some(ordering) => Some(keep(ordering)),
+        None if is_numeric(a) && is_numeric(b) => Some(false),
+        None => None,
+    }
+}
+
+/// Whether `compare_values` has an ordering rule for this value against every
+/// other numeric variant.
+#[inline]
+fn is_numeric(v: &Value) -> bool {
+    matches!(v, Value::Int64(_) | Value::Float64(_) | Value::UniqueId(_))
+}
+
 // ── Total ordering ──────────────────────────────────────────────────────────
 //
 // Filtering calls `compare_values`; sorting calls `total_order`. Nothing calls
@@ -289,7 +331,11 @@ pub fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
 //   a number on the other must produce **no row** — Cypher's three-valued
 //   logic, where a cross-type `<` is `null`. `compare_values` encodes that by
 //   returning `None`, and every filter, `WHERE` predicate, index probe and
-//   `Between` bound goes through it.
+//   `Between` bound goes through it. Only the Cypher operators need the
+//   `null`/`false` distinction that `None` conflates, so they read it through
+//   `ordering_matches` above; the positive-only consumers (pattern property
+//   matchers, index probes, the fluent `FilterCondition`) drop the row either
+//   way and stay two-valued deliberately.
 // * **Ordering is total.** `ORDER BY` must place *every* pair, and an
 //   intransitive comparator makes `slice::sort_by` abort the process with
 //   "user-provided comparison function does not correctly implement a total

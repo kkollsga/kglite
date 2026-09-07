@@ -72,6 +72,29 @@ before upgrading.
   variable that is not an exact signed 64-bit integer, instead of compiling a
   rounded bound the recipe author did not write.
 
+### Changed
+
+- **An ordering comparison between values no ordering rule relates is now
+  `null` instead of `false`.** `1 < 'a'`, `'a' < 1`, `true < 1`, `[1] < 2`,
+  `{a: 1} < 1`, `[1] < [2]` and their `>`, `<=`, `>=` forms answered `false` in
+  *both* directions, which contradicted the total order `ORDER BY` declares
+  (`'a'` sorts before `1`) and made `NOT (…)` manufacture `true`. openCypher
+  and Neo4j 5 make all of these `null`. Cross-type `=` stays `false` and `<>`
+  stays `true`, unchanged. `NaN` is a number, not a cross-type operand: every
+  ordering comparison against it still answers `false`, including
+  `NaN <= NaN`. `ORDER BY`, `min`/`max`, `DISTINCT` and grouping keys are
+  untouched — they use the separate total order, which still places every
+  pair — and an index-backed range predicate answers the same rows as the
+  scan. The rule holds for relationship-property predicates
+  (`WHERE NOT (r.w < 1)`) as well as node properties.
+
+  **Migration.** Rows can disappear from negated filters. A
+  `WHERE NOT (n.v < 5)` that used to keep every row whose `n.v` was a string,
+  list, map or boolean now drops them, because `NOT null` is `null`. Where the
+  old row set was wanted, ask for it explicitly — add the non-numeric rows back
+  with a type test, e.g. `WHERE NOT (n.v < 5) OR toInteger(n.v) IS NULL`.
+  Positive filters (`WHERE n.v < 5`) return exactly the rows they did before.
+
 ## [0.17.0] - 2026-09-07
 
 ### Fixed

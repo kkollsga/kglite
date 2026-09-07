@@ -3874,6 +3874,32 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (n:Sample) RETURN n.site AS site, avg(n.w) AS a, sum(n.w) AS s ORDER BY site",
         None,
     ),
+    # ── Cross-type ordering is null, on both plan profiles ──
+    #
+    # `<`/`<=`/`>`/`>=` answer null when no ordering rule relates the two
+    # types, and `NOT null` is null — so the string and missing `v` cells drop
+    # out of a negated filter. The compiled-scan path
+    # (`ScanPred::Not` over `ScanPred::Comparison`) and the interpreter share
+    # `evaluate_comparison_tristate`, which is why both profiles agree today.
+    # These entries exist to keep it that way: a scan-local ordering shortcut
+    # that re-collapsed the tristate to `false` would diverge here.
+    *(
+        (
+            f"cross_type_ordering_negated_{name}",
+            "mixed_type_props_graph",
+            f"MATCH (n:Sample) WHERE NOT (n.v {op} 5) RETURN n.id AS id ORDER BY id",
+            None,
+        )
+        for name, op in (("lt", "<"), ("le", "<="), ("gt", ">"), ("ge", ">="))
+    ),
+    (
+        # Control: the positive form is unchanged by the tristate move, so this
+        # cell must keep answering what it always did.
+        "cross_type_ordering_positive_control",
+        "mixed_type_props_graph",
+        "MATCH (n:Sample) WHERE n.v < 5 RETURN n.id AS id ORDER BY id",
+        None,
+    ),
     # ── text_bm25 top-k fusion (`fuse_text_bm25_order_limit`) ──
     #
     # The pass claims `RETURN text_bm25(...) AS s ORDER BY s LIMIT k` from the
