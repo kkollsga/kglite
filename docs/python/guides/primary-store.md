@@ -4,10 +4,8 @@ Most KGLite graphs are a {doc}`derived index <derived-index>` over data owned
 somewhere else. This page is about the other case: the graph *is* the
 authoritative copy, and losing it means losing the data.
 
-That is a much stronger promise, so this page is deliberately conservative. It
-states what holds, what the defaults are, and what KGLite does not do — with
-enough detail that you can decide without running an experiment first. Where a
-limit exists, it is named rather than softened.
+This page states the guarantees, defaults, and limits that matter when KGLite
+owns the authoritative copy.
 
 ## What holds
 
@@ -32,18 +30,13 @@ on it opens an O(V+E) checkpoint instead. `memory` and `mapped` both take the
 journal, and a durable graph over either of them does too — durability and
 rollback strategy are independent concerns.
 
-Two cases that used to be on that list are not any more, because the journal
-grew to cover them:
+Two other graph shapes also use the journal:
 
 - **A graph that has been saved, loaded, or opened from a file.** It carries the
   same property shape a freshly built graph does, and a `SET` journals the
   individual cells it overwrote rather than a copy of the type's whole column
-  store. A single-row `SET` measures 4.3–5.0 µs at 50 k nodes × 12 declared
-  properties and 4.3 µs at 100 k — parity with a graph that has never touched a
-  file, and flat in node count. Inside an explicit transaction the same
-  statements cost 14–45 µs each. A graph whose columns have spilled to disk
-  under `set_memory_limit` measures 4.4 µs and keeps its spill; `mapped`
-  measures 5.0 µs unlogged and 7.5 µs at `durable="normal"`.
+  store. The write-scaling benchmark covers freshly built, loaded, spilled, and
+  mapped graphs.
 - **A graph carrying user-created property, range, or composite indexes.** Their
   bucket edits are journalled with the position they occupied, so `CREATE INDEX`
   and the `create_index` API no longer move a graph's writes back onto the
@@ -73,15 +66,12 @@ primary store:
 - **`DELETE` tombstones rows; `vacuum()` reclaims them.** Deleted rows keep
   their space until you compact, so a write-heavy primary store should call
   `vacuum()` periodically (it also fires automatically once fragmentation
-  crosses `auto_vacuum_threshold`). Scans are unaffected — measured at
-  0.975–1.043× with 40% of rows tombstoned — so the cost of putting this off is
-  memory, not time. **`vacuum()` is a no-op on `storage="disk"`** — its node
+  crosses `auto_vacuum_threshold`). **`vacuum()` is a no-op on
+  `storage="disk"`** — its node
   numbering is frozen mmap, so there is no in-place rebuild to do. `save()`
   reclaims instead: a disk save rewrites the columns without the rows no live
   node points at, so the published directory and the graph that reloads from it
-  carry live rows only (measured: a 20k-node graph with half its nodes deleted
-  wrote 2.00x the column bytes of the same graph built from the survivors, and
-  now writes the same bytes). What a save does *not* reclaim is node slots: a
+  carry live rows only. What a save does *not* reclaim is node slots: a
   deleted node's 16-byte slot and its free-list entry are kept, so a disk
   graph's node capacity only shrinks when the directory is rebuilt from a fresh
   ingest. `compact()` is a separate, edge-only operation — it merges overflow
@@ -107,8 +97,8 @@ way of changing a graph is logged, not only Cypher — `add_nodes`,
 `add_connections`, label changes, and committed transactions included. `save()`
 is separately atomic and `fsync`ed, so a reader never observes a torn file.
 
-`storage="disk"` is the exception, and not because it was overlooked: a disk
-graph commits by publishing an immutable generation, so a logical write-ahead
+`storage="disk"` is the exception: a disk graph commits by publishing an
+immutable generation, so a logical write-ahead
 log is not its durability boundary. A disk graph opens non-durable and takes
 `save()` checkpoints instead. Asking for any logging level there —
 `durable=True`/`"full"` *or* `durable="normal"` — raises `ValueError`
@@ -159,7 +149,7 @@ Three consequences worth internalising before you rely on this:
   commit it. The message names the exit: reopen the path. The failed statement
   is not in the recovered graph.
 
-Two smaller sharp edges: `save(fsync=False)` is ignored on a durable graph and
+Two additional constraints: `save(fsync=False)` is ignored on a durable graph and
 warns, because the checkpoint truncates the log and so must itself reach disk;
 and a log written by this version is refused by older builds with a clear message
 rather than silently truncated.
@@ -177,8 +167,7 @@ read/write sets of the two transactions — a commit publishes the transaction's
 working copy by pointer swap, so a transaction that began before *any* other
 commit is working from a stale snapshot regardless of which nodes it touched.
 Two transactions editing entirely unrelated nodes therefore conflict, and the
-second one loses. That is not over-caution: its working copy genuinely does not
-contain the first one's write, so applying it would silently revert that write.
+second one loses because its working copy does not contain the first write.
 
 The practical consequence is that conflicts are ordinary rather than rare, and
 every concurrent writer needs a retry loop. Use `kglite.retry_on_conflict`
@@ -388,10 +377,9 @@ not merely lifecycle-tested
 (`tests/test_bolt_server_transactions.py::test_managed_transaction_retries_after_conflict`).
 The official Python, JavaScript, and Java drivers are regression-tested in CI —
 session and explicit-transaction lifecycle, managed retry, PackStream type
-round-trips, `Neo.*` error codes, and OCC conflict detection. Read that as a 22-check
-conformance suite per driver rather than a full protocol sweep, and note that
-every *other* driver — Go, .NET — remains untested: those clients may connect but
-can rely on features outside the documented wire and Cypher contracts.
+round-trips, `Neo.*` error codes, and OCC conflict detection. This is focused
+contract coverage rather than a full protocol sweep. Other drivers, including
+Go and .NET, are untested.
 
 **Constraints cover uniqueness, presence and property type, not arbitrary
 rules.** Nodes carry all three; relationships carry presence and property type
@@ -443,9 +431,8 @@ Forms KGLite cannot serve — `TEXT`, `POINT`, `FULLTEXT`, `VECTOR`, `LOOKUP`,
 relationship indexes, `OPTIONS { … }`, a property type outside the accepted
 names, and `IS UNIQUE` / `IS RELATIONSHIP KEY` on a relationship — fail with a
 specific unsupported-feature error naming the construct and the route that does
-work. That is the deliberate choice: a constraint accepted and silently
-unenforced would be worse than an error, since it is exactly the kind of promise
-data-integrity assumptions get built on. Full grammar in
+work. Unsupported forms are rejected rather than recorded without enforcement.
+Full grammar in
 {doc}`/reference/cypher-reference`.
 
 **`LOAD CSV` works, and file access is a capability you grant.** `LOAD CSV [WITH
@@ -526,14 +513,14 @@ What `disk` does not give you is a *smaller* unit of durability than a whole
 `save()`. `disk` also keeps the whole-graph write checkpoint described above;
 `mapped` does not — its statements take the same O(changes) journal in-memory
 graphs take.
-In-memory is the product; the disk modes are for exploring graphs too big for it,
-and that is the trade-off you are accepting.
+In-memory is the primary mode; the disk modes are for exploring graphs too big
+for it.
 
-**Three bindings are maintained here; the rest you write.** Python and Rust are
+**Three bindings are maintained here.** Python and Rust are
 first-class, and Java is official since 0.15.9 (Panama/FFM over the C ABI, on
 Maven Central as `io.github.kkollsga:kglite`). Everything else — Go, JavaScript,
-.NET — goes through the C ABI in `crates/kglite-c`: a supported boundary with a
-generated header, but you are writing the binding. See {doc}`/rust/c-abi`.
+.NET — can use the C ABI in `crates/kglite-c`; KGLite does not ship those
+bindings. See {doc}`/rust/c-abi`.
 
 ## Deciding
 

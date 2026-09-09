@@ -929,7 +929,7 @@ Date-range filtering on nodes and relationships with explicit field names.
 | `n.d.year`, `n.d.month`, `n.d.day` | Extract component from a DateTime property (chained accessor — works in `RETURN`, `WHERE`, `ORDER BY`) |
 | `n.d.dayOfWeek`, `n.d.dayOfYear`, `n.d.epochSeconds` | Other temporal field accessors |
 | `duration({days: N, months: M, ...})` | Build a Duration value (see [Duration semantics](#duration-semantics) below) |
-| `duration.between(d1, d2)` | Day-delta between two DateTime values, returned as a Duration |
+| `duration.between(d1, d2)` | Difference between two date or timestamp values; whole days and remaining seconds are returned as a Duration |
 | `add_days(date, n)` / `add_months(date, n)` / `add_years(date, n)` | Checked calendar shift; returns NULL when the requested date is outside the representable range |
 | `date_truncate(date, unit)` | Start of `year`, `month`, `week`, or `day` |
 | `date + duration({days: N})` | Add a duration to a date |
@@ -957,7 +957,11 @@ on two integers raise `CypherExecutionError` when the result leaves the signed
 no wire format kglite ships over can carry, so promoting it would move the
 silence one layer out rather than remove it.
 
-**`localdatetime()` / `localtime()` / `time()` return strings, not a temporal Value.** KGLite's `Value::DateTime` is date-only (`NaiveDate`), so there is no time-of-day Value variant to carry sub-day precision. Rather than silently dropping the time component, these functions emit ISO-8601 strings (`localdatetime()` → `YYYY-MM-DDTHH:MM:SS`, `localtime()`/`time()` → `HH:MM:SS`). The single-string-argument form validates and normalises its input, returning NULL on unparseable input (same contract as `datetime(str)`).
+**`datetime()` and `localdatetime()` return timestamp values.** An offset-bearing
+`datetime(str)` is normalized to naive UTC; `localdatetime(str)` keeps the local
+wall-clock reading and drops the zone. `localtime()` and `time()` return
+`HH:MM:SS` strings because KGLite has no time-only value type. Each single-string
+form returns NULL on unparseable input.
 
 ```python
 # Nodes active at a point in time
@@ -1013,10 +1017,9 @@ Users coming from Postgres will need to know.
 
 #### `duration.between(d1, d2)`
 
-Computes the day-delta between two `DateTime` values. **Months and
-seconds are always 0** because `Value::DateTime` is currently
-date-only (`NaiveDate`); a calendar-month-aware diff requires the
-`Value::DateTime` → `NaiveDateTime` refactor (deferred).
+Computes the difference between two date or timestamp values. `months` is
+always 0; whole days are stored in `days`, and any remaining sub-day difference
+is stored in `seconds`.
 
 ```cypher
 RETURN duration.between(date('2024-08-12'), date('2026-05-02')).days
@@ -3669,7 +3672,7 @@ below; do not infer absence from this shorter list.
 | **String** | `split`, `replace`, `substring`, `left`, `right`, `trim`, `ltrim`, `rtrim`, `reverse` |
 | **Math** | `abs`, `ceil`/`ceiling`, `floor`, `round`, `sqrt`, `sign`, `log`/`ln`, `log10`, `exp`, `pow`, `pi`, `rand`, `randomUUID`, trig: `sin`/`cos`/`tan`/`asin`/`acos`/`atan`/`atan2`/`cot`/`haversin`/`degrees`/`radians` |
 | **Spatial** | `point(lat, lon)`, `distance(a, b)`, `contains(a, b)`, `intersects(a, b)`, `centroid(n)`, `area(n)`, `perimeter(n)`, `latitude(point)`, `longitude(point)` |
-| **Temporal** | `date(str)`/`datetime(str)`, `localdatetime()`/`localtime()`/`time()` (ISO strings), `date_diff(d1, d2)`, `date ± N` (days), `date - date` → int, `d.year`/`d.month`/`d.day`, `valid_at(...)`, `valid_during(...)` |
+| **Temporal** | `date(str)`, `datetime(str)`, `localdatetime()` (timestamp values), `localtime()`/`time()` (ISO strings), `duration.between(d1, d2)`, `date_diff(d1, d2)`, `date ± N` (days), `date - date` → duration, `d.year`/`d.month`/`d.day`, `valid_at(...)`, `valid_during(...)` |
 | **Semantic** | `text_score(n, prop, query [, metric] [, options])` — scores a list `query` as a vector, embeds a string `query` via `set_embedder()`, cosine/dot_product/euclidean/poincare; `embedding_norm(n, prop)` — L2 norm (hierarchy depth) |
 | **Timeseries** | `ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_count`, `ts_at`, `ts_first`, `ts_last`, `ts_delta`, `ts_series` — date-string args with resolution validation |
 | **Mutations** | `CREATE (n:Label {props})`, `CREATE (a)-[:TYPE]->(b)`, `SET n.prop = expr`, `SET n += map`, `SET n = map`, `DELETE`, `DETACH DELETE`, `REMOVE n.prop`, `MERGE ... ON CREATE SET ... ON MATCH SET` |
@@ -3789,7 +3792,7 @@ compatible subset.
 | `labels(n)` return type | `List[String]` (primary first) | `List[String]` | Matches Neo4j since 0.10.5 |
 | `SET n:Label` | Supported (adds a secondary label) | Supported | Primary type is immutable; changing it requires node migration/recreation |
 | Storage | In-memory, mmap-backed, or disk CSR | Disk-based | One Cypher engine spans all three embedded storage modes |
-| Transactions | Snapshot isolation + OCC through `Session` / `Transaction` | Full ACID | Native session coordination is binding-independent; direct graph writes are in-place |
+| Transactions | Snapshot isolation + OCC through `Session` / `Transaction`; durability depends on access mode | Server/embedded transaction management | Native session coordination is binding-independent; direct graph writes are in-place |
 | Indexing | Three separate structures — hash equality, composite, B-tree range — plus automatic type indexes and vector indexes | One general `RANGE` index serving equality, range, and ordering | An equality index cannot serve a range predicate, so KGLite exposes the distinction that Neo4j collapses. `CREATE INDEX` / `DROP INDEX` / `SHOW INDEXES` are supported — see [Cypher index DDL](#cypher-index-ddl) for exactly what each statement builds |
 | Index names | Canonical and derived: `Label.property`, `Label.(a,b)` | User-assigned, unique | A name in `CREATE INDEX <name> …` is accepted for script portability but not stored; the persisted `.kgl` index state is a list of `(label, property)` keys |
 | Constraint DDL | `IS UNIQUE`, `IS NOT NULL`, `IS NODE KEY`, `IS :: TYPE` — enforced on every write path | `CREATE CONSTRAINT … IS UNIQUE / IS NOT NULL / IS NODE KEY / IS :: TYPE` | `IS :: TYPE` accepts the type names with an exact KGLite value counterpart (`BOOLEAN`, `STRING`, `INTEGER`, `FLOAT`, `DATE`, `LOCAL DATETIME`, `DURATION`, `POINT`); lists, unions and zoned temporal types are rejected by name rather than approximated. Relationship constraints cover `IS NOT NULL` and `IS :: TYPE`; `IS UNIQUE` / `IS RELATIONSHIP KEY` on a relationship are refused, because KGLite has no single answer for when two relationships of a type are the same one. See [Cypher constraint DDL](#cypher-constraint-ddl) |

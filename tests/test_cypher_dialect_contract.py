@@ -58,6 +58,8 @@ FORBIDDEN_CLAIM_PHRASES = (
     "plugs in unchanged",
     "absolute-correctness oracle",
     "fully compatible",
+    "bolt drop-in",
+    "drop-in for driver",
     "drop-in replacement",
     "drop-in compatible",
     "complete opencypher",
@@ -205,6 +207,9 @@ def test_public_claim_surfaces_do_not_promise_complete_or_drop_in_compatibility(
 
     migration = (ROOT / "docs" / "python" / "migrations" / "neo4j-to-kglite.md").read_text(encoding="utf-8")
     assert "`FOREACH (x IN list \\| ...)` | Supported" in migration
+    assert "| `allShortestPaths(...)` | Not supported" not in migration
+    assert "`allShortestPaths(...)`." in migration
+    assert "`datetime()` and `localdatetime()` return timestamp values" in migration
 
 
 def test_namespaced_and_flat_extension_function_are_equivalent():

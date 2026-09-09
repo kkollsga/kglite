@@ -7,9 +7,13 @@
 /.venv/
 /.venv*/
 /.claude/
+# Keep the skills path explicit: doctrine adoption checks this contract even
+# though the parent directory is also workstation-local.
+/.claude/skills/
 # Codex conventions and skills are workstation-local adapters. CLAUDE.md is
 # the tracked repository authority; do not auto-generate or stage these files.
 /.agents/
+/.agents/skills/
 /AGENTS.md
 /.pytest_cache/
 /data/

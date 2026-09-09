@@ -2,25 +2,24 @@
 
 This page is for a developer with an existing Neo4j database and/or
 `neo4j`-driver code who wants to evaluate or adopt KGLite. It covers
-where KGLite fits, the two migration paths (Bolt drop-in vs native
-Python), how to lift your data across, and — the core of the guide —
-where the Cypher dialect diverges.
+where KGLite fits, reusing tested Bolt driver code or moving to the native
+Python API, how to transfer data, and where the Cypher dialect diverges.
 
 KGLite ships a focused openCypher subset, **not a Neo4j drop-in
-replacement**. Most read queries port unchanged; the divergences
-below are the ones worth knowing before you commit.
+replacement**. Many common reads use the same syntax; check the divergences
+below against your workload before adopting it.
 
 ## When KGLite fits — and when it doesn't
 
 | | KGLite | Neo4j |
 |---|---|---|
-| Deployment | Embedded, in-process (`pip install kglite`) | Server (JVM) or embedded driver |
+| Deployment | Embedded, in-process (`pip install kglite`) | Server deployment or embedded Java database |
 | Query language | Cypher (subset, see below) | Cypher (full) |
 | Storage | `.kgl` file — in-mem · mmap · disk | Server store directory |
 | Auth | None in-process; basic only via Bolt server | Full RBAC |
-| Multi-database | No — one graph per process / per server | Yes (`USE db`) |
+| Multi-database | No catalog — one graph per handle or Bolt server | Yes (`USE db`) |
 | Clustering / routing | No (single server) | Causal cluster, routing |
-| Transactions | Snapshot isolation + OCC | Full ACID |
+| Transactions | Snapshot isolation + OCC; durability depends on access mode | Server-managed ACID transactions |
 | Data model | One **primary** type per node + optional secondary labels | Arbitrary label sets |
 
 **KGLite fits** when you want Cypher + Python ergonomics in one wheel:
@@ -33,9 +32,8 @@ for the side-by-side against other embedded graph engines, NetworkX,
 rustworkx, and Neo4j Embedded.
 
 **KGLite does not fit** when you need server-mode RBAC, multiple
-databases per instance, a causal cluster with routing, or full ACID
-across long-lived multi-client write sessions. Those are Neo4j's
-domain — KGLite is deliberately single-graph and embedded.
+databases per instance, a causal cluster with routing, or long-lived
+multi-client write transactions managed by a database server.
 
 For positioning detail see
 {doc}`../core-concepts` and the
@@ -43,15 +41,15 @@ For positioning detail see
 
 ## Two migration paths
 
-### Path A — Bolt server (drop-in for driver code)
+### Path A — reuse tested Bolt driver code
 
 `kglite-bolt-server` is a pure-Rust binary that speaks the
 [Bolt v5 wire protocol](https://neo4j.com/docs/bolt/current/). The
 official **Python, JavaScript, and Java drivers are regression-tested in
-CI** and connect with no consumer-side code changes beyond the connection
-URL (the Java driver needs the server started with `--neo4j-compat` — see
-the note below; the change is server-side). Other Bolt v5 clients
-generally work within the documented protocol and Cypher dialect limits:
+CI**. Reconfigure the connection URL and authentication; the Java driver also
+needs the server started with `--neo4j-compat` (see the note below). Other Bolt
+v5 clients are untested and need evaluation within the documented protocol and
+Cypher dialect limits:
 
 - **cypher-shell** connects and queries; standalone `CALL proc()`,
   `SHOW INDEXES/CONSTRAINTS/PROCEDURES`, and `SHOW DATABASES` answer.
@@ -97,7 +95,8 @@ log tells you exactly this, naming both activation routes. See “Driver identit
 [Bolt server operator guide](../../operators/bolt-server.md).
 ```
 
-Your driver code stays almost identical — just re-point the URI:
+Connection and authentication setup changes; query code may be reusable within
+the documented Bolt and Cypher limits:
 
 ```python
 # Before — against Neo4j
@@ -129,8 +128,7 @@ the managed API uncontended; that a managed transaction actually *retries*
 a conflict is covered separately, under real contention, against the
 Python driver
 (`tests/test_bolt_server_transactions.py::test_managed_transaction_retries_after_conflict`).
-Go and .NET use the same Bolt v5 protocol and
-should work, but are untested — exercise them yourself first.
+Go and .NET are untested; validate them before use.
 
 #### What carries over, and what does not
 
@@ -228,10 +226,9 @@ See the [data-loading guide](../guides/data-loading.md).
 
 ### Route 2 — dump to CSV, then `LOAD CSV` (no pandas needed)
 
-KGLite runs `LOAD CSV`, so the standard export/import pair ports
-unedited. Export with APOC (`apoc.export.csv.all('graph.csv', {})`, or
-per-label queries for a clean node/edge split), then load with the same
-Cypher you already have:
+KGLite runs `LOAD CSV`, so CSV is a direct migration route. Export with APOC
+(`apoc.export.csv.all('graph.csv', {})`, or per-label queries for a clean
+node/edge split), then adapt the import query to the restrictions below:
 
 ```python
 import kglite
@@ -265,7 +262,7 @@ rewrite. Four differences are worth knowing before you run it:
 |---|---|---|
 | Sources | `file://` URLs and plain local paths | `file://` plus `http(s)://` |
 | Batching | Automatic — 1000 rows at a time for row-local pipelines, so file size does not drive memory | `CALL { … } IN TRANSACTIONS` (formerly `USING PERIODIC COMMIT`), which you declare |
-| Whole-result clauses | An aggregate, `ORDER BY`, `SKIP`/`LIMIT`, `DISTINCT`, `UNION`, or `CALL` after `LOAD CSV` cannot be batched, so the file is read in one capped pass and fails past 1,000,000 rows naming the clause responsible | Same memory characteristic, no explicit ceiling |
+| Whole-result clauses | An aggregate, `ORDER BY`, `SKIP`/`LIMIT`, `DISTINCT`, `UNION`, or `CALL` after `LOAD CSV` cannot be batched, so the file is read in one capped pass and fails past 1,000,000 rows naming the clause responsible | Behavior depends on the execution plan and server configuration |
 | Position | Must be the first clause | Anywhere in the pipeline |
 
 `http(s)://` is rejected with a message rather than a syntax error: the
@@ -293,11 +290,10 @@ using the same calls as Route 1.
 
 ## Cypher dialect divergence
 
-The tables below are the heart of the guide. KGLite's supported
-surface is documented in full in
+KGLite's supported surface is documented in full in
 [CYPHER.md](https://github.com/kkollsga/kglite/blob/main/CYPHER.md);
-this section lists only where it diverges from Neo4j. Conformance is
-spot-checked against a live Neo4j via `scripts/cypher_conformance.py`
+this section lists only where it diverges from Neo4j. An opt-in live comparison
+runner is available at `scripts/cypher_conformance.py`
 (see {doc}`../../concepts/cypher-conformance`).
 
 ### Data model — labels and node identity
@@ -331,7 +327,7 @@ data — see the
 
 ### Missing language constructs
 
-Verified absent against 0.10.14:
+Current unsupported and partial constructs:
 
 | Neo4j construct | KGLite status | Workaround |
 |---|---|---|
@@ -342,7 +338,6 @@ Verified absent against 0.10.14:
 | `CALL { ... } IN TRANSACTIONS` | Not supported | Server batching; no in-memory analogue |
 | Pattern comprehensions `[(n)-->(m) \| m]` | Not supported | `MATCH`/`OPTIONAL MATCH` + `collect()` |
 | Quantified path patterns `((a)-->(b))+` | Not supported | Variable-length paths `-[:R*1..3]->` (supported) |
-| `allShortestPaths(...)` | Not supported | `shortestPath(...)` (supported) returns one path |
 | `LOAD CSV` | Supported — `file://` and local paths, leading position only | `http(s)://` needs a prior download; off by default for Bolt clients (see above) |
 | `exists(n.prop)` (property existence) | Not supported | `WHERE n.prop IS NOT NULL` / `IS NULL` |
 | `exists((pattern))` in `RETURN` | Not supported as a `RETURN` expression | `EXISTS { pattern }` / inline pattern predicate in `WHERE` |
@@ -352,10 +347,11 @@ Verified absent against 0.10.14:
 
 ### Constructs that DO work (worth confirming)
 
-These port unchanged from Neo4j and are easy to assume missing:
+These forms are supported and are easy to assume missing:
 
 - `MERGE ... ON CREATE SET ... ON MATCH SET` — match-or-create.
-- Variable-length paths `-[:KNOWS*1..3]->`, `shortestPath(...)`.
+- Variable-length paths `-[:KNOWS*1..3]->`, `shortestPath(...)`, and
+  `allShortestPaths(...)`.
 - `WHERE EXISTS { pattern WHERE ... }` (pattern-existence), inline
   pattern predicates, `any/all/none/single(x IN list WHERE ...)`.
 - `CALL { ... }` **read** subqueries — both uncorrelated (`CALL {
@@ -374,24 +370,6 @@ These port unchanged from Neo4j and are easy to assume missing:
 - Window functions `row_number()/rank()/dense_rank() OVER (...)`,
   `UNION`/`INTERSECT`/`EXCEPT`, `HAVING`.
 
-### Recently added functions (new — verify your version ≥ 0.10.x)
-
-These work today and may not appear in older comparison material:
-
-| Function | Form |
-|---|---|
-| Trig family | `sin`/`cos`/`tan`/`asin`/`acos`/`atan`/`cot`/`haversin`/`degrees`/`radians` (radians) |
-| `atan2(y, x)` | Quadrant-aware arctangent |
-| `randomUUID()` | RFC 4122 v4 UUID string |
-| `localdatetime()` / `localtime()` / `time()` | Return ISO-8601 **strings** (`Value::DateTime` is date-only — see note) |
-| `m['key']` | Map subscript |
-| `n[key]` | Dynamic property access (variable key) |
-
-> `localdatetime()`/`localtime()`/`time()` return strings, not a
-> temporal Value, because KGLite's `Value::DateTime` carries no
-> time-of-day component. The 1-arg form validates/normalises a string
-> and returns `NULL` on bad input.
-
 ## Function coverage
 
 KGLite covers the common scalar / string / math / aggregation /
@@ -401,20 +379,19 @@ function tables in
 (Built-in, String, Math, Spatial, Temporal, Timeseries, Text
 predicates, plus the openCypher compatibility matrix).
 
-Notable **absent** functions a Neo4j user will miss (verified against
-0.10.14):
+Current notable function differences:
 
 | Neo4j | KGLite status | Note / workaround |
 |---|---|---|
 | `apoc.*` | Not supported, with exactly two exceptions | No APOC library. `apoc.meta.nodeTypeProperties()` / `apoc.meta.relTypeProperties()` are served as compatibility shims (schema clients read endpoint labels only from them); every other `apoc.*` name — including `apoc.meta.data()` — is rejected |
 | `point({latitude, longitude})` | Map form not supported | KGLite uses `point(lat, lon)` (**latitude-first**); WKT strings are longitude-first per OGC |
 | `point.distance(a, b)` | Use top-level `distance(a, b)` | Geodesic (WGS84); also `contains`, `intersects`, `centroid`, `area`, `perimeter`, geometry primitives (`geom_*`) — all present |
-| `duration('P1Y2M')` (ISO-8601) | Map form only | `duration({years: 1, months: 2})`; `duration.between(d1, d2)` fills `days` only (date-only `DateTime`) |
-| `timestamp()` | Not supported | `datetime()` (date-only); `localdatetime()` for a wall-clock string |
+| `duration('P1Y2M')` (ISO-8601) | Map form only | `duration({years: 1, months: 2})`; `duration.between(d1, d2)` accepts dates or timestamps and returns a months/days/seconds duration |
+| `timestamp()` | Not supported | `datetime()` and `localdatetime()` return timestamp values; there is no epoch-millisecond alias |
 | `toBoolean(...)` | Not supported | `CASE` / Python-side coercion |
 | Calendar-aware month diffs | Approximated (months ≈ 30 days in `DateTime ± Duration`) | Use literal dates for exact month arithmetic — see CYPHER.md "Duration semantics" |
 
-KGLite also adds functions Neo4j lacks — semantic search
+KGLite-specific function names include semantic search
 (`text_score`/`vector_score`), timeseries (`ts_*`), fuzzy text
 predicates (`text_edit_distance`, `text_jaccard`), and graph-algorithm
 procedures (`CALL pagerank/louvain/...`). See CYPHER.md.

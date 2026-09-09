@@ -1,26 +1,22 @@
 # Bolt server
 
-`kglite-bolt-server` speaks Bolt v5.x and is backed by
-`Arc<kglite::api::session::Session>`. The official Neo4j Python driver path is
-regression-tested; other Bolt v5 clients are subject to the documented protocol
-and [Cypher dialect](../reference/cypher-reference.md) limits.
+`kglite-bolt-server` exposes the embedded KGLite engine over Bolt v5.x. The
+official Neo4j Python, JavaScript, and Java drivers are regression-tested; other
+Bolt v5 clients are untested and must stay within the documented protocol and
+[Cypher dialect](../reference/cypher-reference.md) limits.
 
 ## What this server is (and is not)
 
-**It is** a driver-compatible Bolt front-end over the embedded engine: one
-process owns one graph and serves Neo4j-aware clients over the wire. Use it for
+One process owns one graph and serves Bolt clients over the wire. Use it for
 trusted or loopback access, or behind a proxy that owns authentication and
 authorization. Reads run against snapshots and scale across concurrent sessions.
-
-**It is not** a Neo4j server replacement:
 
 - **No user directory and no RBAC.** `--auth basic` configures a single shared
   credential; the authenticated principal is validated at LOGON and not stored,
   so there is no per-session identity to authorize against. `--auth none`
   accepts any LOGON.
-- **No high availability and no replication.** A single process serves a single
-  graph — it is a single point of failure, and there is no failover, no cluster,
-  and no bookmark/causal-consistency protocol.
+- **No high availability and no replication.** There is no failover, cluster,
+  or bookmark/causal-consistency protocol.
 - **One writer.** Writes serialize at commit within the process, and one
   writable server per graph is enforced by a cross-process lease (see
   *Operations and security* below).
@@ -37,11 +33,8 @@ is the [derived-index / traversal-component pattern](../python/guides/derived-in
 where the engine is embedded behind your own API and that API owns
 authentication, authorization, and write policy.
 
-Single-writer and no-HA are design decisions, not gaps: KGLite is deliberately
-an embedded single-graph engine, and this server publishes that engine over
-Bolt rather than layering a distributed database on top of it. For the
-feature-by-feature carry-over table — routing URIs, auth, auto-commit
-mutations, OCC, multi-database — see
+For the feature-by-feature carry-over table — routing URIs, auth, auto-commit
+mutations, OCC, and multi-database — see
 [Migrating from Neo4j to KGLite](../python/migrations/neo4j-to-kglite.md).
 
 ## Install and start
@@ -148,52 +141,13 @@ overtaken loses the race and conflicts with the retriable status code, so a
 driver-managed transaction re-runs the unit of work on a fresh snapshot without
 your code seeing the conflict at all.
 
-What that means for capacity, measured under contending managed writers on one
-graph:
-
-- **Committed throughput is flat.** Adding writers does not add write
-  throughput — the commit point is single — but it does not lose it either.
-  Eight contending writers commit at roughly the rate one writer does.
-- **Latency is where contention shows up.** The median committed transaction
-  stays as fast as the uncontended one; the *average* grows about in proportion
-  to the number of writers, because a transaction now waits behind others.
-- **Conflicts stay rare and self-clearing.** The share of attempts that had to
-  be retried stays in the low single digits at eight writers, no writer
-  exhausts the driver's retry budget, and every committed write lands exactly
-  once.
-- **The tail belongs to the retry policy, not the server.** An unlucky writer
-  can lose several conflict rounds in a row, and each loss pays the driver's
-  compounding backoff, so worst-case *end-to-end* time for one unit of work
-  reaches seconds while the underlying transaction still takes under a
-  millisecond. Tune `max_transaction_retry_time` and the retry-delay settings
-  if that tail matters to you — that is a client-side dial.
-
-Size a deployment by write *rate*, therefore, not by writer count: more
-concurrent clients do not raise the ceiling, and past it, latency rather than
-error rate is what degrades. If a workload needs more write throughput than one
-commit point provides, batch more work into each transaction rather than adding
-writers — that is the dial that moves the ceiling. Measured on the same graph,
-raising a transaction from a single write to a hundred (one `UNWIND $rows`
-query instead of a hundred round-trips) multiplied committed writes per second
-by roughly an order of magnitude, contended and uncontended alike: the cost
-that dominates a small write is per-*transaction*, and batching amortizes it.
-The trade is at the tail — a longer transaction is a wider window in which to
-be overtaken, so at a hundred writes per transaction roughly one attempt in ten
-is retried, against under one in fifty unbatched, and a single unit of work
-correspondingly takes longer end to end.
-
-None of this makes the server highly available: one process owns the graph, and
-losing it loses the endpoint. That is the design (see *What this server is (and
-is not)* above), not a tuning problem.
-
-The measured curve is produced by
-`tests/benchmarks/test_bench_bolt_writers.py` (opt-in:
-`-m "benchmark and bolt_stress"`), which sweeps the writer count and the
-writes-per-transaction batch size, recording committed throughput, retry rate,
-and latency percentiles; captured numbers
-land in the repository's benchmark results record. The correctness half —
-that conflicts are retriable and managed transactions actually retry them —
-is pinned by `tests/test_bolt_server_transactions.py` and
+More writer clients do not create additional commit capacity; contention shows
+up in retries and end-to-end latency. Batch related writes into one transaction,
+for example with `UNWIND $rows`, to amortize per-transaction work. Tune the
+driver's transaction retry budget if tail latency matters. The opt-in
+`tests/benchmarks/test_bench_bolt_writers.py` measures writer count, batch size,
+and durability on the current code; correctness is pinned by
+`tests/test_bolt_server_transactions.py` and
 `tests/test_bolt_server_concurrency.py`.
 
 ## Durability
@@ -227,17 +181,11 @@ in a user-space test can take the page cache or the power away, so the
 `full`-versus-`normal` distinction above is a statement about the barrier each
 level takes, not a measured one.
 
-**The default is `normal`, and it was chosen by measurement.** Under contended
-managed writers on one graph, `normal` cost nothing distinguishable from `off`
-— the two comparison runs straddled zero, inside the cell's own noise — while
-`full` cost roughly seven-eighths of committed throughput, about an eightfold
-drop. One device barrier is taken per commit, inside the lock every Bolt commit
-already serializes on, which is also why `full`'s committed rate does not
-change between one writer and four, why its p95 unit-of-work latency grew by
-nearly two orders of magnitude at four writers, and why its transaction-conflict
-rate rose about tenfold: contenders lose the optimistic-concurrency race far
-more often when the winner holds the lock across a barrier. Power-loss safety
-is therefore opt-in rather than on by default. The sweep is
+The default is `normal`. `full` takes a device barrier for every commit while
+holding the commit lock, so it can sharply reduce write throughput and increase
+contention. Enable it when acknowledged commits must survive an OS crash or
+power loss; measure the effect on representative storage and workload. The
+corresponding sweep is
 `tests/benchmarks/test_bench_bolt_writers.py::test_durability_sweep`
 (`-m "benchmark and bolt_stress"`).
 
@@ -255,8 +203,6 @@ not start.
 Frames the checkpoint already contains — the harmless residue of a crash
 between a checkpoint's file write and its log truncation — are not grounds to
 refuse, and open at every level.
-
-### Checkpoints
 
 ### Server-facts verbs
 
@@ -306,15 +252,9 @@ flush the log, stamp the checkpoint position, write the file, truncate the log.
   sidecar and the next start replays it.
 
 A checkpoint pauses writers and new snapshots for its duration — `Session::save`
-mutates the graph, so it holds the session lock for the whole write — while
-readers already holding a snapshot are unaffected. That pause is bounded by
-what a full save of the graph costs, so it is the graph's size that sets it. At
-the benchmark's ten-thousand-node scale a checkpoint every second under four
-contended writers cost **no measured committed throughput** (the checkpointed
-arm in fact committed more than its own baseline in every pairing, and a
-sham-thread control ruled out the extra session as the explanation; the
-mechanism is not established). Size the interval for a large graph by timing
-one `CALL db.checkpoint()` on it.
+holds the session lock for the full save — while readers already holding a
+snapshot are unaffected. Time one `CALL db.checkpoint()` on a representative
+graph before choosing the interval.
 
 Retention is one: each checkpoint atomically replaces the previous file. Use
 filesystem tooling — a snapshot, a copy, a backup job — if you want history.

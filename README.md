@@ -277,7 +277,7 @@ them is readable through all of them.
 | **Java**: Panama/FFM binding, natives for 4 platforms bundled | Maven Central `io.github.kkollsga:kglite` | [kglite-java README](https://github.com/kkollsga/kglite/tree/main/kglite-java) |
 | **C ABI**: stable `kglite.h` for any other language (Go, JS, .NET, …) | [`crates/kglite-c`](https://github.com/kkollsga/kglite/tree/main/crates/kglite-c) | [C ABI design](https://kglite.readthedocs.io/en/latest/rust/c-abi.html) · [implementing a binding](https://kglite.readthedocs.io/en/latest/rust/implementing-a-binding.html) |
 | **CLI**: shell/scripts/JSONL agent loops over a `.kgl` | bundled in the wheel, or `pip install kglite-cli` / `cargo install kglite-cli` | [CLI guide](https://kglite.readthedocs.io/en/latest/operators/cli.html) |
-| **Bolt server**: Bolt v5 front-end for Neo4j wire-compatible drivers | `cargo install kglite-bolt-server` | [Bolt server](https://kglite.readthedocs.io/en/latest/operators/bolt-server.html) |
+| **Bolt server**: Bolt v5 front-end tested with Neo4j's Python, JavaScript, and Java drivers | `cargo install kglite-bolt-server` | [Bolt server](https://kglite.readthedocs.io/en/latest/operators/bolt-server.html) |
 | **MCP server**: serve a graph to AI agents as tools + skills | bundled with the wheel: `kglite-mcp-server --graph <graph>.kgl` | [MCP config guide](https://kglite.readthedocs.io/en/latest/python/guides/mcp-servers.html) · [operators page](https://kglite.readthedocs.io/en/latest/operators/mcp-server.html) |
 
 The engine itself is a pure-Rust crate
@@ -318,19 +318,19 @@ versioned on its own cadence. Three build graphs it serves; one looks at them:
 |--------------------------------------------|-----------------------------------|-----------------------------------------------------|--------------------|--------------------|------------------------|
 | **Install**                                | `pip install kglite`              | `pip install ladybug`                               | `pip install networkx` | `pip install rustworkx` | JVM + Java deps  |
 | **Query language**                         | Cypher ([broad coverage](CYPHER.md#feature-coverage)) | Cypher                              | Python API         | Python API         | Cypher (full)          |
-| **Storage**                                | in-mem · mmap · disk (tested to 861M edges) | in-mem · disk (columnar)                            | in-mem             | in-mem             | in-mem · disk (JVM)    |
+| **Storage**                                | in-mem · mmap · disk (tested to 861M edges) | in-mem · disk (columnar)                            | in-mem             | in-mem             | disk-backed + page cache (JVM) |
 | **Bulk-load from pandas**                  | one-liner                         | via Arrow                                           | manual             | manual             | via driver             |
-| **MCP server for LLM agents**              | bundled in the `kglite` wheel     | [separate `mcp-server-ladybug` install](https://github.com/LadybugDB/mcp-server-ladybug) | no | no | no |
+| **MCP server for LLM agents**              | bundled in the `kglite` wheel     | [separate `mcp-server-ladybug` install](https://github.com/LadybugDB/mcp-server-ladybug) | no | no | [separate official server](https://neo4j.com/developer/genai-ecosystem/model-context-protocol-mcp/) |
 | **`describe()` schema for LLM prompts**    | ✅                                 | no                                                  | no                 | no                 | no                     |
 | **Declared semantics + data-quality gate** | ✅ (`define_ontology`, audit scorecard, build gate) | typed schema pins edge endpoints | no         | no                 | constraint DDL         |
 | **As-of temporal filtering**               | ✅ (`valid_at` on nodes + edges)   | manual                                              | manual             | manual             | manual                 |
 | **Embeddable in Rust** (no Python in build) | pure-Rust [`kglite`](https://crates.io/crates/kglite) crate | [`lbug`](https://crates.io/crates/lbug) bindings to the C++ engine | no | ✅ | no |
-| **License**                                | MIT                               | MIT                                                 | BSD-3              | Apache-2           | GPLv3                  |
+| **License**                                | MIT                               | MIT                                                 | BSD-3              | Apache-2           | GPLv3 Community; commercial Enterprise |
 
 ("manual" = expressible in application code or a `WHERE` clause, but no engine
-primitive. LadybugDB's rel tables pin each edge's endpoint types at DDL and
-Neo4j's constraints cover uniqueness and existence; neither declares domain,
-range, or cardinality over a class forest, nor gates a build on the result.)
+primitive. The KGLite row refers specifically to its class-forest ontology,
+audit scorecard, and build gate; the other engines have their own schema and
+constraint capabilities.)
 
 **Pick KGLite** when you want one embedded package combining Python and
 pure-Rust Cypher APIs with a bundled MCP binary, prompt-shaped `describe()`,
@@ -343,8 +343,8 @@ LadybugDB** when columnar analytical scans and its broader language ecosystem
 are the priority; it also provides Rust bindings and a separately installed MCP
 server. **Pick NetworkX** when you need its enormous graph-algorithm library and
 your data fits in RAM. **Pick rustworkx** when you want a Rust-backed Python
-graph API with no query language. **Pick Neo4j Embedded** when you've
-standardised on server-mode Cypher and want the in-process driver for tests.
+graph API with no query language. **Pick Neo4j Embedded** when you need a
+Java-embedded DBMS with the broader Neo4j platform.
 
 📊 **[Benchmarks →](BENCHMARKS.md)**: wall-to-wall time per topic (load,
 filter/aggregate, traversal, pathfinding, algorithms, mutations) against other
