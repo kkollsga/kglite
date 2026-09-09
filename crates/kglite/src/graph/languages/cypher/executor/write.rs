@@ -245,10 +245,14 @@ impl MutationCtx<'_> {
     /// Variables declared by everything before `clauses[i]`, including the
     /// stripped leading clauses.
     fn declared_before(&self, clauses: &[Clause], i: usize) -> std::collections::HashSet<String> {
-        use crate::graph::languages::cypher::planner::simplification::declared_variables;
-        let mut declared = declared_variables(self.leading);
-        declared.extend(declared_variables(&clauses[..i]));
-        declared
+        use crate::graph::languages::cypher::planner::simplification::{
+            advance_visible_variable_scope, visible_variables,
+        };
+        let mut visible = visible_variables(self.leading);
+        for clause in &clauses[..i] {
+            advance_visible_variable_scope(&mut visible, clause);
+        }
+        visible
     }
 }
 
@@ -2493,7 +2497,7 @@ mod is_mutation_query_tests {
         // the outer clause is a CallSubquery (not itself a write clause).
         let body = Box::new(query(vec![create_clause(), return_clause()]));
         let call = Clause::CallSubquery {
-            import: Vec::new(),
+            import: CallSubqueryImport::Legacy(Vec::new()),
             body,
         };
         assert!(is_mutation_query(&query(vec![call, return_clause()])));
@@ -2505,12 +2509,12 @@ mod is_mutation_query_tests {
         // must reach an arbitrarily-deep nested body.
         let inner = Box::new(query(vec![create_clause(), return_clause()]));
         let inner_call = Clause::CallSubquery {
-            import: Vec::new(),
+            import: CallSubqueryImport::Legacy(Vec::new()),
             body: inner,
         };
         let outer = Box::new(query(vec![inner_call, return_clause()]));
         let outer_call = Clause::CallSubquery {
-            import: Vec::new(),
+            import: CallSubqueryImport::Legacy(Vec::new()),
             body: outer,
         };
         assert!(is_mutation_query(&query(vec![outer_call])));
@@ -2520,7 +2524,7 @@ mod is_mutation_query_tests {
     fn read_only_call_subquery_body_is_not_a_mutation() {
         let body = Box::new(query(vec![return_clause()]));
         let call = Clause::CallSubquery {
-            import: Vec::new(),
+            import: CallSubqueryImport::Legacy(Vec::new()),
             body,
         };
         assert!(!is_mutation_query(&query(vec![call, return_clause()])));

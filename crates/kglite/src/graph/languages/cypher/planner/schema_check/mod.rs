@@ -354,6 +354,7 @@ fn scope_after_return(
 fn scope_after_with(
     with_clause: &WithClause,
     scope: HashSet<String>,
+    globals: &HashSet<String>,
 ) -> Result<HashSet<String>, SchemaError> {
     for item in &with_clause.items {
         validate_expression_scope(&item.expression, &scope)?;
@@ -370,6 +371,7 @@ fn scope_after_with(
             projected.insert(name.clone());
         }
     }
+    projected.extend(globals.iter().cloned());
     if let Some(where_clause) = &with_clause.where_clause {
         validate_predicate_scope(&where_clause.predicate, &projected)?;
     }
@@ -418,6 +420,17 @@ fn validate_set_items(items: &[SetItem], scope: &HashSet<String>) -> Result<(), 
 }
 
 fn validate_scope(query: &CypherQuery, initial: &HashSet<String>) -> Result<(), SchemaError> {
+    validate_scope_with_globals(query, initial, &HashSet::new())
+}
+
+/// Validate a query while keeping modern CALL-scope imports visible across
+/// every inner WITH boundary. Legacy importing-WITH subqueries pass an empty
+/// `globals` set and retain their historical projection semantics.
+fn validate_scope_with_globals(
+    query: &CypherQuery,
+    initial: &HashSet<String>,
+    globals: &HashSet<String>,
+) -> Result<(), SchemaError> {
     let mut scope = initial.clone();
     // Set by an aggregating RETURN, consumed by the ORDER BY that follows it.
     // Rides through a trailing SKIP/LIMIT; any other clause clears it.
@@ -434,7 +447,10 @@ fn validate_scope(query: &CypherQuery, initial: &HashSet<String>) -> Result<(), 
                 for pattern in &m.patterns {
                     bind_pattern(pattern, &mut scope);
                 }
-                scope.extend(m.path_assignments.iter().map(|path| path.variable.clone()));
+                for path in &m.path_assignments {
+                    reject_global_redeclaration(&path.variable, globals)?;
+                    scope.insert(path.variable.clone());
+                }
                 // The clause's own WHERE sees this clause's pattern variables,
                 // so it is validated only after binding them.
                 if let Some(wc) = &m.where_clause {
@@ -449,7 +465,8 @@ fn validate_scope(query: &CypherQuery, initial: &HashSet<String>) -> Result<(), 
                 aggregate_order_scope = AggregateOrderScope::for_projection(&return_clause.items);
             }
             Clause::With(with_clause) => {
-                scope = scope_after_with(with_clause, scope)?;
+                reject_global_redeclarations_in_with(with_clause, globals)?;
+                scope = scope_after_with(with_clause, scope, globals)?;
             }
             Clause::OrderBy(order) => {
                 for item in &order.items {
@@ -461,7 +478,14 @@ fn validate_scope(query: &CypherQuery, initial: &HashSet<String>) -> Result<(), 
             }
             Clause::Skip(skip) => validate_expression_scope(&skip.count, &scope)?,
             Clause::Limit(limit) => validate_expression_scope(&limit.count, &scope)?,
-            Clause::Unwind(_) | Clause::LoadCsv(_) => bind_row_source(clause, &mut scope)?,
+            Clause::Unwind(unwind) => {
+                reject_global_redeclaration(&unwind.alias, globals)?;
+                bind_row_source(clause, &mut scope)?;
+            }
+            Clause::LoadCsv(load) => {
+                reject_global_redeclaration(&load.variable, globals)?;
+                bind_row_source(clause, &mut scope)?;
+            }
             Clause::Union(union) => validate_scope(&union.query, initial)?,
             Clause::Create(create) => {
                 for pattern in &create.patterns {
@@ -516,6 +540,7 @@ fn validate_scope(query: &CypherQuery, initial: &HashSet<String>) -> Result<(), 
                 }
                 for item in &call.yield_items {
                     let name = item.alias.as_ref().unwrap_or(&item.name);
+                    reject_global_redeclaration(name, globals)?;
                     if scope.contains(name) {
                         return Err(SchemaError {
                             kind: SchemaErrorKind::UndefinedVariable,
@@ -529,11 +554,17 @@ fn validate_scope(query: &CypherQuery, initial: &HashSet<String>) -> Result<(), 
                 }
             }
             Clause::CallSubquery { import, body } => {
-                for name in import {
-                    require_variable(name, &scope)?;
-                }
-                let imported: HashSet<String> = import.iter().cloned().collect();
-                validate_scope(body, &imported)?;
+                let imported = resolve_subquery_imports(import, &scope)?;
+                let no_globals = HashSet::new();
+                let body_globals = if matches!(
+                    import,
+                    CallSubqueryImport::Named(_) | CallSubqueryImport::All
+                ) {
+                    &imported
+                } else {
+                    &no_globals
+                };
+                validate_scope_with_globals(body, &imported, body_globals)?;
                 if let Some(Clause::Return(return_clause)) = body
                     .clauses
                     .iter()
@@ -541,16 +572,78 @@ fn validate_scope(query: &CypherQuery, initial: &HashSet<String>) -> Result<(), 
                     .find(|clause| matches!(clause, Clause::Return(_)))
                 {
                     for item in &return_clause.items {
-                        if let Some(alias) = &item.alias {
-                            scope.insert(alias.clone());
-                        } else if let Expression::Variable(name) = &item.expression {
-                            scope.insert(name.clone());
+                        let name = super::super::executor::return_item_column_name(item);
+                        if scope.contains(&name) {
+                            return Err(SchemaError {
+                                kind: SchemaErrorKind::UndefinedVariable,
+                                message: format!(
+                                    "CALL {{ }} subquery returns a column `{name}` that already \
+                                     exists in the outer scope; rename the subquery's RETURN alias"
+                                ),
+                            });
                         }
+                        scope.insert(name);
                     }
                 }
             }
             // Physical clauses exist only after validation.
             _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn resolve_subquery_imports(
+    import: &CallSubqueryImport,
+    scope: &HashSet<String>,
+) -> Result<HashSet<String>, SchemaError> {
+    let names = match import {
+        CallSubqueryImport::Legacy(names) | CallSubqueryImport::Named(names) => names,
+        CallSubqueryImport::All => return Ok(scope.clone()),
+        CallSubqueryImport::Empty => return Ok(HashSet::new()),
+    };
+    let mut imported = HashSet::with_capacity(names.len());
+    for name in names {
+        require_variable(name, scope)?;
+        if !imported.insert(name.clone()) {
+            return Err(SchemaError {
+                kind: SchemaErrorKind::UndefinedVariable,
+                message: format!("CALL scope lists variable `{name}` more than once"),
+            });
+        }
+    }
+    Ok(imported)
+}
+
+fn reject_global_redeclaration(name: &str, globals: &HashSet<String>) -> Result<(), SchemaError> {
+    if globals.contains(name) {
+        Err(SchemaError {
+            kind: SchemaErrorKind::UndefinedVariable,
+            message: format!(
+                "Variable `{name}` is imported by a CALL scope clause and cannot be redeclared \
+                 inside the subquery"
+            ),
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn reject_global_redeclarations_in_with(
+    with_clause: &WithClause,
+    globals: &HashSet<String>,
+) -> Result<(), SchemaError> {
+    for item in &with_clause.items {
+        let Some(name) = item.alias.as_ref().or_else(|| match &item.expression {
+            Expression::Variable(name) => Some(name),
+            _ => None,
+        }) else {
+            continue;
+        };
+        if globals.contains(name)
+            && !matches!((&item.expression, &item.alias), (Expression::Variable(source), None) if source == name)
+        {
+            reject_global_redeclaration(name, globals)?;
         }
     }
     Ok(())

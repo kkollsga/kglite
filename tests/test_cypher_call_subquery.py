@@ -1,24 +1,9 @@
-"""CALL { } subqueries — Phase 1 (parser) + Phase 2 (validation) +
-Phase 3 (executor: uncorrelated) + Phase 4 (executor: correlated).
+"""Read CALL subqueries: legacy importing WITH and modern scope clauses.
 
-Phase 1 ships the parser; Phase 2 adds v1 structural validation
-(write / unit / UNION bodies rejected, importing-WITH restrictions,
-mutation classification). Phase 3 makes the **uncorrelated** form
-(``CALL { ... }`` importing nothing) executable: the body runs exactly
-once and its result rows are cartesian-producted with the outer row
-stream (§1.1 of ``dev_workfolder/dev-documentation/design/call-subqueries.md``). The
-body sees no outer variables (§1.2 rule 1); only its RETURN columns flow
-out (§1.2 rule 3); a RETURN alias colliding with an outer variable is a
-compile/execution error (§1.2 rule 4).
-
-Phase 4 makes the **correlated** form (leading importing ``WITH``)
-executable: the body is planned once and executed once per outer row,
-seeded with only the imported variables (preserving each import's
-binding kind). Its result rows are inner-joined back to the driving
-outer row (§1.1 / §1.3 — zero rows drops the outer row, an aggregating
-body always returns one row so the outer row survives); a NULL imported
-pattern-anchor yields the empty-match result (§1.3); importing a
-variable not in the outer scope errors at execution start.
+Every body executes once per incoming row. Modern ``CALL (x)``, ``CALL (*)``
+and ``CALL ()`` make their selected imports explicit; named/all imports stay
+visible through inner WITH and aggregation boundaries. Write/unit/set-operation
+bodies remain intentionally outside this phase.
 """
 
 import pytest
@@ -119,14 +104,13 @@ class TestUncorrelatedCallSubquery:
         ).to_list()
         assert rows == [{"pt": "Alice", "c": 3}, {"pt": "Bob", "c": 3}]
 
-    def test_body_executes_exactly_once_via_uuid(self, tagged):
-        """randomUUID() in the body must be the SAME across all output rows
-        if the body ran once (determinism probe per the design doc)."""
+    def test_body_executes_once_per_outer_row_via_uuid(self, tagged):
+        """Legacy no-scope CALL still executes once for each incoming row."""
         rows = tagged.cypher(
             "MATCH (p:P) CALL { RETURN randomUUID() AS u } RETURN p.title AS pt, u ORDER BY pt"
         ).to_list()
-        assert len(rows) == 2  # one per outer P row (cartesian with 1 inner row)
-        assert len({r["u"] for r in rows}) == 1  # body ran once → one UUID
+        assert len(rows) == 2
+        assert len({r["u"] for r in rows}) == 2
 
     def test_nested_uncorrelated_call(self, tagged):
         """A nested uncorrelated CALL { } inside a body (§1.4) executes."""
@@ -162,8 +146,181 @@ class TestUncorrelatedScoping:
     def test_return_alias_collision_with_outer_variable_errors(self, tagged):
         """§1.2 rule 4 — a subquery RETURN alias clashing with an in-scope
         outer variable is an error (Neo4j errors on shadowing)."""
-        with pytest.raises(kglite.CypherExecutionError, match="already exists in"):
+        with pytest.raises(kglite.SchemaError, match="already exists in"):
             tagged.cypher("MATCH (p:P) CALL { MATCH (x:Tag) RETURN x.title AS p } RETURN p")
+
+
+class TestModernCallSubqueryScope:
+    @pytest.mark.parametrize("streaming", [False, True])
+    def test_named_import_survives_with_and_aggregation(self, friends, streaming):
+        rows = friends.cypher(
+            "MATCH (p:Person) "
+            "CALL (p) { MATCH (p)-[:KNOWS]->(f) WITH count(f) AS c "
+            "RETURN p.title AS person, c } "
+            "RETURN person, c ORDER BY person",
+            streaming=streaming,
+        ).to_list()
+        assert rows == [
+            {"person": "Anna", "c": 2},
+            {"person": "Bo", "c": 1},
+            {"person": "Cy", "c": 0},
+            {"person": "Dee", "c": 0},
+        ]
+
+    def test_all_imports_node_and_scalar_bindings(self, friends):
+        rows = friends.cypher(
+            "MATCH (p:Person) WITH p, p.title AS title "
+            "CALL (*) { WITH 1 AS marker RETURN p.title AS person, title AS copied, marker } "
+            "RETURN person, copied, marker ORDER BY person"
+        ).to_list()
+        assert rows == [
+            {"person": "Anna", "copied": "Anna", "marker": 1},
+            {"person": "Bo", "copied": "Bo", "marker": 1},
+            {"person": "Cy", "copied": "Cy", "marker": 1},
+            {"person": "Dee", "copied": "Dee", "marker": 1},
+        ]
+
+    @pytest.mark.parametrize("disable_optimizer", [False, True])
+    def test_nested_all_keeps_enclosing_modern_global(self, friends, disable_optimizer):
+        rows = friends.cypher(
+            "MATCH (p:Person) CALL (p) { WITH 1 AS marker "
+            "CALL (*) { MATCH (p)-[:KNOWS]->(f) RETURN count(f) AS c } "
+            "RETURN p.title AS name, c } RETURN name, c ORDER BY name",
+            disable_optimizer=disable_optimizer,
+        ).to_list()
+        assert rows == [
+            {"name": "Anna", "c": 2},
+            {"name": "Bo", "c": 1},
+            {"name": "Cy", "c": 0},
+            {"name": "Dee", "c": 0},
+        ]
+
+    def test_load_csv_row_can_be_named_import(self, graph, tmp_path):
+        csv_path = tmp_path / "scoped.csv"
+        csv_path.write_text("alpha,1\nbeta,2\n", encoding="utf-8")
+        rows = graph.cypher(
+            f"LOAD CSV FROM '{csv_path}' AS row "
+            "CALL (row) { WITH 1 AS marker RETURN row[0] AS first, marker } "
+            "RETURN first, marker ORDER BY first"
+        ).to_list()
+        assert rows == [
+            {"first": "alpha", "marker": 1},
+            {"first": "beta", "marker": 1},
+        ]
+
+    def test_empty_scope_output_may_reuse_hidden_runtime_binding(self, tagged):
+        rows = tagged.cypher(
+            "MATCH (p:P) WITH p.title AS name CALL () { RETURN 1 AS p } RETURN name, p ORDER BY name"
+        ).to_list()
+        assert rows == [{"name": "Alice", "p": 1}, {"name": "Bob", "p": 1}]
+
+    def test_imported_global_cannot_be_redeclared_as_path(self, friends):
+        with pytest.raises(kglite.SchemaError, match="cannot be redeclared"):
+            friends.cypher("WITH 1 AS p CALL (p) { MATCH p = (a)-[r]->(b) RETURN length(p) AS n } RETURN n")
+
+    def test_create_binding_can_feed_modern_read_subquery(self):
+        graph = KnowledgeGraph()
+        rows = graph.cypher("CREATE (p:X {n:1}) WITH p CALL (p) { RETURN p.n AS n } RETURN n").to_list()
+        assert rows == [{"n": 1}]
+        assert graph.cypher("MATCH (p:X) RETURN count(p) AS c").to_list() == [{"c": 1}]
+
+    @pytest.mark.parametrize("disable_optimizer", [False, True])
+    @pytest.mark.parametrize(
+        "call_clause",
+        [
+            "CALL (*) { RETURN 1 AS q }",
+            "CALL (p) { RETURN 1 AS q }",
+            "CALL { RETURN 1 AS q }",
+        ],
+        ids=["all", "named", "legacy"],
+    )
+    def test_with_hides_name_reused_by_subquery_output(self, call_clause, disable_optimizer):
+        graph = KnowledgeGraph()
+        graph.cypher("CREATE (:P), (:Q)")
+        rows = graph.cypher(
+            f"MATCH (p:P),(q:Q) WITH p {call_clause} RETURN 0 AS z",
+            disable_optimizer=disable_optimizer,
+        ).to_list()
+        assert rows == [{"z": 0}]
+
+    @pytest.mark.parametrize("disable_optimizer", [False, True])
+    def test_nested_with_hides_name_reused_by_subquery_output(self, disable_optimizer):
+        graph = KnowledgeGraph()
+        graph.cypher("CREATE (:P), (:Q)")
+        rows = graph.cypher(
+            "MATCH (p:P),(q:Q) WITH p CALL (p) { "
+            "WITH p, 2 AS q WITH p CALL () { RETURN 3 AS q } RETURN 0 AS n "
+            "} RETURN n",
+            disable_optimizer=disable_optimizer,
+        ).to_list()
+        assert rows == [{"n": 0}]
+
+    def test_all_imports_only_current_outer_scope(self, tagged):
+        with pytest.raises(kglite.SchemaError, match="Undefined variable 'p'"):
+            tagged.cypher("MATCH (p:P) WITH p.title AS title CALL (*) { RETURN p.title AS hidden } RETURN hidden")
+
+    def test_named_import_preserves_edge_path_and_null(self, graph):
+        rows = graph.cypher(
+            "MATCH path = (a:Person)-[r:KNOWS]->(b:Person) WITH path, a, r, null AS missing "
+            "CALL (path, a, r, missing) { WITH 1 AS marker "
+            "RETURN length(path) AS hops, a.name AS source, type(r) AS rel, "
+            "coalesce(missing, 'null') AS fallback } "
+            "RETURN hops, source, rel, fallback"
+        ).to_list()
+        assert rows == [{"hops": 1, "source": "Alice", "rel": "KNOWS", "fallback": "null"}]
+
+    def test_empty_scope_executes_per_row_without_imports(self, tagged):
+        rows = tagged.cypher(
+            "MATCH (p:P) CALL () { RETURN randomUUID() AS u } RETURN p.title AS person, u ORDER BY person"
+        ).to_list()
+        assert len(rows) == 2
+        assert len({row["u"] for row in rows}) == 2
+
+    def test_profile_accounts_for_scoped_subquery_rows(self, tagged):
+        result = tagged.cypher("PROFILE MATCH (p:P) CALL (p) { RETURN p.title AS title } RETURN title")
+        assert result.to_list() == [{"title": "Alice"}, {"title": "Bob"}]
+        call = next(entry for entry in result.profile if entry["clause"] == "CallSubquery")
+        assert (call["rows_in"], call["rows_out"]) == (2, 2)
+
+    def test_scoped_body_warnings_reach_result(self, tagged):
+        result = tagged.cypher("CALL () { MATCH (x:MissingTypo) RETURN count(x) AS n } RETURN n")
+        assert result.to_list() == [{"n": 0}]
+        assert any("MissingTypo" in warning for warning in result.warnings)
+
+    def test_empty_outer_stream_stays_empty(self, tagged):
+        assert tagged.cypher("MATCH (p:Missing) CALL () { RETURN 1 AS n } RETURN n").to_list() == []
+
+    def test_unknown_named_import_rejected_on_empty_stream(self, tagged):
+        with pytest.raises(kglite.SchemaError, match="Undefined variable 'missing'"):
+            tagged.cypher("MATCH (p:Missing) CALL (missing) { RETURN 1 AS n } RETURN n")
+
+    def test_output_collision_rejected_on_empty_stream(self, tagged):
+        with pytest.raises(kglite.SchemaError, match="already exists in the outer scope"):
+            tagged.cypher("MATCH (p:Missing) CALL () { RETURN 1 AS p } RETURN p")
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "MATCH (p:P) CALL (p AS q) { RETURN 1 AS n } RETURN n",
+            "MATCH (p:P) CALL (p.title) { RETURN 1 AS n } RETURN n",
+            "MATCH (p:P) CALL (p, p) { RETURN 1 AS n } RETURN n",
+        ],
+    )
+    def test_scope_alias_expression_and_duplicate_rejected(self, tagged, query):
+        with pytest.raises(kglite.CypherSyntaxError, match="CALL scope"):
+            tagged.cypher(query)
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "WITH 1 AS p RETURN p AS value",
+            "UNWIND [1] AS p RETURN p AS value",
+            "CALL db.labels() YIELD label AS p RETURN p AS value",
+        ],
+    )
+    def test_import_redeclaration_rejected(self, tagged, body):
+        with pytest.raises(kglite.SchemaError, match="cannot be redeclared"):
+            tagged.cypher(f"MATCH (p:P) CALL (p) {{ {body} }} RETURN value")
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -277,7 +434,7 @@ class TestCorrelatedCallSubquery:
     def test_re_returning_imported_name_collides(self, friends):
         """Re-returning an imported variable under the same name is a
         collision (§1.2 rule 4 — Neo4j errors)."""
-        with pytest.raises(kglite.CypherExecutionError, match="already exists in"):
+        with pytest.raises(kglite.SchemaError, match="already exists in"):
             friends.cypher("MATCH (p:Person) CALL { WITH p MATCH (p)-[:KNOWS]->(f) RETURN p AS p } RETURN p")
 
     def test_correlated_inside_uncorrelated(self, friends):
@@ -408,6 +565,15 @@ class TestCorrelatedCallAfterOptionalMatch:
                 "CALL { WITH zzz MATCH (zzz)<-[:LIKES]-(o) RETURN count(o) AS oc } "
                 "RETURN oc"
             )
+
+    @pytest.mark.parametrize("streaming", [False, True])
+    def test_named_import_is_visible_to_inline_with_where(self, friends, streaming):
+        rows = friends.cypher(
+            "MATCH (p:Person) CALL (p) { WITH count(*) AS marker WHERE p.title STARTS WITH 'A' "
+            "RETURN p.title AS person, marker } RETURN person, marker",
+            streaming=streaming,
+        ).to_list()
+        assert rows == [{"person": "Anna", "marker": 1}]
 
     def test_explicit_with_null_import_regression(self, likes):
         """`WITH null AS x` (explicit null, x IS declared) still works — the

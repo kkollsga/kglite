@@ -32,7 +32,7 @@ use crate::graph::core::pattern_matching::{
 use crate::graph::schema::{DirGraph, InternedKey};
 use crate::graph::storage::GraphRead;
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::Instant;
@@ -458,8 +458,14 @@ impl<'a> CypherExecutor<'a> {
         row_limit: Option<usize>,
     ) -> Result<CypherResult, String> {
         let mut profile_stats: Vec<ClauseStats> = Vec::new();
-        let mut result_set =
-            self.execute_clauses_profiled(query, ResultSet::new(), Some(&mut profile_stats))?;
+        let initial_declared = HashSet::new();
+        let mut result_set = self.execute_clauses_profiled(
+            query,
+            ResultSet::new(),
+            Some(&mut profile_stats),
+            None,
+            &initial_declared,
+        )?;
 
         // Applied before `finalize_result`, so rows past the cap are never
         // projected into cells: the cap bounds what the caller retains *and*
@@ -487,8 +493,12 @@ impl<'a> CypherExecutor<'a> {
         query: &CypherQuery,
         load: &LoadCsvClause,
         profile: Option<&mut Vec<ClauseStats>>,
+        preserved: Option<(&ResultRow, &[String])>,
+        initial_declared: &HashSet<String>,
     ) -> Result<ResultSet, String> {
-        let source = self.evaluate_expression(&load.source, &ResultRow::new())?;
+        let empty = ResultRow::new();
+        let eval_row = preserved.map_or(&empty, |(source, _)| source);
+        let source = self.evaluate_expression(&load.source, eval_row)?;
         let barrier = load_csv::batching_barrier(&query.clauses[1..]);
 
         // The suffix is executed as its own query so the driver loop reuses
@@ -502,6 +512,8 @@ impl<'a> CypherExecutor<'a> {
             output_format: query.output_format,
             optimizer_tags: Vec::new(),
         };
+        let mut suffix_declared = initial_declared.clone();
+        suffix_declared.insert(load.variable.clone());
 
         let mut merged_profile: Vec<ClauseStats> = Vec::new();
         let result = load_csv::drive(
@@ -510,7 +522,10 @@ impl<'a> CypherExecutor<'a> {
             &self.csv_import,
             barrier.as_deref(),
             &self.budget,
-            |seed| {
+            |mut seed| {
+                if let Some((source, names)) = preserved {
+                    restore_scoped_imports(&mut seed, source, names);
+                }
                 let mut batch_profile = Vec::new();
                 let out = self.execute_clauses_profiled(
                     &suffix,
@@ -520,6 +535,8 @@ impl<'a> CypherExecutor<'a> {
                     } else {
                         None
                     },
+                    preserved,
+                    &suffix_declared,
                 )?;
                 write::merge_profile(&mut merged_profile, batch_profile);
                 Ok(out)
@@ -544,8 +561,44 @@ impl<'a> CypherExecutor<'a> {
         &self,
         query: &CypherQuery,
         initial: ResultSet,
+        declared: &[String],
     ) -> Result<ResultSet, String> {
-        self.execute_clauses_profiled(query, initial, None)
+        let initial_declared = declared.iter().cloned().collect();
+        self.execute_clauses_profiled(query, initial, None, None, &initial_declared)
+    }
+
+    pub(super) fn execute_clauses_preserving(
+        &self,
+        query: &CypherQuery,
+        initial: ResultSet,
+        source: &ResultRow,
+        names: &[String],
+    ) -> Result<ResultSet, String> {
+        let initial_declared = names.iter().cloned().collect();
+        self.execute_clauses_profiled(
+            query,
+            initial,
+            None,
+            Some((source, names)),
+            &initial_declared,
+        )
+    }
+
+    fn execute_with_preserving(
+        &self,
+        clause: &WithClause,
+        result_set: ResultSet,
+        source: &ResultRow,
+        names: &[String],
+    ) -> Result<ResultSet, String> {
+        let mut projection = clause.clone();
+        projection.where_clause = None;
+        let mut result = self.execute_with(&projection, result_set)?;
+        restore_scoped_imports(&mut result, source, names);
+        if let Some(where_clause) = &clause.where_clause {
+            result = self.execute_where(where_clause, result)?;
+        }
+        Ok(result)
     }
 
     /// Run a query's clause pipeline starting from a caller-provided
@@ -562,12 +615,20 @@ impl<'a> CypherExecutor<'a> {
         query: &CypherQuery,
         initial: ResultSet,
         mut profile: Option<&mut Vec<ClauseStats>>,
+        preserved: Option<(&ResultRow, &[String])>,
+        initial_declared: &HashSet<String>,
     ) -> Result<ResultSet, String> {
         // `LOAD CSV` drives the clauses that follow it over bounded row
         // batches instead of running as a clause, so peak memory never scales
         // with file size. See `executor/load_csv.rs`.
         if let Some(Clause::LoadCsv(load)) = query.clauses.first() {
-            return self.execute_load_csv_pipeline(query, load, profile);
+            return self.execute_load_csv_pipeline(
+                query,
+                load,
+                profile,
+                preserved,
+                initial_declared,
+            );
         }
 
         let mut result_set = initial;
@@ -591,7 +652,11 @@ impl<'a> CypherExecutor<'a> {
                 && result_set.rows.is_empty()
                 && matches!(
                     clause,
-                    Clause::With(_) | Clause::Unwind(_) | Clause::Return(_) | Clause::Call(_)
+                    Clause::With(_)
+                        | Clause::Unwind(_)
+                        | Clause::Return(_)
+                        | Clause::Call(_)
+                        | Clause::CallSubquery { .. }
                 )
             {
                 result_set.rows.push(ResultRow::new());
@@ -673,6 +738,8 @@ impl<'a> CypherExecutor<'a> {
                 && !profiling
                 && inline_where.is_none()
                 && !matches!(clause, Clause::Match(_) | Clause::OptionalMatch(_))
+                && !(preserved.is_some()
+                    && matches!(clause, Clause::With(w) if w.where_clause.is_some()))
             {
                 match stream::pipeline::try_run_streaming(self, &query.clauses[i..], result_set)? {
                     stream::pipeline::StreamingOutcome::Absorbed(run) => {
@@ -682,6 +749,9 @@ impl<'a> CypherExecutor<'a> {
                             }
                         }
                         result_set = run.result;
+                        if let Some((source, names)) = preserved {
+                            restore_scoped_imports(&mut result_set, source, names);
+                        }
                         self.budget
                             .check_rows(result_set.rows.len(), "streaming pipeline")?;
                         continue;
@@ -697,14 +767,23 @@ impl<'a> CypherExecutor<'a> {
                 let start = std::time::Instant::now();
                 result_set = if let Clause::Match(m) = clause {
                     self.execute_match(m, result_set, inline_where)?
+                } else if let (Clause::With(w), Some((source, names))) = (clause, preserved) {
+                    self.execute_with_preserving(w, result_set, source, names)?
                 } else if let Clause::CallSubquery { import, body } = clause {
                     // Correlated import validation needs the *declared* outer
                     // scope (all variables bound by clauses 0..i), not just
                     // the variables present in this row — an OPTIONAL MATCH
                     // miss leaves a declared variable absent/null in the row.
-                    let declared = crate::graph::languages::cypher::planner::simplification::declared_variables(
-                        &query.clauses[..i],
-                    );
+                    let mut declared = initial_declared.clone();
+                    for prior in &query.clauses[..i] {
+                        crate::graph::languages::cypher::planner::simplification::advance_visible_variable_scope(
+                            &mut declared,
+                            prior,
+                        );
+                    }
+                    if let Some((_, names)) = preserved {
+                        declared.extend(names.iter().cloned());
+                    }
                     self.execute_call_subquery(import, body, result_set, &declared)?
                 } else if let Clause::Return(r) = clause {
                     let retain = order_by_scope_after(&query.clauses, i);
@@ -729,10 +808,19 @@ impl<'a> CypherExecutor<'a> {
             } else {
                 result_set = if let Clause::Match(m) = clause {
                     self.execute_match(m, result_set, inline_where)?
+                } else if let (Clause::With(w), Some((source, names))) = (clause, preserved) {
+                    self.execute_with_preserving(w, result_set, source, names)?
                 } else if let Clause::CallSubquery { import, body } = clause {
-                    let declared = crate::graph::languages::cypher::planner::simplification::declared_variables(
-                        &query.clauses[..i],
-                    );
+                    let mut declared = initial_declared.clone();
+                    for prior in &query.clauses[..i] {
+                        crate::graph::languages::cypher::planner::simplification::advance_visible_variable_scope(
+                            &mut declared,
+                            prior,
+                        );
+                    }
+                    if let Some((_, names)) = preserved {
+                        declared.extend(names.iter().cloned());
+                    }
                     self.execute_call_subquery(import, body, result_set, &declared)?
                 } else if let Clause::Return(r) = clause {
                     let retain = order_by_scope_after(&query.clauses, i);
@@ -740,6 +828,10 @@ impl<'a> CypherExecutor<'a> {
                 } else {
                     self.execute_single_clause(clause, result_set)?
                 };
+            }
+
+            if let Some((source, names)) = preserved {
+                restore_scoped_imports(&mut result_set, source, names);
             }
 
             self.budget
@@ -1247,6 +1339,28 @@ pub(super) fn order_by_scope_after(clauses: &[Clause], i: usize) -> Vec<String> 
         );
     }
     names.into_iter().collect()
+}
+
+/// Reattach modern CALL-scope imports after a body clause projected or
+/// aggregated them away. Bindings retain their original node/edge/path/value
+/// representation; output columns are intentionally unchanged.
+fn restore_scoped_imports(result_set: &mut ResultSet, source: &ResultRow, names: &[String]) {
+    for row in &mut result_set.rows {
+        for name in names {
+            if let Some(value) = source.node_bindings.get(name) {
+                row.node_bindings.insert(name.clone(), *value);
+            }
+            if let Some(value) = source.edge_bindings.get(name) {
+                row.edge_bindings.insert(name.clone(), *value);
+            }
+            if let Some(value) = source.path_bindings.get(name) {
+                row.path_bindings.insert(name.clone(), value.clone());
+            }
+            if let Some(value) = source.projected.get(name) {
+                row.projected.insert(name.clone(), value.clone());
+            }
+        }
+    }
 }
 
 /// a result set's rows. Used only by the index-less `execute_single_clause`

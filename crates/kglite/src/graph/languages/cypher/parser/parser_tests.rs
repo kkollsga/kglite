@@ -738,7 +738,7 @@ mod tests {
             parse_cypher("CALL { MATCH (n:Person) RETURN count(n) AS c } RETURN c").unwrap();
         assert_eq!(query.clauses.len(), 2);
         if let Clause::CallSubquery { import, body } = &query.clauses[0] {
-            assert!(import.is_empty(), "uncorrelated subquery has no imports");
+            assert_eq!(import, &CallSubqueryImport::Legacy(Vec::new()));
             assert_eq!(body.clauses.len(), 2);
             assert!(matches!(&body.clauses[0], Clause::Match(_)));
             assert!(matches!(&body.clauses[1], Clause::Return(_)));
@@ -758,7 +758,7 @@ mod tests {
         assert_eq!(query.clauses.len(), 3);
         assert!(matches!(&query.clauses[0], Clause::Match(_)));
         if let Clause::CallSubquery { import, body } = &query.clauses[1] {
-            assert_eq!(import, &vec!["p".to_string()]);
+            assert_eq!(import, &CallSubqueryImport::Legacy(vec!["p".to_string()]));
             // The importing WITH is stripped from the body.
             assert_eq!(body.clauses.len(), 2);
             assert!(matches!(&body.clauses[0], Clause::Match(_)));
@@ -776,7 +776,10 @@ mod tests {
         )
         .unwrap();
         if let Clause::CallSubquery { import, .. } = &query.clauses[1] {
-            assert_eq!(import, &vec!["p".to_string(), "q".to_string()]);
+            assert_eq!(
+                import,
+                &CallSubqueryImport::Legacy(vec!["p".to_string(), "q".to_string()])
+            );
         } else {
             panic!("Expected CallSubquery");
         }
@@ -792,7 +795,7 @@ mod tests {
         .unwrap();
         assert_eq!(query.clauses.len(), 2);
         if let Clause::CallSubquery { import, body } = &query.clauses[0] {
-            assert!(import.is_empty());
+            assert_eq!(import, &CallSubqueryImport::Legacy(Vec::new()));
             // body = [nested CallSubquery, MATCH, RETURN]
             assert_eq!(body.clauses.len(), 3);
             assert!(matches!(&body.clauses[0], Clause::CallSubquery { .. }));
@@ -811,6 +814,43 @@ mod tests {
         assert_eq!(query.clauses.len(), 2);
         assert!(matches!(&query.clauses[0], Clause::CallSubquery { .. }));
         assert!(matches!(&query.clauses[1], Clause::Return(_)));
+    }
+
+    #[test]
+    fn test_call_subquery_modern_scope_modes() {
+        for (source, expected) in [
+            (
+                "MATCH (x), (y) CALL (x, y) { RETURN 1 AS n } RETURN n",
+                CallSubqueryImport::Named(vec!["x".to_string(), "y".to_string()]),
+            ),
+            (
+                "MATCH (x) CALL (*) { RETURN 1 AS n } RETURN n",
+                CallSubqueryImport::All,
+            ),
+            (
+                "MATCH (x) CALL () { RETURN 1 AS n } RETURN n",
+                CallSubqueryImport::Empty,
+            ),
+        ] {
+            let query = parse_cypher(source).unwrap_or_else(|err| panic!("{source}: {err}"));
+            let Clause::CallSubquery { import, .. } = &query.clauses[1] else {
+                panic!("{source}: expected CallSubquery")
+            };
+            assert_eq!(import, &expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn test_call_subquery_modern_scope_rejects_non_variables_and_duplicates() {
+        for source in [
+            "MATCH (x) CALL (x AS y) { RETURN 1 AS n } RETURN n",
+            "MATCH (x) CALL (x.name) { RETURN 1 AS n } RETURN n",
+            "MATCH (x) CALL (x, x) { RETURN 1 AS n } RETURN n",
+            "MATCH (x) CALL (*, x) { RETURN 1 AS n } RETURN n",
+        ] {
+            let err = parse_cypher(source).expect_err(source).to_string();
+            assert!(err.contains("CALL scope"), "{source}: {err}");
+        }
     }
 
     #[test]

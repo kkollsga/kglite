@@ -1,15 +1,7 @@
 //! Cypher executor — `CALL { ... }` subquery execution.
 //!
-//! The **uncorrelated** path (`import.is_empty()`): the body runs exactly
-//! once via a fresh sub-executor over the same graph, and its result rows
-//! are cartesian-producted with the outer row stream (§1.1 of
-//! `dev_workfolder/dev-documentation/design/call-subqueries.md`). The body sees
-//! NO outer variables (§1.2 rule 1 — a fresh, empty executor scope); only
-//! the body's terminal `RETURN` columns flow back into the outer scope.
-//!
-//! The **correlated** path (`!import.is_empty()`, Strategy B1 / §4): the
-//! body is planned ONCE, then executed once per outer row against a seed
-//! carrying ONLY the imported variables — preserving each
+//! Every read subquery body is planned once and executed once per incoming
+//! row. The seed carries only the selected imports — preserving each
 //! import's binding kind (node → node binding, edge → edge binding,
 //! projected value → projected). The subquery's result rows are
 //! inner-joined back to *that* outer row; zero rows drops the outer row
@@ -30,59 +22,59 @@ use crate::datatypes::values::Value;
 impl<'a> CypherExecutor<'a> {
     /// Execute a `CALL { ... }` subquery clause.
     ///
-    /// Dispatches on correlation: an empty `import` is the uncorrelated
-    /// case (run-once + cartesian); a non-empty `import` is correlated
-    /// (per-row inner join over the imported variables).
     pub(super) fn execute_call_subquery(
         &self,
-        import: &[String],
+        import: &CallSubqueryImport,
         body: &CypherQuery,
         result_set: ResultSet,
         declared: &std::collections::HashSet<String>,
     ) -> Result<ResultSet, String> {
         self.check_deadline()?;
+        let mut imports = match import {
+            CallSubqueryImport::Legacy(names) | CallSubqueryImport::Named(names) => names.clone(),
+            CallSubqueryImport::All => declared.iter().cloned().collect(),
+            CallSubqueryImport::Empty => Vec::new(),
+        };
+        imports.sort();
 
-        if !import.is_empty() {
-            return self.execute_correlated_call_subquery(import, body, result_set, declared);
+        // Validate before inspecting runtime rows: an emptied outer stream
+        // must not hide a typo or an output-name collision.
+        for name in &imports {
+            if !declared.contains(name) {
+                return Err(format!(
+                    "CALL {{ }} subquery imports variable `{name}`, but `{name}` is not bound in \
+                     the outer scope at the CALL"
+                ));
+            }
+        }
+        for col in subquery_output_columns(body) {
+            if declared.contains(&col) {
+                return Err(format!(
+                    "CALL {{ }} subquery returns a column `{col}` that already exists in the \
+                     outer scope; rename the subquery's RETURN alias"
+                ));
+            }
         }
 
-        self.execute_uncorrelated_call_subquery(body, result_set)
+        let globally_scoped = matches!(
+            import,
+            CallSubqueryImport::Named(_) | CallSubqueryImport::All
+        );
+        self.execute_per_row_call_subquery(&imports, globally_scoped, body, result_set, declared)
     }
 
     /// Correlated `CALL { WITH … }`: run the planned-once body per outer
     /// row, seeded with only the imported variables (§1.2 rule 1), and
     /// inner-join the sub-results back to each driving outer row (§1.1 /
     /// §1.3).
-    fn execute_correlated_call_subquery(
+    fn execute_per_row_call_subquery(
         &self,
         import: &[String],
+        globally_scoped: bool,
         body: &CypherQuery,
         result_set: ResultSet,
         declared: &std::collections::HashSet<String>,
     ) -> Result<ResultSet, String> {
-        // Import validation needs the outer scope, available only here.
-        // Every imported name must be *declared* by a clause preceding the
-        // CALL — NOT merely "present as a binding on the first row". An
-        // upstream OPTIONAL MATCH that missed leaves its
-        // variable declared-but-absent (null) on that row; the engine
-        // represents the miss as the binding being absent from the row, so
-        // probing a row can't tell "never declared" (typo → error) from
-        // "declared upstream, null here" (must seed null per NULL-import
-        // semantics, §1.3). Static declaredness — computed from the
-        // preceding clauses at the dispatch site — is the correct oracle.
-        //
-        // This validation runs before the empty-rows short-circuit so a
-        // typo'd import is reported even when the outer stream is empty.
-        for name in import {
-            if !declared.contains(name) {
-                return Err(format!(
-                    "CALL {{ }} subquery imports variable `{name}` via its leading WITH, but \
-                     `{name}` is not bound in the outer scope at the CALL; import only \
-                     variables introduced by an earlier MATCH / WITH / UNWIND"
-                ));
-            }
-        }
-
         let outer_rows = result_set.rows;
 
         // No outer rows → nothing to drive the subquery. Carry columns
@@ -148,24 +140,26 @@ impl<'a> CypherExecutor<'a> {
             // as projected-null (the body's expressions see null).
             let seed = self.seed_row_from_imports(&outer_row, import, &anchor_imports);
             let seed_set = ResultSet {
-                rows: vec![seed],
+                rows: vec![seed.clone()],
                 columns: Vec::new(),
                 lazy_return_items: None,
             };
             // The body is optimized but NOT lazy-marked (`mark_lazy_eligibility`
             // runs only on the top-level query, never on a subquery body), so
             // `finalize_result` yields eager `Vec<Vec<Value>>` rows here.
-            let body_set = sub.execute_clauses(body, seed_set)?;
+            let body_set = if globally_scoped {
+                sub.execute_clauses_preserving(body, seed_set, &seed, import)?
+            } else {
+                sub.execute_clauses(body, seed_set, import)?
+            };
             let body_result = sub.finalize_result(body_set)?;
 
-            // First row establishes + validates the subquery's columns.
+            // First row establishes the subquery's columns. Static schema
+            // validation already checked collisions, while this runtime
+            // guard protects callers that construct ASTs directly.
             if sub_columns.is_none() {
                 for col in &body_result.columns {
-                    let collides = outer_row.node_bindings.contains_key(col)
-                        || outer_row.edge_bindings.contains_key(col)
-                        || outer_row.path_bindings.contains_key(col)
-                        || outer_row.projected.contains_key(col);
-                    if collides {
+                    if declared.contains(col) {
                         return Err(format!(
                             "CALL {{ }} subquery returns a column `{col}` that already exists in \
                              the outer scope; rename the subquery's RETURN alias (re-returning an \
@@ -179,13 +173,13 @@ impl<'a> CypherExecutor<'a> {
 
             // Inner join: zero sub-rows drops the outer row (§1.3). For the
             // last sub-row reuse (move) the outer row; clone for the rest —
-            // mirrors the uncorrelated cartesian path's move-on-last.
+            // avoids cloning the outer row for the final pairing.
             let s = body_result.rows.len();
             if s == 0 {
                 continue;
             }
             self.budget
-                .reserve_rows(combined_rows.len(), s, "correlated CALL subquery join")?;
+                .reserve_rows(combined_rows.len(), s, "CALL subquery row join")?;
             for (sub_idx, sub_row) in body_result.rows[..s - 1].iter().enumerate() {
                 self.check_interrupt_periodic(sub_idx)?;
                 let mut row = outer_row.clone();
@@ -294,151 +288,23 @@ impl<'a> CypherExecutor<'a> {
             seed.projected.insert(name.to_string(), Value::Null);
         }
     }
-
-    /// Uncorrelated `CALL { }`: run the body once, fan the outer rows out
-    /// against every subquery row (cartesian product, §1.1).
-    fn execute_uncorrelated_call_subquery(
-        &self,
-        body: &CypherQuery,
-        result_set: ResultSet,
-    ) -> Result<ResultSet, String> {
-        // Run the body exactly once in a fresh executor scope seeded with
-        // NO outer bindings (§1.2 rule 1). Reuse this executor's graph,
-        // params, and deadline so the subquery honours the outer timeout.
-        //
-        // The body is ALREADY optimized: the planner's
-        // `pass_optimize_nested_queries` recurses into `CALL { }` bodies at
-        // plan time. The executor runs the body as planned and does NOT
-        // re-optimize — so a `disable_optimizer=True` outer query,
-        // which disables that recursion, leaves the body naive too (the
-        // differential corpus relies on this for body-level coverage).
-        let sub = CypherExecutor::with_params(self.graph, self.params, self.deadline)
-            .with_streaming(self.streaming)
-            .with_parallel(self.parallel)
-            .with_cancel(self.cancel)
-            .with_budget(self.budget.clone());
-        let sub_result = sub.execute(body)?;
-        // A procedure warning raised inside the body belongs to the query the
-        // caller ran, not to the executor that happens to have run the body.
-        self.absorb_diagnostics(&sub_result);
-
-        // The body must terminate in RETURN (parser-enforced, §1.4), so a
-        // lazy descriptor is never produced here — the body is not lazy-
-        // marked. Defensive: if it somehow were, materialise eagerly is not
-        // possible without the graph-side resolver, so treat the absence of
-        // eager rows as zero rows. In practice `sub_result.rows` is populated.
-        let sub_columns = sub_result.columns;
-        let sub_rows = sub_result.rows;
-
-        // §1.2 rule 4 — a subquery RETURN alias must not clash with a
-        // variable already in the outer scope. For the uncorrelated case
-        // the outer scope is whatever the preceding clauses bound; check
-        // against the current result_set's columns and any per-row
-        // bindings. We probe the first row (all rows share the same
-        // binding key shape within a result set).
-        if let Some(first) = result_set.rows.first() {
-            for col in &sub_columns {
-                let collides = first.node_bindings.contains_key(col)
-                    || first.edge_bindings.contains_key(col)
-                    || first.path_bindings.contains_key(col)
-                    || first.projected.contains_key(col);
-                if collides {
-                    return Err(format!(
-                        "CALL {{ }} subquery returns a column `{col}` that already exists in \
-                         the outer scope; rename the subquery's RETURN alias (Neo4j errors on \
-                         shadowing an outer variable)"
-                    ));
-                }
-            }
-        }
-
-        // Cartesian product: every outer row × every subquery row. The
-        // subquery's RETURN columns become new projected bindings on each
-        // combined row (§1.1 / §1.2 rule 3 — only RETURN columns escape).
-        let outer_rows = result_set.rows;
-        let mut combined_rows: Vec<ResultRow> = Vec::new();
-
-        if outer_rows.is_empty() {
-            // Leading CALL { } (no preceding clause produced rows): the
-            // executor has not seeded an empty row for a CallSubquery
-            // first-clause, so the result is simply the S subquery rows.
-            // R = 1 implicit empty outer row × S subquery rows = S rows.
-            self.budget
-                .check_rows(sub_rows.len(), "uncorrelated CALL subquery join")?;
-            combined_rows.reserve(sub_rows.len());
-            for (sub_idx, sub_row) in sub_rows.iter().enumerate() {
-                self.check_interrupt_periodic(sub_idx)?;
-                combined_rows.push(subquery_row_to_result_row(sub_row, &sub_columns));
-            }
-        } else {
-            // R × S. For each outer row we emit one combined row per
-            // subquery row. To avoid an extra clone, the *last* subquery
-            // pairing reuses (moves) the outer row instead of cloning it,
-            // so we clone exactly (S-1) times per outer row rather than S.
-            // When S == 0 the outer row is dropped entirely (cartesian with
-            // an empty subquery result → zero rows, §1.3 / inner join).
-            let s = sub_rows.len();
-            let total = outer_rows.len().checked_mul(s).ok_or_else(|| {
-                "Query row count overflow while executing uncorrelated CALL subquery join"
-                    .to_string()
-            })?;
-            // `total` rows are about to be reserved and filled, so this is a
-            // pre-sized row collection, not scan work: charging it as rows is
-            // what puts it under the no-max_work_units backstop *before* the
-            // allocation rather than after the join has materialized.
-            self.budget
-                .check_rows(total, "uncorrelated CALL subquery join")?;
-            combined_rows.reserve(total);
-            let mut join_work = 0usize;
-            for outer_row in outer_rows {
-                if s == 0 {
-                    continue;
-                }
-                for sub_row in &sub_rows[..s - 1] {
-                    self.check_interrupt_periodic(join_work)?;
-                    join_work = join_work.saturating_add(1);
-                    let mut row = outer_row.clone();
-                    splice_subquery_columns(&mut row, sub_row, &sub_columns);
-                    combined_rows.push(row);
-                }
-                self.check_interrupt_periodic(join_work)?;
-                join_work = join_work.saturating_add(1);
-                // Last subquery row: move the outer row in (no clone).
-                let mut row = outer_row;
-                splice_subquery_columns(&mut row, &sub_rows[s - 1], &sub_columns);
-                combined_rows.push(row);
-            }
-        }
-
-        // Carry forward outer columns + the subquery's RETURN columns. The
-        // outer columns are only set once a RETURN/WITH ran upstream; for a
-        // mid-pipeline CALL { } after a MATCH, `result_set.columns` may be
-        // empty (columns get assigned by the terminal RETURN). We append the
-        // subquery columns so a later RETURN can reference them.
-        let mut columns = result_set.columns;
-        for col in &sub_columns {
-            if !columns.contains(col) {
-                columns.push(col.clone());
-            }
-        }
-
-        Ok(ResultSet {
-            rows: combined_rows,
-            columns,
-            lazy_return_items: None,
-        })
-    }
 }
 
-/// Build a fresh `ResultRow` carrying only the subquery's RETURN columns
-/// as projected values (used for the leading-CALL case where there is no
-/// outer row to splice onto).
-fn subquery_row_to_result_row(sub_row: &[Value], sub_columns: &[String]) -> ResultRow {
-    let mut projected = Bindings::with_capacity(sub_columns.len());
-    for (col, val) in sub_columns.iter().zip(sub_row.iter()) {
-        projected.insert(col.clone(), val.clone());
-    }
-    ResultRow::from_projected(projected)
+fn subquery_output_columns(body: &CypherQuery) -> Vec<String> {
+    body.clauses
+        .iter()
+        .rev()
+        .find_map(|clause| match clause {
+            Clause::Return(return_clause) => Some(
+                return_clause
+                    .items
+                    .iter()
+                    .map(return_item_column_name)
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 /// Splice the subquery's RETURN columns into an existing outer row's

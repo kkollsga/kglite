@@ -56,6 +56,8 @@ pub struct PassCtx<'a> {
     pub graph: &'a DirGraph,
     pub params: &'a HashMap<String, Value>,
     pub disabled: &'a HashSet<String>,
+    initial_scope: &'a HashSet<String>,
+    global_scope: &'a HashSet<String>,
 }
 
 type PassFn = fn(&mut CypherQuery, &PassCtx);
@@ -283,11 +285,25 @@ pub fn optimize_with_disabled(
     params: &HashMap<String, Value>,
     disabled: &HashSet<String>,
 ) {
+    let empty_scope = empty_disabled_set();
+    optimize_with_disabled_scoped(query, graph, params, disabled, empty_scope, empty_scope);
+}
+
+fn optimize_with_disabled_scoped(
+    query: &mut CypherQuery,
+    graph: &DirGraph,
+    params: &HashMap<String, Value>,
+    disabled: &HashSet<String>,
+    initial_scope: &HashSet<String>,
+    global_scope: &HashSet<String>,
+) {
     query.optimizer_tags.clear();
     let ctx = PassCtx {
         graph,
         params,
         disabled,
+        initial_scope,
+        global_scope,
     };
     for (name, pass_fn) in PASSES {
         if disabled.contains(*name) {
@@ -342,24 +358,21 @@ fn pass_lower_fixed_var_length_hops(query: &mut CypherQuery, _ctx: &PassCtx) {
 /// making the differential corpus's optimized-vs-naive comparison
 /// meaningful for subquery bodies.
 ///
-/// This pass OWNS `CALL { }` body optimization (the executor runs the
-/// body exactly as planned here). Two body shapes are optimized
-/// differently:
+/// This pass OWNS `CALL { }` body optimization (the executor runs the body
+/// exactly as planned here). Two body shapes are optimized differently:
 ///
-/// - **Uncorrelated body** (`import.is_empty()`) or a correlated body
-///   whose patterns do NOT anchor on an imported variable: the full
-///   pipeline runs. A graph-global aggregate in such a body is genuinely
-///   the same value for every outer row, so the seed-ignoring fused
-///   operators are correct.
-/// - **Correlated body whose patterns anchor on an imported variable**
-///   (`!import_pattern_anchors(body, import).is_empty()`): the
-///   [`seed_ignoring_fusion_passes`] are disabled for that body — they
+/// - A body whose patterns do not anchor on an imported variable uses the
+///   full pipeline. A graph-global aggregate remains independent of the
+///   per-row seed, so the seed-ignoring fused operators are correct.
+/// - A body whose patterns anchor on an imported variable disables the
+///   [`seed_ignoring_fusion_passes`] for that body — they
 ///   emit plan-time-anchored operators that ignore the per-row seed and
 ///   would return the GLOBAL count for every outer row. Disabling them
 ///   leaves a plain `Match`/`Return` that honours the seeded binding via
 ///   CSR adjacency (§3.2). The disable is unioned with the inherited
 ///   `disabled` set so an outer toggle still propagates.
 fn pass_optimize_nested_queries(query: &mut CypherQuery, ctx: &PassCtx) {
+    let mut visible = ctx.initial_scope.clone();
     for clause in &mut query.clauses {
         match clause {
             Clause::Union(ref mut u) => {
@@ -369,20 +382,56 @@ fn pass_optimize_nested_queries(query: &mut CypherQuery, ctx: &PassCtx) {
                 ref import,
                 ref mut body,
             } => {
-                let anchors = import_pattern_anchors(body, import);
+                let imports: HashSet<String> = match import {
+                    CallSubqueryImport::Legacy(names) | CallSubqueryImport::Named(names) => {
+                        names.iter().cloned().collect()
+                    }
+                    CallSubqueryImport::All => visible.clone(),
+                    CallSubqueryImport::Empty => HashSet::new(),
+                };
+                let import_names: Vec<String> = imports.iter().cloned().collect();
+                let anchors = import_pattern_anchors(body, &import_names);
+                let empty_globals = HashSet::new();
+                let body_globals = if matches!(
+                    import,
+                    CallSubqueryImport::Named(_) | CallSubqueryImport::All
+                ) {
+                    &imports
+                } else {
+                    &empty_globals
+                };
                 if anchors.is_empty() {
-                    optimize_with_disabled(body, ctx.graph, ctx.params, ctx.disabled);
+                    optimize_with_disabled_scoped(
+                        body,
+                        ctx.graph,
+                        ctx.params,
+                        ctx.disabled,
+                        &imports,
+                        body_globals,
+                    );
                 } else {
                     // Union the seed-ignoring set with the inherited
                     // disabled set so both the per-row-correctness disable
                     // AND any outer diagnostic toggle apply to the body.
                     let mut merged = ctx.disabled.clone();
                     merged.extend(seed_ignoring_fusion_passes().iter().cloned());
-                    optimize_with_disabled(body, ctx.graph, ctx.params, &merged);
+                    optimize_with_disabled_scoped(
+                        body,
+                        ctx.graph,
+                        ctx.params,
+                        &merged,
+                        &imports,
+                        body_globals,
+                    );
                 }
             }
             _ => {}
         }
+        crate::graph::languages::cypher::planner::simplification::advance_visible_variable_scope(
+            &mut visible,
+            clause,
+        );
+        visible.extend(ctx.global_scope.iter().cloned());
     }
 }
 

@@ -1263,10 +1263,10 @@ fn default_column_name(expr: &Expression) -> String {
 ///   to the WITH textually and must keep the projection scope.
 /// - The query does not end in an ordinary procedure CALL, whose result
 ///   exposes the outer projected columns as well as its YIELD columns.
-/// - Every variable referenced anywhere downstream of the WITH appears
-///   in the WITH's projection list. (If the user references a variable
-///   that the WITH was hiding, the original query was a Cypher scope
-///   error; we don't silently make it work.)
+/// - Every pre-WITH variable referenced downstream, or reused as a CALL
+///   subquery output name, appears in the WITH's projection list. References
+///   need their binding preserved; output names need hidden bindings to stay
+///   hidden so a legal subquery result does not become a collision.
 pub(super) fn fold_pass_through_with(query: &mut CypherQuery) {
     let mut i = 0;
     while i < query.clauses.len() {
@@ -1387,33 +1387,60 @@ pub(crate) fn collect_introduced_variables(clause: &Clause, out: &mut HashSet<St
             // columns into the outer scope (§1.2 rule 3). Those names are
             // declared for clauses that follow this CallSubquery — including
             // a later correlated CALL { } that imports them.
-            if let Some(Clause::Return(r)) = body.clauses.last() {
-                for item in &r.items {
-                    out.insert(super::super::executor::return_item_column_name(item));
-                }
+            collect_subquery_output_names(body, out);
+        }
+        Clause::Create(create) => {
+            for pattern in &create.patterns {
+                collect_create_pattern_variables(pattern, out);
             }
         }
-        Clause::Create(_) | Clause::Merge(_) => {
-            // CREATE / MERGE can introduce variables, but those forms don't
-            // appear in the shapes these callers target.
-            // Be conservative: don't claim to know what they bind.
+        Clause::Merge(merge) => {
+            collect_create_pattern_variables(&merge.pattern, out);
         }
         _ => {}
     }
 }
 
-/// The set of variable names *declared* (newly bound) by the clauses in
-/// `clauses`, in order. A thin accumulator over
-/// [`collect_introduced_variables`] — used by correlated `CALL { }`
-/// import validation to distinguish "never declared" (typo → error) from
-/// "declared upstream but absent/null in this row" (seed per the NULL-
-/// import paths).
-pub(crate) fn declared_variables(clauses: &[Clause]) -> HashSet<String> {
-    let mut out = HashSet::new();
-    for clause in clauses {
-        collect_introduced_variables(clause, &mut out);
+fn collect_create_pattern_variables(pattern: &CreatePattern, out: &mut HashSet<String>) {
+    for element in &pattern.elements {
+        match element {
+            CreateElement::Node(node) => out.extend(node.variable.iter().cloned()),
+            CreateElement::Edge(edge) => out.extend(edge.variable.iter().cloned()),
+        }
     }
-    out
+}
+
+/// Variables visible after `clauses`, including projection narrowing. Unlike
+/// the introduced-variable collector, this models a `WITH` scope barrier and
+/// is therefore suitable for resolving `CALL (*)` at a clause position.
+pub(crate) fn visible_variables(clauses: &[Clause]) -> HashSet<String> {
+    let mut scope = HashSet::new();
+    for clause in clauses {
+        advance_visible_variable_scope(&mut scope, clause);
+    }
+    scope
+}
+
+pub(crate) fn advance_visible_variable_scope(scope: &mut HashSet<String>, clause: &Clause) {
+    if let Clause::With(w) = clause {
+        let preserves_all = w
+            .items
+            .iter()
+            .any(|item| matches!(item.expression, Expression::Star));
+        if !preserves_all {
+            scope.clear();
+        }
+        for item in &w.items {
+            if let Some(name) = item.alias.clone().or_else(|| match &item.expression {
+                Expression::Variable(name) => Some(name.clone()),
+                _ => None,
+            }) {
+                scope.insert(name);
+            }
+        }
+    } else {
+        collect_introduced_variables(clause, scope);
+    }
 }
 
 /// The projected variable names if `clause` is a pass-through WITH: each item
@@ -1510,18 +1537,17 @@ pub(super) fn collect_clause_variables(clause: &Clause, out: &mut HashSet<String
             }
         }
         Clause::CallSubquery { import, body } => {
-            // A correlated `CALL { }` REFERENCES its imported outer variables
-            // (its leading WITH was lifted into `import` at parse time, so
-            // they appear nowhere else). Without them recorded,
-            // `fold_pass_through_with` would fold away a `WITH p` that a later
-            // `CALL { WITH q ... }` depends on, silently re-exposing the
-            // dropped `q`. The body's clauses are walked too, so a body
-            // reference to an imported name counts; body-internal variables
-            // leak into `out` harmlessly — they can't collide with a pre-WITH
-            // projection name.
-            for name in import {
-                out.insert(name.clone());
+            // Imports are outer references, while returned column names are
+            // scope-sensitive even when their expressions are constants: a
+            // preceding WITH may deliberately hide an identically named
+            // binding so that the CALL output is legal. Recording both keeps
+            // `fold_pass_through_with` from removing either boundary.
+            if let CallSubqueryImport::Legacy(names) | CallSubqueryImport::Named(names) = import {
+                for name in names {
+                    out.insert(name.clone());
+                }
             }
+            collect_subquery_output_names(body, out);
             for c in &body.clauses {
                 collect_clause_variables(c, out);
             }
@@ -1569,6 +1595,19 @@ pub(super) fn collect_clause_variables(clause: &Clause, out: &mut HashSet<String
             // `unwind_scope_refs_are_enumerable` for why that omission is
             // safe for `fold_pass_through_with` and not for
             // `narrow_unwind_source`.
+        }
+    }
+}
+
+fn collect_subquery_output_names(body: &CypherQuery, out: &mut HashSet<String>) {
+    if let Some(Clause::Return(return_clause)) = body
+        .clauses
+        .iter()
+        .rev()
+        .find(|clause| matches!(clause, Clause::Return(_)))
+    {
+        for item in &return_clause.items {
+            out.insert(super::super::executor::return_item_column_name(item));
         }
     }
 }

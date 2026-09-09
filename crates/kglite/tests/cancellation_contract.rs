@@ -381,10 +381,10 @@ const UNWIND_FANOUT: &str =
 const WITH_PIPELINE: &str = "MATCH (a:A)-[:R1]->(b:B) WITH a, b \
      MATCH (c:C)-[:R2]->(b) WITH a, b, c WHERE c.cid > 0 RETURN a.aid, c.cid";
 
-/// 9. A CALL subquery whose body is shape 2, correlated to the outer row: the
-///    long loop is one nesting level below the clause the executor is running.
+/// 9. A modern scoped CALL subquery whose body is shape 2: the long loop is
+///    one nesting level below the clause the executor is running.
 ///    Uncancelled 2.40 s / 1,014,000 rows · abort 115 ms.
-const CALL_SUBQUERY: &str = "MATCH (b:B) CALL { WITH b \
+const CALL_SUBQUERY: &str = "MATCH (b:B) CALL (b) { \
      MATCH (a:A)-[:R1]->(b)<-[:R2]-(c:C) WHERE toString(a.aid) <> 'zzz' \
      RETURN a.aid AS x, c.cid AS y } RETURN x, y";
 

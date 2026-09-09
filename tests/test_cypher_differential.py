@@ -3265,12 +3265,10 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) RETURN p {.*} AS m ORDER BY m.id",
         None,
     ),
-    # ── CALL { } uncorrelated subqueries ──
-    # The body runs once and its rows cartesian-product with the outer
-    # stream. CALL { } is opaque to the optimizer passes (the
-    # body is optimized once locally), so these entries validate that the
-    # run-once + cartesian-combine path is deterministic across the
-    # optimizer-on / optimizer-off outer runs.
+    # ── Legacy no-import CALL { } subqueries ──
+    # The body is planned once and runs once per incoming row. CALL { } stays
+    # opaque to outer optimizer passes; these entries protect the per-row
+    # inner-join path across optimizer-on / optimizer-off runs.
     (
         "call_uncorrelated_leading_count",
         "social_graph",
@@ -3330,6 +3328,66 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person)-[:WORKS_AT]->(c:Company) "
         "CALL { WITH p, c MATCH (p)-[:KNOWS]->(f) RETURN count(f) AS c2 } "
         "RETURN p.name AS pn, c.name AS cn, c2 ORDER BY pn",
+        None,
+    ),
+    (
+        "call_scoped_named_survives_aggregate_with",
+        "social_graph",
+        "MATCH (p:Person) CALL (p) { MATCH (p)-[:KNOWS]->(f) WITH count(f) AS c "
+        "RETURN p.name AS pn, c } RETURN pn, c ORDER BY pn",
+        None,
+    ),
+    (
+        "call_scoped_named_anchored_fusion_guard",
+        "social_graph",
+        "MATCH (p:Person) CALL (p) { MATCH (p)-[:KNOWS]->(f) RETURN count(f) AS c } RETURN p.name AS pn, c ORDER BY pn",
+        None,
+    ),
+    (
+        "call_scoped_all_preserves_scalar",
+        "social_graph",
+        "MATCH (p:Person) WITH p, p.name AS name "
+        "CALL (*) { WITH count(*) AS c RETURN name AS pn, c } RETURN pn, c ORDER BY pn",
+        None,
+    ),
+    (
+        "call_scoped_all_anchored_fusion_guard",
+        "social_graph",
+        "MATCH (p:Person) CALL (*) { MATCH (p)-[:KNOWS]->(f) RETURN count(f) AS c } RETURN p.name AS pn, c ORDER BY pn",
+        None,
+    ),
+    (
+        "call_scoped_empty_per_row",
+        "social_graph",
+        "MATCH (p:Person) CALL () { RETURN 1 AS one } RETURN p.name AS pn, one ORDER BY pn",
+        None,
+    ),
+    (
+        "call_scoped_nested_all_keeps_enclosing_global",
+        "social_graph",
+        "MATCH (p:Person) CALL (p) { WITH 1 AS marker "
+        "CALL (*) { MATCH (p)-[:KNOWS]->(f) RETURN count(f) AS c } "
+        "RETURN p.name AS pn, c } RETURN pn, c ORDER BY pn",
+        None,
+    ),
+    (
+        "call_scoped_with_hides_output_collision_name",
+        "social_graph",
+        "MATCH (p:Person),(q:Company) WITH p CALL (p) { RETURN 1 AS q } RETURN 0 AS z",
+        None,
+    ),
+    (
+        "call_legacy_with_hides_output_collision_name",
+        "social_graph",
+        "MATCH (p:Person),(q:Company) WITH p CALL { RETURN 1 AS q } RETURN 0 AS z",
+        None,
+    ),
+    (
+        "call_scoped_nested_with_hides_output_collision_name",
+        "social_graph",
+        "MATCH (p:Person),(q:Company) WITH p CALL (p) { "
+        "WITH p, 2 AS q WITH p CALL () { RETURN 3 AS q } RETURN 0 AS n "
+        "} RETURN n",
         None,
     ),
     (
@@ -3450,16 +3508,15 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     # `make neo4j-conformance` run diffs each against a live Neo4j 5. They
     # also run optimized-vs-naive here. Zero divergences expected for v1.
     (
-        # Leading uncorrelated: the subquery runs once with no outer driver,
-        # producing the single seed row × S subquery rows.
+        # A leading subquery receives the statement's one implicit input row.
         "call_conf_leading_uncorrelated",
         "social_graph",
         "CALL { MATCH (p:Person) WHERE p.city = 'Oslo' RETURN p.name AS pn } RETURN pn ORDER BY pn",
         None,
     ),
     (
-        # Cartesian combine: an outer MATCH × an uncorrelated subquery body
-        # → R×S rows. Neo4j's uncorrelated-subquery cartesian semantics.
+        # A no-import body runs independently for each outer row, yielding
+        # the same R×S cardinality for this deterministic body.
         "call_conf_cartesian_combine",
         "social_graph",
         "MATCH (c:Company) WHERE c.industry = 'Tech' "
@@ -5304,6 +5361,11 @@ def json_list_props_graph() -> kglite.KnowledgeGraph:
 # fixture."
 MUTATION_QUERIES: list[tuple[str, str]] = [
     ("create_node", "CREATE (p:Person {person_id: 99, name: 'X', age: 50}) RETURN p.person_id AS pid"),
+    (
+        "create_binding_feeds_modern_read_subquery",
+        "CREATE (p:Person {person_id: 999, name: 'Scoped', age: 1}) WITH p "
+        "CALL (p) { RETURN p.person_id AS pid } RETURN pid",
+    ),
     ("set_property", "MATCH (p:Person {person_id: 1}) SET p.age = 99 RETURN p.age AS age"),
     (
         "set_map_merge",
@@ -6119,6 +6181,10 @@ LOAD_CSV_QUERIES: list[tuple[str, str]] = [
     (
         "load_csv_no_headers_index",
         "LOAD CSV FROM '{csv}' AS row RETURN row[0] AS id",
+    ),
+    (
+        "load_csv_row_feeds_modern_scope",
+        "LOAD CSV FROM '{csv}' AS row CALL (row) { WITH 1 AS marker RETURN row[0] AS id, marker } RETURN id, marker",
     ),
     (
         "load_csv_where_filter",

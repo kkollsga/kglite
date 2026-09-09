@@ -752,8 +752,9 @@ impl CypherParser {
     pub(super) fn parse_call_clause(&mut self) -> Result<Clause, String> {
         self.expect(&CypherToken::Call)?;
 
-        // `CALL {` → subquery; `CALL procName(...)` → procedure call.
-        if self.check(&CypherToken::LBrace) {
+        // `CALL {` and `CALL (<scope>) {` are subqueries;
+        // `CALL procName(...)` is a procedure call.
+        if self.check(&CypherToken::LBrace) || self.check(&CypherToken::LParen) {
             return self.parse_call_subquery();
         }
 
@@ -838,7 +839,8 @@ impl CypherParser {
     }
 
     /// Parse a `CALL { ... }` subquery body. Assumes `CALL` is already
-    /// consumed and the current token is `{`.
+    /// consumed and the current token is `{` or the opening `(` of a modern
+    /// scope clause.
     ///
     /// The body is parsed with the *real* clause parser
     /// (`parse_clause_sequence`) bounded by the matching `}` — NOT the
@@ -854,6 +856,11 @@ impl CypherParser {
     /// into `import` and dropped from the body; any other leading `WITH`
     /// shape in the importing position is a parse error (§1.2 rule 2).
     fn parse_call_subquery(&mut self) -> Result<Clause, String> {
+        let mut import = if self.check(&CypherToken::LParen) {
+            self.parse_call_subquery_scope()?
+        } else {
+            CallSubqueryImport::Legacy(Vec::new())
+        };
         self.expect(&CypherToken::LBrace)?;
 
         let (mut clauses, output_format) = self.parse_clause_sequence(true)?;
@@ -870,19 +877,24 @@ impl CypherParser {
             return Err("CALL { } subquery body must contain at least one clause".to_string());
         }
 
-        // Detect + lift a leading importing WITH.
-        let import = match clauses.first() {
-            Some(Clause::With(w)) => extract_importing_with(w)?,
-            _ => Vec::new(),
-        };
-        if !import.is_empty() {
-            clauses.remove(0); // drop the importing WITH; body re-binds from the seed
-            if clauses.is_empty() {
-                return Err(
-                    "CALL { } subquery body must contain at least one clause after the \
-                     importing WITH"
-                        .to_string(),
-                );
+        // Only the legacy spelling lifts an importing WITH. In a modern
+        // scope-clause body, a leading WITH is an ordinary scope projection;
+        // the explicit imports remain globally visible after it.
+        if matches!(import, CallSubqueryImport::Legacy(_)) {
+            let names = match clauses.first() {
+                Some(Clause::With(w)) => extract_importing_with(w)?,
+                _ => Vec::new(),
+            };
+            if !names.is_empty() {
+                import = CallSubqueryImport::Legacy(names);
+                clauses.remove(0);
+                if clauses.is_empty() {
+                    return Err(
+                        "CALL { } subquery body must contain at least one clause after the \
+                         importing WITH"
+                            .to_string(),
+                    );
+                }
             }
         }
 
@@ -903,6 +915,57 @@ impl CypherParser {
         });
 
         Ok(Clause::CallSubquery { import, body })
+    }
+
+    /// Parse the modern scope clause in `CALL (<scope>) { ... }`.
+    fn parse_call_subquery_scope(&mut self) -> Result<CallSubqueryImport, String> {
+        self.expect(&CypherToken::LParen)?;
+        if self.check(&CypherToken::RParen) {
+            self.advance();
+            return Ok(CallSubqueryImport::Empty);
+        }
+        if self.check(&CypherToken::Star) {
+            self.advance();
+            self.expect(&CypherToken::RParen).map_err(|_| {
+                "CALL scope `(*)` must contain only `*` (aliases and expressions are not allowed)"
+                    .to_string()
+            })?;
+            return Ok(CallSubqueryImport::All);
+        }
+
+        let mut names = Vec::new();
+        loop {
+            let name = match self.peek().cloned() {
+                Some(CypherToken::Identifier(name)) => {
+                    self.advance();
+                    name
+                }
+                other => {
+                    return Err(format!(
+                        "CALL scope may only list plain variables (no aliases or expressions), got {}",
+                        describe_with_hint_opt(other.as_ref())
+                    ));
+                }
+            };
+            if names.contains(&name) {
+                return Err(format!("CALL scope lists variable `{name}` more than once"));
+            }
+            names.push(name);
+
+            if self.check(&CypherToken::Comma) {
+                self.advance();
+                continue;
+            }
+            if !self.check(&CypherToken::RParen) {
+                return Err(format!(
+                    "CALL scope may only list plain variables (no aliases or expressions), got {}",
+                    describe_token_opt(self.peek())
+                ));
+            }
+            self.advance();
+            break;
+        }
+        Ok(CallSubqueryImport::Named(names))
     }
 
     /// Parse comma-separated YIELD items: name [AS alias], ...

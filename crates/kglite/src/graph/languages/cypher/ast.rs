@@ -22,6 +22,21 @@ pub struct CypherQuery {
     pub optimizer_tags: Vec<String>,
 }
 
+/// How a read `CALL { ... }` subquery receives variables from its outer row.
+///
+/// Legacy syntax may lift a leading importing `WITH`; an empty legacy list is
+/// the compatibility spelling `CALL { ... }`.  The three scope-clause forms
+/// keep their distinct syntax because named/all imports remain globally in
+/// scope throughout the body, while legacy imports still obey ordinary
+/// `WITH` scope boundaries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallSubqueryImport {
+    Legacy(Vec<String>),
+    Named(Vec<String>),
+    All,
+    Empty,
+}
+
 /// **Deliberately overloaded**: this one enum carries both *surface* clauses
 /// parsed from Cypher (`Match`, `With`, `Create`, …) AND the optimizer's
 /// *physical* fused nodes (`Fused*`, below). They share a type so the
@@ -73,14 +88,12 @@ pub enum Clause {
     /// constraint counterparts. Always the *sole* clause of its query (the
     /// parser enforces that); see [`SchemaCommand`].
     Schema(SchemaCommand),
-    /// `CALL { ... }` subquery: a nested sub-pipeline evaluated once per outer
-    /// row (correlated) or exactly once (uncorrelated). `import` holds the
-    /// outer variable names lifted from a leading bare importing `WITH`
-    /// (empty = uncorrelated); the importing `WITH` is stripped from `body`
-    /// during parsing so the body re-binds those names from the seed row.
+    /// `CALL { ... }` subquery: a nested read pipeline evaluated once per
+    /// incoming row. `import` distinguishes legacy importing-WITH/no-scope
+    /// compatibility from modern named, all, and empty scope clauses.
     /// `body` is the remaining sub-pipeline (a full `CypherQuery`).
     CallSubquery {
-        import: Vec<String>,
+        import: CallSubqueryImport,
         body: Box<CypherQuery>,
     },
     /// Optimizer-generated: fuse OPTIONAL MATCH + WITH count(...) into a single pass.

@@ -107,6 +107,25 @@ def test_max_work_units_covers_correlated_subquery_join() -> None:
         graph.cypher(query, max_work_units=3)
 
 
+def test_max_work_units_covers_modern_scoped_subquery_rows() -> None:
+    graph = graph_with_types()
+    query = """
+    UNWIND [1, 2] AS x
+    CALL (x) { UNWIND [10, 20] AS y RETURN x + y AS z }
+    RETURN x, z
+    """
+
+    with pytest.raises(kglite.CypherExecutionError, match="max_work_units"):
+        graph.cypher(query, max_work_units=3)
+
+    assert graph.cypher(query, max_work_units=4).to_list() == [
+        {"x": 1, "z": 11},
+        {"x": 1, "z": 21},
+        {"x": 2, "z": 12},
+        {"x": 2, "z": 22},
+    ]
+
+
 def test_max_work_units_covers_count_subquery_patterns_and_cross_joins() -> None:
     graph = graph_with_types()
 
@@ -203,9 +222,10 @@ def test_transaction_mutation_budget_rolls_back_only_failed_statement() -> None:
 
 BACKSTOP_ROWS = 10_000_000
 
-# 3200 x 3200 = 10,240,000 combined rows. The uncorrelated CALL subquery join
-# knows the product before it allocates, so the backstop stops it while only
-# 6,400 rows exist.
+# The no-import body runs per outer row. Its 3,200-item ranges share the query
+# budget, which stops after the outer range plus 3,125 complete body ranges:
+# 3,126 × 3,200 = 10,003,200 collection items. The 10,240,000-row join is
+# never materialized.
 UNBOUNDED_CROSS_PRODUCT = """
 UNWIND range(1, 3200) AS a
 CALL { UNWIND range(1, 3200) AS b RETURN b }
@@ -224,7 +244,7 @@ def test_default_path_backstops_an_unbounded_cross_product() -> None:
     message = str(excinfo.value)
     assert str(BACKSTOP_ROWS) in message, message
     assert "max_work_units" in message, message
-    assert "10240000" in message, message
+    assert "10003200" in message, message
     # Incremental/pre-sized checks mean this must fail early, not after the
     # cross-product has been built.
     assert elapsed < 30.0, f"backstop took {elapsed:.1f}s — it is not failing early"
