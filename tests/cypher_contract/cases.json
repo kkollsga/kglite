@@ -272,6 +272,20 @@
       ]
     },
     {
+      "id": "order.offset_limit",
+      "category": "clause",
+      "requirement": "OFFSET is an exact synonym for SKIP in an ordered pagination pipeline.",
+      "query": "UNWIND [1, 2, 3, 4] AS x RETURN x AS value ORDER BY value OFFSET 1 LIMIT 2",
+      "expected": [
+        {
+          "value": 2
+        },
+        {
+          "value": 3
+        }
+      ]
+    },
+    {
       "id": "unwind.order",
       "category": "clause",
       "requirement": "UNWIND emits one row per list item and ORDER BY controls result order.",
@@ -374,6 +388,20 @@
         {
           "id": 1,
           "missing": null
+        }
+      ]
+    },
+    {
+      "id": "filter.optional_null_drop",
+      "category": "clause",
+      "requirement": "Standalone FILTER runs after OPTIONAL MATCH and removes a null-extended row whose predicate is unknown.",
+      "setup": [
+        "CREATE (:Person {age: 30})"
+      ],
+      "query": "UNWIND [30, 99] AS wanted OPTIONAL MATCH (p:Person) WHERE p.age = wanted FILTER p.age = wanted RETURN wanted AS age",
+      "expected": [
+        {
+          "age": 30
         }
       ]
     },
@@ -577,6 +605,38 @@
           "count": 1
         }
       ]
+    },
+    {
+      "id": "delete.nodetach",
+      "category": "mutation",
+      "requirement": "NODETACH DELETE removes an unconnected node with the same behavior as plain DELETE.",
+      "setup": [
+        "CREATE (:Item {id: 1})",
+        "MATCH (n:Item) NODETACH DELETE n"
+      ],
+      "query": "MATCH (n:Item) RETURN count(n) AS count",
+      "expected": [
+        {
+          "count": 0
+        }
+      ]
+    },
+    {
+      "id": "finish.read",
+      "category": "clause",
+      "requirement": "A read query ending in FINISH returns no rows.",
+      "setup": [
+        "CREATE (:Item {id: 1})"
+      ],
+      "query": "MATCH (n:Item) FINISH",
+      "expected": []
+    },
+    {
+      "id": "finish.write",
+      "category": "mutation",
+      "requirement": "A write query may end in FINISH and returns no rows.",
+      "query": "CREATE (:Item {id: 1}) FINISH",
+      "expected": []
     },
     {
       "id": "path.decomposition",

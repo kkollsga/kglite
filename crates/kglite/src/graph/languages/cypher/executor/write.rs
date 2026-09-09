@@ -610,6 +610,7 @@ fn clause_needs_implicit_row(clause: &Clause) -> bool {
     matches!(
         clause,
         Clause::With(_)
+            | Clause::Filter(_)
             | Clause::Unwind(_)
             | Clause::Call(_)
             | Clause::CallSubquery { .. }

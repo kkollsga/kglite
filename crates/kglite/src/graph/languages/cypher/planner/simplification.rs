@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 pub(super) fn fold_or_to_in(query: &mut CypherQuery) {
     for clause in &mut query.clauses {
         match clause {
-            Clause::Where(ref mut w) => {
+            Clause::Where(ref mut w) | Clause::Filter(ref mut w) => {
                 w.predicate = fold_or_to_in_pred(&w.predicate);
             }
             // An OPTIONAL MATCH carries its predicate in-clause; folding it
@@ -725,7 +725,7 @@ impl TextScoreCollector {
                     self.rewrite_pred(having, params)?;
                 }
             }
-            Clause::Where(w) => {
+            Clause::Where(w) | Clause::Filter(w) => {
                 self.rewrite_pred(&mut w.predicate, params)?;
             }
             Clause::Match(m) | Clause::OptionalMatch(m) => {
@@ -1494,7 +1494,7 @@ pub(super) fn collect_clause_variables(clause: &Clause, out: &mut HashSet<String
                 collect_predicate_refs(&wc.predicate, out);
             }
         }
-        Clause::Where(w) => collect_predicate_refs(&w.predicate, out),
+        Clause::Where(w) | Clause::Filter(w) => collect_predicate_refs(&w.predicate, out),
         Clause::With(w) => {
             for item in &w.items {
                 collect_expression_refs(&item.expression, out);
@@ -1570,6 +1570,7 @@ pub(super) fn collect_clause_variables(clause: &Clause, out: &mut HashSet<String
         | Clause::Delete(_)
         | Clause::Remove(_)
         | Clause::Merge(_)
+        | Clause::Finish
         // Schema DDL binds and references no query variables.
         | Clause::Schema(_)
         | Clause::FusedOptionalMatchAggregate { .. }
@@ -1878,6 +1879,7 @@ fn unwind_scope_refs_are_enumerable(clause: &Clause) -> bool {
         Clause::Match(_)
             | Clause::OptionalMatch(_)
             | Clause::Where(_)
+            | Clause::Filter(_)
             | Clause::With(_)
             | Clause::Return(_)
             | Clause::OrderBy(_)

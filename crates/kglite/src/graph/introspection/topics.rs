@@ -7,8 +7,8 @@ use super::DescribeSurface;
 
 // ── Cypher tier 3: topic detail functions ──────────────────────────────────
 
-const CYPHER_TOPIC_LIST: &str = "MATCH, WHERE, RETURN, WITH, HAVING, ORDER BY, UNWIND, UNION, \
-    CALL_SUBQUERY, CASE, CREATE, SET, DELETE, MERGE, EXPLAIN, PROFILE, operators, functions, patterns, spatial, \
+const CYPHER_TOPIC_LIST: &str = "MATCH, WHERE, FILTER, RETURN, FINISH, WITH, HAVING, ORDER BY, OFFSET, UNWIND, UNION, \
+    CALL_SUBQUERY, CASE, CREATE, SET, DELETE, NODETACH DELETE, MERGE, EXPLAIN, PROFILE, operators, functions, patterns, spatial, \
     temporal, pagerank, betweenness, degree, closeness, louvain, leiden, \
     label_propagation, connected_components, k_core, clustering_coefficient, cluster, orphan_node, self_loop, \
     cycle_2step, missing_required_edge, missing_inbound_edge, duplicate_title, \
@@ -29,6 +29,12 @@ pub(super) fn write_cypher_topics(
     xml.push_str("<cypher>\n");
     for topic in topics {
         let key = topic.to_uppercase();
+        if write_cypher25_topic(xml, &key) {
+            continue;
+        }
+        if write_diagnostic_topic(xml, &key) {
+            continue;
+        }
         match key.as_str() {
             "MATCH" => write_topic_match(xml),
             "WHERE" => write_topic_where(xml),
@@ -79,10 +85,6 @@ pub(super) fn write_cypher_topics(
             "TYPE_DOMAIN_VIOLATION" => write_topic_type_domain_violation(xml),
             "TYPE_RANGE_VIOLATION" => write_topic_type_range_violation(xml),
             "PARALLEL_EDGES" => write_topic_parallel_edges(xml),
-            "SPATIAL" => write_topic_spatial(xml),
-            "TEMPORAL" => write_topic_temporal(xml),
-            "EXPLAIN" => write_topic_explain(xml),
-            "PROFILE" => write_topic_profile(xml),
             _ => {
                 return Err(format!(
                     "Unknown Cypher topic '{}'. Available: {}",
@@ -93,6 +95,28 @@ pub(super) fn write_cypher_topics(
     }
     xml.push_str("</cypher>\n");
     Ok(())
+}
+
+fn write_cypher25_topic(xml: &mut String, key: &str) -> bool {
+    match key {
+        "FILTER" => write_topic_filter(xml),
+        "FINISH" => write_topic_finish(xml),
+        "OFFSET" => write_topic_order_by(xml),
+        "NODETACH DELETE" | "NODETACH_DELETE" => write_topic_delete(xml),
+        _ => return false,
+    }
+    true
+}
+
+fn write_diagnostic_topic(xml: &mut String, key: &str) -> bool {
+    match key {
+        "SPATIAL" => write_topic_spatial(xml),
+        "TEMPORAL" => write_topic_temporal(xml),
+        "EXPLAIN" => write_topic_explain(xml),
+        "PROFILE" => write_topic_profile(xml),
+        _ => return false,
+    }
+    true
 }
 
 pub(super) fn write_topic_match(xml: &mut String) {
@@ -135,6 +159,17 @@ pub(super) fn write_topic_where(xml: &mut String) {
     xml.push_str("  </WHERE>\n");
 }
 
+pub(super) fn write_topic_filter(xml: &mut String) {
+    xml.push_str("  <FILTER>\n");
+    xml.push_str("    <desc>Standalone row filter, equivalent to WITH * WHERE predicate. After OPTIONAL MATCH it removes null-extended rows whose predicate is null; an attached WHERE instead constrains the optional pattern and preserves the outer row.</desc>\n");
+    xml.push_str("    <syntax>FILTER predicate</syntax>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"post-match filter\">MATCH (n:Field) FILTER n.depth &gt; 3000 RETURN n.name</ex>\n");
+    xml.push_str("      <ex desc=\"drop optional misses\">OPTIONAL MATCH (n:Field) FILTER n IS NOT NULL RETURN n</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </FILTER>\n");
+}
+
 pub(super) fn write_topic_return(xml: &mut String) {
     xml.push_str("  <RETURN>\n");
     xml.push_str("    <desc>Project columns to output. Supports DISTINCT, aliases (AS), expressions, aggregations.</desc>\n");
@@ -151,6 +186,19 @@ pub(super) fn write_topic_return(xml: &mut String) {
     xml.push_str("      <ex desc=\"window-partition\">RETURN n.name, rank() OVER (PARTITION BY n.dept ORDER BY n.score DESC) AS r</ex>\n");
     xml.push_str("    </examples>\n");
     xml.push_str("  </RETURN>\n");
+}
+
+pub(super) fn write_topic_finish(xml: &mut String) {
+    xml.push_str("  <FINISH>\n");
+    xml.push_str("    <desc>Terminal alternative to RETURN. Executes the preceding read or write pipeline, preserves side effects, and returns no rows or columns.</desc>\n");
+    xml.push_str("    <syntax>query FINISH</syntax>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"read without results\">MATCH (n:Field) FINISH</ex>\n");
+    xml.push_str(
+        "      <ex desc=\"write without results\">CREATE (:Field {name: 'Test'}) FINISH</ex>\n",
+    );
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </FINISH>\n");
 }
 
 pub(super) fn write_topic_with(xml: &mut String) {
@@ -177,12 +225,13 @@ pub(super) fn write_topic_having(xml: &mut String) {
 
 pub(super) fn write_topic_order_by(xml: &mut String) {
     xml.push_str("  <ORDER_BY>\n");
-    xml.push_str("    <desc>Sort results. Default ascending; append DESC for descending. Combine with SKIP and LIMIT for pagination.</desc>\n");
-    xml.push_str("    <syntax>ORDER BY expr [DESC] [SKIP n] [LIMIT n]</syntax>\n");
+    xml.push_str("    <desc>Sort results. Default ascending; append DESC for descending. Combine with SKIP or its exact synonym OFFSET, plus LIMIT, for pagination.</desc>\n");
+    xml.push_str("    <syntax>ORDER BY expr [DESC] [SKIP n | OFFSET n] [LIMIT n]</syntax>\n");
     xml.push_str("    <examples>\n");
     xml.push_str("      <ex desc=\"ascending\">ORDER BY n.name</ex>\n");
     xml.push_str("      <ex desc=\"descending\">ORDER BY n.depth DESC</ex>\n");
     xml.push_str("      <ex desc=\"pagination\">ORDER BY n.name SKIP 20 LIMIT 10</ex>\n");
+    xml.push_str("      <ex desc=\"offset synonym\">ORDER BY n.name OFFSET 20 LIMIT 10</ex>\n");
     xml.push_str("      <ex desc=\"multi-key\">ORDER BY n.status, n.name DESC</ex>\n");
     xml.push_str("    </examples>\n");
     xml.push_str("  </ORDER_BY>\n");
@@ -247,9 +296,10 @@ pub(super) fn write_topic_set(xml: &mut String) {
 
 pub(super) fn write_topic_delete(xml: &mut String) {
     xml.push_str("  <DELETE>\n");
-    xml.push_str("    <desc>Delete nodes or relationships. REMOVE drops individual properties from a node.</desc>\n");
+    xml.push_str("    <desc>Delete nodes or relationships. NODETACH DELETE explicitly uses plain DELETE semantics and refuses nodes that still have relationships; DETACH DELETE removes those relationships too. REMOVE drops individual properties or labels.</desc>\n");
     xml.push_str("    <examples>\n");
     xml.push_str("      <ex desc=\"delete node\">MATCH (n:Field {name: 'Test'}) DELETE n</ex>\n");
+    xml.push_str("      <ex desc=\"explicit non-detach\">MATCH (n:Field {name: 'Test'}) NODETACH DELETE n</ex>\n");
     xml.push_str(
         "      <ex desc=\"delete relationship\">MATCH (a)-[r:OLD_REL]-&gt;(b) DELETE r</ex>\n",
     );
@@ -1382,9 +1432,11 @@ pub(super) fn write_cypher_overview(xml: &mut String, surface: DescribeSurface) 
     xml.push_str("  <clauses>\n");
     xml.push_str("    <clause name=\"MATCH\">Pattern-match nodes and relationships. OPTIONAL MATCH for left-join semantics.</clause>\n");
     xml.push_str("    <clause name=\"WHERE\">Filter by predicate (comparison, null check, regex, string predicates).</clause>\n");
+    xml.push_str("    <clause name=\"FILTER\">Standalone post-match row filter, equivalent to WITH * WHERE predicate.</clause>\n");
     xml.push_str("    <clause name=\"RETURN\">Project columns. Supports DISTINCT, aliases (AS), aggregations.</clause>\n");
+    xml.push_str("    <clause name=\"FINISH\">Terminal alternative to RETURN: preserve side effects and return no rows or columns.</clause>\n");
     xml.push_str("    <clause name=\"WITH\">Intermediate projection, aggregation, and variable scoping.</clause>\n");
-    xml.push_str("    <clause name=\"ORDER BY\">Sort results. Append DESC for descending. Combine with SKIP n, LIMIT n.</clause>\n");
+    xml.push_str("    <clause name=\"ORDER BY\">Sort results. Append DESC for descending. Combine with SKIP n or its OFFSET synonym, then LIMIT n.</clause>\n");
     xml.push_str("    <clause name=\"UNWIND\">Expand a list into individual rows: UNWIND expr AS var.</clause>\n");
     xml.push_str(
         "    <clause name=\"UNION\">Combine result sets. UNION ALL keeps duplicates.</clause>\n",
@@ -1394,7 +1446,7 @@ pub(super) fn write_cypher_overview(xml: &mut String, surface: DescribeSurface) 
         "    <clause name=\"CREATE\">Create nodes and relationships with properties.</clause>\n",
     );
     xml.push_str("    <clause name=\"SET\">Set or update node/relationship properties.</clause>\n");
-    xml.push_str("    <clause name=\"DELETE\">Delete nodes/relationships. REMOVE to drop individual properties.</clause>\n");
+    xml.push_str("    <clause name=\"DELETE\">Delete nodes/relationships. NODETACH DELETE is explicit plain DELETE; DETACH DELETE also removes incident relationships. REMOVE drops properties or labels.</clause>\n");
     xml.push_str(
         "    <clause name=\"MERGE\">Match existing or create new (upsert pattern).</clause>\n",
     );

@@ -63,6 +63,7 @@ fn match_var_labels<'q>(query: &'q CypherQuery, graph: &DirGraph) -> HashMap<&'q
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AbsentSite {
     Where,
+    Filter,
     Return,
     With,
     OrderBy,
@@ -75,6 +76,7 @@ impl AbsentSite {
     fn clause(self) -> &'static str {
         match self {
             AbsentSite::Where => "WHERE",
+            AbsentSite::Filter => "FILTER",
             AbsentSite::Return => "RETURN",
             AbsentSite::With => "WITH",
             AbsentSite::OrderBy => "ORDER BY",
@@ -85,6 +87,10 @@ impl AbsentSite {
         match self {
             AbsentSite::Where => format!(
                 "WHERE references property '{property}' which no {label} node has — the \
+                 comparison is null (always false), so this filters out every row.{hint}"
+            ),
+            AbsentSite::Filter => format!(
+                "FILTER references property '{property}' which no {label} node has — the \
                  comparison is null (always false), so this filters out every row.{hint}"
             ),
             AbsentSite::Return => format!(
@@ -158,6 +164,7 @@ fn absent_property_findings<'q>(
     for clause in &query.clauses {
         match clause {
             Clause::Where(w) => scan.predicate(&w.predicate, AbsentSite::Where),
+            Clause::Filter(w) => scan.predicate(&w.predicate, AbsentSite::Filter),
             Clause::Match(m) | Clause::OptionalMatch(m) => {
                 if let Some(wc) = &m.where_clause {
                     scan.predicate(&wc.predicate, AbsentSite::Where);

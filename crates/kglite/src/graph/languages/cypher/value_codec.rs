@@ -173,7 +173,7 @@ fn decode_clauses(clauses: &mut [Clause], lookup: &HashMap<&str, &ValueCodec>) {
                     decode_predicate(&mut wc.predicate, lookup);
                 }
             }
-            Clause::Where(w) => decode_predicate(&mut w.predicate, lookup),
+            Clause::Where(w) | Clause::Filter(w) => decode_predicate(&mut w.predicate, lookup),
             Clause::With(w) => {
                 if let Some(wc) = &mut w.where_clause {
                     decode_predicate(&mut wc.predicate, lookup);

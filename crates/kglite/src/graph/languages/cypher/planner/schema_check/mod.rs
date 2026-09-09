@@ -457,7 +457,7 @@ fn validate_scope_with_globals(
                     validate_predicate_scope(&wc.predicate, &scope)?;
                 }
             }
-            Clause::Where(where_clause) => {
+            Clause::Where(where_clause) | Clause::Filter(where_clause) => {
                 validate_predicate_scope(&where_clause.predicate, &scope)?
             }
             Clause::Return(return_clause) => {
@@ -992,7 +992,7 @@ fn walk_clause_patterns<E>(
                 walk_predicate_patterns(&wc.predicate, visit)?;
             }
         }
-        Clause::Where(w) => walk_predicate_patterns(&w.predicate, visit)?,
+        Clause::Where(w) | Clause::Filter(w) => walk_predicate_patterns(&w.predicate, visit)?,
         Clause::With(w) => {
             if let Some(wc) = &w.where_clause {
                 walk_predicate_patterns(&wc.predicate, visit)?;

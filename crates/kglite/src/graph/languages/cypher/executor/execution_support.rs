@@ -363,7 +363,9 @@ pub fn clause_display_name(clause: &Clause) -> String {
             }
         }
         Clause::Where(_) => "Where".into(),
+        Clause::Filter(_) => "Filter".into(),
         Clause::Return(_) => "Return".into(),
+        Clause::Finish => "Finish".into(),
         Clause::With(_) => "With".into(),
         Clause::OrderBy(_) => "OrderBy".into(),
         Clause::Skip(_) => "Skip".into(),

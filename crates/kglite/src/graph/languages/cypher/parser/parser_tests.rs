@@ -1090,6 +1090,68 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod cypher25_clause_spellings {
+    use super::super::super::ast::{Clause, Expression};
+    use super::super::parse_cypher;
+
+    #[test]
+    fn simple_spellings_lower_to_their_exact_existing_semantics() {
+        let parsed = parse_cypher("UNWIND [1,2,3] AS x FILTER x > 1 OFFSET 1 FINISH").unwrap();
+        assert!(matches!(parsed.clauses[1], Clause::Filter(_)));
+        assert!(matches!(parsed.clauses[2], Clause::Skip(_)));
+        assert!(matches!(parsed.clauses[3], Clause::Finish));
+
+        let parsed = parse_cypher("MATCH (n) NODETACH DELETE n FINISH").unwrap();
+        let Clause::Delete(delete) = &parsed.clauses[1] else {
+            panic!("NODETACH DELETE did not lower to DELETE");
+        };
+        assert!(!delete.detach);
+    }
+
+    #[test]
+    fn finish_is_a_terminal_replacement_for_return() {
+        for query in [
+            "FINISH",
+            "MATCH (n) FINISH RETURN n",
+            "MATCH (n) FINISH LIMIT 1",
+            "MATCH (n) RETURN n FINISH",
+            "CREATE (:N) FINISH FORMAT CSV",
+        ] {
+            assert!(parse_cypher(query).is_err(), "{query} unexpectedly parsed");
+        }
+        parse_cypher("MATCH (n) FINISH;").unwrap();
+        parse_cypher("CREATE (:N) FINISH").unwrap();
+    }
+
+    #[test]
+    fn filter_is_a_standalone_clause_not_match_pattern_syntax() {
+        parse_cypher("MATCH (n) FILTER n.x > 1 RETURN n").unwrap();
+        assert!(parse_cypher("MATCH (n FILTER n.x > 1) RETURN n").is_err());
+    }
+
+    #[test]
+    fn clause_heads_remain_soft_identifiers() {
+        let parsed = parse_cypher(
+            "MATCH (filter:OFFSET {finish: 1, nodetach: 2}) \
+             RETURN filter.finish AS offset, filter.nodetach AS finish",
+        )
+        .unwrap();
+        let Clause::Return(ret) = &parsed.clauses[1] else {
+            panic!("expected RETURN");
+        };
+        assert!(matches!(
+            &ret.items[0].expression,
+            Expression::PropertyAccess { variable, property }
+                if variable == "filter" && property == "finish"
+        ));
+
+        // A soft word in expression position is an ordinary variable, not a
+        // zero-argument clause accidentally opened by lookahead.
+        parse_cypher("UNWIND [1] AS finish RETURN finish").unwrap();
+    }
+}
+
 /// `DISTINCT` is soft-reserved in this dialect — `MATCH (DISTINCT:Person)`
 /// binds a variable of that name — so an aggregate has to be able to read it
 /// back. Inside a call, DISTINCT is the dedup *flag* iff an argument follows

@@ -307,6 +307,7 @@ struct TypeMismatchScan<'a, 'q> {
     /// parameter — never a guess.
     params: &'a HashMap<String, Value>,
     var_label: &'a HashMap<&'q str, &'q str>,
+    clause: &'static str,
     /// Rendered messages already emitted — an identical predicate written
     /// twice is one finding, two different ones are two.
     seen: HashSet<String>,
@@ -340,19 +341,29 @@ pub(super) fn type_mismatch_findings<'q>(
         graph,
         params,
         var_label,
+        clause: "WHERE",
         seen: HashSet::new(),
         out: Vec::new(),
     };
     for clause in &query.clauses {
         match clause {
-            Clause::Where(w) => scan.predicate(&w.predicate),
+            Clause::Where(w) => {
+                scan.clause = "WHERE";
+                scan.predicate(&w.predicate);
+            }
+            Clause::Filter(w) => {
+                scan.clause = "FILTER";
+                scan.predicate(&w.predicate);
+            }
             Clause::Match(m) | Clause::OptionalMatch(m) => {
                 if let Some(wc) = &m.where_clause {
+                    scan.clause = "WHERE";
                     scan.predicate(&wc.predicate);
                 }
             }
             Clause::With(w) => {
                 if let Some(wc) = &w.where_clause {
+                    scan.clause = "WHERE";
                     scan.predicate(&wc.predicate);
                 }
             }
@@ -495,7 +506,8 @@ impl<'a, 'q> TypeMismatchScan<'a, 'q> {
         }
         Some(TypeMismatch {
             message: format!(
-                "WHERE compares {label}.{property} ({}) with {} — {}",
+                "{} compares {label}.{property} ({}) with {} — {}",
+                self.clause,
                 source.parenthetical(),
                 operand.phrase(),
                 consequence(operator, "the property")?,
@@ -526,8 +538,9 @@ impl<'a, 'q> TypeMismatchScan<'a, 'q> {
         let (left_prop, right_prop) = (left.1, right.1);
         Some(TypeMismatch {
             message: format!(
-                "WHERE compares {left_label}.{left_prop} ({}) with {right_label}.{right_prop} \
+                "{} compares {left_label}.{left_prop} ({}) with {right_label}.{right_prop} \
                  ({}) — {}",
+                self.clause,
                 left_source.parenthetical(),
                 right_source.parenthetical(),
                 // Both properties must be present for either claim to hold: a
@@ -570,9 +583,10 @@ impl<'a, 'q> TypeMismatchScan<'a, 'q> {
         let parenthetical = source.parenthetical();
         self.push(TypeMismatch {
             message: format!(
-                "WHERE tests {label}.{property} ({parenthetical}) with IN against a list holding \
+                "{} tests {label}.{property} ({parenthetical}) with IN against a list holding \
                  no {name} value — cross-type values are never equal, so this filters out every \
-                 row."
+                 row.",
+                self.clause
             ),
             promotable: source.is_declared(),
         });
@@ -599,8 +613,9 @@ impl<'a, 'q> TypeMismatchScan<'a, 'q> {
         }
         self.push(TypeMismatch {
             message: format!(
-                "WHERE applies {keyword} to {label}.{property} ({}) — string predicates only \
+                "{} applies {keyword} to {label}.{property} ({}) — string predicates only \
                  match STRING values, so this filters out every row.",
+                self.clause,
                 source.parenthetical()
             ),
             promotable: source.is_declared(),

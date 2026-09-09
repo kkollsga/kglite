@@ -60,6 +60,15 @@
       "note": "Predicates preserve three-valued boolean, membership, and quantifier semantics; EXISTS subqueries enforce relationship uniqueness across their comma patterns."
     },
     {
+      "id": "clause.filter",
+      "syntax": "FILTER",
+      "status": "covered",
+      "case_ids": [
+        "filter.optional_null_drop"
+      ],
+      "note": "Standalone row filtering equivalent to WITH * WHERE. Because it is a clause rather than an OPTIONAL MATCH subclause, it removes null-extended rows whose predicate is unknown."
+    },
+    {
       "id": "clause.return",
       "syntax": "RETURN",
       "status": "covered",
@@ -81,13 +90,14 @@
     },
     {
       "id": "clause.order",
-      "syntax": "ORDER BY / SKIP / LIMIT",
+      "syntax": "ORDER BY / SKIP / OFFSET / LIMIT",
       "status": "covered",
       "case_ids": [
         "unwind.order",
-        "order.skip_limit"
+        "order.skip_limit",
+        "order.offset_limit"
       ],
-      "note": "Stable multi-key ordering and pagination."
+      "note": "Stable multi-key ordering and pagination; the cited OFFSET case pins its SKIP-equivalent pagination position."
     },
     {
       "id": "clause.unwind",
@@ -131,14 +141,25 @@
     },
     {
       "id": "clause.delete",
-      "syntax": "DELETE / DETACH DELETE / REMOVE",
+      "syntax": "DELETE / NODETACH DELETE / DETACH DELETE / REMOVE",
       "status": "covered",
       "case_ids": [
         "delete.node",
         "delete.detach",
+        "delete.nodetach",
         "remove.property"
       ],
-      "note": "Entity deletion, detach deletion, and property/label removal."
+      "note": "Entity deletion, detach deletion, and property/label removal; the cited NODETACH DELETE case pins explicit non-detaching deletion of an isolated node."
+    },
+    {
+      "id": "clause.finish",
+      "syntax": "FINISH",
+      "status": "covered",
+      "case_ids": [
+        "finish.read",
+        "finish.write"
+      ],
+      "note": "The cited cases pin terminal FINISH as a no-row ending for read and write query shapes."
     },
     {
       "id": "clause.merge",

@@ -182,6 +182,25 @@ impl CypherParser {
         Ok(Clause::Skip(SkipClause { count }))
     }
 
+    /// `OFFSET` is the Cypher 25 soft-keyword synonym for `SKIP`.
+    pub(super) fn parse_offset_clause(&mut self) -> Result<Clause, String> {
+        self.expect_soft_word("OFFSET", "OFFSET clause")?;
+        let count = self.parse_expression()?;
+        Ok(Clause::Skip(SkipClause { count }))
+    }
+
+    /// Standalone `FILTER predicate`, equivalent to `WITH * WHERE predicate`.
+    ///
+    /// Its own clause node preserves the implicit initial row when FILTER
+    /// leads a query. It remains separate from an OPTIONAL MATCH's attached
+    /// WHERE and therefore removes null-extended rows whose predicate is null.
+    pub(super) fn parse_filter_clause(&mut self) -> Result<Clause, String> {
+        self.expect_soft_word("FILTER", "FILTER clause")?;
+        Ok(Clause::Filter(WhereClause {
+            predicate: self.parse_predicate()?,
+        }))
+    }
+
     // ========================================================================
     // UNWIND / UNION
     // ========================================================================
@@ -585,6 +604,8 @@ impl CypherParser {
         let detach = if self.check(&CypherToken::Detach) {
             self.advance(); // consume DETACH
             true
+        } else if self.eat_soft_word("NODETACH") {
+            false
         } else {
             false
         };
@@ -740,6 +761,9 @@ impl CypherParser {
                 Some(CypherToken::Create) => self.parse_create_clause()?,
                 Some(CypherToken::Set) => self.parse_set_clause()?,
                 Some(CypherToken::Delete) | Some(CypherToken::Detach) => {
+                    self.parse_delete_clause()?
+                }
+                Some(CypherToken::Identifier(_)) if self.identifier_opens_nodetach_delete() => {
                     self.parse_delete_clause()?
                 }
                 Some(CypherToken::Remove) => self.parse_remove_clause()?,
@@ -1033,6 +1057,22 @@ impl CypherParser {
         }
 
         Ok(items)
+    }
+}
+
+impl CypherParser {
+    /// True when the current soft word starts one of the Cypher 25 clauses.
+    /// NODETACH needs a two-token lookahead so a variable with that name is
+    /// not mistaken for a clause unless `DELETE` follows it.
+    pub(super) fn identifier_opens_cypher25_clause(&self) -> bool {
+        self.peek_soft_word("FILTER")
+            || self.peek_soft_word("OFFSET")
+            || self.peek_soft_word("FINISH")
+            || self.identifier_opens_nodetach_delete()
+    }
+
+    pub(super) fn identifier_opens_nodetach_delete(&self) -> bool {
+        self.peek_soft_word("NODETACH") && self.peek_at(1) == Some(&CypherToken::Delete)
     }
 }
 

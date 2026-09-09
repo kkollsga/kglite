@@ -54,7 +54,14 @@ pub enum Clause {
     Match(MatchClause),
     OptionalMatch(MatchClause),
     Where(WhereClause),
+    /// Standalone Cypher 25 `FILTER`, semantically `WITH * WHERE`. Kept
+    /// distinct from `Where` so a leading filter can consume the query's
+    /// implicit initial row without changing legacy leading-WHERE behavior.
+    Filter(WhereClause),
     Return(ReturnClause),
+    /// Terminal `FINISH`: discard the pipeline's rows while retaining every
+    /// side effect performed by preceding clauses.
+    Finish,
     With(WithClause),
     OrderBy(OrderByClause),
     Skip(SkipClause),

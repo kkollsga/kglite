@@ -110,6 +110,13 @@ def self_loop_incidence_graph():
 
 DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     (
+        "filter_after_optional_null_extension",
+        "social_graph",
+        "UNWIND [21, 999] AS wanted OPTIONAL MATCH (p:Person) WHERE p.age = wanted "
+        "FILTER p.age = wanted RETURN wanted AS age ORDER BY age",
+        None,
+    ),
+    (
         "loop_incidence_bound_count",
         "self_loop_incidence_graph",
         "MATCH(a:N{id:0}) WITH a MATCH(a)-[:R]-(b:N) RETURN count(*) AS n",

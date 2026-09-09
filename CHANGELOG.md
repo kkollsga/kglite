@@ -9,6 +9,14 @@ before upgrading.
 
 ## [Unreleased]
 
+### Added
+
+- **Cypher 25 clause spellings `FILTER`, `OFFSET`, `NODETACH DELETE`, and
+  `FINISH` are supported.** `FILTER` is the standalone `WITH * WHERE`
+  equivalent, `OFFSET` is an exact `SKIP` synonym, `NODETACH DELETE` retains
+  plain `DELETE` relationship checks, and terminal `FINISH` preserves side
+  effects while returning no result columns or rows.
+
 ## [0.17.1] - 2026-09-08
 
 ### Fixed

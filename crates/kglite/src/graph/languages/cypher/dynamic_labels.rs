@@ -171,7 +171,7 @@ fn resolve_clauses(clauses: &mut [Clause], params: &HashMap<String, Value>) -> R
                     resolve_predicate(&mut wc.predicate, params)?;
                 }
             }
-            Clause::Where(w) => resolve_predicate(&mut w.predicate, params)?,
+            Clause::Where(w) | Clause::Filter(w) => resolve_predicate(&mut w.predicate, params)?,
             Clause::With(w) => {
                 for item in &mut w.items {
                     resolve_return_item(item, params)?;

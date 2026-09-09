@@ -233,6 +233,7 @@ impl CypherExecutor<'_> {
                 && matches!(
                     clause,
                     Clause::With(_)
+                        | Clause::Filter(_)
                         | Clause::Unwind(_)
                         | Clause::Return(_)
                         | Clause::Call(_)

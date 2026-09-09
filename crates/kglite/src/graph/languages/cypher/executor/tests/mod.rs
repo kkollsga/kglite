@@ -32,6 +32,7 @@ use crate::graph::storage::GraphWrite;
 // the `super::super::parser` the flat file used before the split.
 use crate::graph::languages::cypher::parser;
 
+mod cypher25_clauses;
 mod deadline_rows;
 mod exists_witness;
 mod expressions;

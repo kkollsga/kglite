@@ -199,7 +199,7 @@ fn for_each_exists_subquery(clause: &mut Clause, visit: &mut impl FnMut(&mut [Pa
                 walk_predicate(&mut wc.predicate, visit);
             }
         }
-        Clause::Where(wc) => walk_predicate(&mut wc.predicate, visit),
+        Clause::Where(wc) | Clause::Filter(wc) => walk_predicate(&mut wc.predicate, visit),
         Clause::With(wc) => {
             for item in &mut wc.items {
                 walk_expression(&mut item.expression, visit);
@@ -424,6 +424,7 @@ fn consumer_is_dedup_safe(clauses: &[Clause], idx: usize) -> bool {
             Clause::Match(_)
             | Clause::OptionalMatch(_)
             | Clause::Where(_)
+            | Clause::Filter(_)
             | Clause::Unwind(_)
             | Clause::OrderBy(_) => continue,
             _ => return false,

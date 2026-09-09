@@ -261,13 +261,15 @@ pub fn batching_barrier(clauses: &[Clause]) -> Option<String> {
             Clause::Match(_)
             | Clause::OptionalMatch(_)
             | Clause::Where(_)
+            | Clause::Filter(_)
             | Clause::Unwind(_)
             | Clause::Create(_)
             | Clause::Set(_)
             | Clause::Delete(_)
             | Clause::Remove(_)
             | Clause::Merge(_)
-            | Clause::Foreach { .. } => continue,
+            | Clause::Foreach { .. }
+            | Clause::Finish => continue,
 
             Clause::With(w) => match with_barrier(w) {
                 Some(reason) => reason,
@@ -669,6 +671,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(batching_barrier(&batchable.clauses[1..]), None);
+
+        let finished = parse_cypher(
+            "LOAD CSV WITH HEADERS FROM 'file:///tmp/x.csv' AS row \
+             CREATE (:Person {name: row.name}) FINISH",
+        )
+        .unwrap();
+        assert_eq!(batching_barrier(&finished.clauses[1..]), None);
 
         let counted =
             parse_cypher("LOAD CSV FROM 'file:///tmp/x.csv' AS row RETURN count(*) AS n").unwrap();

@@ -372,7 +372,9 @@ impl CypherParser {
             // positional rule. Stopping here hands the token back to the
             // clause loop, which reports
             // `CypherParser::misplaced_load_csv_error`.
-            Some(CypherToken::Identifier(_)) => self.identifier_opens_load_csv(),
+            Some(CypherToken::Identifier(_)) => {
+                self.identifier_opens_load_csv() || self.identifier_opens_cypher25_clause()
+            }
             _ => false,
         }
     }
@@ -407,6 +409,8 @@ impl CypherParser {
         if clauses.is_empty() {
             return Err("Empty query".to_string());
         }
+
+        validate_finish_position(&clauses, output_format)?;
 
         // A bare `CALL proc()` (no YIELD) is legal only as the entire
         // statement — Neo4j's standalone-CALL rule. Mid-pipeline, YIELD is
@@ -558,12 +562,11 @@ impl CypherParser {
                 Some(CypherToken::Foreach) => {
                     clauses.push(self.parse_foreach_clause()?);
                 }
-                // The two soft-keyword clause heads. Both arrive as
-                // `Identifier` (neither word is reserved) and each owns a
-                // positional rule, so each parses in its own method rather
-                // than inline.
                 Some(CypherToken::Identifier(_)) if self.identifier_opens_load_csv() => {
                     clauses.push(self.parse_leading_load_csv(clauses.is_empty(), end_at_rbrace)?)
+                }
+                Some(CypherToken::Identifier(_)) if self.identifier_opens_cypher25_clause() => {
+                    clauses.push(self.parse_cypher25_clause()?);
                 }
                 Some(CypherToken::Identifier(s)) if s.eq_ignore_ascii_case("FORMAT") => {
                     return Ok((clauses, self.parse_format_tail(end_at_rbrace)?))
@@ -580,6 +583,53 @@ impl CypherParser {
 
         Ok((clauses, OutputFormat::Default))
     }
+
+    fn parse_cypher25_clause(&mut self) -> Result<Clause, String> {
+        if self.peek_soft_word("FILTER") {
+            return self.parse_filter_clause();
+        }
+        if self.peek_soft_word("OFFSET") {
+            return self.parse_offset_clause();
+        }
+        if self.identifier_opens_nodetach_delete() {
+            return self.parse_delete_clause();
+        }
+        if self.peek_soft_word("FINISH") {
+            self.advance();
+            return Ok(Clause::Finish);
+        }
+        Err("Expected a Cypher 25 clause head".to_string())
+    }
+}
+
+/// Reject `FINISH` unless it is the sole terminal projection replacement.
+///
+/// `FINISH` concludes an existing read or write pipeline; it is not a query by
+/// itself and cannot follow `RETURN`.  Keeping this validation above execution
+/// makes malformed write queries fail before any side effect occurs.
+fn validate_finish_position(clauses: &[Clause], output_format: OutputFormat) -> Result<(), String> {
+    let Some(index) = clauses
+        .iter()
+        .position(|clause| matches!(clause, Clause::Finish))
+    else {
+        return Ok(());
+    };
+    if index == 0 {
+        return Err("FINISH must conclude a preceding query clause".to_string());
+    }
+    if index + 1 != clauses.len() {
+        return Err("FINISH must be the final clause of a query".to_string());
+    }
+    if clauses[..index]
+        .iter()
+        .any(|clause| matches!(clause, Clause::Return(_)))
+    {
+        return Err("FINISH replaces RETURN and cannot follow a RETURN clause".to_string());
+    }
+    if !matches!(output_format, OutputFormat::Default) {
+        return Err("FORMAT cannot follow FINISH because FINISH returns no rows".to_string());
+    }
+    Ok(())
 }
 
 /// The offending token as the user wrote it, plus — when it is a reserved
