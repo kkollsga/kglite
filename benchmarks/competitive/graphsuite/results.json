@@ -2,7 +2,7 @@
   "schema_version": 2,
   "harness": {
     "name": "graphsuite",
-    "version": 2
+    "version": 3
   },
   "historical_capture": {
     "origin": "manual",

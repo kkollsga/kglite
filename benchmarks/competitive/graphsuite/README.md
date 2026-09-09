@@ -16,7 +16,7 @@ to over time.
 | `kglite-bolt`   | kglite, in-memory, over the wire | Bolt protocol (neo4j driver) |
 | `networkx`      | NetworkX (pure Python) | native API |
 | `duckdb`        | DuckDB (relational/SQL) | SQL + recursive CTEs |
-| `kuzu`          | Kùzu (embedded graph DB) | Cypher |
+| `ladybug`       | LadybugDB (embedded graph DB) | Cypher |
 | `rustworkx`     | rustworkx (Rust graph algos) | native API |
 | `igraph`        | python-igraph (C graph algos) | native API |
 | `neo4j`         | Neo4j server | Bolt (opt-in, see below) |
@@ -55,21 +55,23 @@ multi-hop traversal, and a DEPENDS_ON DAG for deep traversal. Scale
 presets: `small` (~2.5k nodes), `medium` (~24k nodes, default), `large`
 (~120k nodes). Generation is deterministic (seeded), and a frozen set of
 **query parameters** (seed node ids, filter values, shortest-path pairs)
-is shared by every backend so all of them run the *same* queries.
+is shared by every adapter. Each adapter expresses the corresponding workload
+through its own data model and idiomatic API; query text and some semantics
+therefore differ.
 
 ## Fairness notes
 
-- **Same logical result per group.** Each group prints a sanity value (a
-  count) next to its timing; these line up across backends, so a
-  comparison reflects equal work. K-hop groups count *distinct nodes
-  reachable within k hops* from the seed set — these agree to <1% across
-  engines; the only delta is how each engine treats a path that returns to
-  its own seed. A walk-semantics engine (kuzu/duckdb/fluent) may step back
+- **Results are visible, not presumed equal.** Each group prints a sanity
+  value and digest next to its timing. `--verify` lists every cross-adapter
+  difference. K-hop groups aim to count *distinct nodes reachable within k
+  hops* from the seed set, but engines differ in how a path may return to
+  its own seed. A walk-semantics engine (LadybugDB/DuckDB/fluent) may step back
   along the edge it arrived on, so every seed with a neighbour re-enters the
   count at two hops. A trail engine (kglite's Cypher path, neo4j) may not
   reuse a relationship, so a seed re-enters only when the return goes round
   a cycle on different edges — which shifts a handful of seed nodes in or
-  out of the count. We keep each engine's idiomatic form rather than
+  out of the count. Other recorded differences must be reviewed before a
+  capture is described as like-for-like. We keep each engine's idiomatic form rather than
   bolting on a `NOT IN $seeds` filter, because that filter would distort
   the *timing* (it hits the same `IN $list` planner cost noted below) far
   more than the <1% count nuance it would erase.
@@ -77,11 +79,10 @@ is shared by every backend so all of them run the *same* queries.
   and `shortestPath`; the algorithm libraries use BFS / `descendants` /
   `connected_components`; SQL uses recursive CTEs and joins. Each backend
   is written the way a competent user of *that* tool would write it.
-- **Honest skips.** A backend skips a group it can't express well rather
-  than faking it: kùzu/Neo4j skip `connected_components` (no native WCC);
-  DuckDB skips `shortest_path` + `connected_components` (impractical in
-  pure SQL); rustworkx/igraph skip `pattern_match` (no relational
-  surface). The fluent kglite column skips exactly four — `edge_scan`
+- **Missing means not exercised.** An adapter skips a group when this harness
+  profile has no maintained implementation for it. That is not a claim that
+  the underlying product lacks the feature. The fluent kglite column skips
+  exactly four — `edge_scan`
   (no scan primitive; `label_pair_counts()` is a cached cardinality
   snapshot, so timing it would be a fake win), `two_step_join`
   (`traverse()` returns a node set, not path rows), and
@@ -97,8 +98,9 @@ is shared by every backend so all of them run the *same* queries.
   rather than the deleted one. Read that one cell as a *substitution*,
   not a like-for-like time. `mutations` is excluded from the
   cross-backend result-parity check for the same reason.
-- **Full-dataset build.** The property-graph stores load the entire
-  dataset; the algorithm libraries load the subgraphs they operate on.
+- **Construction is not cross-kind ranked.** Property-graph stores load the
+  full dataset while some algorithm adapters build only the subgraphs they
+  operate on. The public headline therefore omits construction time.
 - **Deeper hops use smaller seed sets** (200 → 50 → 20) to keep
   variable-length expansion tractable; every backend uses the same seeds
   per group, so within-group comparisons stay fair.
@@ -124,14 +126,14 @@ as the idiomatic baseline; both are now fast.
 ## Running
 
 ```bash
-source .venv/bin/activate          # or use .venv/bin/python directly
-maturin develop --release          # kglite numbers must be a release build
+uv run --no-sync maturin develop --release
+make build-bolt-server
 
-python -m benchmarks.competitive.graphsuite.run                  # all libs, medium
-python -m benchmarks.competitive.graphsuite.run --scale small    # quick
-python -m benchmarks.competitive.graphsuite.run --libs kglite-cypher,kuzu,duckdb
-python -m benchmarks.competitive.graphsuite.run --report-only    # re-render datafile
-python -m benchmarks.competitive.graphsuite.run --list           # libs + groups
+.venv/bin/python -m benchmarks.competitive.graphsuite.run                  # default adapters, medium
+.venv/bin/python -m benchmarks.competitive.graphsuite.run --scale small    # exploratory quick run
+.venv/bin/python -m benchmarks.competitive.graphsuite.run --libs kglite-cypher,ladybug,duckdb
+.venv/bin/python -m benchmarks.competitive.graphsuite.run --report-only
+.venv/bin/python -m benchmarks.competitive.graphsuite.run --list
 ```
 
 The `kglite-bolt` row needs the release bolt binary at
@@ -155,8 +157,10 @@ library**, tagged with `library`, `version`, `run_date`, the dataset
 `signature`, the machine, and per-group `{min_s, median_s, reps, sanity,
 status}`. Re-run any time — to add a new library, refresh a library after
 an upgrade, or record a new machine — and old runs are preserved.
-`report.py` renders the most recent run per library for a given dataset
-signature as the combined-time-per-group matrix.
+`report.py` renders the most recent raw run per library for investigation.
+The public generator additionally requires one clean capture id containing an
+error-free row for every requested adapter. An incomplete invocation remains
+raw history but cannot silently borrow old rows for publication.
 
 ## Methodology
 
@@ -165,8 +169,9 @@ Each group method bundles its operations; the reported number is the
 few repeats (repeat count adapts to per-run cost so the suite stays
 bounded — sub-0.4s groups get the full repeat count, multi-second groups
 run once). `build` is measured once (twice for cheap builds, keeping the
-min). For trustworthy kglite numbers, build the wheel with
-`maturin develop --release`.
+minimum). There is no warm-up. The public report labels this protocol
+directly; values above 10 seconds are retained and labelled rather than called
+timeouts. Kglite measurements require the release build shown above.
 
 ## Adding a library
 

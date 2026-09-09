@@ -105,8 +105,8 @@ def render_parity(signature: str | None = None) -> str:
 
     For each group, cluster the libraries by their result digest. If every
     library agrees there is one cluster (PASS). Divergence among the kglite
-    **Cypher-driven storage modes** (memory / mapped / disk / bolt — which
-    run the *identical* query) is an ERROR: those must be byte-for-byte
+    **Cypher-driven storage modes** (memory / mapped / disk / Bolt) is an
+    ERROR: those modes are required to produce byte-for-byte matching results.
     equal. Divergence involving a different surface (fluent) or a different
     library is INFO (expected for a couple of groups — see the README
     walk-vs-trail note).
@@ -116,8 +116,8 @@ def render_parity(signature: str | None = None) -> str:
     if not runs:
         return "(no runs recorded)"
     libs = sorted(runs)
-    # the modes that run identical Cypher and therefore MUST agree exactly
-    strict = {"kglite-cypher", "kglite-mapped", "kglite-disk", "kglite-bolt"}
+    # Cypher-driven kglite modes are one result contract.
+    strict = {"kglite-cypher", "kglite-mapped", "kglite-disk", "kglite-bolt", "kglite-bolt-docker"}
 
     lines = ["Result parity across backends (per group). digest = hash of the actual result set."]
     sample = next(iter(runs.values()))["dataset"]

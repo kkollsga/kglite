@@ -40,7 +40,7 @@ REGISTRY: dict[str, tuple[str, str]] = {
     "kglite-bolt-docker": ("ad_kglite", "KgliteBoltDocker"),
     "networkx": ("ad_networkx", "NetworkXAdapter"),
     "duckdb": ("ad_duckdb", "DuckDBAdapter"),
-    "kuzu": ("ad_kuzu", "KuzuAdapter"),
+    "ladybug": ("ad_ladybug", "LadybugAdapter"),
     "rustworkx": ("ad_rustworkx", "RustworkxAdapter"),
     "igraph": ("ad_igraph", "IgraphAdapter"),
     # Neo4j (all three reuse the one Bolt adapter). `neo4j` talks to a
@@ -63,7 +63,7 @@ PROVISIONERS: dict[str, str] = {
 # explicitly, e.g. --libs neo4j-native,neo4j-docker,kglite-bolt-docker.
 # kglite-bolt-docker self-provisions its container in its own adapter, so it
 # isn't in PROVISIONERS, but it's just as heavy → opt-in too.
-OPT_IN = set(PROVISIONERS) | {"kglite-bolt-docker"}
+OPT_IN = set(PROVISIONERS) | {"kglite-bolt-docker", "neo4j"}
 DEFAULT_LIBS = [k for k in REGISTRY if k not in OPT_IN]
 
 
@@ -248,6 +248,11 @@ def main(argv=None):
     )
     ap.add_argument("--report-only", action="store_true", help="just render the datafile")
     ap.add_argument("--verify", action="store_true", help="render the cross-backend parity report")
+    ap.add_argument(
+        "--publication-capture",
+        action="store_true",
+        help="require one clean, complete, error-free row for every requested adapter",
+    )
     ap.add_argument("--list", action="store_true", help="list libraries and groups")
     args = ap.parse_args(argv)
 
@@ -281,7 +286,11 @@ def main(argv=None):
         ds = dataset_mod.generate(args.scale, args.seed)
     print(f"  nodes={ds.n_nodes:,} edges={ds.n_edges:,} signature={ds.signature()}", flush=True)
 
-    provenance = results_mod.capture_context(origin=args.origin, base_repeats=args.repeats)
+    provenance = results_mod.capture_context(
+        origin=args.origin,
+        base_repeats=args.repeats,
+        requested_libraries=libs,
+    )
     new_runs = []
     for key in libs:
         print(f"\n=== {key} ===", flush=True)
@@ -294,6 +303,14 @@ def main(argv=None):
         if run is not None:
             new_runs.append(run)
 
+    publication_issues = results_mod.publication_issues(new_runs, libs)
+    if args.publication_capture:
+        qualified = not publication_issues
+        for run in new_runs:
+            run["provenance"]["publication_qualified"] = qualified
+            if publication_issues:
+                run["provenance"]["qualification_issues"] = publication_issues
+
     if new_runs:
         results_mod.append_runs(new_runs)
         print(f"\nAppended {len(new_runs)} run(s) to {results_mod.RESULTS_PATH}\n")
@@ -301,6 +318,12 @@ def main(argv=None):
     print(report_mod.render(signature=ds.signature()))
     print()
     print(report_mod.render_parity(signature=ds.signature()))
+    if args.publication_capture and publication_issues:
+        print("\nPublication capture rejected:", file=sys.stderr)
+        for issue in publication_issues:
+            print(f"  - {issue}", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

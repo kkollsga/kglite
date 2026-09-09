@@ -1,11 +1,9 @@
-"""Kùzu adapter — embedded, columnar, Cypher-speaking graph database.
+"""LadybugDB adapter — embedded, columnar, Cypher-speaking graph database.
 
-The closest "embedded graph DB" peer to kglite. Same logical Cypher
-workloads as the kglite Cypher adapter (translated to Kùzu's `gid`
+The closest "embedded graph DB" peer to kglite. Corresponding Cypher
+workloads use LadybugDB's `gid`
 property + `* SHORTEST` path syntax). Bulk-loaded from CSV (no
-pyarrow/parquet dependency by design — this repo deliberately avoids
-pyarrow). Weakly-connected-components needs the optional algo extension
-and is skipped here, matching kglite's no-native-WCC stance.
+pyarrow/parquet dependency by design — this repo deliberately avoids pyarrow).
 """
 
 from __future__ import annotations
@@ -14,13 +12,13 @@ from pathlib import Path
 import shutil
 import tempfile
 
-import kuzu
+import ladybug
 import pandas as pd
 
 from .base import Adapter, Skip
 from .dataset import DEGREE_MIN, GEO_BBOX, SCORE_MIN, SCORE_RANGE, Dataset
 
-# node type -> (PRIMARY KEY-first ordered (column, kuzu_type) list)
+# node type -> (PRIMARY KEY-first ordered (column, LadybugDB type) list)
 NODE_SCHEMA = {
     "Person": [
         ("gid", "INT64"),
@@ -55,18 +53,18 @@ REL_SCHEMA = {
 }
 
 
-class KuzuAdapter(Adapter):
-    name = "kuzu"
+class LadybugAdapter(Adapter):
+    name = "ladybug"
 
     def version(self) -> str:
-        return kuzu.__version__
+        return ladybug.__version__
 
     def build(self, ds: Dataset) -> None:
-        self._tmpdir = tempfile.mkdtemp(prefix="graphsuite_kuzu_")
+        self._tmpdir = tempfile.mkdtemp(prefix="graphsuite_ladybug_")
         csvdir = Path(self._tmpdir) / "csv"
         csvdir.mkdir()
-        db = kuzu.Database(str(Path(self._tmpdir) / "kz"))
-        con = kuzu.Connection(db)
+        db = ladybug.Database(str(Path(self._tmpdir) / "ladybug"))
+        con = ladybug.Connection(db)
 
         for ntype, cols in NODE_SCHEMA.items():
             df = ds.node_frame(ntype).copy()
@@ -181,13 +179,13 @@ class KuzuAdapter(Adapter):
         return self._anchored("[:KNOWS*1..2]", ds.params["seed_persons_small"])
 
     def g_three_hop(self, ds):
-        # The dense, hub-heavy KNOWS subgraph can exhaust Kùzu's var-length
+        # The dense, hub-heavy KNOWS subgraph can exhaust var-length
         # path materialisation at 3 hops; degrade to a clean Skip rather than
-        # surfacing a raw engine error (honest "Kùzu can't do this here").
+        # surfacing a raw engine error.
         try:
             return self._anchored("[:KNOWS*1..3]", ds.params["seed_persons_tiny"])
         except Exception as e:
-            raise Skip(f"Kùzu 3-hop var-length exhausts the dense hub graph: {type(e).__name__}") from e
+            raise Skip(f"LadybugDB 3-hop var-length did not complete: {type(e).__name__}") from e
 
     def g_filtered_traversal(self, ds):
         df = self._df(
@@ -246,7 +244,7 @@ class KuzuAdapter(Adapter):
         return tuple(int(x) for x in df["deg"])
 
     def g_connected_components(self, ds):
-        raise Skip("WCC needs the kuzu algo extension; not enabled")
+        raise Skip("WCC was not exercised by this adapter profile")
 
     def g_mutations(self, ds):
         off = ds.params["mut_new_base"] + self._mut * 100_000
