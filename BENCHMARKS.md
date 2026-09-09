@@ -1,23 +1,21 @@
 # KGLite benchmarks
 
-> **Unqualified historical snapshot.** These rows predate publication qualification. They may combine different invocations or dirty source revisions and must not be described as a current capture.
-
 Minimum observed wall time for the workloads each adapter exercised on one seed-deterministic synthetic graph. Lower is better within a row; `not exercised` is not a claim about the underlying product's capabilities.
 
-**Dataset:** 25,333 nodes · 280,774 edges (Person/Company/Project/Skill/City), scale `medium`.
+**Dataset:** 25,333 nodes · 266,944 edges (Person/Company/Project/Skill/City), scale `medium`.
 
-| Workload topic | kglite | DuckDB | igraph | Kùzu (historical) | Neo4j (native) | NetworkX | rustworkx |
+| Workload topic | kglite | DuckDB | igraph | LadybugDB | Neo4j (native) | NetworkX | rustworkx |
 |---|---|---|---|---|---|---|---|
-| Node/edge scans and ID lookup | 2.4ms | 1.7ms | **14µs** | 4.5ms | 4.7ms | 2.5ms | 241µs |
-| Property filters and aggregation | 3.7ms | **1.4ms** | 4.2ms | 3.4ms | 64.2ms | 5.4ms | 3.6ms |
-| Reachability and traversal | 16.8ms | 12.9ms | **2.9ms** | 3.51s (5/6 exercised) | 272.0ms | 8.0ms | 8.5ms |
-| Shortest-path queries | **261µs** | not exercised | 22.5ms | 38.3ms | 12.3ms | 482µs | 88.1ms |
-| Typed graph joins and aggregation | 7.3ms | **1.9ms** | not exercised | 3.4ms | 25.8ms | 117.5ms | not exercised |
-| Degree and connected-components operations | 23.0ms | 3.3ms (2/3 exercised) | **2.0ms** | 10.3ms (2/3 exercised) | 39.4ms (2/3 exercised) | 9.1ms | 8.6ms |
-| Louvain community detection | **133.9ms** | not exercised | 1.41s | not exercised | not exercised | 11.17s (measured >10s) | not exercised |
-| Updates and create/delete batch | 4.3ms | 2.4ms | 6.8ms | 143.6ms | 63.6ms | 673µs | **149µs** |
-| Exact vector scoring | **4.2ms** | not exercised | not exercised | not exercised | not exercised | not exercised | not exercised |
-| Latitude/longitude bounding-box filter | **17µs** | 73µs | not exercised | 252µs | 647µs | not exercised | not exercised |
+| Node/edge scans and ID lookup | 2.9ms | 1.8ms | **16µs** | 4.7ms | 5.4ms | 4.7ms | 275µs |
+| Property filters and aggregation | 4.0ms | **1.4ms** | 4.7ms | 3.9ms | 83.7ms | 6.3ms | 4.1ms |
+| Reachability and traversal | 11.0ms | 13.2ms | **2.0ms** | 16.62s (measured >10s) | 211.9ms | 4.8ms | 5.2ms |
+| Shortest-path queries | **2.8ms** | not exercised | 118.5ms | 1.15s | 74.2ms | 5.3ms | 350.9ms |
+| Typed graph joins and aggregation | 12.5ms | **2.0ms** | not exercised | 4.6ms | 46.9ms | 124.8ms | not exercised |
+| Degree and connected-components operations | 25.0ms | 3.0ms (2/3 exercised) | **2.0ms** | 11.5ms (2/3 exercised) | 53.0ms (2/3 exercised) | 20.4ms | 5.8ms |
+| Louvain community detection | **17.8ms** | not exercised | 87.4ms | not exercised | not exercised | 1.94s | not exercised |
+| Updates and create/delete batch | 2.7ms | 2.9ms | 6.1ms | 87.8ms | 53.7ms | 391µs | **130µs** |
+| Exact vector scoring | **5.6ms** | not exercised | not exercised | not exercised | not exercised | not exercised | not exercised |
+| Latitude/longitude bounding-box filter | **21µs** | 76µs | not exercised | 339µs | 731µs | not exercised | not exercised |
 
 Bold marks the fastest complete, non-slow measurement in that row. Partial cells sum only the named executed groups; missing work is not estimated. Values above 10 seconds remain in the measurement and are labelled, not treated as timeouts. There is deliberately no grand total across unequal workload coverage.
 
@@ -27,11 +25,11 @@ Adapters receive the same generated input records and shared query parameters, b
 
 This is coverage of the recorded adapter implementations, not a product capability matrix.
 
-| Workload topic | kglite | DuckDB | igraph | Kùzu (historical) | Neo4j (native) | NetworkX | rustworkx |
+| Workload topic | kglite | DuckDB | igraph | LadybugDB | Neo4j (native) | NetworkX | rustworkx |
 |---|---|---|---|---|---|---|---|
 | Node/edge scans and ID lookup | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Property filters and aggregation | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Reachability and traversal | ✓ | ✓ | ✓ | 5/6 exercised | ✓ | ✓ | ✓ |
+| Reachability and traversal | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Shortest-path queries | ✓ | not exercised | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Typed graph joins and aggregation | ✓ | ✓ | not exercised | ✓ | ✓ | ✓ | not exercised |
 | Degree and connected-components operations | ✓ | 2/3 exercised | ✓ | 2/3 exercised | 2/3 exercised | ✓ | ✓ |
@@ -45,7 +43,7 @@ This is coverage of the recorded adapter implementations, not a product capabili
 - **kglite** — Cypher graph engine, in-memory
 - **DuckDB** — SQL/relational database
 - **igraph** — C-backed graph library
-- **Kùzu (historical)** — archived Cypher graph database, embedded
+- **LadybugDB** — Cypher graph database, embedded
 - **Neo4j (native)** — Cypher graph database, native server
 - **NetworkX** — pure-Python graph library
 - **rustworkx** — Rust-backed graph library
@@ -56,17 +54,17 @@ Graph-construction time is omitted from the cross-kind headline because these ad
 
 | Workload topic | kglite | kglite (mapped) | kglite (disk) | kglite (fluent) | kglite (Bolt) |
 |---|---|---|---|---|---|
-| Graph construction | 39.7ms | 44.2ms | 88.3ms | **38.2ms** | 221.5ms |
-| Node/edge scans and ID lookup | **2.4ms** | 2.4ms | 3.7ms | 444µs (2/3 exercised) | 171.9ms |
-| Property filters and aggregation | 3.7ms | **3.6ms** | 6.9ms | 6.2ms | 28.6ms |
-| Reachability and traversal | **16.8ms** | 17.4ms | 18.0ms | 46.6ms | 219.1ms |
-| Shortest-path queries | **261µs** | 273µs | 319µs | 22.0ms | 3.0ms |
-| Typed graph joins and aggregation | **7.3ms** | 8.0ms | 10.1ms | 45.1ms (2/3 exercised) | 9.8ms |
-| Degree and connected-components operations | **23.0ms** | 23.3ms | 70.4ms | 5.7ms (2/3 exercised) | 37.2ms |
-| Louvain community detection | **133.9ms** | 134.6ms | 134.3ms | not exercised | 137.8ms |
-| Updates and create/delete batch | **4.3ms** | 4.6ms | 10.2ms | 82.3ms | 20.8ms |
-| Exact vector scoring | 4.2ms | 4.3ms | 11.5ms | **129µs** | 5.7ms |
-| Latitude/longitude bounding-box filter | **17µs** | 17µs | 22µs | 21µs | 329µs |
+| Graph construction | 73.5ms | 79.1ms | 138.1ms | **72.9ms** | 285.6ms |
+| Node/edge scans and ID lookup | 2.9ms | **2.8ms** | 5.0ms | 1.2ms (2/3 exercised) | 190.0ms |
+| Property filters and aggregation | 4.0ms | **3.9ms** | 7.3ms | 7.7ms | 31.6ms |
+| Reachability and traversal | **11.0ms** | 11.1ms | 12.4ms | 48.0ms | 156.9ms |
+| Shortest-path queries | **2.8ms** | 3.2ms | 2.9ms | 123.1ms | 23.6ms |
+| Typed graph joins and aggregation | **12.5ms** | 14.0ms | 20.3ms | 62.1ms (2/3 exercised) | 14.9ms |
+| Degree and connected-components operations | **25.0ms** | 25.9ms | 61.2ms | 6.9ms (2/3 exercised) | 49.2ms |
+| Louvain community detection | 17.8ms | 18.2ms | **17.7ms** | not exercised | 21.7ms |
+| Updates and create/delete batch | **2.7ms** | 3.0ms | 61.8ms | 60.5ms | 25.7ms |
+| Exact vector scoring | 5.6ms | 5.2ms | 13.7ms | **125µs** | 7.5ms |
+| Latitude/longitude bounding-box filter | **21µs** | 21µs | 27µs | 23µs | 370µs |
 
 ### Scaling
 
@@ -89,20 +87,20 @@ Each query group records the minimum observed wall time from an adaptive 1–5 r
 
 Versions used for the selected rows:
 
-_kglite 0.16.9, DuckDB 1.5.3, igraph 1.0.0, Kùzu (historical) 0.11.3, Neo4j (native) 2026.02.3, NetworkX 3.6.1, rustworkx 0.17.1_
+_kglite 0.17.1, DuckDB 1.5.5, igraph 1.0.0, LadybugDB 0.17.0, Neo4j (native) 2026.07.1, NetworkX 3.6.1, rustworkx 0.18.1_
 
-Run on macOS-26.3-arm64-arm-64bit-Mach-O · Python 3.14.3.
+Run on macOS-26.6.2-arm64-arm-64bit-Mach-O · Python 3.14.3.
 
 ### Capture provenance
 
-- Publication qualification: `legacy / unqualified`
+- Publication qualification: `qualified`
 - Results schema: `2`
 - Results file writer: `graphsuite` v3
-- Dataset signature: `medium-s1234-n25333-e280774`
-- Selected run timestamps: `2026-08-25T18:21:09+02:00` through `2026-08-25T18:41:06+02:00`
-- Selected capture harness: `v2`
-- Capture id: `not recorded`
-- Source commit: `4822c840edb8aa3c5ea3761172f2d1a26f19e859, e2df280492ef7d5e6de8673047823784bb5c2458` (dirty: `true`)
+- Dataset signature: `medium-s1234-n25333-e266944`
+- Selected run timestamps: `2026-09-09T09:44:30+02:00` through `2026-09-09T09:45:27+02:00`
+- Selected capture harness: `v3`
+- Capture id: `97eaae7115a14aacb13d16c5de97c74c`
+- Source commit: `bf6c7bbf07e747e851254f5a0e45d2fe3995144b` (dirty: `false`)
 - Base repeat policy: `5`
 - Dataset seed: `1234`
 - Raw metadata authority: `benchmarks/competitive/graphsuite/results.json`.

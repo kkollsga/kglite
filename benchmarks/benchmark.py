@@ -30,6 +30,11 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DEFAULT_PUBLIC_LIBS = "kglite-cypher,ladybug,networkx,rustworkx,igraph,duckdb"
 
+# Resolve the benchmark package from this checkout even when the invoking
+# interpreter has another editable KGLite checkout installed.
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
