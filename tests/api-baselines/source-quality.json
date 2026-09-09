@@ -290,8 +290,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/tokenizer.rs",
       "qualified_name": "crate::tokenize_cypher_with_positions",
-      "lines": 333,
-      "branches": 69,
+      "lines": 280,
+      "branches": 56,
       "nesting": 6
     },
     {

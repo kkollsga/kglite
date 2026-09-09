@@ -798,14 +798,12 @@ impl CypherParser {
     // ========================================================================
 
     pub(super) fn parse_delete_clause(&mut self) -> Result<Clause, String> {
-        let detach = if self.check(&CypherToken::Detach) {
+        let detach = self.check(&CypherToken::Detach);
+        if detach {
             self.advance(); // consume DETACH
-            true
-        } else if self.eat_soft_word("NODETACH") {
-            false
         } else {
-            false
-        };
+            self.eat_soft_word("NODETACH");
+        }
         self.expect(&CypherToken::Delete)?;
 
         let mut expressions = Vec::new();
@@ -1158,7 +1156,7 @@ impl CypherParser {
         // belong at parse time where they fire uniformly on every path
         // (read / mutate / Python pre-parse / bolt / mcp) before
         // execution or mutation classification ever runs.
-        validate_subquery_body(&clauses)?;
+        validate_subquery_body(&clauses, &import)?;
 
         let body = Box::new(CypherQuery {
             clauses,
@@ -1361,11 +1359,32 @@ fn extract_importing_with(w: &WithClause) -> Result<Vec<String>, String> {
 /// Nested `CALL { }` is *allowed* in v1 (§1.4: "falls out of
 /// recursion") and is intentionally not rejected — each nested body
 /// is validated by its own `parse_call_subquery` call.
-fn validate_subquery_body(clauses: &[Clause]) -> Result<(), String> {
-    validate_subquery_set_tree(clauses).map(|_| ())
+fn validate_subquery_body(clauses: &[Clause], import: &CallSubqueryImport) -> Result<(), String> {
+    validate_subquery_set_tree(clauses)?;
+
+    // `CALL (*)` imports are resolved from the outer scope later, so the
+    // parser cannot expand RETURN * without risking a false set-arm mismatch.
+    // Named, empty, and legacy imports are already concrete here.
+    if !matches!(import, CallSubqueryImport::All) {
+        let mut imports = match import {
+            CallSubqueryImport::Legacy(names) | CallSubqueryImport::Named(names) => names.clone(),
+            CallSubqueryImport::Empty => Vec::new(),
+            CallSubqueryImport::All => unreachable!("CALL (*) handled above"),
+        };
+        imports.sort();
+        let globals = if matches!(import, CallSubqueryImport::Named(_)) {
+            imports.as_slice()
+        } else {
+            &[]
+        };
+        crate::graph::languages::cypher::executor::call_subquery::subquery_set_output_columns(
+            clauses, &imports, globals,
+        )?;
+    }
+    Ok(())
 }
 
-fn validate_subquery_set_tree(clauses: &[Clause]) -> Result<Vec<String>, String> {
+fn validate_subquery_set_tree(clauses: &[Clause]) -> Result<(), String> {
     let set_index = clauses.iter().position(|c| matches!(c, Clause::Union(_)));
     let arm_end = set_index.unwrap_or(clauses.len());
 
@@ -1393,21 +1412,11 @@ fn validate_subquery_set_tree(clauses: &[Clause]) -> Result<Vec<String>, String>
     let return_idx = clauses[..arm_end]
         .iter()
         .position(|c| matches!(c, Clause::Return(_)));
-    let columns = match return_idx {
+    match return_idx {
         Some(idx)
             if clauses[idx + 1..arm_end]
                 .iter()
-                .all(|c| matches!(c, Clause::OrderBy(_) | Clause::Skip(_) | Clause::Limit(_))) =>
-        {
-            let Clause::Return(return_clause) = &clauses[idx] else {
-                unreachable!("return index must point to RETURN")
-            };
-            return_clause
-                .items
-                .iter()
-                .map(crate::graph::languages::cypher::executor::helpers::return_item_column_name)
-                .collect::<Vec<_>>()
-        }
+                .all(|c| matches!(c, Clause::OrderBy(_) | Clause::Skip(_) | Clause::Limit(_))) => {}
         _ => {
             return Err(
                 "a CALL { } subquery body must end with RETURN; unit subqueries (no RETURN) are \
@@ -1415,27 +1424,16 @@ fn validate_subquery_set_tree(clauses: &[Clause]) -> Result<Vec<String>, String>
                     .to_string(),
             );
         }
-    };
+    }
 
     if let Some(idx) = set_index {
         let Clause::Union(set) = &clauses[idx] else {
             unreachable!("set index must point to set operation")
         };
-        let right_columns = validate_subquery_set_tree(&set.query.clauses)?;
-        if columns != right_columns {
-            let operator = match set.kind {
-                SetOpKind::Union => "UNION",
-                SetOpKind::Intersect => "INTERSECT",
-                SetOpKind::Except => "EXCEPT",
-            };
-            return Err(format!(
-                "All sub queries in a {operator} must have the same return column names \
-                 (left side {columns:?} != right side {right_columns:?})."
-            ));
-        }
+        validate_subquery_set_tree(&set.query.clauses)?;
     }
 
-    Ok(columns)
+    Ok(())
 }
 
 /// Collect the union of variables imported by legacy set arms while retaining

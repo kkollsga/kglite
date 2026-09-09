@@ -1,4 +1,14 @@
 use super::*;
+use std::path::Path;
+
+fn local_file_url(path: &Path) -> String {
+    let slash_path = path.to_string_lossy().replace('\\', "/");
+    if slash_path.starts_with('/') {
+        format!("file://{slash_path}")
+    } else {
+        format!("file:///{slash_path}")
+    }
+}
 
 fn execute_read(graph: &DirGraph, source: &str, optimize: bool) -> CypherResult {
     let params = HashMap::new();
@@ -73,8 +83,8 @@ fn load_csv_create_finish_streams_across_batch_boundaries() {
         .collect::<String>();
     std::fs::write(file.path(), rows).unwrap();
     let query = parser::parse_cypher(&format!(
-        "LOAD CSV FROM 'file://{}' AS row CREATE (:Imported {{id: row[0]}}) FINISH",
-        file.path().display()
+        "LOAD CSV FROM '{}' AS row CREATE (:Imported {{id: row[0]}}) FINISH",
+        local_file_url(file.path())
     ))
     .unwrap();
     assert_eq!(
@@ -99,6 +109,18 @@ fn load_csv_create_finish_streams_across_batch_boundaries() {
     assert_eq!(
         graph.graph.node_count(),
         super::super::load_csv::BATCH_ROWS + 1
+    );
+}
+
+#[test]
+fn local_file_url_uses_an_empty_host_on_unix_and_windows_paths() {
+    assert_eq!(
+        local_file_url(Path::new("/tmp/data.csv")),
+        "file:///tmp/data.csv"
+    );
+    assert_eq!(
+        local_file_url(Path::new(r"C:\Temp\data.csv")),
+        "file:///C:/Temp/data.csv"
     );
 }
 

@@ -246,6 +246,324 @@ fn call_subquery_set_arms_share_outer_seed_without_sharing_arm_results() {
 }
 
 #[test]
+fn empty_outer_call_subquery_keeps_its_static_output_schema() {
+    let graph = DirGraph::new();
+    let params = HashMap::new();
+    let executor = CypherExecutor::with_params(&graph, &params, None);
+
+    let cases = [
+        ("MATCH (n:Missing) CALL (n) { RETURN n AS z }", vec!["z"]),
+        ("MATCH (n:Missing) CALL () { RETURN 1 AS z }", vec!["z"]),
+        ("MATCH (n:Missing) CALL { RETURN 1 AS z }", vec!["z"]),
+        (
+            "MATCH (n:Missing) WITH n AS kept CALL (kept) { RETURN kept AS z }",
+            vec!["kept", "z"],
+        ),
+        (
+            "MATCH (n:Missing) CALL () { RETURN 1 AS b, 2 AS a }",
+            vec!["b", "a"],
+        ),
+    ];
+    for (source, expected) in cases {
+        let query = parser::parse_cypher(source).unwrap();
+        let result = executor.execute(&query).unwrap();
+        assert!(result.rows.is_empty(), "{source}");
+        assert_eq!(result.columns, expected, "{source}");
+    }
+
+    for operator in ["UNION", "UNION ALL", "INTERSECT", "EXCEPT"] {
+        let source = format!(
+            "MATCH (:Missing) CALL () {{ RETURN 1 AS b, 2 AS a {operator} RETURN 3 AS b, 4 AS a }}"
+        );
+        let query = parser::parse_cypher(&source).unwrap();
+        let result = executor.execute(&query).unwrap();
+        assert!(result.rows.is_empty(), "{operator}");
+        assert_eq!(result.columns, vec!["b", "a"], "{operator}");
+    }
+
+    for (source, expected) in [
+        (
+            "WITH 1 AS x CALL () { MATCH (:Missing) RETURN 1 AS z }",
+            vec!["x", "z"],
+        ),
+        (
+            "WITH 1 AS seed CALL () { MATCH (n:Missing) RETURN * }",
+            vec!["seed", "n"],
+        ),
+        (
+            "WITH 1 AS seed CALL () { WITH 2 AS a FILTER false RETURN * }",
+            vec!["seed", "a"],
+        ),
+        (
+            "WITH 1 AS seed CALL () { UNWIND [] AS a RETURN * }",
+            vec!["seed", "a"],
+        ),
+        (
+            "WITH 1 AS seed FILTER false CALL () { WITH 2 AS b, 3 AS a RETURN * \
+             UNION ALL WITH 4 AS b, 5 AS a RETURN * }",
+            vec!["seed", "b", "a"],
+        ),
+    ] {
+        let query = parser::parse_cypher(source).unwrap();
+        let result = executor.execute(&query).unwrap();
+        assert!(result.rows.is_empty(), "{source}");
+        assert_eq!(result.columns, expected, "{source}");
+    }
+
+    for (source, collision) in [
+        (
+            "WITH 1 AS a FILTER false CALL () { WITH 2 AS a RETURN * }",
+            "`a`",
+        ),
+        (
+            "WITH 1 AS x FILTER false CALL (x) { WITH 2 AS a RETURN * }",
+            "`x`",
+        ),
+    ] {
+        let query = parser::parse_cypher(source).unwrap();
+        let error = executor.execute(&query).unwrap_err();
+        assert!(error.contains(collision), "{source}: {error}");
+    }
+
+    let error = parser::parse_cypher(
+        "WITH 1 AS seed FILTER false CALL () { WITH 2 AS a RETURN * \
+         UNION ALL WITH 2 AS b RETURN * }",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("same return column names"), "{error}");
+}
+
+#[test]
+fn subquery_return_star_schema_is_independent_of_rows_and_binding_families() {
+    let empty = DirGraph::new();
+    let populated = build_test_graph();
+    let params = HashMap::new();
+    let path_query = "CALL () { MATCH p=(a)-[r:KNOWS]->(b) RETURN * }";
+
+    let empty_result = CypherExecutor::with_params(&empty, &params, None)
+        .execute(&parser::parse_cypher(path_query).unwrap())
+        .unwrap();
+    assert_eq!(empty_result.columns, vec!["a", "r", "b", "p"]);
+    assert!(empty_result.rows.is_empty());
+
+    let populated_executor = CypherExecutor::with_params(&populated, &params, None);
+    let path_result = populated_executor
+        .execute(&parser::parse_cypher(path_query).unwrap())
+        .unwrap();
+    assert_eq!(path_result.columns, vec!["a", "r", "b", "p"]);
+    assert_eq!(path_result.rows.len(), 1);
+    assert!(matches!(path_result.rows[0][0], Value::Node(_)));
+    assert!(matches!(path_result.rows[0][1], Value::Relationship(_)));
+    assert!(matches!(path_result.rows[0][2], Value::Node(_)));
+    assert!(matches!(path_result.rows[0][3], Value::Path(_)));
+
+    let filtered = populated_executor
+        .execute(
+            &parser::parse_cypher("CALL () { MATCH p=(a)-[r:KNOWS]->(b) FILTER false RETURN * }")
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(filtered.columns, vec!["a", "r", "b", "p"]);
+    assert!(filtered.rows.is_empty());
+
+    for graph in [&empty, &populated] {
+        let result = CypherExecutor::with_params(graph, &params, None)
+            .execute(
+                &parser::parse_cypher("CALL () { MATCH (a)-[r:KNOWS]->(b) RETURN * }").unwrap(),
+            )
+            .unwrap();
+        assert_eq!(result.columns, vec!["a", "r", "b"]);
+    }
+
+    for (yield_items, expected) in [
+        ("node AS n, score AS s", vec!["n", "s"]),
+        ("score AS s, node AS n", vec!["s", "n"]),
+    ] {
+        let source = format!("CALL () {{ CALL pagerank() YIELD {yield_items} RETURN * }}");
+        for graph in [&empty, &populated] {
+            let result = CypherExecutor::with_params(graph, &params, None)
+                .execute(&parser::parse_cypher(&source).unwrap())
+                .unwrap();
+            assert_eq!(result.columns, expected, "{source}");
+        }
+    }
+
+    let nested = populated_executor
+        .execute(
+            &parser::parse_cypher(
+                "CALL () { CALL () { MATCH p=(a)-[r:KNOWS]->(b) RETURN * } RETURN * }",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(nested.columns, vec!["a", "r", "b", "p"]);
+    assert!(matches!(nested.rows[0][3], Value::Path(_)));
+
+    let nested_explicit = populated_executor
+        .execute(
+            &parser::parse_cypher(
+                "CALL () { CALL () { WITH 2 AS b, 3 AS a RETURN b, a } RETURN * }",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(nested_explicit.columns, vec!["b", "a"]);
+}
+
+#[test]
+fn subquery_return_star_set_arms_preserve_paths_and_distinct() {
+    let populated = build_test_graph();
+    let params = HashMap::new();
+
+    for (operator, populated_rows) in [
+        ("UNION ALL", 2),
+        ("UNION", 1),
+        ("INTERSECT", 1),
+        ("EXCEPT", 0),
+    ] {
+        for (left, right) in [
+            ("RETURN a, r, b, p", "RETURN *"),
+            ("RETURN *", "RETURN a, r, b, p"),
+            ("RETURN *", "RETURN *"),
+        ] {
+            let source = format!(
+                "CALL () {{ MATCH p=(a)-[r:KNOWS]->(b) {left} \
+                 {operator} MATCH p=(a)-[r:KNOWS]->(b) {right} }}"
+            );
+            for (graph, expected_rows) in [(&DirGraph::new(), 0), (&populated, populated_rows)] {
+                let result = CypherExecutor::with_params(graph, &params, None)
+                    .execute(&parser::parse_cypher(&source).unwrap())
+                    .unwrap();
+                assert_eq!(result.columns, vec!["a", "r", "b", "p"], "{source}");
+                assert_eq!(result.rows.len(), expected_rows, "{source}");
+                assert!(
+                    result
+                        .rows
+                        .iter()
+                        .all(|row| matches!(row[3], Value::Path(_))),
+                    "{source}"
+                );
+            }
+        }
+    }
+
+    let mut parallel = build_test_graph();
+    let duplicate = EdgeData::new("KNOWS".to_string(), HashMap::new(), &mut parallel.interner);
+    parallel.graph.add_edge(
+        petgraph::graph::NodeIndex::new(0),
+        petgraph::graph::NodeIndex::new(1),
+        duplicate,
+    );
+    let distinct = CypherExecutor::with_params(&parallel, &params, None)
+        .execute(
+            &parser::parse_cypher("CALL () { MATCH p=(a)-[:KNOWS]->(b) RETURN DISTINCT * }")
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(distinct.columns, vec!["a", "b", "p"]);
+    assert_eq!(distinct.rows.len(), 2);
+    assert!(distinct
+        .rows
+        .iter()
+        .all(|row| matches!(row[2], Value::Path(_))));
+}
+
+#[test]
+fn subquery_return_star_scope_and_set_order_are_static() {
+    let empty = DirGraph::new();
+    let populated = build_test_graph();
+    let params = HashMap::new();
+
+    for (items, expected) in [("[1]", 1), ("[]", 0)] {
+        let source = format!("CALL () {{ WITH {items} AS xs UNWIND xs AS x RETURN * }}");
+        let result = CypherExecutor::with_params(&empty, &params, None)
+            .execute(&parser::parse_cypher(&source).unwrap())
+            .unwrap();
+        assert_eq!(result.columns, vec!["xs", "x"]);
+        assert_eq!(result.rows.len(), expected);
+    }
+
+    for (left, right) in [
+        ("RETURN *", "RETURN n, s"),
+        ("RETURN n, s", "RETURN *"),
+        ("RETURN *", "RETURN *"),
+    ] {
+        let source = format!(
+            "CALL () {{ CALL pagerank() YIELD node AS n, score AS s {left} \
+             UNION ALL CALL pagerank() YIELD node AS n, score AS s {right} }}"
+        );
+        for (graph, expected_rows) in [(&empty, 0), (&populated, 4)] {
+            let result = CypherExecutor::with_params(graph, &params, None)
+                .execute(&parser::parse_cypher(&source).unwrap())
+                .unwrap();
+            assert_eq!(result.columns, vec!["n", "s"], "{source}");
+            assert_eq!(result.rows.len(), expected_rows, "{source}");
+        }
+    }
+
+    let graph_stats = CypherExecutor::with_params(&empty, &params, None)
+        .execute(
+            &parser::parse_cypher(
+                "CALL () { CALL db.graph_stats() YIELD edge_count AS e, node_count AS n \
+                 RETURN * }",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(graph_stats.columns, vec!["e", "n"]);
+
+    let error = parser::parse_cypher(
+        "CALL () { CALL pagerank() YIELD node AS n, score AS s RETURN * \
+         UNION ALL CALL pagerank() YIELD score AS s, node AS n RETURN * }",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("same return column names"), "{error}");
+
+    for variable in ["a", "r", "p"] {
+        for filter in ["", "FILTER false"] {
+            let source = format!(
+                "MATCH p=(a)-[r:KNOWS]->(b) {filter} \
+                 CALL ({variable}) {{ WITH 1 AS local RETURN * }}"
+            );
+            let error = CypherExecutor::with_params(&populated, &params, None)
+                .execute(&parser::parse_cypher(&source).unwrap())
+                .unwrap_err();
+            assert!(
+                error.contains(&format!("`{variable}`")),
+                "{source}: {error}"
+            );
+        }
+    }
+
+    for filter in ["", "FILTER false"] {
+        let source = format!("WITH 1 AS x {filter} CALL (x) {{ WITH 2 AS local RETURN * }}");
+        let error = CypherExecutor::with_params(&empty, &params, None)
+            .execute(&parser::parse_cypher(&source).unwrap())
+            .unwrap_err();
+        assert!(error.contains("`x`"), "{source}: {error}");
+    }
+
+    let legacy = CypherExecutor::with_params(&populated, &params, None)
+        .execute(
+            &parser::parse_cypher(
+                "MATCH p=(a)-[:KNOWS]->(b) CALL { WITH p WITH 1 AS local RETURN * }",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(legacy.columns, vec!["local"]);
+
+    let legacy_collision = CypherExecutor::with_params(&populated, &params, None)
+        .execute(
+            &parser::parse_cypher("MATCH p=(a)-[:KNOWS]->(b) CALL { WITH p RETURN * }").unwrap(),
+        )
+        .unwrap_err();
+    assert!(legacy_collision.contains("`p`"), "{legacy_collision}");
+}
+
+#[test]
 fn periodic_interrupt_reaches_seeded_call_subquery_right_arm() {
     let graph = DirGraph::new();
     let params = HashMap::new();

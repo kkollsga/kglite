@@ -395,7 +395,29 @@ impl CypherExecutor<'_> {
             }
         } else if let Clause::Return(r) = clause {
             let retain = order_by_scope_after(&query.clauses, index);
-            self.execute_return_retaining(r, result_set, &retain)
+            if let Some(set_seed) = set_seed.filter(|_| {
+                r.items.len() == 1
+                    && matches!(r.items[0].expression, Expression::Star)
+                    && r.items[0].alias.is_none()
+            }) {
+                let globals = preserved.map(|(_, names)| names).unwrap_or(&[]);
+                let columns = super::call_subquery::subquery_arm_output_columns(
+                    &query.clauses,
+                    set_seed.imports,
+                    globals,
+                )?;
+                let mut expanded = r.clone();
+                expanded.items = columns
+                    .into_iter()
+                    .map(|name| ReturnItem {
+                        expression: Expression::Variable(name.clone()),
+                        alias: Some(name),
+                    })
+                    .collect();
+                self.execute_return_retaining(&expanded, result_set, &retain)
+            } else {
+                self.execute_return_retaining(r, result_set, &retain)
+            }
         } else {
             self.execute_single_clause(clause, result_set)
         }

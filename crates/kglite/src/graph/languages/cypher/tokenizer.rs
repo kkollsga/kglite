@@ -173,6 +173,28 @@ fn lex_parameter(chars: &[char], at: usize) -> Result<(String, usize, usize), St
     Ok((name, start, i))
 }
 
+/// Token for punctuation whose spelling and width are both one character.
+fn single_char_token(ch: char) -> Option<CypherToken> {
+    Some(match ch {
+        '(' => CypherToken::LParen,
+        ')' => CypherToken::RParen,
+        '[' => CypherToken::LBracket,
+        ']' => CypherToken::RBracket,
+        '{' => CypherToken::LBrace,
+        '}' => CypherToken::RBrace,
+        ':' => CypherToken::Colon,
+        ',' => CypherToken::Comma,
+        ';' => CypherToken::Semicolon,
+        '*' => CypherToken::Star,
+        '+' => CypherToken::Plus,
+        '/' => CypherToken::Slash,
+        '%' => CypherToken::Percent,
+        '&' => CypherToken::Ampersand,
+        '-' => CypherToken::Dash,
+        _ => return None,
+    })
+}
+
 /// Same as [`tokenize_cypher`] but returns the **char-position** at
 /// the start of each token, alongside the token — plus the verbatim
 /// keyword lexeme table (see [`TokenizedCypher`]). 0.9.0 Cluster 3 —
@@ -203,63 +225,13 @@ pub fn tokenize_cypher_with_positions(input: &str) -> Result<TokenizedCypher, St
             continue;
         }
 
+        if let Some(token) = single_char_token(ch) {
+            tokens.push((token, start));
+            i += 1;
+            continue;
+        }
+
         match ch {
-            '(' => {
-                tokens.push((CypherToken::LParen, start));
-                i += 1;
-            }
-            ')' => {
-                tokens.push((CypherToken::RParen, start));
-                i += 1;
-            }
-            '[' => {
-                tokens.push((CypherToken::LBracket, start));
-                i += 1;
-            }
-            ']' => {
-                tokens.push((CypherToken::RBracket, start));
-                i += 1;
-            }
-            '{' => {
-                tokens.push((CypherToken::LBrace, start));
-                i += 1;
-            }
-            '}' => {
-                tokens.push((CypherToken::RBrace, start));
-                i += 1;
-            }
-            ':' => {
-                tokens.push((CypherToken::Colon, start));
-                i += 1;
-            }
-            ',' => {
-                tokens.push((CypherToken::Comma, start));
-                i += 1;
-            }
-            ';' => {
-                tokens.push((CypherToken::Semicolon, start));
-                i += 1;
-            }
-            '*' => {
-                tokens.push((CypherToken::Star, start));
-                i += 1;
-            }
-            '+' => {
-                tokens.push((CypherToken::Plus, start));
-                i += 1;
-            }
-            '/' => {
-                tokens.push((CypherToken::Slash, start));
-                i += 1;
-            }
-            '%' => {
-                tokens.push((CypherToken::Percent, start));
-                i += 1;
-            }
-            '&' => {
-                tokens.push((CypherToken::Ampersand, start));
-                i += 1;
-            }
             '|' => {
                 if i + 1 < len && chars[i + 1] == '|' {
                     tokens.push((CypherToken::DoublePipe, start));
@@ -277,13 +249,6 @@ pub fn tokenize_cypher_with_positions(input: &str) -> Result<TokenizedCypher, St
                     tokens.push((CypherToken::Equals, start));
                     i += 1;
                 }
-            }
-
-            '-' => {
-                // Could be dash (edge syntax) or negative number in some contexts,
-                // but we always tokenize as Dash and let the parser handle unary negation
-                tokens.push((CypherToken::Dash, start));
-                i += 1;
             }
 
             '<' => {

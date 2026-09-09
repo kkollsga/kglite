@@ -47,8 +47,13 @@ impl<'a> CypherExecutor<'a> {
                 ));
             }
         }
-        for col in subquery_output_columns(body) {
-            if declared.contains(&col) {
+        let globally_scoped = matches!(
+            import,
+            CallSubqueryImport::Named(_) | CallSubqueryImport::All
+        );
+        let output_columns = subquery_output_columns(body, &imports, globally_scoped)?;
+        for col in &output_columns {
+            if declared.contains(col) {
                 return Err(format!(
                     "CALL {{ }} subquery returns a column `{col}` that already exists in the \
                      outer scope; rename the subquery's RETURN alias"
@@ -56,11 +61,14 @@ impl<'a> CypherExecutor<'a> {
             }
         }
 
-        let globally_scoped = matches!(
-            import,
-            CallSubqueryImport::Named(_) | CallSubqueryImport::All
-        );
-        self.execute_per_row_call_subquery(&imports, globally_scoped, body, result_set, declared)
+        self.execute_per_row_call_subquery(
+            &imports,
+            globally_scoped,
+            body,
+            &output_columns,
+            result_set,
+            declared,
+        )
     }
 
     /// Correlated `CALL { WITH … }`: run the planned-once body per outer
@@ -72,17 +80,24 @@ impl<'a> CypherExecutor<'a> {
         import: &[String],
         globally_scoped: bool,
         body: &CypherQuery,
+        output_columns: &[String],
         result_set: ResultSet,
         declared: &std::collections::HashSet<String>,
     ) -> Result<ResultSet, String> {
         let outer_rows = result_set.rows;
 
-        // No outer rows → nothing to drive the subquery. Carry columns
-        // forward so a later RETURN still type-checks; the body never runs.
+        // No outer rows → nothing drives the body, but its statically declared
+        // RETURN columns remain part of the result schema.
         if outer_rows.is_empty() {
+            let mut columns = result_set.columns;
+            for col in output_columns {
+                if !columns.contains(col) {
+                    columns.push(col.clone());
+                }
+            }
             return Ok(ResultSet {
                 rows: Vec::new(),
-                columns: result_set.columns,
+                columns,
                 lazy_return_items: None,
             });
         }
@@ -158,7 +173,12 @@ impl<'a> CypherExecutor<'a> {
             // validation already checked collisions, while this runtime
             // guard protects callers that construct ASTs directly.
             if sub_columns.is_none() {
-                for col in &body_result.columns {
+                let columns = if body_result.rows.is_empty() {
+                    output_columns
+                } else {
+                    &body_result.columns
+                };
+                for col in columns {
                     if declared.contains(col) {
                         return Err(format!(
                             "CALL {{ }} subquery returns a column `{col}` that already exists in \
@@ -167,7 +187,7 @@ impl<'a> CypherExecutor<'a> {
                         ));
                     }
                 }
-                sub_columns = Some(body_result.columns.clone());
+                sub_columns = Some(columns.to_vec());
             }
             let cols = sub_columns.as_deref().unwrap();
 
@@ -310,21 +330,128 @@ impl<'a> CypherExecutor<'a> {
     }
 }
 
-fn subquery_output_columns(body: &CypherQuery) -> Vec<String> {
-    body.clauses
+pub(crate) fn subquery_output_columns(
+    body: &CypherQuery,
+    imports: &[String],
+    globally_scoped: bool,
+) -> Result<Vec<String>, String> {
+    let globals = if globally_scoped { imports } else { &[] };
+    subquery_set_output_columns(&body.clauses, imports, globals)
+}
+
+pub(crate) fn subquery_set_output_columns(
+    clauses: &[Clause],
+    imports: &[String],
+    globals: &[String],
+) -> Result<Vec<String>, String> {
+    let columns = subquery_arm_output_columns(clauses, imports, globals)?;
+    if let Some(Clause::Union(set)) = clauses.iter().find(|c| matches!(c, Clause::Union(_))) {
+        let right = subquery_set_output_columns(&set.query.clauses, imports, globals)?;
+        if columns != right {
+            let operator = match set.kind {
+                SetOpKind::Union => "UNION",
+                SetOpKind::Intersect => "INTERSECT",
+                SetOpKind::Except => "EXCEPT",
+            };
+            return Err(format!(
+                "All sub queries in a {operator} must have the same return column names \
+                 (left side {columns:?} != right side {right:?})."
+            ));
+        }
+    }
+    Ok(columns)
+}
+
+pub(crate) fn subquery_arm_output_columns(
+    clauses: &[Clause],
+    imports: &[String],
+    globals: &[String],
+) -> Result<Vec<String>, String> {
+    let mut scope = imports.to_vec();
+    for clause in clauses {
+        match clause {
+            Clause::Return(ret) => {
+                if ret.items.len() == 1
+                    && matches!(ret.items[0].expression, Expression::Star)
+                    && ret.items[0].alias.is_none()
+                {
+                    return Ok(scope);
+                }
+                return Ok(ret.items.iter().map(return_item_column_name).collect());
+            }
+            Clause::Union(_) => break,
+            Clause::With(with) => project_static_scope(&mut scope, with, globals),
+            Clause::Match(matched) | Clause::OptionalMatch(matched) => {
+                extend_match_scope(&mut scope, matched)
+            }
+            Clause::Unwind(unwind) => push_unique(&mut scope, &unwind.alias),
+            Clause::LoadCsv(load) => push_unique(&mut scope, &load.variable),
+            Clause::Call(call) => {
+                for item in &call.yield_items {
+                    push_unique(&mut scope, item.alias.as_ref().unwrap_or(&item.name));
+                }
+            }
+            Clause::CallSubquery { import, body } => {
+                let nested_imports = match import {
+                    CallSubqueryImport::Legacy(names) | CallSubqueryImport::Named(names) => {
+                        names.clone()
+                    }
+                    CallSubqueryImport::All => scope.clone(),
+                    CallSubqueryImport::Empty => Vec::new(),
+                };
+                let nested_globals = matches!(
+                    import,
+                    CallSubqueryImport::Named(_) | CallSubqueryImport::All
+                );
+                for column in subquery_output_columns(body, &nested_imports, nested_globals)? {
+                    push_unique(&mut scope, &column);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(Vec::new())
+}
+
+fn project_static_scope(scope: &mut Vec<String>, with: &WithClause, globals: &[String]) {
+    if !with
+        .items
         .iter()
-        .rev()
-        .find_map(|clause| match clause {
-            Clause::Return(return_clause) => Some(
-                return_clause
-                    .items
-                    .iter()
-                    .map(return_item_column_name)
-                    .collect(),
-            ),
-            _ => None,
-        })
-        .unwrap_or_default()
+        .any(|item| matches!(item.expression, Expression::Star))
+    {
+        scope.clear();
+    }
+    for item in &with.items {
+        if !matches!(item.expression, Expression::Star) {
+            push_unique(scope, &return_item_column_name(item));
+        }
+    }
+    for global in globals {
+        push_unique(scope, global);
+    }
+}
+
+fn extend_match_scope(scope: &mut Vec<String>, matched: &MatchClause) {
+    for pattern in &matched.patterns {
+        for element in &pattern.elements {
+            let variable = match element {
+                PatternElement::Node(node) => node.variable.as_ref(),
+                PatternElement::Edge(edge) => edge.variable.as_ref(),
+            };
+            if let Some(variable) = variable {
+                push_unique(scope, variable);
+            }
+        }
+    }
+    for path in &matched.path_assignments {
+        push_unique(scope, &path.variable);
+    }
+}
+
+fn push_unique(scope: &mut Vec<String>, name: &str) {
+    if !scope.iter().any(|existing| existing == name) {
+        scope.push(name.to_string());
+    }
 }
 
 /// Splice the subquery's RETURN columns into an existing outer row's

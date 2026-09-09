@@ -602,16 +602,22 @@ fn validate_call_subquery_scope(
     } else {
         validate_scope_with_globals(body, &imported, body_globals)?;
     }
-    let Some(Clause::Return(return_clause)) = body
-        .clauses
-        .iter()
-        .rev()
-        .find(|clause| matches!(clause, Clause::Return(_)))
-    else {
-        return Ok(());
-    };
-    for item in &return_clause.items {
-        let name = super::super::executor::return_item_column_name(item);
+    let mut imported_names: Vec<String> = imported.iter().cloned().collect();
+    imported_names.sort();
+    let globally_scoped = matches!(
+        import,
+        CallSubqueryImport::Named(_) | CallSubqueryImport::All
+    );
+    let output_columns = super::super::executor::call_subquery::subquery_output_columns(
+        body,
+        &imported_names,
+        globally_scoped,
+    )
+    .map_err(|message| SchemaError {
+        kind: SchemaErrorKind::UndefinedVariable,
+        message,
+    })?;
+    for name in output_columns {
         if scope.contains(&name) {
             return Err(SchemaError {
                 kind: SchemaErrorKind::UndefinedVariable,
@@ -1689,6 +1695,32 @@ mod tests {
         let err = validate_schema(&q, &g).unwrap_err();
         assert_eq!(err.kind, SchemaErrorKind::UnknownProperty);
         assert!(err.message.contains("age"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn call_subquery_return_star_declares_outputs_before_runtime_rows_exist() {
+        let graph = graph_with_schema();
+        let valid = parse_cypher(
+            "WITH 1 AS seed FILTER false CALL () { WITH 2 AS a RETURN * } RETURN seed, a",
+        )
+        .unwrap();
+        assert!(validate_schema(&valid, &graph).is_ok());
+
+        for source in [
+            "WITH 1 AS a FILTER false CALL () { WITH 2 AS a RETURN * }",
+            "WITH 1 AS x FILTER false CALL (x) { WITH 2 AS a RETURN * }",
+        ] {
+            let query = parse_cypher(source).unwrap();
+            assert!(validate_schema(&query, &graph).is_err(), "{source}");
+        }
+
+        let error = parse_cypher(
+            "WITH 1 AS seed FILTER false CALL () { WITH 2 AS a RETURN * \
+             UNION ALL WITH 2 AS b RETURN * }",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("same return column names"), "{error}");
     }
 
     #[test]
