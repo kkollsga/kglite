@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import socket
 import subprocess
 import tempfile
+import time
 
 import kglite
 
@@ -500,6 +502,45 @@ class KgliteFluent(Adapter):
         raise Skip("louvain_communities() takes no node-type scope; to_subgraph() would time a graph copy")
 
 
+_BOLT_BINARY = Path(__file__).resolve().parents[3] / "target" / "release" / "kglite-bolt-server"
+
+
+def _spawn_local_bolt(fixture: Path) -> tuple[subprocess.Popen, str]:
+    port = _free_port()
+    proc = subprocess.Popen(
+        [
+            str(_BOLT_BINARY),
+            "--graph",
+            str(fixture),
+            "--bind",
+            "127.0.0.1",
+            "--port",
+            str(port),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            stderr = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
+            raise RuntimeError(f"bolt server exited before listening: {stderr}")
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                return proc, f"bolt://127.0.0.1:{port}"
+        except (ConnectionRefusedError, OSError):
+            time.sleep(0.1)
+    proc.kill()
+    proc.wait(timeout=5)
+    raise RuntimeError(f"bolt server never started listening on 127.0.0.1:{port}")
+
+
+def _stop_local_bolt(proc: subprocess.Popen) -> None:
+    if proc.poll() is None:
+        proc.kill()
+    proc.wait(timeout=5)
+
+
 class KgliteBolt(KgliteCypher):
     """Same Cypher workloads sent over the Bolt wire protocol via the
     neo4j Python driver. Reveals the wire/serialisation tax vs the direct
@@ -512,10 +553,6 @@ class KgliteBolt(KgliteCypher):
         return kglite.__version__
 
     def available(self) -> tuple[bool, str]:
-        try:
-            from tests.conftest import _BOLT_BINARY  # noqa
-        except Exception as e:  # pragma: no cover
-            return False, f"conftest import failed: {e}"
         if not _BOLT_BINARY.exists():
             return False, f"bolt binary not built at {_BOLT_BINARY}"
         try:
@@ -537,9 +574,6 @@ class KgliteBolt(KgliteCypher):
     def build(self, ds: Dataset) -> None:
         import neo4j
 
-        from tests.conftest import _spawn_bolt_server, _teardown_bolt_server
-
-        self._teardown_fn = _teardown_bolt_server
         g = build_kglite_graph(ds)
         # Persist the embedding store into the .kgl so the server loads it —
         # then vector_score works over the Bolt wire (no in-process API needed).
@@ -552,7 +586,7 @@ class KgliteBolt(KgliteCypher):
         self._tmpdir = tempfile.mkdtemp(prefix="graphsuite_bolt_")
         fixture = Path(self._tmpdir) / "graph.kgl"
         g.save(str(fixture))
-        self._proc, url = _spawn_bolt_server(fixture)
+        self._proc, url = _spawn_local_bolt(fixture)
         self._driver = neo4j.GraphDatabase.driver(url, auth=("neo4j", "password"))
         self._session = self._driver.session()
         self._mut = 0
@@ -563,7 +597,7 @@ class KgliteBolt(KgliteCypher):
             self._session.close()
             self._driver.close()
         finally:
-            self._teardown_fn(self._proc)
+            _stop_local_bolt(self._proc)
 
     def _q(self, query, **params):
         # mimic the ResultView surface used by the parent class
