@@ -519,82 +519,109 @@ fn validate_scope_with_globals(
                 variable,
                 list,
                 body,
-            } => {
-                validate_expression_scope(list, &scope)?;
-                let mut inner = scope.clone();
-                inner.insert(variable.clone());
-                validate_scope(
-                    &CypherQuery {
-                        clauses: body.clone(),
-                        explain: false,
-                        profile: false,
-                        output_format: OutputFormat::Default,
-                        optimizer_tags: Vec::new(),
-                    },
-                    &inner,
-                )?;
-            }
-            Clause::Call(call) => {
-                for (_, expression) in &call.parameters {
-                    validate_expression_scope(expression, &scope)?;
-                }
-                for item in &call.yield_items {
-                    let name = item.alias.as_ref().unwrap_or(&item.name);
-                    reject_global_redeclaration(name, globals)?;
-                    if scope.contains(name) {
-                        return Err(SchemaError {
-                            kind: SchemaErrorKind::UndefinedVariable,
-                            message: format!(
-                                "CALL procedure YIELD column `{name}` already exists in the outer \
-                                 scope; rename it with YIELD ... AS ..."
-                            ),
-                        });
-                    }
-                    scope.insert(name.clone());
-                }
-            }
+            } => validate_foreach_scope(variable, list, body, &scope)?,
+            Clause::Call(call) => validate_call_scope(call, &mut scope, globals)?,
             Clause::CallSubquery { import, body } => {
-                let imported = resolve_subquery_imports(import, &scope)?;
-                let no_globals = HashSet::new();
-                let body_globals = if matches!(
-                    import,
-                    CallSubqueryImport::Named(_) | CallSubqueryImport::All
-                ) {
-                    &imported
-                } else {
-                    &no_globals
-                };
-                if matches!(import, CallSubqueryImport::Legacy(_))
-                    && body.clauses.iter().any(|c| matches!(c, Clause::Union(_)))
-                {
-                    validate_legacy_set_scope(body, &imported)?;
-                } else {
-                    validate_scope_with_globals(body, &imported, body_globals)?;
-                }
-                if let Some(Clause::Return(return_clause)) = body
-                    .clauses
-                    .iter()
-                    .rev()
-                    .find(|clause| matches!(clause, Clause::Return(_)))
-                {
-                    for item in &return_clause.items {
-                        let name = super::super::executor::return_item_column_name(item);
-                        if scope.contains(&name) {
-                            return Err(SchemaError {
-                                kind: SchemaErrorKind::UndefinedVariable,
-                                message: format!(
-                                    "CALL {{ }} subquery returns a column `{name}` that already \
-                                     exists in the outer scope; rename the subquery's RETURN alias"
-                                ),
-                            });
-                        }
-                        scope.insert(name);
-                    }
-                }
+                validate_call_subquery_scope(import, body, &mut scope)?;
             }
             // Physical clauses exist only after validation.
             _ => {}
         }
+    }
+    Ok(())
+}
+
+fn validate_foreach_scope(
+    variable: &str,
+    list: &Expression,
+    body: &[Clause],
+    scope: &HashSet<String>,
+) -> Result<(), SchemaError> {
+    validate_expression_scope(list, scope)?;
+    let mut inner = scope.clone();
+    inner.insert(variable.to_string());
+    validate_scope(
+        &CypherQuery {
+            clauses: body.to_vec(),
+            explain: false,
+            profile: false,
+            output_format: OutputFormat::Default,
+            optimizer_tags: Vec::new(),
+        },
+        &inner,
+    )
+}
+
+fn validate_call_scope(
+    call: &CallClause,
+    scope: &mut HashSet<String>,
+    globals: &HashSet<String>,
+) -> Result<(), SchemaError> {
+    for (_, expression) in &call.parameters {
+        validate_expression_scope(expression, scope)?;
+    }
+    for item in &call.yield_items {
+        let name = item.alias.as_ref().unwrap_or(&item.name);
+        reject_global_redeclaration(name, globals)?;
+        if scope.contains(name) {
+            return Err(SchemaError {
+                kind: SchemaErrorKind::UndefinedVariable,
+                message: format!(
+                    "CALL procedure YIELD column `{name}` already exists in the outer scope; \
+                     rename it with YIELD ... AS ..."
+                ),
+            });
+        }
+        scope.insert(name.clone());
+    }
+    Ok(())
+}
+
+fn validate_call_subquery_scope(
+    import: &CallSubqueryImport,
+    body: &CypherQuery,
+    scope: &mut HashSet<String>,
+) -> Result<(), SchemaError> {
+    let imported = resolve_subquery_imports(import, scope)?;
+    let no_globals = HashSet::new();
+    let body_globals = if matches!(
+        import,
+        CallSubqueryImport::Named(_) | CallSubqueryImport::All
+    ) {
+        &imported
+    } else {
+        &no_globals
+    };
+    let legacy_set = matches!(import, CallSubqueryImport::Legacy(_))
+        && body
+            .clauses
+            .iter()
+            .any(|clause| matches!(clause, Clause::Union(_)));
+    if legacy_set {
+        validate_legacy_set_scope(body, &imported)?;
+    } else {
+        validate_scope_with_globals(body, &imported, body_globals)?;
+    }
+    let Some(Clause::Return(return_clause)) = body
+        .clauses
+        .iter()
+        .rev()
+        .find(|clause| matches!(clause, Clause::Return(_)))
+    else {
+        return Ok(());
+    };
+    for item in &return_clause.items {
+        let name = super::super::executor::return_item_column_name(item);
+        if scope.contains(&name) {
+            return Err(SchemaError {
+                kind: SchemaErrorKind::UndefinedVariable,
+                message: format!(
+                    "CALL {{ }} subquery returns a column `{name}` that already exists in the \
+                     outer scope; rename the subquery's RETURN alias"
+                ),
+            });
+        }
+        scope.insert(name);
     }
     Ok(())
 }
@@ -679,7 +706,7 @@ fn reject_global_redeclarations_in_with(
     globals: &HashSet<String>,
 ) -> Result<(), SchemaError> {
     for item in &with_clause.items {
-        let Some(name) = item.alias.as_ref().or_else(|| match &item.expression {
+        let Some(name) = item.alias.as_ref().or(match &item.expression {
             Expression::Variable(name) => Some(name),
             _ => None,
         }) else {

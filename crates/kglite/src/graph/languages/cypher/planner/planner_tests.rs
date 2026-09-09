@@ -1,6 +1,6 @@
 use super::*;
 use crate::graph::core::pattern_matching::pattern::{PropOp, RelEdgePredicate};
-use crate::graph::core::pattern_matching::PropertyMatcher;
+use crate::graph::core::pattern_matching::{PatternElement, PropertyMatcher};
 use crate::graph::languages::cypher::parser::parse_cypher;
 
 #[test]

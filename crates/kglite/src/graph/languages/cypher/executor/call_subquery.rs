@@ -116,10 +116,11 @@ impl<'a> CypherExecutor<'a> {
         let mut combined_rows: Vec<ResultRow> = Vec::new();
         let mut sub_columns: Option<Vec<String>> = None;
 
-        for outer_row in outer_rows.into_iter() {
-            // Deadline check inside the per-row loop — a 100k-outer-row
-            // correlated CALL must remain cancellable.
-            self.check_deadline()?;
+        for (outer_index, outer_row) in outer_rows.into_iter().enumerate() {
+            // Poll the driving-row loop itself: a body that returns one row
+            // never enters the cloned-subrow loop below, but a large join
+            // must still observe both deadlines and cooperative cancellation.
+            self.check_interrupt_periodic(outer_index)?;
 
             // NULL-anchor handling (§1.3): if an imported variable that the
             // current set arm uses as a pattern anchor is NULL on this outer row (e.g.

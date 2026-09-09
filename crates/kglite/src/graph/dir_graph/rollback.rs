@@ -282,7 +282,7 @@ impl CdcCheckpoint {
             let log = handle
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone();
+                .isolated_copy();
             std::sync::Arc::new(std::sync::Mutex::new(log))
         });
         let recording = graph.graph.recording_state();

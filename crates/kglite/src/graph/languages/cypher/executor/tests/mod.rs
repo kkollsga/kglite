@@ -146,7 +146,7 @@ fn periodic_interrupt_reaches_range_unwind_and_single_group_aggregate() {
 }
 
 #[test]
-fn periodic_interrupt_reaches_union_and_subquery_join_inner_loops() {
+fn periodic_interrupt_reaches_union_and_single_row_subquery_join_loops() {
     let graph = DirGraph::new();
     let params = HashMap::new();
     let executor = CypherExecutor::with_params(&graph, &params, None);

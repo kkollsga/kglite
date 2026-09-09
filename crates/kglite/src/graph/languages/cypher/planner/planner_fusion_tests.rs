@@ -2,6 +2,7 @@
 //! tests extracted from planner_tests.rs.
 
 use super::*;
+use crate::graph::core::pattern_matching::PatternElement;
 use crate::graph::languages::cypher::parser::parse_cypher;
 
 /// The lazy-eligibility contract, pinned as a corpus.

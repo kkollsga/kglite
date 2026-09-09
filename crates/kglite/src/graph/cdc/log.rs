@@ -127,7 +127,7 @@ pub struct CdcStatus {
 /// design decision, not an omission: persisting it would grow the file without
 /// bound and would hand a cursor from one process to a copy of the data in
 /// another, where the same `seq` means something else.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct CdcLog {
     epoch: u64,
     /// Sequence number the next published event will carry. Starts at 1, so a
@@ -147,6 +147,22 @@ impl CdcLog {
             capacity: capacity.max(1),
             enrichment,
             events: VecDeque::new(),
+        }
+    }
+
+    /// Deep-copy the ring for an isolated, tentative reconfiguration.
+    ///
+    /// This is deliberately crate-private rather than a public [`Clone`]
+    /// implementation: callers may observe a log only through its shared
+    /// handle, while statement rollback alone needs a disconnected working
+    /// copy whose evictions cannot touch that handle.
+    pub(crate) fn isolated_copy(&self) -> Self {
+        Self {
+            epoch: self.epoch,
+            next_seq: self.next_seq,
+            capacity: self.capacity,
+            enrichment: self.enrichment,
+            events: self.events.clone(),
         }
     }
 
