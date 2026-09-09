@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 import json
 from pathlib import Path
 import re
@@ -190,7 +191,10 @@ def _overclaims(text: str) -> list[str]:
         pattern = re.escape(phrase).replace(r"\ ", r"\s+")
         for match in re.finditer(pattern, lowered):
             window = lowered[max(0, match.start() - NEGATION_WINDOW) : match.start()]
-            if re.search(r"\bnot\b", window):
+            # Accept only a grammatical negation directly governing the claim,
+            # e.g. "not a Neo4j drop-in replacement". An unrelated earlier
+            # "not" must not disable the guard.
+            if re.search(r"\bnot(?:\s+[a-z0-9-]+){0,4}\s*$", window):
                 continue
             found.append(phrase)
     return found
@@ -209,7 +213,24 @@ def test_public_claim_surfaces_do_not_promise_complete_or_drop_in_compatibility(
     assert "`FOREACH (x IN list \\| ...)` | Supported" in migration
     assert "| `allShortestPaths(...)` | Not supported" not in migration
     assert "`allShortestPaths(...)`." in migration
-    assert "`datetime()` and `localdatetime()` return timestamp values" in migration
+    assert "`datetime()` and `localdatetime()` return zoneless timestamp values" in migration
+
+
+def test_overclaim_negation_must_govern_the_claim() -> None:
+    assert _overclaims("This is not a Neo4j drop-in replacement.") == []
+    assert _overclaims("This is not experimental; it is a Bolt drop-in.") == ["bolt drop-in"]
+
+
+def test_documented_timestamp_constructors_return_zoneless_values() -> None:
+    row = (
+        kglite.KnowledgeGraph()
+        .cypher("RETURN datetime('2024-01-15T10:30:00+02:00') AS utc, localdatetime('2024-01-15T10:30:00') AS local")
+        .to_list()[0]
+    )
+    assert row == {
+        "utc": datetime(2024, 1, 15, 8, 30),
+        "local": datetime(2024, 1, 15, 10, 30),
+    }
 
 
 def test_namespaced_and_flat_extension_function_are_equivalent():

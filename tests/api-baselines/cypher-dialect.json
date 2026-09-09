@@ -19,6 +19,7 @@
       "case_ids": [
         "match.undirected",
         "match.variable_length",
+        "match.all_shortest_paths",
         "create.relationship",
         "match.abbreviated_outgoing",
         "match.abbreviated_incoming",

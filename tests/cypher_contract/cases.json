@@ -434,6 +434,27 @@
       ]
     },
     {
+      "id": "match.all_shortest_paths",
+      "category": "pattern",
+      "requirement": "All shortest paths returns every minimal route and excludes a longer alternative.",
+      "setup": [
+        "CREATE (a:Route {id: 1})-[:STEP]->(b:Route {id: 2})-[:STEP]->(d:Route {id: 4})",
+        "MATCH (a:Route {id: 1}), (d:Route {id: 4}) CREATE (a)-[:STEP]->(:Route {id: 3})-[:STEP]->(d)",
+        "MATCH (a:Route {id: 1}), (d:Route {id: 4}) CREATE (a)-[:STEP]->(:Route {id: 5})-[:STEP]->(:Route {id: 6})-[:STEP]->(d)"
+      ],
+      "query": "MATCH p = allShortestPaths((a:Route {id: 1})-[:STEP*..5]->(d:Route {id: 4})) RETURN [n IN nodes(p) | n.id] AS ids, length(p) AS length ORDER BY ids",
+      "expected": [
+        {
+          "ids": [1, 2, 4],
+          "length": 2
+        },
+        {
+          "ids": [1, 3, 4],
+          "length": 2
+        }
+      ]
+    },
+    {
       "id": "match.var_length_default_cap",
       "category": "pattern",
       "requirement": "An unbounded variable-length pattern traverses at most ten hops: KGLite's runaway-query guard, an intentional divergence from unbounded traversal.",

@@ -14,6 +14,7 @@ to over time.
 | `kglite-mapped` | kglite, mmap-backed columnar | Cypher |
 | `kglite-disk`   | kglite, fully disk-backed | Cypher |
 | `kglite-bolt`   | kglite, in-memory, over the wire | Bolt protocol (neo4j driver) |
+| `kglite-bolt-docker` | kglite, containerized server | Bolt protocol (neo4j driver) |
 | `networkx`      | NetworkX (pure Python) | native API |
 | `duckdb`        | DuckDB (relational/SQL) | SQL + recursive CTEs |
 | `ladybug`       | LadybugDB (embedded graph DB) | Cypher |
@@ -21,7 +22,7 @@ to over time.
 | `igraph`        | python-igraph (C graph algos) | native API |
 | `neo4j`         | Neo4j server | Bolt (opt-in, see below) |
 
-The five kglite rows exercise large parts of kglite's surface: bulk
+The six kglite rows exercise large parts of kglite's surface: bulk
 load, the Cypher planner/executor (filter, aggregation, variable-length
 traversal, `shortestPath`, cyclic pattern match, mutations), the fluent
 surface (`select/where/traverse/statistics`, plus `shortest_path`,

@@ -387,7 +387,7 @@ Current notable function differences:
 | `point({latitude, longitude})` | Map form not supported | KGLite uses `point(lat, lon)` (**latitude-first**); WKT strings are longitude-first per OGC |
 | `point.distance(a, b)` | Use top-level `distance(a, b)` | Geodesic (WGS84); also `contains`, `intersects`, `centroid`, `area`, `perimeter`, geometry primitives (`geom_*`) — all present |
 | `duration('P1Y2M')` (ISO-8601) | Map form only | `duration({years: 1, months: 2})`; `duration.between(d1, d2)` accepts dates or timestamps and returns a months/days/seconds duration |
-| `timestamp()` | Not supported | `datetime()` and `localdatetime()` return timestamp values; there is no epoch-millisecond alias |
+| `timestamp()` | Not supported | `datetime()` and `localdatetime()` return zoneless timestamp values; an offset-bearing `datetime(str)` is normalized to naive UTC, so zoned round-trip identity is not preserved. There is no epoch-millisecond alias |
 | `toBoolean(...)` | Not supported | `CASE` / Python-side coercion |
 | Calendar-aware month diffs | Approximated (months ≈ 30 days in `DateTime ± Duration`) | Use literal dates for exact month arithmetic — see CYPHER.md "Duration semantics" |
 

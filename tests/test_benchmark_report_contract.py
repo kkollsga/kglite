@@ -7,7 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from benchmarks.competitive.graphsuite import marketing, results
+from benchmarks.competitive.graphsuite import marketing, report, results
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RESULTS = REPO_ROOT / "benchmarks" / "competitive" / "graphsuite" / "results.json"
@@ -149,3 +149,37 @@ def test_public_report_calls_missing_work_not_exercised(monkeypatch) -> None:
     assert "**Total**" not in report
     assert "missing work is not estimated" in report
     assert "percentile" not in report
+
+
+def test_public_report_uses_the_selected_scale_and_capture_harness(monkeypatch) -> None:
+    runs = [_publication_run("kglite-cypher"), _publication_run("ladybug")]
+    for run in runs:
+        run["dataset"]["scale"] = "large"
+        run["dataset"]["signature"] = "large-s1-n1-e0"
+    monkeypatch.setattr(
+        marketing, "load", lambda: {"schema_version": 2, "harness": {"name": "graphsuite", "version": 9}, "runs": runs}
+    )
+    rendered = marketing.render()
+    assert "headline uses the `large` graph" in rendered
+    assert "Results file writer: `graphsuite` v9" in rendered
+    assert f"Selected capture harness: `v{results.HARNESS_VERSION}`" in rendered
+
+
+def test_legacy_signature_tie_has_a_stable_choice() -> None:
+    left = _publication_run("kglite-cypher")
+    right = _publication_run("ladybug")
+    for run, signature in ((left, "a"), (right, "b")):
+        run["dataset"]["signature"] = signature
+        run["provenance"].pop("publication_qualified")
+    selected, qualified = marketing.publication_runs({"runs": [left, right]})
+    assert not qualified
+    assert set(selected) == {"ladybug"}
+
+
+def test_parity_summary_requires_two_kglite_modes(monkeypatch) -> None:
+    run = _publication_run("kglite-cypher")
+    run["groups"]["node_scan"] = {"status": "ok", "digest": "same", "sanity": 1}
+    monkeypatch.setattr(report, "load", lambda: {"runs": [run]})
+    rendered = report.render_parity()
+    assert "parity not evaluated" in rendered
+    assert "identical" not in rendered

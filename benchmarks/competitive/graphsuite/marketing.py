@@ -129,7 +129,7 @@ def publication_runs(data: dict[str, Any], signature: str | None = None) -> tupl
     legacy = latest_per_library(data, signature)
     if signature is None and legacy:
         signatures = [run["dataset"]["signature"] for run in legacy.values()]
-        signature = max(set(signatures), key=signatures.count)
+        signature = max(set(signatures), key=lambda item: (signatures.count(item), item))
         legacy = latest_per_library(data, signature)
     return legacy, False
 
@@ -239,7 +239,7 @@ def render(signature: str | None = None) -> str:
         [
             "### Scaling",
             "",
-            "The headline uses the `medium` graph so every recorded adapter can complete a useful subset. "
+            f"The headline uses the `{dataset['scale']}` graph selected above. "
             "For the separate historical load-and-first-query study of disk-backed modes, see "
             "[`benchmarks/competitive/largescale/`](benchmarks/competitive/largescale/README.md).",
             "",
@@ -278,21 +278,23 @@ def render(signature: str | None = None) -> str:
     out.append(f"- Publication qualification: `{'qualified' if qualified else 'legacy / unqualified'}`")
     out.append(f"- Results schema: `{data.get('schema_version', 'unknown')}`")
     harness = data.get("harness", {})
-    out.append(f"- Harness: `{harness.get('name', 'graphsuite')}` v{harness.get('version', 'unknown')}")
+    out.append(f"- Results file writer: `{harness.get('name', 'graphsuite')}` v{harness.get('version', 'unknown')}")
     out.append(f"- Dataset signature: `{dataset['signature']}`")
     dates = sorted(run["run_date"] for run in latest.values())
     out.append(f"- Selected run timestamps: `{dates[0]}` through `{dates[-1]}`")
     provenances = [run.get("provenance") for run in latest.values() if isinstance(run.get("provenance"), dict)]
     if provenances:
+        capture_harnesses = sorted({str(p.get("harness_version", "not recorded")) for p in provenances})
         capture_ids = sorted({p.get("capture_id", "not recorded") for p in provenances})
         commits = sorted({p.get("source_commit", "not recorded") for p in provenances})
         dirty = sorted({str(p.get("source_dirty", "not recorded")).lower() for p in provenances})
         repeats = sorted({str(p.get("base_repeats", "not recorded")) for p in provenances})
+        out.append(f"- Selected capture harness: `v{', v'.join(capture_harnesses)}`")
         out.append(f"- Capture id: `{', '.join(capture_ids)}`")
         out.append(f"- Source commit: `{', '.join(commits)}` (dirty: `{', '.join(dirty)}`)")
         out.append(f"- Base repeat policy: `{', '.join(repeats)}`")
     else:
-        out.append("- Capture id and source revision: `not recorded by the historical harness`")
+        out.append("- Selected capture harness, id, and source revision: `not recorded`")
     out.append(f"- Dataset seed: `{dataset.get('seed', 'recorded in signature')}`")
     out.append("- Raw metadata authority: `benchmarks/competitive/graphsuite/results.json`.")
     out.append("")

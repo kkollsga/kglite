@@ -70,7 +70,7 @@ Graph-construction time is omitted from the cross-kind headline because these ad
 
 ### Scaling
 
-The headline uses the `medium` graph so every recorded adapter can complete a useful subset. For the separate historical load-and-first-query study of disk-backed modes, see [`benchmarks/competitive/largescale/`](benchmarks/competitive/largescale/README.md).
+The headline uses the `medium` graph selected above. For the separate historical load-and-first-query study of disk-backed modes, see [`benchmarks/competitive/largescale/`](benchmarks/competitive/largescale/README.md).
 
 ## Reproduce
 
@@ -97,9 +97,10 @@ Run on macOS-26.3-arm64-arm-64bit-Mach-O · Python 3.14.3.
 
 - Publication qualification: `legacy / unqualified`
 - Results schema: `2`
-- Harness: `graphsuite` v3
+- Results file writer: `graphsuite` v3
 - Dataset signature: `medium-s1234-n25333-e280774`
 - Selected run timestamps: `2026-08-25T18:21:09+02:00` through `2026-08-25T18:41:06+02:00`
+- Selected capture harness: `v2`
 - Capture id: `not recorded`
 - Source commit: `4822c840edb8aa3c5ea3761172f2d1a26f19e859, e2df280492ef7d5e6de8673047823784bb5c2458` (dirty: `true`)
 - Base repeat policy: `5`

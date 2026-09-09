@@ -107,7 +107,7 @@ def render_parity(signature: str | None = None) -> str:
     library agrees there is one cluster (PASS). Divergence among the kglite
     **Cypher-driven storage modes** (memory / mapped / disk / Bolt) is an
     ERROR: those modes are required to produce byte-for-byte matching results.
-    equal. Divergence involving a different surface (fluent) or a different
+    Divergence involving a different surface (fluent) or a different
     library is INFO (expected for a couple of groups — see the README
     walk-vs-trail note).
     """
@@ -125,6 +125,7 @@ def render_parity(signature: str | None = None) -> str:
     lines.append("")
 
     kglite_errors = 0
+    kglite_comparisons = 0
     for gid, _desc, _m in GROUPS:
         if gid == "mutations":
             continue  # per-backend write workloads differ; not a parity target
@@ -146,6 +147,9 @@ def render_parity(signature: str | None = None) -> str:
                 kglite_errors += 1
             else:
                 verdict = "INFO(library/surface variance)"
+        strict_observations = sum(1 for libraries in clusters.values() for library in libraries if library in strict)
+        if strict_observations >= 2:
+            kglite_comparisons += 1
         lines.append(f"  {gid:<22} {verdict}")
         if len(clusters) > 1:
             for d, ls in sorted(clusters.items(), key=lambda kv: -len(kv[1])):
@@ -155,9 +159,13 @@ def render_parity(signature: str | None = None) -> str:
     lines.append(
         "SUMMARY: "
         + (
-            "kglite storage-mode parity OK (memory/mapped/disk/bolt identical)"
-            if kglite_errors == 0
-            else f"{kglite_errors} kglite storage-mode PARITY FAILURE(s)"
+            f"{kglite_errors} kglite storage-mode PARITY FAILURE(s)"
+            if kglite_errors
+            else (
+                f"kglite storage/protocol parity OK across {kglite_comparisons} compared group(s)"
+                if kglite_comparisons
+                else "kglite storage/protocol parity not evaluated (fewer than two modes exercised)"
+            )
         )
     )
     return "\n".join(lines)
