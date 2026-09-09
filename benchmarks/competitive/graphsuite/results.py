@@ -163,8 +163,7 @@ def publication_issues(runs: list[dict[str, Any]], requested_libraries: list[str
         digests = {
             result.get("digest")
             for run in strict_runs
-            if (result := run.get("groups", {}).get(gid, {})).get("status") == "ok"
-            and result.get("digest") is not None
+            if (result := run.get("groups", {}).get(gid, {})).get("status") == "ok" and result.get("digest") is not None
         }
         if len(digests) > 1:
             divergent.append(gid)
