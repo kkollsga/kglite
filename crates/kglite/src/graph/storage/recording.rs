@@ -302,7 +302,42 @@ pub struct RecordingGraph<G: GraphRead> {
     forgotten_sites: Vec<(usize, BeforeSlot, ImageSite)>,
 }
 
+/// The write-capture wrapper state that is independent of its inner graph.
+///
+/// CDC lifecycle calls can install or remove the wrapper in the middle of a
+/// fallible statement. A rollback restores the inner graph separately; this
+/// snapshot preserves the wrapper's ownership, buffered transaction ops, and
+/// before-image bookkeeping across that structural change.
+pub(crate) struct RecordingState {
+    ops: Vec<RawOp>,
+    wal_owner: bool,
+    capture_before: bool,
+    before_touched: HashMap<BeforeSlot, ImageSite>,
+    pending_before: Option<(BeforeSlot, Box<BeforeImage>)>,
+    forgotten_sites: Vec<(usize, BeforeSlot, ImageSite)>,
+}
+
 impl<G: GraphRead> RecordingGraph<G> {
+    pub(crate) fn checkpoint_state(&self) -> RecordingState {
+        RecordingState {
+            ops: self.ops.clone(),
+            wal_owner: self.wal_owner,
+            capture_before: self.capture_before,
+            before_touched: self.before_touched.clone(),
+            pending_before: self.pending_before.clone(),
+            forgotten_sites: self.forgotten_sites.clone(),
+        }
+    }
+
+    pub(crate) fn restore_state(&mut self, state: RecordingState) {
+        self.ops = state.ops;
+        self.wal_owner = state.wal_owner;
+        self.capture_before = state.capture_before;
+        self.before_touched = state.before_touched;
+        self.pending_before = state.pending_before;
+        self.forgotten_sites = state.forgotten_sites;
+    }
+
     /// Wrap `inner` in a fresh-buffer `RecordingGraph` that no write-ahead log
     /// owns. The durable path calls [`claim_wal_ownership`](Self::claim_wal_ownership)
     /// on top; see the [`wal_owner`](Self::is_wal_owner) contract.

@@ -19,10 +19,11 @@
 //!
 //! Running the suffix once per batch and concatenating is only equal to
 //! running it once over every row when every remaining clause is *row-local*.
-//! An aggregate, `ORDER BY`, `SKIP`/`LIMIT`, `DISTINCT`, `UNION`, or a
-//! procedure call reasons over the whole row set, so per-batch execution would
-//! produce one answer per batch instead of one answer overall — a silent wrong
-//! result, the one outcome worse than an error.
+//! An aggregate, `ORDER BY`, `SKIP`/`LIMIT`, `DISTINCT`, `UNION`, a CALL
+//! subquery, or the set-oriented `cluster()` procedure reasons over the whole
+//! row set, so per-batch execution would produce one answer per batch instead
+//! of one answer overall — a silent wrong result, the one outcome worse than
+//! an error. Ordinary procedures are row-local and can stream.
 //!
 //! [`batching_barrier`] detects those shapes. When one is present the file is
 //! read into a single batch instead, capped at [`MAX_MATERIALIZED_ROWS`] so a
@@ -281,7 +282,10 @@ pub fn batching_barrier(clauses: &[Clause]) -> Option<String> {
             Clause::Skip(_) => "SKIP counts across the whole result".to_string(),
             Clause::Limit(_) => "LIMIT counts across the whole result".to_string(),
             Clause::Union(_) => "UNION combines whole result sets".to_string(),
-            Clause::Call(_) => "CALL yields rows independently of the input rows".to_string(),
+            Clause::Call(call) if is_cluster_call(&call.procedure_name) => {
+                "cluster() consumes the whole incoming row cohort".to_string()
+            }
+            Clause::Call(_) => continue,
             Clause::CallSubquery { .. } => {
                 "an uncorrelated CALL { } subquery body runs once per invocation".to_string()
             }
@@ -292,6 +296,11 @@ pub fn batching_barrier(clauses: &[Clause]) -> Option<String> {
         return Some(reason);
     }
     None
+}
+
+fn is_cluster_call(procedure_name: &str) -> bool {
+    procedure_name.eq_ignore_ascii_case("cluster")
+        || procedure_name.eq_ignore_ascii_case("kglite.cluster")
 }
 
 fn with_barrier(w: &WithClause) -> Option<String> {
@@ -449,6 +458,7 @@ pub(crate) fn drive<F>(
     source: &Value,
     policy: &CsvImportPolicy,
     barrier: Option<&str>,
+    budget: &super::budget::ExecutionBudget,
     mut run_batch: F,
 ) -> Result<ResultSet, String>
 where
@@ -504,6 +514,11 @@ where
             lazy_return_items: None,
         };
         let out = run_batch(seed)?;
+        budget.reserve_rows(
+            merged.as_ref().map_or(0, |acc| acc.rows.len()),
+            out.rows.len(),
+            "LOAD CSV accumulated result",
+        )?;
         merged = Some(match merged {
             None => out,
             Some(mut acc) => {
@@ -669,5 +684,31 @@ mod tests {
         assert!(batching_barrier(&ordered.clauses[1..])
             .unwrap()
             .contains("ORDER BY"));
+
+        let ordinary_call = parse_cypher(
+            "LOAD CSV FROM 'file:///tmp/x.csv' AS row \
+             CALL db.property_stats({node_type: row[0], property: 'name'}) \
+             YIELD value_count RETURN value_count",
+        )
+        .unwrap();
+        assert_eq!(batching_barrier(&ordinary_call.clauses[1..]), None);
+
+        let cluster = parse_cypher(
+            "LOAD CSV FROM 'file:///tmp/x.csv' AS row \
+             MATCH (n:N) CALL cluster() YIELD node, cluster RETURN cluster",
+        )
+        .unwrap();
+        assert!(batching_barrier(&cluster.clauses[1..])
+            .unwrap()
+            .contains("whole incoming row cohort"));
+
+        let qualified_cluster = parse_cypher(
+            "LOAD CSV FROM 'file:///tmp/x.csv' AS row \
+             MATCH (n:N) CALL KGLITE.cluster() YIELD node, cluster RETURN cluster",
+        )
+        .unwrap();
+        assert!(batching_barrier(&qualified_cluster.clauses[1..])
+            .unwrap()
+            .contains("whole incoming row cohort"));
     }
 }

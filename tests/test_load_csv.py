@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from kglite import KnowledgeGraph
+from kglite import CypherExecutionError, KnowledgeGraph
 
 # The engine's batch size (`executor/load_csv.rs::BATCH_ROWS`). Tests that
 # must cross a batch boundary derive their row counts from this so they keep
@@ -203,6 +203,17 @@ def test_non_aggregating_return_streams_every_row(tmp_path: Path) -> None:
     g = KnowledgeGraph()
     rows = g.cypher(f"LOAD CSV WITH HEADERS FROM 'file://{path}' AS row RETURN row.id AS id").to_list()
     assert len(rows) == total
+
+
+def test_streamed_procedure_rows_share_one_cumulative_budget(tmp_path: Path) -> None:
+    path = write_csv(tmp_path / "many.csv", [[str(i)] for i in range(1500)])
+    g = KnowledgeGraph()
+    g.cypher("CREATE (:A), (:B)")
+    query = f"LOAD CSV FROM 'file://{path}' AS row CALL db.labels() YIELD label"
+
+    with pytest.raises(CypherExecutionError, match="max_work_units budget of 2500"):
+        g.cypher(query, max_work_units=2500)
+    assert len(g.cypher(query, max_work_units=3000)) == 3000
 
 
 def test_where_filters_rows_before_ingest(tmp_path: Path) -> None:

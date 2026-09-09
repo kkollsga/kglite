@@ -1261,6 +1261,8 @@ fn default_column_name(expr: &Expression) -> String {
 ///   aliases that rename the source variable.
 /// - The next clause is **not** ORDER BY / SKIP / LIMIT — those bind
 ///   to the WITH textually and must keep the projection scope.
+/// - The query does not end in an ordinary procedure CALL, whose result
+///   exposes the outer projected columns as well as its YIELD columns.
 /// - Every variable referenced anywhere downstream of the WITH appears
 ///   in the WITH's projection list. (If the user references a variable
 ///   that the WITH was hiding, the original query was a Cypher scope
@@ -1282,6 +1284,10 @@ pub(super) fn fold_pass_through_with(query: &mut CypherQuery) {
             query.clauses.get(i + 1),
             Some(Clause::OrderBy(_)) | Some(Clause::Skip(_)) | Some(Clause::Limit(_))
         ) {
+            i += 1;
+            continue;
+        }
+        if matches!(query.clauses.last(), Some(Clause::Call(_))) {
             i += 1;
             continue;
         }
@@ -1314,8 +1320,9 @@ pub(super) fn fold_pass_through_with(query: &mut CypherQuery) {
 
 /// Collect the variable names *introduced* (newly bound) by `clause` into
 /// `out`: MATCH / OPTIONAL MATCH pattern variables (node / edge / path), WITH
-/// and RETURN aliases (and bare-`Variable` pass-throughs), UNWIND aliases, and
-/// a nested `CALL { }` subquery's terminal RETURN output columns.
+/// and RETURN aliases (and bare-`Variable` pass-throughs), UNWIND aliases,
+/// procedure YIELD names, and a nested `CALL { }` subquery's terminal RETURN
+/// output columns.
 pub(crate) fn collect_introduced_variables(clause: &Clause, out: &mut HashSet<String>) {
     match clause {
         Clause::Match(m) | Clause::OptionalMatch(m) => {
@@ -1370,6 +1377,11 @@ pub(crate) fn collect_introduced_variables(clause: &Clause, out: &mut HashSet<St
         Clause::LoadCsv(l) => {
             out.insert(l.variable.clone());
         }
+        Clause::Call(call) => {
+            for item in &call.yield_items {
+                out.insert(item.alias.as_ref().unwrap_or(&item.name).clone());
+            }
+        }
         Clause::CallSubquery { body, .. } => {
             // A nested CALL { } introduces its body's terminal RETURN
             // columns into the outer scope (§1.2 rule 3). Those names are
@@ -1381,9 +1393,9 @@ pub(crate) fn collect_introduced_variables(clause: &Clause, out: &mut HashSet<St
                 }
             }
         }
-        Clause::Call(_) | Clause::Create(_) | Clause::Merge(_) => {
-            // CALL (procedure) / CREATE / MERGE can introduce variables, but
-            // those forms don't appear in the shapes these callers target.
+        Clause::Create(_) | Clause::Merge(_) => {
+            // CREATE / MERGE can introduce variables, but those forms don't
+            // appear in the shapes these callers target.
             // Be conservative: don't claim to know what they bind.
         }
         _ => {}
@@ -1480,6 +1492,11 @@ pub(super) fn collect_clause_variables(clause: &Clause, out: &mut HashSet<String
         Clause::Skip(s) => collect_expression_refs(&s.count, out),
         Clause::Limit(l) => collect_expression_refs(&l.count, out),
         Clause::Unwind(u) => collect_expression_refs(&u.expression, out),
+        Clause::Call(call) => {
+            for (_, expression) in &call.parameters {
+                collect_expression_refs(expression, out);
+            }
+        }
         // The source expression may reference a parameter (`FROM $path`);
         // the bound row variable is recorded for the same
         // barrier-correctness reason as FOREACH's loop variable below.
@@ -1522,8 +1539,7 @@ pub(super) fn collect_clause_variables(clause: &Clause, out: &mut HashSet<String
                 collect_clause_variables(c, out);
             }
         }
-        Clause::Call(_)
-        | Clause::Create(_)
+        Clause::Create(_)
         | Clause::Set(_)
         | Clause::Delete(_)
         | Clause::Remove(_)
@@ -1547,9 +1563,9 @@ pub(super) fn collect_clause_variables(clause: &Clause, out: &mut HashSet<String
         | Clause::FusedNodeScanAggregate { .. }
         | Clause::FusedNodeScanTopK { .. }
         | Clause::SpatialJoin { .. } => {
-            // These contribute no references: the write / procedure clauses
-            // read names this walk does not model, and the fused shapes are
-            // built after this pass runs. See
+            // These contribute no references: the write clauses read names
+            // this walk does not model, and the fused shapes are built after
+            // this pass runs. See
             // `unwind_scope_refs_are_enumerable` for why that omission is
             // safe for `fold_pass_through_with` and not for
             // `narrow_unwind_source`.
@@ -1789,8 +1805,8 @@ pub(crate) fn collect_expression_refs(expr: &Expression, out: &mut HashSet<Strin
 ///
 /// [`collect_clause_variables`] answers "which variables does this clause
 /// mention" for the clause kinds it models, and contributes **nothing** for
-/// the write clauses (`CREATE` / `SET` / `MERGE` / `DELETE` / `REMOVE` /
-/// `CALL`) and the fused shapes. For [`fold_pass_through_with`] that omission
+/// the write clauses (`CREATE` / `SET` / `MERGE` / `DELETE` / `REMOVE`) and
+/// the fused shapes. For [`fold_pass_through_with`] that omission
 /// is harmless — a variable it would miss is one the query could not have had
 /// in scope anyway. For `narrow_unwind_source` it is **not**: a missed
 /// reference means dropping a binding that a later clause still reads, which
@@ -1829,6 +1845,7 @@ fn unwind_scope_refs_are_enumerable(clause: &Clause) -> bool {
             | Clause::Skip(_)
             | Clause::Limit(_)
             | Clause::Unwind(_)
+            | Clause::Call(_)
             | Clause::CallSubquery { .. }
     )
     // `Clause::Union` is deliberately absent. A UNION branch that ends without
@@ -1863,8 +1880,10 @@ fn unwind_scope_refs_are_enumerable(clause: &Clause) -> bool {
 /// - `v == alias` → the alias rebinds the same name; downstream references
 ///   mean the *element*, and the conservative check below already refuses,
 ///   but the explicit guard keeps the reasoning local.
-/// - any downstream clause is a write / fused / procedure clause → its
+/// - any downstream write, fused, or otherwise unmodelled clause → its
 ///   references are not enumerable, so we cannot prove `v` is dead.
+/// - a terminal procedure CALL → every outer projected column is observable
+///   in the result even when no CALL parameter names it.
 /// - `v` is mentioned downstream → the binding is live; copying is required.
 pub(super) fn narrow_unwind_source(query: &mut CypherQuery) {
     for i in 0..query.clauses.len() {
@@ -1880,6 +1899,9 @@ pub(super) fn narrow_unwind_source(query: &mut CypherQuery) {
         let var = var.clone();
 
         let tail = &query.clauses[i + 1..];
+        if matches!(tail.last(), Some(Clause::Call(_))) {
+            continue;
+        }
         if !tail.iter().all(unwind_scope_refs_are_enumerable) {
             continue;
         }
@@ -1991,6 +2013,26 @@ mod narrow_unwind_source_tests {
         // Nothing is bound in the row, so there is nothing to narrow.
         assert!(!narrows("UNWIND range(0, 10) AS m RETURN m"));
         assert!(!narrows("UNWIND [1, 2, 3] AS m RETURN m"));
+    }
+
+    #[test]
+    fn procedure_collectors_record_parameter_refs_and_yield_bindings() {
+        let query = parse_cypher(
+            "UNWIND ['Person'] AS typ \
+             CALL db.property_stats({node_type: typ, property: 'name'}) \
+             YIELD value_count AS count RETURN typ, count",
+        )
+        .unwrap();
+        let call = &query.clauses[1];
+
+        let mut references = HashSet::new();
+        collect_clause_variables(call, &mut references);
+        assert_eq!(references, HashSet::from(["typ".to_string()]));
+
+        let mut introduced = HashSet::new();
+        collect_introduced_variables(call, &mut introduced);
+        assert_eq!(introduced, HashSet::from(["count".to_string()]));
+        assert!(unwind_scope_refs_are_enumerable(call));
     }
 
     #[test]

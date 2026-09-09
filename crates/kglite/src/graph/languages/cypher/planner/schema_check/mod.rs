@@ -514,11 +514,19 @@ fn validate_scope(query: &CypherQuery, initial: &HashSet<String>) -> Result<(), 
                 for (_, expression) in &call.parameters {
                     validate_expression_scope(expression, &scope)?;
                 }
-                scope.extend(
-                    call.yield_items
-                        .iter()
-                        .map(|item| item.alias.as_ref().unwrap_or(&item.name).clone()),
-                );
+                for item in &call.yield_items {
+                    let name = item.alias.as_ref().unwrap_or(&item.name);
+                    if scope.contains(name) {
+                        return Err(SchemaError {
+                            kind: SchemaErrorKind::UndefinedVariable,
+                            message: format!(
+                                "CALL procedure YIELD column `{name}` already exists in the outer \
+                                 scope; rename it with YIELD ... AS ..."
+                            ),
+                        });
+                    }
+                    scope.insert(name.clone());
+                }
             }
             Clause::CallSubquery { import, body } => {
                 for name in import {

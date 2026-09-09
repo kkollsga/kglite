@@ -95,6 +95,26 @@ class TestClusterSpatialDbscan:
         assert result[0]["n"] == 7
         assert result[0]["cluster"] >= 0
 
+    def test_cluster_consumes_one_whole_cohort_not_one_call_per_row(self, spatial_graph):
+        rows = spatial_graph.cypher("""
+            MATCH (c:City)
+            UNWIND [1, 2] AS duplicate
+            CALL cluster({method: 'dbscan', eps: 1200000, min_points: 1})
+            YIELD node, cluster
+            RETURN node.name AS name, cluster
+            ORDER BY name
+        """).to_dicts()
+        assert len(rows) == 7
+        assert [row["name"] for row in rows] == [
+            "Athens",
+            "Bergen",
+            "Naples",
+            "Oslo",
+            "Reykjavik",
+            "Rome",
+            "Stavanger",
+        ]
+
 
 class TestClusterSpatialKmeans:
     """Test CALL cluster() with spatial K-means."""

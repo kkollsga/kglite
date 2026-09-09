@@ -265,6 +265,26 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         None,
     ),
     ("simple_match", "small_graph", "MATCH (p:Person) RETURN p.name AS n", None),
+    (
+        "correlated_procedure_parameter",
+        "small_graph",
+        "UNWIND ['Person', 'Missing'] AS typ "
+        "CALL db.property_stats({node_type: typ, property: 'name'}) YIELD value_count "
+        "RETURN typ, value_count ORDER BY typ",
+        None,
+    ),
+    (
+        "terminal_call_unwind_scope",
+        "small_graph",
+        "WITH [1, 2] AS ns UNWIND ns AS m CALL db.labels() YIELD label",
+        None,
+    ),
+    (
+        "terminal_call_pass_through_scope",
+        "small_graph",
+        "MATCH (n:Person), (m:Person) WITH n CALL db.labels() YIELD label",
+        None,
+    ),
     ("simple_match_param", "small_graph", "MATCH (p:Person) WHERE p.age > $min RETURN p.name AS n", {"min": 30}),
     # Dynamic label / relationship type: the parameter is bound before the
     # optimizer runs, so both paths must plan and answer exactly as the

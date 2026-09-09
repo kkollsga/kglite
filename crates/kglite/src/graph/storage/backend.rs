@@ -7,7 +7,7 @@
 use crate::graph::schema::{EdgeData, InternedKey, NodeData};
 use crate::graph::storage::column_store::ColumnStore;
 use crate::graph::storage::forked::{can_fork, ForkedGraph};
-use crate::graph::storage::recording::RecordingGraph;
+use crate::graph::storage::recording::{RecordingGraph, RecordingState};
 use crate::graph::storage::undo::UndoJournal;
 use crate::graph::storage::{GraphRead, GraphWrite, MappedGraph, MemoryGraph};
 use petgraph::graph::{EdgeIndex, NodeIndex};
@@ -220,6 +220,36 @@ impl GraphBackend {
         match self {
             GraphBackend::Recording(rg) => Some(rg),
             _ => None,
+        }
+    }
+
+    /// Snapshot the write-capture wrapper without cloning its inner graph.
+    pub(crate) fn recording_state(&self) -> Option<RecordingState> {
+        match self {
+            GraphBackend::Recording(recording) => Some(recording.checkpoint_state()),
+            _ => None,
+        }
+    }
+
+    /// Restore the exact wrapper shape and transient state around the current
+    /// inner graph. Used when a failed CDC lifecycle statement installed or
+    /// removed the wrapper after the ordinary graph checkpoint opened.
+    pub(crate) fn restore_recording_state(&mut self, state: Option<RecordingState>) {
+        match state {
+            Some(state) => {
+                self.wrap_for_capture();
+                let GraphBackend::Recording(recording) = self else {
+                    unreachable!("wrap_for_capture must install a recording wrapper")
+                };
+                recording.restore_state(state);
+            }
+            None => {
+                debug_assert!(
+                    !self.is_wal_owner(),
+                    "CDC lifecycle rollback cannot remove a pre-existing WAL wrapper"
+                );
+                self.unwrap_capture_if_unowned();
+            }
         }
     }
 

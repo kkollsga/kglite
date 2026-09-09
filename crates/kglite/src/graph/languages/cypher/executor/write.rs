@@ -35,6 +35,26 @@ pub fn is_mutation_query(query: &CypherQuery) -> bool {
     query.clauses.iter().any(clause_is_mutation)
 }
 
+/// Whether a statement contains a CDC lifecycle procedure whose shared log
+/// must be deep-snapshotted for statement rollback.
+pub(crate) fn mutates_cdc_configuration(query: &CypherQuery) -> bool {
+    fn clause_mutates_cdc(clause: &Clause) -> bool {
+        match clause {
+            Clause::Call(call) => {
+                let name = call.procedure_name.to_lowercase();
+                name.starts_with("db.cdc.")
+                    && super::procedure_registry::is_mutating_procedure(&name)
+            }
+            Clause::CallSubquery { body, .. } | Clause::Union(UnionClause { query: body, .. }) => {
+                mutates_cdc_configuration(body)
+            }
+            Clause::Foreach { body, .. } => body.iter().any(clause_mutates_cdc),
+            _ => false,
+        }
+    }
+    query.clauses.iter().any(clause_mutates_cdc)
+}
+
 /// True if `clause` is itself a write clause or contains a write clause in a
 /// nested sub-pipeline.
 ///
@@ -78,13 +98,14 @@ pub(crate) fn clause_is_mutation(clause: &Clause) -> bool {
     }
 }
 
-/// Run a change-capture lifecycle procedure (`db.cdc.enable` / `db.cdc.disable`)
-/// on the write engine.
+/// Run a mutating table or CDC procedure on the write engine, once per input
+/// row, and inner-join each yielded row back onto its input.
 ///
 /// Split out of the clause pipeline, which is at its complexity ceiling.
-fn execute_cdc_lifecycle_call(
+fn execute_mutating_call(
     graph: &mut DirGraph,
     call: &crate::graph::languages::cypher::ast::CallClause,
+    existing: ResultSet,
     params: &HashMap<String, Value>,
     interrupt: &Interrupt,
     budget: &super::budget::ExecutionBudget,
@@ -97,36 +118,55 @@ fn execute_cdc_lifecycle_call(
         &call.procedure_name,
         &call.yield_items,
     )?;
-    // Arguments are evaluated by the read executor: a CALL argument is an
-    // ordinary expression over no rows, and duplicating that evaluation here is
-    // how the two paths would start accepting different argument forms.
-    let params_map = {
-        let executor = CypherExecutor::with_params(graph, params, interrupt.deadline)
-            .with_cancel(interrupt.cancel)
-            .with_budget(budget.clone());
-        executor.extract_call_params(&call.parameters)?
+    let resolved_call = crate::graph::languages::cypher::ast::CallClause {
+        procedure_name: call.procedure_name.clone(),
+        parameters: call.parameters.clone(),
+        yield_items,
     };
-    let rows = if proc_name.starts_with("table.") {
-        super::table_procedures::execute_table_procedure(
-            graph,
-            &proc_name,
-            &params_map,
-            &yield_items,
-        )?
-    } else {
-        super::cdc_procedures::execute_mutating_procedure(
-            graph,
-            &proc_name,
-            &params_map,
-            &yield_items,
-        )?
-    };
+    super::call_clause::reject_call_yield_collisions(&existing, &resolved_call)?;
+
+    let mut columns = existing.columns;
+    super::call_clause::append_call_yield_columns(&mut columns, &resolved_call);
+    let mut joined_rows = Vec::new();
+    for outer_row in existing.rows {
+        super::check_interrupt(interrupt)?;
+        let params_map = {
+            // Expression evaluation is shared with the read executor, but it
+            // must borrow the graph immutably only until this row's arguments
+            // are ready; the procedure invocation below mutates it.
+            let executor = CypherExecutor::with_params(graph, params, interrupt.deadline)
+                .with_cancel(interrupt.cancel)
+                .with_budget(budget.clone());
+            executor.extract_call_params(&resolved_call.parameters, &outer_row)?
+        };
+        let rows = if proc_name.starts_with("table.") {
+            super::table_procedures::execute_table_procedure(
+                graph,
+                &proc_name,
+                &params_map,
+                &resolved_call.yield_items,
+            )?
+        } else {
+            super::cdc_procedures::execute_mutating_procedure(
+                graph,
+                &proc_name,
+                &params_map,
+                &resolved_call.yield_items,
+            )?
+        };
+        budget.check_work(rows.len(), &format!("CALL {proc_name}"))?;
+        budget.reserve_rows(
+            joined_rows.len(),
+            rows.len(),
+            &format!("CALL {proc_name} row join"),
+        )?;
+        for row in rows {
+            joined_rows.push(super::call_clause::join_call_row(&outer_row, row));
+        }
+    }
     Ok(ResultSet {
-        columns: yield_items
-            .iter()
-            .map(|item| item.alias.clone().unwrap_or_else(|| item.name.clone()))
-            .collect(),
-        rows,
+        columns,
+        rows: joined_rows,
         lazy_return_items: None,
     })
 }
@@ -292,13 +332,20 @@ pub(crate) fn execute_mutable_with_csv(
             executor.evaluate_expression(&load.source, &ResultRow::new())?
         };
         let barrier = super::load_csv::batching_barrier(suffix);
-        super::load_csv::drive(load, &source, csv_import, barrier.as_deref(), |seed| {
-            let mut batch_profile = Vec::new();
-            let out =
-                run_clause_pipeline(graph, suffix, seed, &ctx, &mut stats, &mut batch_profile)?;
-            merge_profile(&mut profile_stats, batch_profile);
-            Ok(out)
-        })?
+        super::load_csv::drive(
+            load,
+            &source,
+            csv_import,
+            barrier.as_deref(),
+            &budget,
+            |seed| {
+                let mut batch_profile = Vec::new();
+                let out =
+                    run_clause_pipeline(graph, suffix, seed, &ctx, &mut stats, &mut batch_profile)?;
+                merge_profile(&mut profile_stats, batch_profile);
+                Ok(out)
+            },
+        )?
     } else {
         let ctx = MutationCtx {
             diagnostics: &diagnostics,
@@ -492,7 +539,8 @@ fn run_clause_pipeline(
                     &call.procedure_name.to_lowercase(),
                 ) =>
             {
-                result_set = execute_cdc_lifecycle_call(graph, call, params, interrupt, budget)?;
+                result_set =
+                    execute_mutating_call(graph, call, result_set, params, interrupt, budget)?;
             }
             // Schema DDL runs here, not on the read engine (see
             // `clause_is_mutation`); the `SHOW` forms classify as reads and
@@ -549,8 +597,8 @@ fn run_clause_pipeline(
 /// a query?
 ///
 /// True for the clauses that produce output per incoming row and so need one to
-/// act on with nothing before them. Read clauses are absent on purpose —
-/// MATCH/OPTIONAL MATCH open a query by scanning, not by extending a row.
+/// act on with nothing before them. MATCH/OPTIONAL MATCH are absent on purpose:
+/// they open a query by scanning, not by extending a row.
 ///
 /// Only ever consulted while the stream is unestablished, so it cannot
 /// resurrect a stream that a preceding clause emptied.
@@ -559,6 +607,7 @@ fn clause_needs_implicit_row(clause: &Clause) -> bool {
         clause,
         Clause::With(_)
             | Clause::Unwind(_)
+            | Clause::Call(_)
             | Clause::Create(_)
             | Clause::Merge(_)
             | Clause::Foreach { .. }

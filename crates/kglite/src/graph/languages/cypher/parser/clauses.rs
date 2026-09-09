@@ -817,9 +817,8 @@ impl CypherParser {
         // declared column in declared order (Neo4j semantics; the executor
         // expands the empty list against the procedure's declared columns).
         // `parse_query` enforces that the bare form is the entire statement —
-        // mid-pipeline CALL still requires YIELD, both to match Neo4j and
-        // because `execute_call` replaces the incoming row set rather than
-        // joining with it (see the acknowledgement at executor/load_csv.rs).
+        // mid-pipeline CALL still requires YIELD, both to match Neo4j and to
+        // make the variables introduced into the surrounding scope explicit.
         let yield_items = if self.check(&CypherToken::Yield) {
             self.advance(); // consume YIELD
             let items = self.parse_yield_items()?;

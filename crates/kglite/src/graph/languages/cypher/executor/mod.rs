@@ -509,6 +509,7 @@ impl<'a> CypherExecutor<'a> {
             &source,
             &self.csv_import,
             barrier.as_deref(),
+            &self.budget,
             |seed| {
                 let mut batch_profile = Vec::new();
                 let out = self.execute_clauses_profiled(
@@ -581,15 +582,16 @@ impl<'a> CypherExecutor<'a> {
                 continue;
             }
             self.check_deadline()?;
-            // Seed first-clause WITH/UNWIND with one empty row so standalone
-            // expressions (e.g. `WITH [1,2,3] AS l` or `RETURN 1+2`) can be evaluated.
+            // Seed first-clause row consumers with one empty row so standalone
+            // expressions (e.g. `WITH [1,2,3] AS l`, `RETURN 1+2`, or a
+            // leading ordinary procedure CALL) can be evaluated.
             // Only for the very first clause — a WITH after an empty MATCH
             // must stay empty.
             if i == 0
                 && result_set.rows.is_empty()
                 && matches!(
                     clause,
-                    Clause::With(_) | Clause::Unwind(_) | Clause::Return(_)
+                    Clause::With(_) | Clause::Unwind(_) | Clause::Return(_) | Clause::Call(_)
                 )
             {
                 result_set.rows.push(ResultRow::new());

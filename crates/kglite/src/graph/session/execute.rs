@@ -511,7 +511,10 @@ pub fn execute_mut(
     // it MUST be closed on every exit path — `commit` is what uninstalls the
     // capture journal.
     let checkpoint = if is_mutation && !can_skip_rollback_checkpoint(graph, &parsed, opts) {
-        StatementCheckpoint::open(graph)
+        StatementCheckpoint::open_with_cdc(
+            graph,
+            cypher::executor::write::mutates_cdc_configuration(&parsed),
+        )
     } else {
         StatementCheckpoint::None
     };

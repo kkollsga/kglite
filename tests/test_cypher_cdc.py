@@ -110,6 +110,67 @@ def test_capacity_is_configurable_and_resizes_in_place():
     assert again["epoch"] == first["epoch"], "a resize keeps live cursors valid"
 
 
+def test_mutating_cdc_call_runs_once_per_input_row_and_keeps_outer_values():
+    g = kglite.KnowledgeGraph()
+    rows = g.cypher(
+        "UNWIND [16, 8] AS requested "
+        "CALL db.cdc.enable({capacity: requested}) YIELD capacity AS applied "
+        "RETURN requested, applied"
+    ).to_dicts()
+    assert rows == [
+        {"requested": 16, "applied": 16},
+        {"requested": 8, "applied": 8},
+    ]
+    assert g.cypher("CALL db.cdc.status() YIELD capacity RETURN capacity").scalar() == 8
+
+
+def test_successful_correlated_reconfiguration_commits_intermediate_eviction():
+    g = enabled_graph(capacity=16)
+    g.cypher("CREATE (:P {id: 1}), (:P {id: 2}), (:P {id: 3})")
+    g.cypher("UNWIND [1, 16] AS requested CALL db.cdc.enable({capacity: requested}) YIELD capacity RETURN capacity")
+    status = g.cypher("CALL db.cdc.status()").to_dicts()[0]
+    assert (status["capacity"], status["buffered"]) == (16, 1)
+    assert [event["nodeId"] for event in events(g)] == [3]
+
+
+def test_empty_outer_stream_does_not_run_a_mutating_cdc_call():
+    g = enabled_graph(capacity=16)
+    rows = g.cypher("MATCH (n:Missing) CALL db.cdc.disable() YIELD enabled RETURN enabled").to_dicts()
+    assert rows == []
+    assert g.cypher("CALL db.cdc.status() YIELD enabled RETURN enabled").scalar() is True
+
+
+def test_mutating_cdc_call_rolls_back_earlier_row_on_later_failure():
+    g = enabled_graph(capacity=16)
+    with pytest.raises(kglite.CypherExecutionError, match="positive integer"):
+        g.cypher("UNWIND [32, 0] AS requested CALL db.cdc.enable({capacity: requested}) YIELD capacity RETURN capacity")
+    assert g.cypher("CALL db.cdc.status() YIELD capacity RETURN capacity").scalar() == 16
+
+
+def test_cdc_rollback_restores_capture_mode_used_by_later_events():
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (:P {id: 1, value: 'before'})")
+    g.cypher("CALL db.cdc.enable({capacity: 16, enrichment: 'off'})")
+    held = cursor(g)
+
+    with pytest.raises(kglite.CypherExecutionError, match="does not accept 'diff'"):
+        g.cypher(
+            "UNWIND ['full', 'diff'] AS mode "
+            "CALL db.cdc.enable({capacity: 16, enrichment: mode}) "
+            "YIELD enabled RETURN enabled"
+        )
+
+    status = g.cypher("CALL db.cdc.status()").to_dicts()[0]
+    assert status["enrichment"] == "off"
+    g.cypher("MATCH (n:P {id: 1}) SET n.value = 'after'")
+    changed = events(g, held)
+    assert len(changed) == 1
+    assert changed[0]["state"] == {
+        "before": None,
+        "after": {"title": "P_0", "labels": [], "properties": {"value": "after"}},
+    }
+
+
 def test_capacity_and_parameter_names_are_validated():
     g = kglite.KnowledgeGraph()
     with pytest.raises(kglite.CypherExecutionError, match="positive integer"):

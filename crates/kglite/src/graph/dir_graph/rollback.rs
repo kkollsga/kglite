@@ -254,18 +254,102 @@ pub(crate) enum StatementCheckpoint {
         /// exactly this statement's ops. `None` when the backend captures no
         /// WAL ops.
         recorded_ops: Option<usize>,
+        cdc: Option<CdcCheckpoint>,
     },
     /// Whole-graph clone, for backends and graph shapes outside
     /// [`journal_covers`].
-    Clone { snapshot: Box<DirGraph> },
+    Clone {
+        snapshot: Box<DirGraph>,
+        cdc: Option<CdcCheckpoint>,
+    },
+}
+
+/// Isolated state for a statement containing CDC lifecycle procedures.
+/// Tentative reconfiguration runs on `working_handle`, so rollback never
+/// rewrites the shared log or erases a concurrent publisher's event. The
+/// recording snapshot restores wrapper shape and buffered transaction ops if
+/// the statement enabled or disabled capture before failing.
+pub(crate) struct CdcCheckpoint {
+    original_handle: Option<crate::graph::cdc::CdcHandle>,
+    working_handle: Option<crate::graph::cdc::CdcHandle>,
+    recording: Option<crate::graph::storage::recording::RecordingState>,
+}
+
+impl CdcCheckpoint {
+    fn capture(graph: &mut DirGraph) -> Self {
+        let original_handle = graph.cdc.clone();
+        let working_handle = original_handle.as_ref().map(|handle| {
+            let log = handle
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            std::sync::Arc::new(std::sync::Mutex::new(log))
+        });
+        let recording = graph.graph.recording_state();
+        graph.cdc = working_handle.clone();
+        Self {
+            original_handle,
+            working_handle,
+            recording,
+        }
+    }
+
+    fn restore(self, graph: &mut DirGraph) {
+        graph.cdc = self.original_handle;
+        graph.graph.restore_recording_state(self.recording);
+    }
+
+    /// Publish a successful in-place reconfiguration onto the original shared
+    /// handle. The private working log kept tentative capacity changes from
+    /// evicting events, so concurrent publishers stayed untouched; applying
+    /// the final configuration and isolated eviction floor here retains their
+    /// sequence progress without resurrecting events a tentative shrink
+    /// deliberately evicted.
+    fn commit(self, graph: &mut DirGraph) {
+        let Some(final_handle) = graph.cdc.as_ref() else {
+            return;
+        };
+        let Some(working_handle) = self.working_handle.as_ref() else {
+            return;
+        };
+        if !std::sync::Arc::ptr_eq(final_handle, working_handle) {
+            // The statement disabled then re-enabled capture, minting a new
+            // epoch. That new handle is the committed result; the old epoch
+            // remains available only to graph views that already held it.
+            return;
+        }
+        let Some(original_handle) = self.original_handle else {
+            return;
+        };
+        let (capacity, enrichment, earliest_retained) = {
+            let working = working_handle
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (working.capacity(), working.enrichment(), working.earliest())
+        };
+        original_handle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .commit_reconfiguration(capacity, enrichment, earliest_retained);
+        graph.cdc = Some(original_handle);
+    }
 }
 
 impl StatementCheckpoint {
     /// Open a checkpoint for a statement that may fail after its first write.
+    #[cfg(test)]
     pub(crate) fn open(graph: &mut DirGraph) -> Self {
+        Self::open_with_cdc(graph, false)
+    }
+
+    /// Open a checkpoint, additionally snapshotting the CDC ring when this
+    /// statement can reconfigure or disable it.
+    pub(crate) fn open_with_cdc(graph: &mut DirGraph, capture_cdc: bool) -> Self {
+        let cdc = capture_cdc.then(|| CdcCheckpoint::capture(graph));
         if !journal_covers(graph) {
             return Self::Clone {
                 snapshot: Box::new(graph.fork_transaction()),
+                cdc,
             };
         }
         let recorded_ops = graph.graph.recorded_ops_len();
@@ -274,15 +358,28 @@ impl StatementCheckpoint {
         Self::Journal {
             shell,
             recorded_ops,
+            cdc,
         }
     }
 
     /// The statement succeeded: drop the checkpoint and stop capturing.
     pub(crate) fn commit(self, graph: &mut DirGraph) {
-        if matches!(self, Self::Journal { .. }) {
-            // Dropping the journal is the whole commit: the graph already
-            // holds the new state.
-            graph.graph.take_undo();
+        match self {
+            Self::None => {}
+            Self::Clone { cdc, .. } => {
+                if let Some(cdc) = cdc {
+                    cdc.commit(graph);
+                }
+            }
+            Self::Journal { cdc, .. } => {
+                // Dropping the journal is the graph commit: the graph already
+                // holds the new state. CDC configuration is published only
+                // after that succeeds.
+                graph.graph.take_undo();
+                if let Some(cdc) = cdc {
+                    cdc.commit(graph);
+                }
+            }
         }
     }
 
@@ -290,10 +387,16 @@ impl StatementCheckpoint {
     pub(crate) fn rollback(self, graph: &mut DirGraph) {
         match self {
             Self::None => {}
-            Self::Clone { snapshot } => *graph = *snapshot,
+            Self::Clone { snapshot, cdc } => {
+                *graph = *snapshot;
+                if let Some(cdc) = cdc {
+                    cdc.restore(graph);
+                }
+            }
             Self::Journal {
                 shell,
                 recorded_ops,
+                cdc,
             } => {
                 let journal = graph.graph.take_undo();
                 let fallout = journal
@@ -315,6 +418,9 @@ impl StatementCheckpoint {
                 // shell cannot restore them; drop them and let the next read
                 // rebuild.
                 graph.invalidate_edge_type_counts_cache();
+                if let Some(cdc) = cdc {
+                    cdc.restore(graph);
+                }
             }
         }
     }

@@ -282,6 +282,65 @@ fn normalize_and_validate_algo_params(
     validate_scope_names(proc, params, graph)
 }
 
+pub(super) fn call_yield_columns(clause: &CallClause) -> Vec<String> {
+    clause
+        .yield_items
+        .iter()
+        .map(|item| item.alias.clone().unwrap_or_else(|| item.name.clone()))
+        .collect()
+}
+
+pub(super) fn append_call_yield_columns(columns: &mut Vec<String>, clause: &CallClause) {
+    for column in call_yield_columns(clause) {
+        if !columns.contains(&column) {
+            columns.push(column);
+        }
+    }
+}
+
+pub(super) fn reject_call_yield_collisions(
+    existing: &ResultSet,
+    clause: &CallClause,
+) -> Result<(), String> {
+    for column in call_yield_columns(clause) {
+        let in_columns = existing.columns.contains(&column);
+        let in_bindings = existing.rows.first().is_some_and(|row| {
+            row.node_bindings.contains_key(&column)
+                || row.edge_bindings.contains_key(&column)
+                || row.path_bindings.contains_key(&column)
+                || row.projected.contains_key(&column)
+        });
+        if in_columns || in_bindings {
+            return Err(format!(
+                "CALL procedure YIELD column `{column}` already exists in the outer scope; \
+                 rename it with YIELD ... AS ..."
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Inner-join one procedure output row onto one incoming pipeline row.
+/// Binding families stay distinct so node, edge and path values retain their
+/// lazy graph-backed representation; ordered bindings append YIELD names after
+/// the outer row's existing names.
+pub(super) fn join_call_row(outer: &ResultRow, yielded: ResultRow) -> ResultRow {
+    let mut joined = outer.clone();
+    for (name, value) in yielded.node_bindings {
+        joined.node_bindings.insert(name, value);
+    }
+    for (name, value) in yielded.edge_bindings {
+        joined.edge_bindings.insert(name, value);
+    }
+    for (name, value) in yielded.path_bindings {
+        joined.path_bindings.insert(name, value);
+    }
+    for (name, value) in yielded.projected {
+        joined.projected.insert(name, value);
+    }
+    joined
+}
+
 impl<'a> CypherExecutor<'a> {
     /// [`normalize_and_validate_algo_params`] against this executor's graph,
     /// recording its non-fatal warnings on the query rather than returning
@@ -476,6 +535,71 @@ impl<'a> CypherExecutor<'a> {
         } else {
             clause
         };
+        reject_call_yield_collisions(&existing, clause)?;
+
+        // `cluster()` deliberately consumes the whole incoming cohort: the
+        // nodes bound by every row are the data set being clustered. Keep it
+        // outside the ordinary per-row procedure driver.
+        if proc_name == "cluster" {
+            let empty_row = ResultRow::new();
+            let mut params = self.extract_call_params(&clause.parameters, &empty_row)?;
+            self.validate_algo_params(proc_name.as_str(), &mut params)?;
+            let rows = self.execute_call_cluster(&params, &clause.yield_items, &existing)?;
+            self.check_call_output_budget(proc_name.as_str(), rows.len())?;
+            return Ok(ResultSet {
+                rows,
+                columns: call_yield_columns(clause),
+                lazy_return_items: None,
+            });
+        }
+
+        // Keep the read dispatcher's defensive error observable even when a
+        // direct caller hands it an empty row set. Production routing sends
+        // these procedures to the mutable engine before this method runs.
+        if super::procedure_registry::is_mutating_procedure(proc_name.as_str()) {
+            return Err(format!(
+                "Procedure '{proc_name}' changes graph state and cannot run on the read path. Run \
+                 it as its own statement on a writable graph — a read-only transaction or a \
+                 read-only graph cannot execute it."
+            ));
+        }
+
+        let mut columns = existing.columns;
+        append_call_yield_columns(&mut columns, clause);
+        let outer_rows = existing.rows;
+        let mut joined_rows = Vec::new();
+        for (outer_index, outer_row) in outer_rows.into_iter().enumerate() {
+            self.check_interrupt_periodic(outer_index)?;
+            let params = self.extract_call_params(&clause.parameters, &outer_row)?;
+            let yielded_rows =
+                self.execute_resolved_call_once(proc_name.as_str(), clause, params)?;
+            self.budget.reserve_rows(
+                joined_rows.len(),
+                yielded_rows.len(),
+                &format!("CALL {proc_name} row join"),
+            )?;
+            for yielded in yielded_rows {
+                joined_rows.push(join_call_row(&outer_row, yielded));
+            }
+        }
+
+        Ok(ResultSet {
+            rows: joined_rows,
+            columns,
+            lazy_return_items: None,
+        })
+    }
+
+    /// Invoke an already-resolved ordinary procedure once for one input row.
+    /// Procedure lookup/YIELD expansion belongs to [`Self::execute_call`];
+    /// only row-dependent parameter evaluation varies between invocations.
+    fn execute_resolved_call_once(
+        &self,
+        proc_name: &str,
+        clause: &CallClause,
+        mut params: HashMap<String, Value>,
+    ) -> Result<Vec<ResultRow>, String> {
+        self.check_deadline()?;
 
         // Fail-fast guard against unscoped procedure runs on large graphs.
         // These procedures all walk the full graph (no scope/projection arg
@@ -488,7 +612,7 @@ impl<'a> CypherExecutor<'a> {
         // want a full-graph walk.
         const PROC_FULL_GRAPH_LIMIT: usize = 2_000_000;
         let needs_scope = matches!(
-            proc_name.as_str(),
+            proc_name,
             "pagerank"
                 | "betweenness"
                 | "betweenness_centrality"
@@ -511,15 +635,14 @@ impl<'a> CypherExecutor<'a> {
         // may run for minutes but cannot OOM. See `louvain_communities` /
         // `leiden_communities` (both gate the streaming path on is_disk/is_mapped).
         let streaming_community = matches!(
-            proc_name.as_str(),
+            proc_name,
             "louvain" | "louvain_communities" | "leiden" | "leiden_communities"
         ) && (self.graph.graph.is_disk() || self.graph.graph.is_mapped());
 
-        let mut params = self.extract_call_params(&clause.parameters)?;
         // Alias the scoping keys and reject unknown config keys, so a typo
         // errors instead of silently no-op'ing — see
         // `normalize_and_validate_algo_params`.
-        self.validate_algo_params(proc_name.as_str(), &mut params)?;
+        self.validate_algo_params(proc_name, &mut params)?;
 
         // Built once here so the algorithms stay free of the executor / parser.
         // None ⇒ whole-graph.
@@ -544,7 +667,7 @@ impl<'a> CypherExecutor<'a> {
             }
         }
 
-        let rows = match proc_name.as_str() {
+        let rows = match proc_name {
             "pagerank"
             | "betweenness"
             | "betweenness_centrality"
@@ -558,7 +681,7 @@ impl<'a> CypherExecutor<'a> {
             | "leiden_communities"
             | "label_propagation" => super::centrality_procedures::execute_centrality_procedure(
                 self,
-                &proc_name,
+                proc_name,
                 &params,
                 scope.as_ref(),
                 streaming_community,
@@ -794,10 +917,9 @@ impl<'a> CypherExecutor<'a> {
                 }
                 vec![row]
             }
-            "cluster" => self.execute_call_cluster(&params, &clause.yield_items, &existing)?,
             name if super::rule_procedures::RULE_PROCEDURES.contains(&name) => {
                 super::rule_procedures::execute_rule_procedure(
-                    &proc_name,
+                    proc_name,
                     self.graph,
                     &params,
                     &clause.yield_items,
@@ -805,7 +927,7 @@ impl<'a> CypherExecutor<'a> {
             }
             "affected_tests" | "rev_diff" | "dead_code" | "refresh_stats" => {
                 super::analysis_procedures::execute_analysis_procedure(
-                    &proc_name,
+                    proc_name,
                     self.graph,
                     &params,
                     &clause.yield_items,
@@ -852,13 +974,13 @@ impl<'a> CypherExecutor<'a> {
             // source of truth and are also consumed by `describe()`.
             "db.labels" => super::schema_procedures::execute_schema_procedure(
                 self,
-                &proc_name,
+                proc_name,
                 &params,
                 &clause.yield_items,
             )?,
             "db.relationshiptypes" => super::schema_procedures::execute_schema_procedure(
                 self,
-                &proc_name,
+                proc_name,
                 &params,
                 &clause.yield_items,
             )?,
@@ -867,14 +989,14 @@ impl<'a> CypherExecutor<'a> {
             // with `SHOW INDEXES`.
             "db.indexes" | "db.constraints" => super::schema_procedures::execute_schema_procedure(
                 self,
-                &proc_name,
+                proc_name,
                 &params,
                 &clause.yield_items,
             )?,
             // db.propertyKeys() — every declared property name, one per row.
             "db.propertykeys" => super::schema_procedures::execute_schema_procedure(
                 self,
-                &proc_name,
+                proc_name,
                 &params,
                 &clause.yield_items,
             )?,
@@ -890,7 +1012,7 @@ impl<'a> CypherExecutor<'a> {
             | "apoc.meta.nodetypeproperties"
             | "apoc.meta.reltypeproperties" => super::schema_procedures::execute_schema_procedure(
                 self,
-                &proc_name,
+                proc_name,
                 &params,
                 &clause.yield_items,
             )?,
@@ -899,7 +1021,7 @@ impl<'a> CypherExecutor<'a> {
             // relationship_type_count).
             "db.graph_stats" => super::schema_procedures::execute_schema_procedure(
                 self,
-                &proc_name,
+                proc_name,
                 &params,
                 &clause.yield_items,
             )?,
@@ -908,7 +1030,7 @@ impl<'a> CypherExecutor<'a> {
             // distinct_count.
             "db.property_stats" => super::schema_procedures::execute_schema_procedure(
                 self,
-                &proc_name,
+                proc_name,
                 &params,
                 &clause.yield_items,
             )?,
@@ -919,7 +1041,7 @@ impl<'a> CypherExecutor<'a> {
             // distinct_count.
             "db.property_uniqueness" => super::schema_procedures::execute_schema_procedure(
                 self,
-                &proc_name,
+                proc_name,
                 &params,
                 &clause.yield_items,
             )?,
@@ -931,46 +1053,33 @@ impl<'a> CypherExecutor<'a> {
             // cannot swallow a typo.
             other if other.starts_with("db.cdc.") => super::cdc_procedures::execute_cdc_procedure(
                 self,
-                &proc_name,
+                proc_name,
                 &params,
                 &clause.yield_items,
             )?,
             _ => unreachable!(),
         };
 
-        self.budget
-            .check_work(rows.len(), &format!("CALL {proc_name}"))?;
-        self.budget
-            .check_rows(rows.len(), &format!("CALL {proc_name}"))?;
-
-        Ok(ResultSet {
-            rows,
-            // YIELD order (alias-or-name), matching Neo4j — not inferred.
-            // Pre-fix this was Vec::new(), so `finalize_result` reconstructed
-            // columns from the first row's key sets sorted alphabetically:
-            // `YIELD type, name` answered [name, type], and a zero-row CALL
-            // (e.g. db.indexes() on a fresh graph) answered no columns at
-            // all — a Bolt client's result.keys() came back empty.
-            columns: clause
-                .yield_items
-                .iter()
-                .map(|item| item.alias.clone().unwrap_or_else(|| item.name.clone()))
-                .collect(),
-            lazy_return_items: None,
-        })
+        self.check_call_output_budget(proc_name, rows.len())?;
+        Ok(rows)
     }
 
     pub(super) fn extract_call_params(
         &self,
         params: &[(String, Expression)],
+        row: &ResultRow,
     ) -> Result<HashMap<String, Value>, String> {
-        let empty_row = ResultRow::new();
         let mut map = HashMap::new();
         for (key, expr) in params {
-            let val = self.evaluate_expression(expr, &empty_row)?;
+            let val = self.evaluate_expression(expr, row)?;
             map.insert(key.clone(), val);
         }
         Ok(map)
+    }
+
+    fn check_call_output_budget(&self, proc_name: &str, rows: usize) -> Result<(), String> {
+        self.budget.check_work(rows, &format!("CALL {proc_name}"))?;
+        self.budget.check_rows(rows, &format!("CALL {proc_name}"))
     }
 
     /// Execute CALL cluster() — cluster nodes from the preceding MATCH result set.

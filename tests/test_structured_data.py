@@ -203,6 +203,33 @@ def test_table_upsert_and_delete(g):
     assert (r["removed"], r["rows"]) == (1, 3)
 
 
+def test_table_upsert_is_correlated_and_preserves_outer_rows(g):
+    g.set_table_property("Order", "order-1", "line_items", _items().iloc[:1])
+    rows = g.cypher(
+        "UNWIND [{sku: 'a-1', qty: 9}, {sku: 'd-4', qty: 5}] AS item "
+        "CALL table.upsert({type: 'Order', id: 'order-1', property: 'line_items', "
+        "key: 'sku', row: item}) YIELD action, rows AS row_count "
+        "RETURN item.sku AS sku, action, row_count"
+    ).to_dicts()
+    assert rows == [
+        {"sku": "a-1", "action": "updated", "row_count": 1},
+        {"sku": "d-4", "action": "inserted", "row_count": 2},
+    ]
+
+
+def test_table_upsert_rolls_back_prior_row_when_a_later_row_fails(g):
+    original = _items().iloc[:1]
+    g.set_table_property("Order", "order-1", "line_items", original)
+    with pytest.raises(Exception, match="carries no 'sku' cell"):
+        g.cypher(
+            "UNWIND [{sku: 'a-1', qty: 99}, {qty: 5}] AS item "
+            "CALL table.upsert({type: 'Order', id: 'order-1', property: 'line_items', "
+            "key: 'sku', row: item}) YIELD action RETURN action"
+        )
+    restored = g.get_table_property("Order", "order-1", "line_items")
+    assert restored.to_dict(orient="records") == original.to_dict(orient="records")
+
+
 def test_table_procs_are_write_gated(g):
     g.set_table_property("Order", "order-1", "line_items", _items())
     ro = g  # read_only flag route

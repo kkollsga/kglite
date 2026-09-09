@@ -127,7 +127,7 @@ pub struct CdcStatus {
 /// design decision, not an omission: persisting it would grow the file without
 /// bound and would hand a cursor from one process to a copy of the data in
 /// another, where the same `seq` means something else.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CdcLog {
     epoch: u64,
     /// Sequence number the next published event will carry. Starts at 1, so a
@@ -231,6 +231,28 @@ impl CdcLog {
         while self.events.len() > self.capacity {
             self.events.pop_front();
         }
+    }
+
+    /// Commit a reconfiguration evaluated on an isolated copy of this log.
+    ///
+    /// `earliest_retained` carries irreversible eviction caused by any
+    /// temporary shrink in the statement. Applying that floor before the final
+    /// capacity preserves those semantics while retaining events concurrently
+    /// appended to this live log after the isolated copy was made.
+    pub(crate) fn commit_reconfiguration(
+        &mut self,
+        capacity: usize,
+        enrichment: CdcEnrichment,
+        earliest_retained: u64,
+    ) {
+        while self
+            .events
+            .front()
+            .is_some_and(|event| event.seq < earliest_retained)
+        {
+            self.events.pop_front();
+        }
+        self.reconfigure(capacity, enrichment);
     }
 
     /// Events with `seq > from`, oldest first, capped at `limit` when given.

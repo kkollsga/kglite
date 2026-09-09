@@ -341,6 +341,113 @@ class TestCallYieldAlias:
         assert "score" in result[0]
 
 
+class TestCallRowScope:
+    """Ordinary procedures are correlated inner-join operators."""
+
+    def test_parameters_are_evaluated_once_per_input_row(self):
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Person {name: 'A'}), (:Person {name: 'B'}), (:Company {name: 'C'})")
+        query = (
+            "UNWIND ['Person', 'Company'] AS typ "
+            "CALL db.property_stats({node_type: typ, property: 'name'}) YIELD value_count "
+            "RETURN typ, value_count ORDER BY typ"
+        )
+        expected = [
+            {"typ": "Company", "value_count": 1},
+            {"typ": "Person", "value_count": 2},
+        ]
+        assert g.cypher(query).to_dicts() == expected
+
+        profiled = g.cypher("PROFILE " + query)
+        assert profiled.to_dicts() == expected
+        call_stats = next(entry for entry in profiled.profile if entry["clause"] == "Call")
+        assert (call_stats["rows_in"], call_stats["rows_out"]) == (2, 2)
+
+    def test_procedure_rows_multiply_each_outer_row(self):
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Person), (:Company)")
+        query = "UNWIND ['left', 'right'] AS side CALL db.labels() YIELD label RETURN side, label ORDER BY side, label"
+        rows = g.cypher(query).to_dicts()
+        assert rows == [
+            {"side": "left", "label": "Company"},
+            {"side": "left", "label": "Person"},
+            {"side": "right", "label": "Company"},
+            {"side": "right", "label": "Person"},
+        ]
+        with pytest.raises(kglite.CypherExecutionError, match="max_work_units"):
+            g.cypher(query, max_work_units=3)
+        assert len(g.cypher(query, max_work_units=4)) == 4
+
+    def test_only_a_leading_call_gets_the_implicit_empty_row(self):
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:N)")
+        assert g.cypher("CALL db.graph_stats() YIELD node_count RETURN node_count").to_dicts() == [{"node_count": 1}]
+        assert g.cypher("MATCH (n:Missing) CALL db.graph_stats() YIELD node_count RETURN node_count").to_dicts() == []
+
+    def test_outer_node_edge_path_and_scalar_bindings_survive(self):
+        g = KnowledgeGraph()
+        g.cypher("CREATE (a:N {name: 'A'})-[r:R]->(b:N {name: 'B'})")
+        result = g.cypher(
+            "MATCH p=(a:N)-[r:R]->(b:N) "
+            "WITH a, r, b, p, 'marker' AS scalar "
+            "CALL db.graph_stats() YIELD node_count "
+            "RETURN a.name AS a, startNode(r).name AS source, b.name AS b, "
+            "length(p) AS hops, scalar, node_count"
+        )
+        assert list(result.columns) == ["a", "source", "b", "hops", "scalar", "node_count"]
+        assert result.to_dicts() == [
+            {
+                "a": "A",
+                "source": "A",
+                "b": "B",
+                "hops": 1,
+                "scalar": "marker",
+                "node_count": 2,
+            }
+        ]
+
+    def test_terminal_call_keeps_unwind_source_with_and_without_optimizer(self):
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:A), (:B)")
+        query = "WITH [1, 2] AS ns UNWIND ns AS m CALL db.labels() YIELD label"
+        expected = [
+            {"ns": [1, 2], "label": "A"},
+            {"ns": [1, 2], "label": "B"},
+            {"ns": [1, 2], "label": "A"},
+            {"ns": [1, 2], "label": "B"},
+        ]
+        for disable_optimizer in (False, True):
+            result = g.cypher(query, disable_optimizer=disable_optimizer)
+            assert list(result.columns) == ["ns", "label"]
+            assert result.to_dicts() == expected
+
+    def test_terminal_call_keeps_pass_through_node_with_and_without_optimizer(self):
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:A {id: 7}), (:B)")
+        query = "MATCH (n:A), (m:A) WITH n CALL db.labels() YIELD label"
+        for disable_optimizer in (False, True):
+            result = g.cypher(query, disable_optimizer=disable_optimizer)
+            assert list(result.columns) == ["n", "label"]
+            assert [(row["n"]["properties"]["id"], row["label"]) for row in result.to_dicts()] == [
+                (7, "A"),
+                (7, "B"),
+            ]
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "MATCH (n:N) CALL db.graph_stats() YIELD node_count AS n RETURN n",
+            "UNWIND [1] AS node_count CALL db.graph_stats() YIELD node_count RETURN node_count",
+            "MATCH (n:Missing) CALL db.graph_stats() YIELD node_count AS n RETURN n",
+        ],
+    )
+    def test_yield_may_not_shadow_the_outer_scope(self, query):
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:N)")
+        with pytest.raises(kglite.SchemaError, match="already exists in the outer scope"):
+            g.cypher(query)
+
+
 class TestCallErrors:
     """Test error handling."""
 

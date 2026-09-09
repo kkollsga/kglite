@@ -410,9 +410,8 @@ impl CypherParser {
 
         // A bare `CALL proc()` (no YIELD) is legal only as the entire
         // statement — Neo4j's standalone-CALL rule. Mid-pipeline, YIELD is
-        // required: `execute_call` replaces the incoming row set instead of
-        // joining with it, so accepting the bare form there would silently
-        // drop bound rows.
+        // required so the procedure's additions to the surrounding scope are
+        // explicit. A standalone bare CALL expands all declared columns.
         if clauses.len() > 1 {
             for clause in &clauses {
                 if matches!(&clause, Clause::Call(call) if call.yield_items.is_empty()) {

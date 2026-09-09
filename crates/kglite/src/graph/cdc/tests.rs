@@ -354,6 +354,58 @@ fn a_rolled_back_statement_publishes_nothing() {
     assert_eq!(since(&graph, from).len(), 1);
 }
 
+#[test]
+fn lifecycle_rollback_keeps_events_published_on_the_original_shared_handle() {
+    use crate::graph::dir_graph::rollback::StatementCheckpoint;
+
+    let mut tx_a = seeded();
+    let from = cursor(&tx_a);
+    let original = tx_a.cdc_log().expect("enabled").clone();
+    let mut tx_b = tx_a.clone();
+
+    let checkpoint = StatementCheckpoint::open_with_cdc(&mut tx_a, true);
+    let isolated = tx_a.cdc_log().expect("working log").clone();
+    assert!(!Arc::ptr_eq(&original, &isolated));
+    cdc::enable(&mut tx_a, Some(1), CdcEnrichment::Full).expect("tentative reconfigure");
+
+    run(&mut tx_b, "CREATE (:Item {id: 3, name: 'concurrent'})");
+    commit(&mut tx_b);
+    assert_eq!(cursor(&tx_b), from + 1, "the concurrent commit published");
+
+    checkpoint.rollback(&mut tx_a);
+    assert!(Arc::ptr_eq(
+        tx_a.cdc_log().expect("restored log"),
+        &original
+    ));
+    let published = since(&tx_a, from);
+    assert_eq!(published.len(), 1);
+    assert_eq!(node_id(&published[0]), Value::Int64(3));
+    let status = cdc::status(&tx_a).expect("capture remains enabled");
+    assert_eq!(status.capacity, DEFAULT_CAPACITY);
+    assert_eq!(status.enrichment, CdcEnrichment::Off);
+}
+
+#[test]
+fn lifecycle_rollback_restores_capture_wrapper_presence_and_mode() {
+    use crate::graph::dir_graph::rollback::StatementCheckpoint;
+
+    let mut initially_off = DirGraph::new();
+    let checkpoint = StatementCheckpoint::open_with_cdc(&mut initially_off, true);
+    cdc::enable(&mut initially_off, Some(8), CdcEnrichment::Full).expect("tentative enable");
+    checkpoint.rollback(&mut initially_off);
+    assert!(initially_off.cdc_log().is_none());
+    assert!(!initially_off.graph.is_recording());
+
+    let mut initially_on = seeded();
+    assert!(!initially_on.graph.captures_before_images());
+    let checkpoint = StatementCheckpoint::open_with_cdc(&mut initially_on, true);
+    assert!(cdc::disable(&mut initially_on));
+    checkpoint.rollback(&mut initially_on);
+    assert!(initially_on.cdc_log().is_some());
+    assert!(initially_on.graph.is_recording());
+    assert!(!initially_on.graph.captures_before_images());
+}
+
 /// The same invariant one rung up: a failed statement inside an otherwise
 /// good commit contributes nothing, while its neighbours in the same commit
 /// still publish.
