@@ -737,11 +737,7 @@ class TestDescribeReadOnly:
         root = ET.fromstring(social_graph.describe())
         ro = root.find("read-only")
         assert ro is not None
-        assert "CREATE" in ro.text
-        assert "SET" in ro.text
-        assert "DELETE" in ro.text
-        assert "REMOVE" in ro.text
-        assert "MERGE" in ro.text
+        assert ro.text == "Cypher mutations are disabled"
 
     def test_no_read_only_notice_when_writable(self, social_graph):
         """Writable graph should NOT include <read-only> element."""
@@ -1434,15 +1430,18 @@ class TestDescribeTokenBudget:
         knows = root.find("conn[@type='KNOWS']")
         assert "since:Int64" in knows.attrib["properties"]
 
-    def test_cypher_hint_states_opencypher_is_supported(self, social_graph):
-        """A hint listing only extensions read as 'this is a partial dialect'."""
+    def test_cypher_hint_states_supported_dialect_and_extensions(self, social_graph):
+        """The compact hint scopes the dialect claim and points to extensions."""
         root = ET.fromstring(social_graph.describe())
         hint = root.find("extensions/cypher").attrib["hint"]
-        assert "openCypher" in hint
-        assert "EXTENSIONS" in hint or "extensions" in hint
+        assert hint.startswith("The supported Cypher dialect includes MATCH/OPTIONAL MATCH")
+        assert "KGLite also exposes separately documented extensions." in hint
+        assert "Standard openCypher is supported" not in hint
 
-    def test_extreme_tier_cypher_hint_states_opencypher_is_supported(self, extreme_graph):
+    def test_extreme_tier_cypher_hint_states_supported_dialect_and_extensions(self, extreme_graph):
         """The short-form hint is the only Cypher guidance the Extreme tier gives."""
         root = ET.fromstring(extreme_graph.describe())
         hint = root.find("extensions/cypher").attrib["hint"]
-        assert "openCypher" in hint
+        assert hint.startswith("The supported Cypher dialect includes MATCH, WHERE/FILTER")
+        assert "KGLite also exposes separately documented extensions." in hint
+        assert "Standard openCypher is supported" not in hint
