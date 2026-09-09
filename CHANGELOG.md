@@ -9,6 +9,8 @@ before upgrading.
 
 ## [Unreleased]
 
+## [0.17.2] - 2026-09-09
+
 ### Added
 
 - **Read `CALL` subqueries support modern scope clauses and set composition.**
@@ -28,6 +30,10 @@ before upgrading.
 
 ### Changed
 
+- **Rust API:** `PassCtx` can no longer be constructed with a struct literal
+  outside KGLite. It gained private `initial_scope` and `global_scope` fields
+  used to carry `CALL` import visibility through planner passes. There is no
+  public constructor or builder for `PassCtx`.
 - **Ordinary `CALL procedure(...) YIELD ...` now obeys the incoming row
   pipeline.** Parameters are evaluated once per input row and yielded values
   inner-join with that row's existing bindings. A later empty stream stays
@@ -39,6 +45,23 @@ before upgrading.
   returned names cannot overwrite outer bindings. Legacy importing `WITH`
   remains supported and must be repeated in each set arm. Writes, unit bodies,
   and `IN TRANSACTIONS` remain unsupported.
+- **The public comparison and migration guidance now distinguishes tested Bolt
+  drivers from general wire compatibility and describes Neo4j deployment,
+  transactions, licensing, MCP support, and current Cypher differences without
+  presenting KGLite as a drop-in replacement.** README and guide capability
+  claims now use the same verified dialect contract.
+- **Competitive benchmark reports now publish only qualified, clean, complete
+  captures and label unexercised or semantically different workloads.** The
+  current snapshot includes KGLite 0.17.1 and LadybugDB 0.20.3 with capture
+  provenance, result digests, and the updated shared dataset.
+
+### Fixed
+
+- **Read subqueries retain their declared schema even when no runtime row
+  reveals it.** Empty outer inputs and empty bodies preserve explicit return
+  columns; `RETURN *` expands body-owned variables introduced by matches,
+  unwinds, CSV loads, procedure yields, nested calls, and named paths. Column
+  collisions and set-arm schema mismatches are rejected before execution.
 
 ## [0.17.1] - 2026-09-08
 

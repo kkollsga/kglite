@@ -637,6 +637,8 @@ def test_breaking_symbols_are_scoped_to_the_release_that_broke_them(ecosystem: P
     """
     assert "NodeView" in vc.breaking_symbols_for("0.15.9")
     assert vc.breaking_symbols_for("0.17.0") == []
+    assert vc.breaking_symbols_for("0.17.1") == []
+    assert vc.breaking_symbols_for("0.17.2") == ["PassCtx"]
 
     _write(
         ecosystem / "downstream" / "src" / "lib.rs",

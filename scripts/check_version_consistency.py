@@ -2085,6 +2085,11 @@ def run_notify(
 #: Add an entry when a release removes or changes a public symbol; never edit
 #: an existing release's set to mean "the current release".
 BREAKING_SYMBOLS_BY_VERSION: dict[str, list[str]] = {
+    # 0.17.2 — PassCtx gained private initial_scope/global_scope fields, so
+    # downstream Rust code can no longer construct it with a struct literal.
+    "0.17.2": [
+        "PassCtx",
+    ],
     # 0.16.1 — the backlog-zero train (semver-major set, shipped in a patch
     # per project policy). Wire note: kglite_value_to_json now emits
     # structured JSON for Node/Relationship/Path/temporal/Point/Duration/

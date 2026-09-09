@@ -1980,7 +1980,7 @@ dependencies = [
 
 [[package]]
 name = "kglite"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "bzip2",
  "calamine",
@@ -2020,7 +2020,7 @@ dependencies = [
 
 [[package]]
 name = "kglite-bolt-server"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2038,7 +2038,7 @@ dependencies = [
 
 [[package]]
 name = "kglite-c"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "cbindgen",
  "kglite",
@@ -2047,7 +2047,7 @@ dependencies = [
 
 [[package]]
 name = "kglite-cli"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -2062,7 +2062,7 @@ dependencies = [
 
 [[package]]
 name = "kglite-mcp-server"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2087,7 +2087,7 @@ dependencies = [
 
 [[package]]
 name = "kglite-py"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "chrono",
  "kglite",
