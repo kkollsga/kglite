@@ -199,7 +199,7 @@ impl CypherParser {
         }))
     }
 
-    pub(super) fn parse_union_clause(&mut self) -> Result<Clause, String> {
+    pub(super) fn parse_union_clause(&mut self, end_at_rbrace: bool) -> Result<Clause, String> {
         self.expect(&CypherToken::Union)?;
         let all = if self.check(&CypherToken::All) {
             self.advance();
@@ -208,8 +208,7 @@ impl CypherParser {
             false
         };
 
-        // Parse the rest as a new query
-        let query = self.parse_query()?;
+        let query = self.parse_set_right_arm(end_at_rbrace)?;
 
         Ok(Clause::Union(UnionClause {
             all,
@@ -218,9 +217,9 @@ impl CypherParser {
         }))
     }
 
-    pub(super) fn parse_intersect_clause(&mut self) -> Result<Clause, String> {
+    pub(super) fn parse_intersect_clause(&mut self, end_at_rbrace: bool) -> Result<Clause, String> {
         self.expect(&CypherToken::Intersect)?;
-        let query = self.parse_query()?;
+        let query = self.parse_set_right_arm(end_at_rbrace)?;
         Ok(Clause::Union(UnionClause {
             all: false,
             query: Box::new(query),
@@ -228,14 +227,34 @@ impl CypherParser {
         }))
     }
 
-    pub(super) fn parse_except_clause(&mut self) -> Result<Clause, String> {
+    pub(super) fn parse_except_clause(&mut self, end_at_rbrace: bool) -> Result<Clause, String> {
         self.expect(&CypherToken::Except)?;
-        let query = self.parse_query()?;
+        let query = self.parse_set_right_arm(end_at_rbrace)?;
         Ok(Clause::Union(UnionClause {
             all: false,
             query: Box::new(query),
             kind: SetOpKind::Except,
         }))
+    }
+
+    /// Parse the right arm of a set operator. Top-level arms retain the
+    /// historical to-EOF boundary; arms inside `CALL { ... }` stop at that
+    /// body's matching `}` so the caller, not the set parser, consumes it.
+    fn parse_set_right_arm(&mut self, end_at_rbrace: bool) -> Result<CypherQuery, String> {
+        if !end_at_rbrace {
+            return self.parse_query();
+        }
+        let (clauses, output_format) = self.parse_clause_sequence(true)?;
+        if clauses.is_empty() {
+            return Err("A set operator requires a query in its right arm".to_string());
+        }
+        Ok(CypherQuery {
+            clauses,
+            explain: false,
+            profile: false,
+            output_format,
+            optimizer_tags: Vec::new(),
+        })
     }
 
     // ========================================================================
@@ -881,19 +900,30 @@ impl CypherParser {
         // scope-clause body, a leading WITH is an ordinary scope projection;
         // the explicit imports remain globally visible after it.
         if matches!(import, CallSubqueryImport::Legacy(_)) {
-            let names = match clauses.first() {
-                Some(Clause::With(w)) => extract_importing_with(w)?,
-                _ => Vec::new(),
-            };
-            if !names.is_empty() {
+            let has_set_operation = clauses.iter().any(|c| matches!(c, Clause::Union(_)));
+            if has_set_operation {
+                // Each legacy set arm owns its importing WITH. Keep those
+                // clauses in place and seed the CALL with the union of their
+                // imports; validation and execution narrow each arm back to
+                // only the variables that arm explicitly named.
+                let mut names = Vec::new();
+                collect_legacy_set_imports(&clauses, &mut names)?;
                 import = CallSubqueryImport::Legacy(names);
-                clauses.remove(0);
-                if clauses.is_empty() {
-                    return Err(
-                        "CALL { } subquery body must contain at least one clause after the \
-                         importing WITH"
-                            .to_string(),
-                    );
+            } else {
+                let names = match clauses.first() {
+                    Some(Clause::With(w)) => extract_importing_with(w)?,
+                    _ => Vec::new(),
+                };
+                if !names.is_empty() {
+                    import = CallSubqueryImport::Legacy(names);
+                    clauses.remove(0);
+                    if clauses.is_empty() {
+                        return Err(
+                            "CALL { } subquery body must contain at least one clause after the \
+                             importing WITH"
+                                .to_string(),
+                        );
+                    }
                 }
             }
         }
@@ -1071,28 +1101,34 @@ fn extract_importing_with(w: &WithClause) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
-/// v1 structural validation of a `CALL { }` subquery body
+/// Structural validation of a read `CALL { }` subquery body.
 /// (§1.4 / §6 of `dev_workfolder/dev-documentation/design/call-subqueries.md`).
 ///
-/// `clauses` is the body *after* the importing `WITH` has been lifted
-/// and dropped. Rejects the shapes excluded from v1:
+/// In a non-set legacy body the importing `WITH` has already been lifted and
+/// dropped. Set bodies retain one importing `WITH` per arm because those
+/// clauses are independent scope boundaries. Rejects unsupported shapes:
 ///
 /// - **Write clauses** (`CREATE`/`SET`/`DELETE`/`REMOVE`/`MERGE`) —
 ///   deferred (§6 Q1): routing + atomicity are out of v1 scope. We
 ///   classify write-in-`CALL` correctly (`is_mutation_query` recurses)
 ///   but reject it here so it is never mis-executed.
-/// - **No terminal `RETURN` (unit subquery)** — deferred (§1.3): a
-///   body must end in `RETURN` in v1.
-///
-/// `UNION` / `INTERSECT` / `EXCEPT` inside the body (deferred, §6 Q2)
-/// are rejected earlier, in `parse_clause_sequence`, so they never
-/// reach here.
+/// - **No terminal `RETURN` (unit subquery)** — every set arm must end in
+///   `RETURN`.
+/// - **Set output disagreement** — every arm must return the same names in
+///   the same order, before an empty outer stream can hide the mismatch.
 ///
 /// Nested `CALL { }` is *allowed* in v1 (§1.4: "falls out of
 /// recursion") and is intentionally not rejected — each nested body
 /// is validated by its own `parse_call_subquery` call.
 fn validate_subquery_body(clauses: &[Clause]) -> Result<(), String> {
-    for clause in clauses {
+    validate_subquery_set_tree(clauses).map(|_| ())
+}
+
+fn validate_subquery_set_tree(clauses: &[Clause]) -> Result<Vec<String>, String> {
+    let set_index = clauses.iter().position(|c| matches!(c, Clause::Union(_)));
+    let arm_end = set_index.unwrap_or(clauses.len());
+
+    for clause in &clauses[..arm_end] {
         if matches!(
             clause,
             Clause::Create(_)
@@ -1100,24 +1136,37 @@ fn validate_subquery_body(clauses: &[Clause]) -> Result<(), String> {
                 | Clause::Delete(_)
                 | Clause::Remove(_)
                 | Clause::Merge(_)
+                | Clause::Foreach { .. }
         ) {
             return Err(
-                "write clauses (CREATE / SET / DELETE / REMOVE / MERGE) inside a CALL { } \
-                 subquery are not supported in this version"
+                "write clauses (CREATE / SET / DELETE / REMOVE / MERGE / FOREACH) inside a \
+                 CALL { } subquery are not supported in this version"
                     .to_string(),
             );
         }
     }
 
-    // The body must terminate in a RETURN. ORDER BY / SKIP / LIMIT are
+    // Each arm must terminate in a RETURN. ORDER BY / SKIP / LIMIT are
     // parsed as separate trailing clauses *after* the RETURN, so accept
     // a RETURN followed only by those.
-    let return_idx = clauses.iter().position(|c| matches!(c, Clause::Return(_)));
-    match return_idx {
+    let return_idx = clauses[..arm_end]
+        .iter()
+        .position(|c| matches!(c, Clause::Return(_)));
+    let columns = match return_idx {
         Some(idx)
-            if clauses[idx + 1..]
+            if clauses[idx + 1..arm_end]
                 .iter()
-                .all(|c| matches!(c, Clause::OrderBy(_) | Clause::Skip(_) | Clause::Limit(_))) => {}
+                .all(|c| matches!(c, Clause::OrderBy(_) | Clause::Skip(_) | Clause::Limit(_))) =>
+        {
+            let Clause::Return(return_clause) = &clauses[idx] else {
+                unreachable!("return index must point to RETURN")
+            };
+            return_clause
+                .items
+                .iter()
+                .map(crate::graph::languages::cypher::executor::helpers::return_item_column_name)
+                .collect::<Vec<_>>()
+        }
         _ => {
             return Err(
                 "a CALL { } subquery body must end with RETURN; unit subqueries (no RETURN) are \
@@ -1125,7 +1174,43 @@ fn validate_subquery_body(clauses: &[Clause]) -> Result<(), String> {
                     .to_string(),
             );
         }
+    };
+
+    if let Some(idx) = set_index {
+        let Clause::Union(set) = &clauses[idx] else {
+            unreachable!("set index must point to set operation")
+        };
+        let right_columns = validate_subquery_set_tree(&set.query.clauses)?;
+        if columns != right_columns {
+            let operator = match set.kind {
+                SetOpKind::Union => "UNION",
+                SetOpKind::Intersect => "INTERSECT",
+                SetOpKind::Except => "EXCEPT",
+            };
+            return Err(format!(
+                "All sub queries in a {operator} must have the same return column names \
+                 (left side {columns:?} != right side {right_columns:?})."
+            ));
+        }
     }
 
+    Ok(columns)
+}
+
+/// Collect the union of variables imported by legacy set arms while retaining
+/// each arm's WITH in the AST. Different arms may import different subsets;
+/// the executor uses this union only to copy candidates from the outer row,
+/// then narrows each arm to its own leading WITH.
+fn collect_legacy_set_imports(clauses: &[Clause], imports: &mut Vec<String>) -> Result<(), String> {
+    if let Some(Clause::With(with_clause)) = clauses.first() {
+        for name in extract_importing_with(with_clause)? {
+            if !imports.contains(&name) {
+                imports.push(name);
+            }
+        }
+    }
+    if let Some(Clause::Union(set)) = clauses.iter().find(|c| matches!(c, Clause::Union(_))) {
+        collect_legacy_set_imports(&set.query.clauses, imports)?;
+    }
     Ok(())
 }

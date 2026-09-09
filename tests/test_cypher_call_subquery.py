@@ -2,8 +2,8 @@
 
 Every body executes once per incoming row. Modern ``CALL (x)``, ``CALL (*)``
 and ``CALL ()`` make their selected imports explicit; named/all imports stay
-visible through inner WITH and aggregation boundaries. Write/unit/set-operation
-bodies remain intentionally outside this phase.
+visible through inner WITH, aggregation, and set-operation boundaries. Legacy
+set arms import independently. Write and unit bodies remain unsupported.
 """
 
 import pytest
@@ -619,6 +619,9 @@ class TestCallSubqueryWriteBodyRejected:
             "MATCH (p:Person) CALL { WITH p DELETE p RETURN 1 AS x } RETURN x",
             "MATCH (p:Person) CALL { WITH p REMOVE p.name RETURN p } RETURN p",
             "CALL { MERGE (:Tag {name: 'x'}) RETURN 1 AS x } RETURN x",
+            "CALL () { RETURN 1 AS x UNION CREATE (:Tag) RETURN 2 AS x } RETURN x",
+            "CALL () { FOREACH (x IN [1] | CREATE (:Tag {v: x})) RETURN 1 AS n UNION ALL RETURN 2 AS n } RETURN n",
+            "CALL () { RETURN 1 AS n UNION ALL FOREACH (x IN [1] | CREATE (:Tag {v: x})) RETURN 2 AS n } RETURN n",
         ],
     )
     def test_write_in_call_rejected(self, graph, query):
@@ -643,6 +646,7 @@ class TestCallSubqueryUnitBodyRejected:
         [
             "MATCH (p:Person) CALL { WITH p MATCH (p)-[:KNOWS]->(f) } RETURN p",
             "CALL { MATCH (n:Person) WITH n } RETURN n",
+            "CALL () { RETURN 1 AS n UNION MATCH (n:Person) } RETURN n",
         ],
     )
     def test_unit_subquery_rejected(self, graph, query):
@@ -650,12 +654,96 @@ class TestCallSubqueryUnitBodyRejected:
             graph.cypher(query)
 
 
-class TestCallSubqueryUnionBodyRejected:
-    def test_union_in_call_rejected(self, graph):
-        with pytest.raises(kglite.CypherSyntaxError, match="UNION.*inside a CALL"):
+class TestCallSubquerySetBodies:
+    @pytest.mark.parametrize("disable_optimizer", [False, True])
+    def test_union_distinct_and_all_preserve_multiplicity(self, graph, disable_optimizer):
+        distinct = graph.cypher(
+            "CALL () { UNWIND [1, 1, 2] AS n RETURN n UNION UNWIND [2, 3] AS n RETURN n } RETURN n ORDER BY n",
+            disable_optimizer=disable_optimizer,
+        ).to_list()
+        assert distinct == [{"n": 1}, {"n": 2}, {"n": 3}]
+
+        all_rows = graph.cypher(
+            "CALL () { UNWIND [1, 1, 2] AS n RETURN n UNION ALL UNWIND [2, 3] AS n RETURN n } RETURN n ORDER BY n",
+            disable_optimizer=disable_optimizer,
+        ).to_list()
+        assert all_rows == [{"n": 1}, {"n": 1}, {"n": 2}, {"n": 2}, {"n": 3}]
+
+    @pytest.mark.parametrize("streaming", [False, True])
+    @pytest.mark.parametrize("scope", ["(p)", "(*)"], ids=["named", "all"])
+    def test_modern_import_is_global_in_every_arm(self, friends, streaming, scope):
+        rows = friends.cypher(
+            f"MATCH (p:Person) CALL {scope} {{ "
+            "WITH 0 AS marker RETURN p.title AS value "
+            "UNION ALL WITH 1 AS marker RETURN p.title + '!' AS value "
+            "} RETURN p.title AS person, value ORDER BY person, value",
+            streaming=streaming,
+        ).to_list()
+        assert rows == [
+            {"person": "Anna", "value": "Anna"},
+            {"person": "Anna", "value": "Anna!"},
+            {"person": "Bo", "value": "Bo"},
+            {"person": "Bo", "value": "Bo!"},
+            {"person": "Cy", "value": "Cy"},
+            {"person": "Cy", "value": "Cy!"},
+            {"person": "Dee", "value": "Dee"},
+            {"person": "Dee", "value": "Dee!"},
+        ]
+
+    def test_legacy_arms_import_different_outer_variables(self, graph):
+        rows = graph.cypher(
+            "WITH 1 AS x, 2 AS y CALL { WITH x RETURN x AS n UNION ALL WITH y RETURN y AS n } RETURN n ORDER BY n"
+        ).to_list()
+        assert rows == [{"n": 1}, {"n": 2}]
+
+    def test_legacy_import_is_required_in_each_arm(self, graph):
+        with pytest.raises(kglite.SchemaError, match="Undefined variable 'x'"):
+            graph.cypher("WITH 1 AS x CALL { WITH x RETURN x AS n UNION RETURN x AS n } RETURN n")
+
+    def test_null_import_kind_is_decided_per_arm(self, graph):
+        rows = graph.cypher(
+            "OPTIONAL MATCH (x:Nope) CALL (x) { "
+            "RETURN coalesce(x, 'fallback') AS value UNION ALL "
+            "MATCH (x)-[:KNOWS]->(f) RETURN count(f) AS value "
+            "} RETURN value"
+        ).to_list()
+        assert rows == [{"value": "fallback"}, {"value": 0}]
+
+    @pytest.mark.parametrize(
+        ("operator", "expected"),
+        [("INTERSECT", [{"n": 2}]), ("EXCEPT", [{"n": 1}])],
+    )
+    def test_kglite_set_extensions_in_body(self, graph, operator, expected):
+        rows = graph.cypher(
+            f"CALL () {{ UNWIND [1, 1, 2] AS n RETURN n {operator} "
+            "UNWIND [2, 2, 3] AS n RETURN n } RETURN n ORDER BY n"
+        ).to_list()
+        assert rows == expected
+
+    def test_nested_set_body(self, graph):
+        rows = graph.cypher(
+            "CALL () { RETURN 1 AS n UNION ALL "
+            "CALL () { RETURN 2 AS n UNION ALL RETURN 3 AS n } RETURN n "
+            "} RETURN n ORDER BY n"
+        ).to_list()
+        assert rows == [{"n": 1}, {"n": 2}, {"n": 3}]
+
+    def test_ordered_output_schema_checked_on_empty_outer_stream(self, graph):
+        with pytest.raises(kglite.CypherSyntaxError, match="same return column names"):
             graph.cypher(
-                "CALL { MATCH (n:Person) RETURN n.name AS nm UNION MATCH (m:Person) RETURN m.name AS nm } RETURN nm"
+                "MATCH (missing:Nope) CALL () { RETURN 1 AS a, 2 AS b UNION RETURN 2 AS b, 1 AS a } RETURN a, b"
             )
+
+    def test_profile_and_warnings_cover_set_body(self, graph):
+        result = graph.cypher(
+            "PROFILE CALL () { MATCH (a:MissingA) RETURN count(a) AS n "
+            "UNION ALL MATCH (b:MissingB) RETURN count(b) AS n } RETURN n"
+        )
+        assert result.to_list() == [{"n": 0}, {"n": 0}]
+        call = next(entry for entry in result.profile if entry["clause"] == "CallSubquery")
+        assert (call["rows_in"], call["rows_out"]) == (1, 2)
+        assert any("MissingA" in warning for warning in result.warnings)
+        assert any("MissingB" in warning for warning in result.warnings)
 
 
 class TestCallProcedureUnaffected:

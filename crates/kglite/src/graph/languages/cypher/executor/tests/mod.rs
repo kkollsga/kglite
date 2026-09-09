@@ -184,3 +184,98 @@ fn periodic_interrupt_reaches_union_and_subquery_join_inner_loops() {
         .unwrap_err()
         .contains("test hook"));
 }
+
+#[test]
+fn call_subquery_set_arms_share_outer_seed_without_sharing_arm_results() {
+    let graph = DirGraph::new();
+    let params = HashMap::new();
+    let executor = CypherExecutor::with_params(&graph, &params, None);
+
+    let mut modern = parser::parse_cypher(
+        "UNWIND [1, 2] AS x CALL (x) { RETURN x AS n UNION ALL RETURN x + 10 AS n } \
+         RETURN x, n ORDER BY x, n",
+    )
+    .unwrap();
+    crate::graph::languages::cypher::planner::optimize(&mut modern, &graph, &params);
+    let result = executor.execute(&modern).unwrap();
+    assert_eq!(result.columns, vec!["x", "n"]);
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![Value::Int64(1), Value::Int64(1)],
+            vec![Value::Int64(1), Value::Int64(11)],
+            vec![Value::Int64(2), Value::Int64(2)],
+            vec![Value::Int64(2), Value::Int64(12)],
+        ]
+    );
+
+    let mut legacy = parser::parse_cypher(
+        "WITH 1 AS x, 2 AS y CALL { WITH x RETURN x AS n UNION ALL WITH y RETURN y AS n } \
+         RETURN n ORDER BY n",
+    )
+    .unwrap();
+    crate::graph::languages::cypher::planner::optimize(&mut legacy, &graph, &params);
+    let result = executor.execute(&legacy).unwrap();
+    assert_eq!(
+        result.rows,
+        vec![vec![Value::Int64(1)], vec![Value::Int64(2)]]
+    );
+
+    for (operator, expected) in [
+        ("UNION", vec![1]),
+        ("UNION ALL", vec![1, 1]),
+        ("INTERSECT", vec![1]),
+        ("EXCEPT", Vec::new()),
+    ] {
+        let query = parser::parse_cypher(&format!(
+            "CALL () {{ RETURN 1 AS n {operator} RETURN 1 AS n }} RETURN n"
+        ))
+        .unwrap();
+        let result = executor.execute(&query).unwrap();
+        let values: Vec<i64> = result
+            .rows
+            .iter()
+            .map(|row| match row.as_slice() {
+                [Value::Int64(value)] => *value,
+                other => panic!("unexpected set row: {other:?}"),
+            })
+            .collect();
+        assert_eq!(values, expected, "{operator}");
+    }
+}
+
+#[test]
+fn periodic_interrupt_reaches_seeded_call_subquery_right_arm() {
+    let graph = DirGraph::new();
+    let params = HashMap::new();
+    let executor = CypherExecutor::with_params(&graph, &params, None);
+    let query = parser::parse_cypher(
+        "CALL () { RETURN 0 AS x UNION ALL UNWIND range(1, 8193) AS x RETURN x } RETURN x",
+    )
+    .unwrap();
+
+    CypherExecutor::interrupt_after_periodic_polls(1);
+    assert!(executor.execute(&query).unwrap_err().contains("test hook"));
+}
+
+#[test]
+fn call_subquery_set_decides_null_anchor_kind_per_arm() {
+    let graph = build_test_graph();
+    let params = HashMap::new();
+    let executor = CypherExecutor::with_params(&graph, &params, None);
+    let mut query = parser::parse_cypher(
+        "OPTIONAL MATCH (x:Nope) CALL (x) { RETURN coalesce(x, 'fallback') AS value \
+         UNION ALL MATCH (x)-[:KNOWS]->(f) RETURN count(f) AS value } RETURN value",
+    )
+    .unwrap();
+    crate::graph::languages::cypher::planner::optimize(&mut query, &graph, &params);
+
+    let result = executor.execute(&query).unwrap();
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![Value::String("fallback".to_string())],
+            vec![Value::Int64(0)],
+        ]
+    );
+}

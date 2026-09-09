@@ -107,6 +107,14 @@ def test_max_work_units_covers_correlated_subquery_join() -> None:
         graph.cypher(query, max_work_units=3)
 
 
+def test_max_work_units_is_shared_across_call_subquery_set_arms() -> None:
+    graph = graph_with_types()
+    query = "CALL () { UNWIND [1, 2] AS x RETURN x UNION ALL UNWIND [3, 4] AS x RETURN x } RETURN x"
+
+    with pytest.raises(kglite.CypherExecutionError, match="max_work_units"):
+        graph.cypher(query, max_work_units=3)
+
+
 def test_max_work_units_covers_modern_scoped_subquery_rows() -> None:
     graph = graph_with_types()
     query = """

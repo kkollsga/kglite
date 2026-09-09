@@ -486,7 +486,7 @@ fn validate_scope_with_globals(
                 reject_global_redeclaration(&load.variable, globals)?;
                 bind_row_source(clause, &mut scope)?;
             }
-            Clause::Union(union) => validate_scope(&union.query, initial)?,
+            Clause::Union(union) => validate_scope_with_globals(&union.query, initial, globals)?,
             Clause::Create(create) => {
                 for pattern in &create.patterns {
                     bind_create_pattern(pattern, &mut scope);
@@ -564,7 +564,13 @@ fn validate_scope_with_globals(
                 } else {
                     &no_globals
                 };
-                validate_scope_with_globals(body, &imported, body_globals)?;
+                if matches!(import, CallSubqueryImport::Legacy(_))
+                    && body.clauses.iter().any(|c| matches!(c, Clause::Union(_)))
+                {
+                    validate_legacy_set_scope(body, &imported)?;
+                } else {
+                    validate_scope_with_globals(body, &imported, body_globals)?;
+                }
                 if let Some(Clause::Return(return_clause)) = body
                     .clauses
                     .iter()
@@ -613,6 +619,45 @@ fn resolve_subquery_imports(
         }
     }
     Ok(imported)
+}
+
+/// Validate every legacy set arm from only the variables named by that arm's
+/// leading importing WITH. `available` is the union collected by the parser,
+/// used solely to validate those first projections against the outer scope.
+fn validate_legacy_set_scope(
+    query: &CypherQuery,
+    available: &HashSet<String>,
+) -> Result<(), SchemaError> {
+    let set_index = query
+        .clauses
+        .iter()
+        .position(|clause| matches!(clause, Clause::Union(_)));
+    let arm_end = set_index.unwrap_or(query.clauses.len());
+    let has_importing_with = matches!(query.clauses.first(), Some(Clause::With(_)));
+    let empty = HashSet::new();
+    let initial = if has_importing_with {
+        available
+    } else {
+        &empty
+    };
+    validate_scope_with_globals(
+        &CypherQuery {
+            clauses: query.clauses[..arm_end].to_vec(),
+            explain: false,
+            profile: false,
+            output_format: OutputFormat::Default,
+            optimizer_tags: Vec::new(),
+        },
+        initial,
+        &empty,
+    )?;
+    if let Some(idx) = set_index {
+        let Clause::Union(set) = &query.clauses[idx] else {
+            unreachable!("set index must point to set operation")
+        };
+        validate_legacy_set_scope(&set.query, available)?;
+    }
+    Ok(())
 }
 
 fn reject_global_redeclaration(name: &str, globals: &HashSet<String>) -> Result<(), SchemaError> {
@@ -1631,6 +1676,24 @@ mod tests {
         let err = validate_schema(&q, &g).unwrap_err();
         assert_eq!(err.kind, SchemaErrorKind::UnknownProperty);
         assert!(err.message.contains("age"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn legacy_set_arms_validate_only_their_own_explicit_imports() {
+        let g = graph_with_schema();
+        let valid = parse_cypher(
+            "WITH 1 AS x, 2 AS y CALL { WITH x RETURN x AS n UNION ALL WITH y RETURN y AS n } \
+             RETURN n",
+        )
+        .unwrap();
+        assert!(validate_schema(&valid, &g).is_ok());
+
+        let invalid = parse_cypher(
+            "WITH 1 AS x CALL { WITH x RETURN x AS n UNION ALL RETURN x AS n } RETURN n",
+        )
+        .unwrap();
+        let err = validate_schema(&invalid, &g).unwrap_err();
+        assert!(err.message.contains("Undefined variable 'x'"), "{err:?}");
     }
 
     #[test]

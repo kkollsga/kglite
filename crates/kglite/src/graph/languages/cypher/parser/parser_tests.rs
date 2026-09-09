@@ -854,6 +854,66 @@ mod tests {
     }
 
     #[test]
+    fn test_call_subquery_set_body_is_bounded_by_closing_brace() {
+        let query = parse_cypher(
+            "CALL () { RETURN 1 AS x UNION ALL RETURN 2 AS x INTERSECT RETURN 2 AS x } \
+             RETURN x",
+        )
+        .unwrap();
+        assert_eq!(query.clauses.len(), 2);
+        let Clause::CallSubquery { body, .. } = &query.clauses[0] else {
+            panic!("expected CALL subquery")
+        };
+        assert!(matches!(
+            body.clauses.as_slice(),
+            [Clause::Return(_), Clause::Union(_)]
+        ));
+        let Clause::Union(union) = &body.clauses[1] else {
+            unreachable!()
+        };
+        assert!(union.all);
+        assert_eq!(union.kind, SetOpKind::Union);
+        assert!(matches!(
+            union.query.clauses.as_slice(),
+            [Clause::Return(_), Clause::Union(_)]
+        ));
+    }
+
+    #[test]
+    fn test_call_subquery_legacy_set_collects_arm_local_imports() {
+        let query = parse_cypher(
+            "WITH 1 AS x, 2 AS y CALL { WITH x RETURN x AS n UNION WITH y RETURN y AS n } \
+             RETURN n",
+        )
+        .unwrap();
+        let Clause::CallSubquery { import, body } = &query.clauses[1] else {
+            panic!("expected CALL subquery")
+        };
+        assert_eq!(
+            import,
+            &CallSubqueryImport::Legacy(vec!["x".to_string(), "y".to_string()])
+        );
+        assert!(matches!(body.clauses.first(), Some(Clause::With(_))));
+        let Clause::Union(union) = &body.clauses[2] else {
+            panic!("expected set operator")
+        };
+        assert!(matches!(union.query.clauses.first(), Some(Clause::With(_))));
+    }
+
+    #[test]
+    fn test_call_subquery_set_rejects_schema_and_terminal_disagreement() {
+        for source in [
+            "CALL { RETURN 1 AS x UNION RETURN 2 AS y } RETURN x",
+            "CALL { RETURN 1 AS x UNION MATCH (n) } RETURN x",
+            "CALL { RETURN 1 AS x UNION CREATE (:N) RETURN 2 AS x } RETURN x",
+            "CALL () { FOREACH (x IN [1] | CREATE (:N {v: x})) RETURN 1 AS n UNION ALL RETURN 2 AS n } RETURN n",
+            "CALL () { RETURN 1 AS n UNION ALL FOREACH (x IN [1] | CREATE (:N {v: x})) RETURN 2 AS n } RETURN n",
+        ] {
+            assert!(parse_cypher(source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
     fn test_call_subquery_missing_closing_brace() {
         let err = parse_cypher("CALL { MATCH (n:Person) RETURN n").unwrap_err();
         let msg = format!("{}", err);

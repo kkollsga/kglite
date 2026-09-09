@@ -13,8 +13,8 @@
 //! every `CALL { }` body once at plan time (import-aware: it disables the
 //! seed-ignoring fusion passes for correlated bodies that anchor on an
 //! imported variable) and the executor runs the body exactly as planned.
-//! The executor still re-derives `import_pattern_anchors` (re-exported
-//! from the planner) for per-row NULL-anchor detection (§1.3).
+//! The executor still re-derives arm-local pattern anchors (re-exported from
+//! the planner) for per-row NULL-anchor detection (§1.3).
 
 use super::*;
 use crate::datatypes::values::Value;
@@ -96,13 +96,6 @@ impl<'a> CypherExecutor<'a> {
         // collapsing to the global KNOWS count). The executor runs the
         // body exactly as planned; it does NOT re-optimize.
         //
-        // `import_pattern_anchors` is still needed here — but only for
-        // per-row NULL-anchor detection below (an imported pattern anchor
-        // that is NULL on a given outer row empties that row's pipeline,
-        // §1.3). It is the same analysis the planner used to make the
-        // fusion decision, re-used at execution time.
-        let anchor_imports = import_pattern_anchors(body, import);
-
         // One sub-executor, reused across every outer row. It holds only
         // graph/params refs + fresh per-query caches (regex/spatial), so
         // reuse lets those caches warm across rows instead of being thrown
@@ -129,7 +122,7 @@ impl<'a> CypherExecutor<'a> {
             self.check_deadline()?;
 
             // NULL-anchor handling (§1.3): if an imported variable that the
-            // body uses as a pattern anchor is NULL on this outer row (e.g.
+            // current set arm uses as a pattern anchor is NULL on this outer row (e.g.
             // an unmatched upstream OPTIONAL MATCH), every anchored match
             // produces no rows. Seed the body with an EMPTY pipeline (zero
             // rows) rather than a one-row null binding: a non-aggregating
@@ -138,7 +131,13 @@ impl<'a> CypherExecutor<'a> {
             // `count() = 0`, outer row survives) — matching Neo4j. A NULL
             // scalar import that is NOT a pattern anchor stays in the seed
             // as projected-null (the body's expressions see null).
-            let seed = self.seed_row_from_imports(&outer_row, import, &anchor_imports);
+            let set_seed = SubquerySetSeed {
+                outer_row: &outer_row,
+                imports: import,
+                arm_local: !globally_scoped
+                    && body.clauses.iter().any(|c| matches!(c, Clause::Union(_))),
+            };
+            let (seed, arm_imports) = self.seed_subquery_set_arm(set_seed, body);
             let seed_set = ResultSet {
                 rows: vec![seed.clone()],
                 columns: Vec::new(),
@@ -148,9 +147,9 @@ impl<'a> CypherExecutor<'a> {
             // runs only on the top-level query, never on a subquery body), so
             // `finalize_result` yields eager `Vec<Vec<Value>>` rows here.
             let body_set = if globally_scoped {
-                sub.execute_clauses_preserving(body, seed_set, &seed, import)?
+                sub.execute_clauses_preserving(body, seed_set, &seed, import, set_seed)?
             } else {
-                sub.execute_clauses(body, seed_set, import)?
+                sub.execute_clauses(body, seed_set, &arm_imports, set_seed)?
             };
             let body_result = sub.finalize_result(body_set)?;
 
@@ -276,6 +275,26 @@ impl<'a> CypherExecutor<'a> {
         seed
     }
 
+    /// Build one arm's seed directly from the original outer row. Modern
+    /// scope clauses expose every selected import to every arm. Legacy arms
+    /// expose only the variables named by that arm's leading importing WITH;
+    /// the CALL-level list is merely the union of candidates copied from the
+    /// outer row.
+    pub(super) fn seed_subquery_set_arm(
+        &self,
+        set_seed: SubquerySetSeed<'_>,
+        arm: &CypherQuery,
+    ) -> (ResultRow, Vec<String>) {
+        let imports = if set_seed.arm_local {
+            legacy_arm_imports(arm)
+        } else {
+            set_seed.imports.to_vec()
+        };
+        let anchors = import_pattern_anchors_in_arm(arm, &imports);
+        let row = self.seed_row_from_imports(set_seed.outer_row, &imports, &anchors);
+        (row, imports)
+    }
+
     /// Seed a single NULL/absent import into `seed`, deciding its kind: a
     /// sentinel node binding when the body anchors a pattern on it (so the
     /// anchored match yields nothing), else projected-null. Factored out so
@@ -320,4 +339,18 @@ fn splice_subquery_columns(row: &mut ResultRow, sub_row: &[Value], sub_columns: 
 // decision, which the planner OWNS. The executor re-uses
 // `import_pattern_anchors` for per-row NULL-anchor detection via the
 // planner re-export.
-use crate::graph::languages::cypher::planner::import_pattern_anchors;
+fn legacy_arm_imports(arm: &CypherQuery) -> Vec<String> {
+    let Some(Clause::With(with_clause)) = arm.clauses.first() else {
+        return Vec::new();
+    };
+    with_clause
+        .items
+        .iter()
+        .filter_map(|item| match (&item.expression, &item.alias) {
+            (Expression::Variable(name), None) => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+use crate::graph::languages::cypher::planner::import_pattern_anchors_in_arm;

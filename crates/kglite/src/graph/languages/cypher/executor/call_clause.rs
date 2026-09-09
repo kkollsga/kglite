@@ -1388,7 +1388,44 @@ impl<'a> CypherExecutor<'a> {
         // `None`, never `self.row_limit`: see `execute_with_cap`.
         let right_result = self.execute_with_cap(&clause.query, None)?;
         self.absorb_diagnostics(&right_result);
+        self.combine_set_results(clause, result_set, right_result)
+    }
 
+    /// Execute a CALL-subquery set arm from the same original outer row as
+    /// its left sibling. Legacy arms select their own importing-WITH names;
+    /// modern arms receive the scope-clause imports globally.
+    pub(super) fn execute_seeded_union(
+        &self,
+        clause: &UnionClause,
+        result_set: ResultSet,
+        set_seed: SubquerySetSeed<'_>,
+        preserved: Option<(&ResultRow, &[String])>,
+    ) -> Result<ResultSet, String> {
+        let (right_row, right_imports) = self.seed_subquery_set_arm(set_seed, &clause.query);
+        let right_seed = ResultSet {
+            rows: vec![right_row],
+            columns: Vec::new(),
+            lazy_return_items: None,
+        };
+        let right_declared = right_imports.iter().cloned().collect();
+        let right_set = self.execute_clauses_profiled(
+            &clause.query,
+            right_seed,
+            None,
+            preserved,
+            &right_declared,
+            Some(set_seed),
+        )?;
+        let right_result = self.finalize_result(right_set)?;
+        self.combine_set_results(clause, result_set, right_result)
+    }
+
+    fn combine_set_results(
+        &self,
+        clause: &UnionClause,
+        result_set: ResultSet,
+        right_result: CypherResult,
+    ) -> Result<ResultSet, String> {
         // All arms of a set operation must return the same column names, in the
         // same order — matching Neo4j ("All sub queries in an UNION must have
         // the same return column names"). Without this check a mismatch produced

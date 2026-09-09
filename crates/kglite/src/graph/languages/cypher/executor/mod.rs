@@ -52,6 +52,16 @@ pub(super) const INTERRUPT_POLL_INTERVAL: usize = 4096;
 
 type SpatialCacheShard = RwLock<HashMap<usize, Option<NodeSpatialData>>>;
 
+/// Original outer-row context used to seed every set arm of a read CALL
+/// subquery. Legacy arms select from `imports` through their own leading WITH;
+/// modern scope-clause arms receive the complete list globally.
+#[derive(Clone, Copy)]
+pub(super) struct SubquerySetSeed<'r> {
+    outer_row: &'r ResultRow,
+    imports: &'r [String],
+    arm_local: bool,
+}
+
 /// What [`apply_row_limit`] observed, for [`stamp_row_limit`] to record.
 pub(super) struct RowLimitOutcome {
     /// The cap that was in force.
@@ -465,6 +475,7 @@ impl<'a> CypherExecutor<'a> {
             Some(&mut profile_stats),
             None,
             &initial_declared,
+            None,
         )?;
 
         // Applied before `finalize_result`, so rows past the cap are never
@@ -537,6 +548,7 @@ impl<'a> CypherExecutor<'a> {
                     },
                     preserved,
                     &suffix_declared,
+                    None,
                 )?;
                 write::merge_profile(&mut merged_profile, batch_profile);
                 Ok(out)
@@ -562,9 +574,17 @@ impl<'a> CypherExecutor<'a> {
         query: &CypherQuery,
         initial: ResultSet,
         declared: &[String],
+        set_seed: SubquerySetSeed<'_>,
     ) -> Result<ResultSet, String> {
         let initial_declared = declared.iter().cloned().collect();
-        self.execute_clauses_profiled(query, initial, None, None, &initial_declared)
+        self.execute_clauses_profiled(
+            query,
+            initial,
+            None,
+            None,
+            &initial_declared,
+            Some(set_seed),
+        )
     }
 
     pub(super) fn execute_clauses_preserving(
@@ -573,6 +593,7 @@ impl<'a> CypherExecutor<'a> {
         initial: ResultSet,
         source: &ResultRow,
         names: &[String],
+        set_seed: SubquerySetSeed<'_>,
     ) -> Result<ResultSet, String> {
         let initial_declared = names.iter().cloned().collect();
         self.execute_clauses_profiled(
@@ -581,6 +602,7 @@ impl<'a> CypherExecutor<'a> {
             None,
             Some((source, names)),
             &initial_declared,
+            Some(set_seed),
         )
     }
 
@@ -617,6 +639,7 @@ impl<'a> CypherExecutor<'a> {
         mut profile: Option<&mut Vec<ClauseStats>>,
         preserved: Option<(&ResultRow, &[String])>,
         initial_declared: &HashSet<String>,
+        set_seed: Option<SubquerySetSeed<'_>>,
     ) -> Result<ResultSet, String> {
         // `LOAD CSV` drives the clauses that follow it over bounded row
         // batches instead of running as a clause, so peak memory never scales
@@ -785,6 +808,12 @@ impl<'a> CypherExecutor<'a> {
                         declared.extend(names.iter().cloned());
                     }
                     self.execute_call_subquery(import, body, result_set, &declared)?
+                } else if let Clause::Union(union) = clause {
+                    if let Some(seed) = set_seed {
+                        self.execute_seeded_union(union, result_set, seed, preserved)?
+                    } else {
+                        self.execute_union(union, result_set)?
+                    }
                 } else if let Clause::Return(r) = clause {
                     let retain = order_by_scope_after(&query.clauses, i);
                     self.execute_return_retaining(r, result_set, &retain)?
@@ -822,6 +851,12 @@ impl<'a> CypherExecutor<'a> {
                         declared.extend(names.iter().cloned());
                     }
                     self.execute_call_subquery(import, body, result_set, &declared)?
+                } else if let Clause::Union(union) = clause {
+                    if let Some(seed) = set_seed {
+                        self.execute_seeded_union(union, result_set, seed, preserved)?
+                    } else {
+                        self.execute_union(union, result_set)?
+                    }
                 } else if let Clause::Return(r) = clause {
                     let retain = order_by_scope_after(&query.clauses, i);
                     self.execute_return_retaining(r, result_set, &retain)?

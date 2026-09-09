@@ -376,7 +376,14 @@ fn pass_optimize_nested_queries(query: &mut CypherQuery, ctx: &PassCtx) {
     for clause in &mut query.clauses {
         match clause {
             Clause::Union(ref mut u) => {
-                optimize_with_disabled(&mut u.query, ctx.graph, ctx.params, ctx.disabled);
+                optimize_with_disabled_scoped(
+                    &mut u.query,
+                    ctx.graph,
+                    ctx.params,
+                    ctx.disabled,
+                    ctx.initial_scope,
+                    ctx.global_scope,
+                );
             }
             Clause::CallSubquery {
                 ref import,
@@ -400,30 +407,31 @@ fn pass_optimize_nested_queries(query: &mut CypherQuery, ctx: &PassCtx) {
                 } else {
                     &empty_globals
                 };
-                if anchors.is_empty() {
-                    optimize_with_disabled_scoped(
-                        body,
-                        ctx.graph,
-                        ctx.params,
-                        ctx.disabled,
-                        &imports,
-                        body_globals,
-                    );
-                } else {
-                    // Union the seed-ignoring set with the inherited
-                    // disabled set so both the per-row-correctness disable
-                    // AND any outer diagnostic toggle apply to the body.
-                    let mut merged = ctx.disabled.clone();
-                    merged.extend(seed_ignoring_fusion_passes().iter().cloned());
-                    optimize_with_disabled_scoped(
-                        body,
-                        ctx.graph,
-                        ctx.params,
-                        &merged,
-                        &imports,
-                        body_globals,
-                    );
+                // Legacy set-arm importing WITH clauses are executable scope
+                // boundaries and also record which outer variables belong to
+                // each arm. Removing them would make seeded execution lose
+                // that arm's imports, so the pass-through fold is disabled
+                // throughout this one body/set tree.
+                let legacy_set = matches!(import, CallSubqueryImport::Legacy(_))
+                    && body.clauses.iter().any(|c| matches!(c, Clause::Union(_)));
+                let mut merged = ctx.disabled.clone();
+                if legacy_set {
+                    merged.insert("fold_pass_through_with".to_string());
                 }
+                if !anchors.is_empty() {
+                    // Union the seed-ignoring set with the inherited disabled
+                    // set so both per-row correctness and outer diagnostic
+                    // toggles apply to the body.
+                    merged.extend(seed_ignoring_fusion_passes().iter().cloned());
+                }
+                optimize_with_disabled_scoped(
+                    body,
+                    ctx.graph,
+                    ctx.params,
+                    &merged,
+                    &imports,
+                    body_globals,
+                );
             }
             _ => {}
         }
@@ -447,9 +455,32 @@ fn pass_optimize_nested_queries(query: &mut CypherQuery, ctx: &PassCtx) {
 /// concern.
 pub(crate) fn import_pattern_anchors(body: &CypherQuery, import: &[String]) -> Vec<String> {
     let mut anchors: Vec<String> = Vec::new();
+    collect_import_pattern_anchors(body, import, true, &mut anchors);
+    anchors
+}
+
+/// Arm-local form used by seeded set execution. Unlike the planner-wide
+/// analysis, it stops at the current arm's set operator so a NULL import can
+/// be a scalar in one legacy arm and a pattern anchor in another.
+pub(crate) fn import_pattern_anchors_in_arm(body: &CypherQuery, import: &[String]) -> Vec<String> {
+    let mut anchors = Vec::new();
+    collect_import_pattern_anchors(body, import, false, &mut anchors);
+    anchors
+}
+
+fn collect_import_pattern_anchors(
+    body: &CypherQuery,
+    import: &[String],
+    recurse_sets: bool,
+    anchors: &mut Vec<String>,
+) {
     for clause in &body.clauses {
         let patterns = match clause {
             Clause::Match(m) | Clause::OptionalMatch(m) => &m.patterns,
+            Clause::Union(set) if recurse_sets => {
+                collect_import_pattern_anchors(&set.query, import, true, anchors);
+                continue;
+            }
             _ => continue,
         };
         for pattern in patterns {
@@ -466,7 +497,6 @@ pub(crate) fn import_pattern_anchors(body: &CypherQuery, import: &[String]) -> V
             }
         }
     }
-    anchors
 }
 
 /// The optimizer passes that emit a graph-global / plan-time-anchored

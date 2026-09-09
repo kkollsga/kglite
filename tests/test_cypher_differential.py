@@ -381,6 +381,25 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         None,
     ),
     (
+        "call_subquery_seeded_union_all",
+        "small_graph",
+        "MATCH (p:Person) CALL (p) { RETURN p.name AS n UNION ALL RETURN p.name AS n } RETURN n ORDER BY n",
+        None,
+    ),
+    (
+        "call_subquery_seeded_intersect",
+        "small_graph",
+        "MATCH (p:Person) CALL (p) { RETURN p.name AS n INTERSECT RETURN p.name AS n } RETURN n ORDER BY n",
+        None,
+    ),
+    (
+        "call_subquery_seeded_anchor_in_right_arm",
+        "small_graph",
+        "MATCH (p:Person) CALL (p) { RETURN 0 AS n UNION ALL "
+        "MATCH (p)-[:KNOWS]->(f) RETURN count(f) AS n } RETURN p.name AS name, n ORDER BY name, n",
+        None,
+    ),
+    (
         "range_i64_terminal_shape",
         "small_graph",
         "RETURN range($start, $end, $step) AS r",
