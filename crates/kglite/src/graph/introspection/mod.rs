@@ -194,7 +194,7 @@ impl DescribeSurface {
 pub enum CypherDetail {
     /// No Cypher docs (default).
     Off,
-    /// Tier 2: compact reference listing — all clauses, operators, functions, procedures.
+    /// Tier 2: compact reference for the major supported Cypher surface.
     Overview,
     /// Tier 3: detailed docs with params and examples for specific topics.
     Topics(Vec<String>),

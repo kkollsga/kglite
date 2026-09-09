@@ -79,7 +79,8 @@ but serve different roles in the executor:
   When a query or loader admits a value as a stored property, KGLite
   recursively snapshots every `NodeRef` to the referenced node's ordinary
   title value first. The rule covers node titles, scalar/list/map properties,
-  `CREATE`/`SET`/repeated `MERGE`, table-backed writes, subsets, and graph
+  Cypher writes (including `CREATE`/`INSERT`/`SET`/repeated `MERGE`), table-backed
+  writes, subsets, and graph
   transfers such as `extend()`. A transfer resolves against its source view
   before inserting into the destination. A missing reference or cyclic chain
   becomes NULL. Constraints, indexes, CDC and WAL therefore observe the same

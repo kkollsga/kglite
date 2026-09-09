@@ -317,7 +317,7 @@ versioned on its own cadence. Three build graphs it serves; one looks at them:
 |                                            | KGLite                            | [LadybugDB](https://ladybugdb.com/) (formerly Kuzu) | NetworkX           | rustworkx          | Neo4j Embedded         |
 |--------------------------------------------|-----------------------------------|-----------------------------------------------------|--------------------|--------------------|------------------------|
 | **Install**                                | `pip install kglite`              | `pip install ladybug`                               | `pip install networkx` | `pip install rustworkx` | JVM + Java deps  |
-| **Query language**                         | Cypher ([broad coverage](CYPHER.md#feature-coverage)) | Cypher                              | Python API         | Python API         | Cypher (full)          |
+| **Query language**                         | Cypher ([supported dialect](CYPHER.md#feature-coverage)) | Cypher                              | Python API         | Python API         | Cypher                 |
 | **Storage**                                | in-mem · mmap · disk (tested to 861M edges) | in-mem · disk (columnar)                            | in-mem             | in-mem             | disk-backed + page cache (JVM) |
 | **Bulk-load from pandas**                  | one-liner                         | via Arrow                                           | manual             | manual             | via driver             |
 | **MCP server for LLM agents**              | bundled in the `kglite` wheel     | [separate `mcp-server-ladybug` install](https://github.com/LadybugDB/mcp-server-ladybug) | no | no | [separate official server](https://neo4j.com/developer/genai-ecosystem/model-context-protocol-mcp/) |
@@ -417,7 +417,7 @@ graph.cypher("""
 
 `missing_required_edge` and `missing_inbound_edge` validate the `(type, edge)`
 direction against the graph's actual schema and refuse to execute when misused.
-**→ [Full procedure list](https://kglite.readthedocs.io/en/latest/python/guides/cypher.html#structural-validator-call-procedures).**
+**→ [Procedure examples and discovery](https://kglite.readthedocs.io/en/latest/python/guides/cypher.html#structural-validator-call-procedures).**
 
 ### Graph algorithms
 
@@ -556,7 +556,7 @@ Quick reference to the feature set; each row links into the appropriate guide.
 
 | Feature | Description |
 |---|---|
-| **[Cypher](https://kglite.readthedocs.io/en/latest/python/guides/cypher.html)** | MATCH, CREATE, SET, DELETE, MERGE, UNION/INTERSECT/EXCEPT, aggregations (incl. `median`, `percentile_cont`, `variance`), `reduce()`, ORDER BY, LIMIT, SKIP |
+| **[Cypher](https://kglite.readthedocs.io/en/latest/python/guides/cypher.html)** | Reads, mutations, aggregations, scoped per-row `CALL` subqueries, set operations, schema DDL, `FILTER`/`OFFSET`/`FINISH`, and strict `INSERT`; see the [supported dialect](CYPHER.md#feature-coverage) |
 | **Label model** | One immutable primary type per node plus optional secondary labels: `CREATE (n:A:B)`, `SET n:B`, `REMOVE n:B`, and `labels(n)` returns the list (primary first). Details in the [Cypher reference](CYPHER.md) callout. |
 | **Text predicates** | `text_edit_distance`, `text_normalize`, `text_jaccard`, `text_ngrams`, `text_contains_any` / `text_starts_with_any` |
 | **[Ontology](https://kglite.readthedocs.io/en/latest/python/guides/ontology.html)** | Declared semantic layer: `is_a` class forest + relationship semantics (`define_ontology`), `SHOW ONTOLOGY`, no-arg validators, `CALL ontology_audit()` scorecard, blueprint data-quality gate, opt-in materialization. Annotations, not axioms: SKOS in spirit, never OWL. |

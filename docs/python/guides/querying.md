@@ -145,7 +145,7 @@ people.get_properties(['age', 'city'])  # → [(28, 'Oslo'), (35, 'Bergen'), (42
 people.collect()                      # → [{'type': 'Person', 'title': 'Alice', 'id': 1, 'age': 28, ...}, ...]
 people.to_df()                          # → DataFrame with columns type, title, id, age, city, ...
 
-# Single node lookup (O(1))
+# Single node lookup through the identity index
 graph.node('Person', 1)       # → {'type': 'Person', 'title': 'Alice', ...} or None
 ```
 

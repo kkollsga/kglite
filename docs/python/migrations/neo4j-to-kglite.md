@@ -14,7 +14,7 @@ below against your workload before adopting it.
 | | KGLite | Neo4j |
 |---|---|---|
 | Deployment | Embedded, in-process (`pip install kglite`) | Server deployment or embedded Java database |
-| Query language | Cypher (subset, see below) | Cypher (full) |
+| Query language | Supported Cypher dialect (see below) | Cypher |
 | Storage | `.kgl` file — in-mem · mmap · disk | Server store directory |
 | Auth | None in-process; basic only via Bolt server | Full RBAC |
 | Multi-database | No catalog — one graph per handle or Bolt server | Yes (`USE db`) |
@@ -73,7 +73,7 @@ cargo install kglite-bolt-server
 kglite-bolt-server --graph my-graph.kgl --bind 127.0.0.1 --port 7687
 ```
 
-```{note}
+````{note}
 **JVM clients need `--neo4j-compat`.** The official Java driver refuses to talk
 to a server whose handshake agent does not begin with `Neo4j/`, and fails at
 connect time with `UntrustedServerException: Server does not identify as a
@@ -93,7 +93,7 @@ It is opt-in because presenting as another product is the operator's decision.
 Connect a driver that enforces the check with compatibility off and the server
 log tells you exactly this, naming both activation routes. See “Driver identity” in the
 [Bolt server operator guide](../../operators/bolt-server.md).
-```
+````
 
 Connection and authentication setup changes; query code may be reusable within
 the documented Bolt and Cypher limits:
@@ -139,7 +139,7 @@ Go and .NET are untested; validate them before use.
 | Auth | `--auth basic` with `--auth-user` / `--auth-pass`; default `--auth none` accepts any LOGON. No RBAC, users, or roles. |
 | TLS (`bolt+s://` / `neo4j+s://`) | Supported via `--tls-cert` + `--tls-key` |
 | Read-only enforcement | `--readonly` rejects all mutations |
-| Auto-commit **mutations** | **Not supported** — wrap `CREATE`/`SET`/`DELETE`/`MERGE` in explicit `BEGIN`/`COMMIT` (`session.execute_write` does this for you). Auto-commit reads work. Note: not every client wraps writes — G.V()'s query editor sends writes auto-commit and surfaces the server's rejection message verbatim (measured 2026-08-15) |
+| Auto-commit **mutations** | **Not supported** — wrap every write (`CREATE`/`INSERT`, `SET`/`REMOVE`, delete forms, `MERGE`, or write DDL/procedures) in explicit `BEGIN`/`COMMIT` (`session.execute_write` does this for you). Auto-commit reads work. Note: not every client wraps writes — G.V()'s query editor sends writes auto-commit and surfaces the server's rejection message verbatim (measured 2026-08-15) |
 | OCC on writes | Supported — stale-snapshot commits get `Neo.TransientError.Transaction.Outdated`. That class is retriable, so `session.execute_write` retries the unit of work for you; only hand-rolled `begin_transaction` code needs its own retry loop |
 | Multi-database (`USE db`) | **Not supported** — single graph. A `USE` clause is a syntax error; the *session-level* `database=` field is accepted and ignored, and `SHOW DATABASES` reports the single served graph as `neo4j` |
 | Causal consistency / bookmarks | **Not supported** — the `bookmark` field is not returned on COMMIT |
@@ -262,7 +262,7 @@ rewrite. Four differences are worth knowing before you run it:
 |---|---|---|
 | Sources | `file://` URLs and plain local paths | `file://` plus `http(s)://` |
 | Batching | Automatic — 1000 rows at a time for row-local pipelines, so file size does not drive memory | `CALL { … } IN TRANSACTIONS` (formerly `USING PERIODIC COMMIT`), which you declare |
-| Whole-result clauses | An aggregate, `ORDER BY`, `SKIP`/`LIMIT`, `DISTINCT`, `UNION`, or `CALL` after `LOAD CSV` cannot be batched, so the file is read in one capped pass and fails past 1,000,000 rows naming the clause responsible | Behavior depends on the execution plan and server configuration |
+| Whole-result clauses | An aggregate, `ORDER BY`, `SKIP`/`OFFSET`/`LIMIT`, `DISTINCT`, a set operation, `cluster()`, or a `CALL` subquery after `LOAD CSV` cannot be batched, so the file is read in one capped pass and fails past 1,000,000 rows naming the clause responsible. Ordinary procedures remain row-local | Behavior depends on the execution plan and server configuration |
 | Position | Must be the first clause | Anywhere in the pipeline |
 
 `http(s)://` is rejected with a message rather than a syntax error: the
@@ -318,7 +318,7 @@ identically in every storage mode.
 |---|---|
 | `CREATE (n {id: X})` | Honours `X` as the identity (string / int / float; survives save → load) |
 | Prefixed-id datasets (Wikidata `Q42`) | Loader stores the **integer** as `id` (`n.id == 42`) and the string form as the `nid` property (`n.nid == 'Q42'`) |
-| Lookup by string id | `{nid: 'Q42'}` (a plain indexed string-property lookup); `{id: 'Q42'}` does **not** match — ids are integers |
+| Lookup by string id | `{nid: 'Q42'}` (a plain indexed string-property lookup); `{id: 'Q42'}` does **not** match — these loaded Wikidata ids are integers |
 | Duplicate ids | `MATCH (n {id: X})` returns one node per id; a rate-limited warning is emitted at index build. Use `MERGE` or dedupe input. |
 
 This is a **breaking** change from earlier releases for prefixed-id
@@ -332,10 +332,11 @@ Current unsupported and partial constructs:
 | Neo4j construct | KGLite status | Workaround |
 |---|---|---|
 | `FOREACH (x IN list \| ...)` | Supported | Updating bodies, including nested `FOREACH` |
-| `CALL { ... CREATE/SET/DELETE ... }` (writes in body) | Not supported (v1) | Do writes in a separate top-level clause; read subqueries **are** supported (see below) |
-| `CALL { ... UNION ... }` (UNION inside body) | Not supported (v1) | Top-level `UNION`, or combine separate `cypher()` results |
-| Unit `CALL { ... }` (no terminal `RETURN`) | Not supported (v1) | Body must end in `RETURN` |
+| `CALL { ... CREATE/SET/DELETE ... }` (writes in body) | Not supported | Do writes in a separate top-level clause; read subqueries **are** supported (see below) |
+| Unit `CALL { ... }` (no terminal `RETURN`) | Not supported | Body must end in `RETURN` |
 | `CALL { ... } IN TRANSACTIONS` | Not supported | Server batching; no in-memory analogue |
+| `OPTIONAL CALL` | Not supported | A read `CALL` subquery is an inner join; restructure the body to return an aggregate/default row when the outer row must survive |
+| `LET` | Not supported | Use an explicit `WITH` projection, keeping every variable the next clause needs |
 | Pattern comprehensions `[(n)-->(m) \| m]` | Not supported | `MATCH`/`OPTIONAL MATCH` + `collect()` |
 | Quantified path patterns `((a)-->(b))+` | Not supported | Variable-length paths `-[:R*1..3]->` (supported) |
 | `LOAD CSV` | Supported — `file://` and local paths, leading position only | `http(s)://` needs a prior download; off by default for Bolt clients (see above) |
@@ -354,15 +355,25 @@ These forms are supported and are easy to assume missing:
   `allShortestPaths(...)`.
 - `WHERE EXISTS { pattern WHERE ... }` (pattern-existence), inline
   pattern predicates, `any/all/none/single(x IN list WHERE ...)`.
-- `CALL { ... }` **read** subqueries — both uncorrelated (`CALL {
-  MATCH ... RETURN ... }`, cartesian-combined with the outer rows)
-  and correlated (`CALL { WITH p MATCH (p)-->... RETURN ... }`, run
-  per outer row). The importing `WITH` lists **bare variables only**.
-  Aggregating bodies preserve the outer row with a zero value; non-
-  aggregating bodies inner-join (zero matches drops the row). v1
-  caveats: no writes / `UNION` / unit subqueries in the body, no
-  `IN TRANSACTIONS`. See
-  [CYPHER.md → `CALL { ... }` Subqueries](https://github.com/kkollsga/kglite/blob/main/CYPHER.md#call----subqueries).
+- `CALL { ... }` **read** subqueries run per input row, whether or not they
+  import outer variables. Modern `CALL (p, q)`, `CALL (*)`, and `CALL ()`
+  scope syntax is supported; those imports remain visible across `WITH` and
+  every set arm. The legacy `CALL { WITH p ... }` form remains available and
+  requires a separate bare-variable importing `WITH` in each arm.
+  `UNION` / `UNION ALL` work inside the body, with `INTERSECT` / `EXCEPT` as
+  KGLite extensions. Aggregating bodies preserve an outer row with a zero;
+  non-aggregating bodies inner-join, so zero returned rows drop it. Writes,
+  unit bodies, and `IN TRANSACTIONS` remain unsupported. See
+  [CYPHER.md → `CALL { ... }` read subqueries](https://github.com/kkollsga/kglite/blob/main/CYPHER.md#call----read-subqueries).
+- Ordinary `CALL procedure(...) YIELD ...` evaluates its parameters and joins
+  its results per incoming row. `cluster()` is the deliberate exception: it
+  consumes the full preceding cohort.
+- Cypher 25 `FILTER`, `OFFSET`, `NODETACH DELETE`, and terminal `FINISH`.
+  `INSERT` is supported for static node labels (`&` between multiple labels)
+  and one directed static relationship type. It rejects dynamic labels/types,
+  dynamic property maps, path assignment, colon-separated multiple labels,
+  relationship type alternation, and undirected or variable-length edges; keep
+  `CREATE` where one of those CREATE-only forms is required.
 - List comprehensions `[x IN list WHERE p \| expr]`, `reduce(...)`,
   list slicing `xs[1..3]`, map projections `n {.a, .b}`, map literals.
 - Map subscript `m['key']` and **dynamic property access** `n[key]`
@@ -423,8 +434,8 @@ prefix required.
 | Constraint DDL | `CREATE CONSTRAINT ... IS UNIQUE / IS NOT NULL / IS NODE KEY / IS :: TYPE` | Supported and enforced on every write path, including the bulk loader. Composite tuples (`REQUIRE (n.a, n.b) IS UNIQUE`) work; `IS NODE KEY` is uniqueness plus presence, installed atomically. Unlike index names, **constraint names are stored**, so `DROP CONSTRAINT <name>` works as written in a Neo4j script; unnamed constraints are addressable by their canonical descriptor. Declaring a constraint the existing data already violates is rejected and changes nothing. `IS :: TYPE` declares a per-property type, checked before a write lands. Relationship constraints — `FOR ()-[r:T]-() REQUIRE r.p IS NOT NULL` / `IS :: TYPE` — are served the same way; `IS UNIQUE` / `IS RELATIONSHIP KEY` on a relationship are refused (see above). See [CYPHER.md → Cypher constraint DDL](https://github.com/kkollsga/kglite/blob/main/CYPHER.md#cypher-constraint-ddl). `define_schema({"nodes": {...}})` declares the same constraints from Python. |
 | Migrations | Versioned migration tools | None — you own schema evolution in Python load code |
 
-Indexes are maintained automatically across Cypher mutations
-(`CREATE`/`SET`/`REMOVE`/`DELETE`/`MERGE`). On disk-backed graphs
+Indexes are maintained automatically across Cypher mutations, including
+`CREATE`/`INSERT`, property updates/removals, deletes, and `MERGE`. On disk-backed graphs
 property indexes are persisted next to the store; on in-memory graphs
 they live in a HashMap. See the Indexes section of
 [CYPHER.md](https://github.com/kkollsga/kglite/blob/main/CYPHER.md).
@@ -439,5 +450,5 @@ contract see {doc}`../../concepts/concurrency`.
 - {doc}`../core-concepts` — nodes, relationships, storage modes.
 - {doc}`../transactions` — `begin()` / `commit()` / OCC.
 - [Bolt server operator guide](../../operators/bolt-server.md).
-- {doc}`../../concepts/cypher-conformance` — how the Neo4j oracle works.
-- [CYPHER.md](https://github.com/kkollsga/kglite/blob/main/CYPHER.md) — full supported Cypher reference.
+- {doc}`../../concepts/cypher-conformance` — how behavioral comparisons work.
+- [CYPHER.md](https://github.com/kkollsga/kglite/blob/main/CYPHER.md) — authoritative supported Cypher reference.

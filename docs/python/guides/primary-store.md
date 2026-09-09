@@ -191,7 +191,7 @@ includes the write path: a `save()`, `sync()` or `to_bytes()` that fails on I/O
 raises `kglite.FileIoError` (`.code == "FileIo"`), not a bare `OSError`.
 
 **Integrity constraints are enforced on every write path.** Declared through
-`define_schema`, and checked on Cypher `CREATE` / `MERGE` / `SET` / `REMOVE` and
+`define_schema`, and checked on Cypher `CREATE` / `INSERT` / `MERGE` / `SET` / `REMOVE` and
 on the bulk loaders alike — `add_nodes`, and therefore blueprints,
 `from_records`, OKF ingestion, WAL replay, and `extend_graph`:
 
@@ -204,7 +204,7 @@ graph.define_schema({"nodes": {"Person": {
 ```
 
 Three things make this real rather than advisory. `primary_key` may name any
-property, not just `id` — a key on `id` routes through the O(1) identity index,
+property, not just `id` — a key on `id` routes through the identity index,
 any other key is backed by a unique secondary index that persists and rebuilds on
 load. `required` is enforced at write time, so a `CREATE` that omits the
 property, a `SET` that nulls it, and a `REMOVE` that drops it all raise, rather
@@ -314,9 +314,9 @@ deliberately:
   that is the source of truth for the schema does not need a declaration.
 - **A fresh node type** — the set is per type, so `:ItemV2` starts over.
 
-The guard covers the node-creating patterns — `CREATE` and `MERGE`'s match/create
-pattern. Relationship properties are not guarded at all, and neither is a `SET`
-clause attached to a `MERGE`.
+The guard covers the node-creating patterns—`CREATE`, `INSERT`, and `MERGE`'s
+match/create pattern. Relationship properties are not guarded at all, and
+neither is a `SET` clause attached to a `MERGE`.
 
 ## What KGLite does not do
 
@@ -460,12 +460,14 @@ The security model deserves stating plainly, because it is default-deny:
   by an explicit test.
 
 Loading streams: the executor reads 1000 rows at a time, so peak memory does not
-track file size for row-local pipelines. A downstream clause that must see the
-whole result — an aggregate, `ORDER BY`, `DISTINCT`, `UNION`, `CALL` — cannot be
-batched without changing the answer, so those queries take a single capped pass
-and fail at 1,000,000 rows naming the clause that forced it, rather than
-exhausting memory. `add_nodes` / `add_connections`, {doc}`blueprints`, and the
-CLI's `.import` remain the higher-throughput routes.
+track file size for row-local pipelines such as `MATCH`, `FILTER`,
+`CREATE`/`INSERT`, the delete forms, ordinary procedures, and terminal `FINISH`.
+A downstream clause that must see the whole result—an aggregate, `ORDER BY`,
+`SKIP`/`OFFSET`/`LIMIT`, `DISTINCT`, a set operation, `cluster()`, or a `CALL`
+subquery—cannot be batched without changing the answer, so those queries take a
+single capped pass and fail at 1,000,000 rows naming the clause that forced it,
+rather than exhausting memory. `add_nodes` / `add_connections`,
+{doc}`blueprints`, and the CLI's `.import` remain the higher-throughput routes.
 
 **Migrations are a convention plus a CLI verb, not a framework.** There is a
 user-schema version stamp — your own data-model revision, persisted with the

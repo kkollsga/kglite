@@ -887,7 +887,7 @@ the manifest sets `builtins.save_graph: true`, or when the server is
 write-enabled (`--writable`, or `extensions.writable: true`), and it writes the
 active graph back to the source `.kgl` path. The mode banner above flips its
 `save_graph` line from "not registered (read-only)" to "registered. Call to
-persist CREATE / SET / DELETE mutations." when this is on.
+persist Cypher mutations." when this is on.
 
 The two keys are not interchangeable. `builtins.save_graph: true` on its own
 registers the tool and nothing more — `cypher_query` still refuses every

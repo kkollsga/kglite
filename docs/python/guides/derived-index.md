@@ -163,7 +163,7 @@ node type into freshness provenance and every write stamps it automatically:
 graph.define_schema({"nodes": {"Person": {"auto_timestamp": True}}})
 ```
 
-Writes through Cypher (`CREATE` / `SET` / `MERGE`) and through `add_nodes` then
+Writes through Cypher (`CREATE` / `INSERT` / `SET` / `MERGE`) and through `add_nodes` then
 carry an `updated_at` timestamp, plus caller-supplied `git_sha` and
 `modified_by` when provided. It is off by default so ordinary writes stay
 deterministic. Being a property like any other, it is queryable:

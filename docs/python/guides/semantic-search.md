@@ -450,7 +450,7 @@ embs = graph.embeddings('Article', 'summary')
 # Retrieve embeddings for current selection only
 embs = graph.select('Article').where({'category': 'politics'}).embeddings('summary')
 
-# Get a single node's embedding (O(1) lookup, returns None if not found)
+# Get a single node's embedding (indexed lookup; returns None if not found)
 vec = graph.embedding('Article', 'summary', node_id)
 ```
 

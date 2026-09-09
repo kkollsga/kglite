@@ -363,6 +363,67 @@
       ]
     },
     {
+      "id": "call.procedure_per_row",
+      "category": "clause",
+      "requirement": "An ordinary procedure evaluates parameters against each incoming row and preserves the outer binding in every joined result.",
+      "setup": [
+        "CREATE (:Person {name: 'Ada'}), (:Person {name: 'Bo'}), (:Company {name: 'Acme'})"
+      ],
+      "query": "UNWIND ['Person', 'Company'] AS kind CALL db.property_stats({node_type: kind, property: 'name'}) YIELD value_count RETURN kind, value_count ORDER BY kind",
+      "expected": [
+        {
+          "kind": "Company",
+          "value_count": 1
+        },
+        {
+          "kind": "Person",
+          "value_count": 2
+        }
+      ]
+    },
+    {
+      "id": "call.procedure_empty_input",
+      "category": "clause",
+      "requirement": "An ordinary procedure after an empty input stream is not invoked and cannot create output rows.",
+      "setup": [
+        "CREATE (:Present {id: 1})"
+      ],
+      "query": "MATCH (n:Missing) CALL db.labels() YIELD label RETURN label",
+      "expected": []
+    },
+    {
+      "id": "call.subquery_no_import_per_row",
+      "category": "clause",
+      "requirement": "A CALL subquery with an explicit empty import scope executes separately for every incoming row.",
+      "query": "UNWIND [1, 2] AS outer CALL () { RETURN randomUUID() AS token } RETURN count(DISTINCT token) AS invocations",
+      "expected": [
+        {
+          "invocations": 2
+        }
+      ]
+    },
+    {
+      "id": "call.subquery_empty_input",
+      "category": "clause",
+      "requirement": "A read CALL subquery after an empty input stream does not resurrect a row.",
+      "query": "MATCH (n:Missing) CALL () { RETURN 1 AS value } RETURN value",
+      "expected": []
+    },
+    {
+      "id": "call.subquery_modern_scope_set_arms",
+      "category": "clause",
+      "requirement": "A modern named import remains visible after WITH and in every UNION ALL arm.",
+      "query": "WITH 10 AS x CALL (x) { WITH 0 AS marker RETURN x AS value UNION ALL WITH 1 AS marker RETURN x + 1 AS value } RETURN value ORDER BY value",
+      "expected": [
+        {
+          "value": 10
+        },
+        {
+          "value": 11
+        }
+      ]
+    },
+    {
       "id": "create.node",
       "category": "mutation",
       "requirement": "A created node can be matched by label and property.",

@@ -1,6 +1,8 @@
 # Cypher Queries
 
-KGLite supports a substantial Cypher subset. This page covers the essentials — see the [full Cypher reference](../../reference/cypher-reference.md) for complete documentation of every clause and function.
+KGLite supports a substantial Cypher dialect. This page covers the essentials;
+the [Cypher reference](../../reference/cypher-reference.md) defines the supported
+clauses, functions, extensions, and known gaps.
 
 ```{note}
 **Label model:** Each node has one immutable **primary** type plus optional
@@ -41,6 +43,9 @@ graph.cypher("MATCH (n:Person {name: 'Bob'}) SET n.age = 26")
 # DELETE / DETACH DELETE
 graph.cypher("MATCH (n:Person {name: 'Alice'}) DETACH DELETE n")
 
+# Cypher 25 static INSERT: use & between multiple labels
+graph.cypher("INSERT (n IS Person&Employee {id: 7, name: 'Dana'})")
+
 # MERGE
 graph.cypher("""
     MERGE (n:Person {name: 'Alice'})
@@ -48,6 +53,14 @@ graph.cypher("""
     ON MATCH SET n.updated = 'today'
 """)
 ```
+
+KGLite also accepts `FILTER` as a standalone row filter, `OFFSET` as a `SKIP`
+synonym, `NODETACH DELETE` as explicit plain `DELETE`, and terminal `FINISH`
+when a pipeline should preserve its work but return no rows. `INSERT` is the
+strict static form: node labels may use `&`, relationships need one directed
+static type, and dynamic labels/types or other CREATE-only pattern forms are
+rejected. See the reference before substituting `INSERT` for an existing
+`CREATE` statement.
 
 ### Bulk ingest: one `UNWIND … CREATE`, not N `CREATE`s
 
@@ -153,7 +166,7 @@ The shape of that table *is* the guidance: **scanning parallelises, building
 result rows does not.** Returning a million rows to Python is bound by the
 allocator rather than by arithmetic, so the flag buys almost nothing there.
 The "Parallel runtime" section of the
-[full Cypher reference](../../reference/cypher-reference.md) lists operator by
+[Cypher reference](../../reference/cypher-reference.md) lists operator by
 operator what fans out and what deliberately stays sequential.
 
 **A small query stays sequential however it is flagged.** Each operator gates
@@ -328,7 +341,7 @@ rows = graph.cypher("MATCH (a),(b),(c) RETURN count(*)", timeout_ms=0)
 
 Interruption shares the engine's deadline checkpoints, so the same advice
 applies: if you're routinely interrupting a query, anchor it or add an index.
-In-place mutations (`CREATE` / `SET` / `DELETE` on a live graph) and
+In-place mutations on a live graph and
 multi-statement transactions remain bounded by the deadline rather than
 Ctrl-C. On non-POSIX platforms the deadline still applies; Ctrl-C mid-query
 does not.
@@ -626,6 +639,36 @@ graph.cypher("""
 """)
 ```
 
+## Per-row CALL subqueries
+
+A read `CALL` subquery executes once for each incoming row. Modern scope syntax
+states exactly which outer variables it imports; those imports remain visible
+through later `WITH` clauses and every set-operation arm:
+
+```python
+graph.cypher("""
+    MATCH (p:Person)
+    CALL (p) {
+        MATCH (p)-[:KNOWS]->(friend)
+        RETURN count(friend) AS friend_count
+    }
+    RETURN p.name, friend_count
+    ORDER BY friend_count DESC
+""")
+```
+
+Use `CALL (p, q)` for named imports, `CALL (*)` for every current variable, or
+`CALL ()` for none. The legacy `CALL { WITH p ... RETURN ... }` form remains
+supported; a legacy import must appear separately in each `UNION` arm. A body
+with no imports still runs per input row, and any subquery that returns no rows
+drops that outer row. Empty outer streams stay empty.
+
+Read bodies support `UNION` / `UNION ALL`, plus KGLite's `INTERSECT` / `EXCEPT`
+extensions. Writes, unit bodies without a terminal `RETURN`, and `CALL { ... }
+IN TRANSACTIONS` are not supported. Ordinary `CALL procedure(...) YIELD ...`
+is also a per-row inner join; `cluster()` alone consumes the full preceding
+cohort as its input.
+
 ## Supported Cypher surface
 
 The machine-checked [Cypher reference](../../reference/cypher-reference.md)
@@ -635,10 +678,12 @@ use older subset lists copied from release notes as a compatibility contract.
 
 ## Structural-validator CALL procedures
 
-Fourteen procedures surface data-integrity gaps without writing
-`WHERE NOT EXISTS` patterns yourself. Each binds `node` (or
-`node_a, node_b`) — compose freely with WHERE / ORDER BY / LIMIT /
-aggregation as you would any Cypher row.
+Fifteen procedures surface data-integrity gaps without writing
+`WHERE NOT EXISTS` patterns yourself. Six common procedures appear below;
+discover the full set and each procedure's columns with `describe(cypher=True)`
+and `describe(cypher=['procedure_name'])`. Each yields composable rows: select
+its documented columns with `YIELD`, then use `WHERE` / `ORDER BY` / `LIMIT` /
+aggregation as you would for any Cypher row.
 
 | Procedure | What it finds | Required params |
 |---|---|---|
@@ -685,4 +730,5 @@ g.describe(cypher=['orphan_node'])
 g.describe(cypher=['missing_required_edge'])
 ```
 
-See the [full Cypher reference](../../reference/cypher-reference.md) for detailed examples of every feature.
+See the [Cypher reference](../../reference/cypher-reference.md) for the complete
+supported surface and detailed examples.

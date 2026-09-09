@@ -1,14 +1,12 @@
 """Path-decomposition Cypher functions: `length(p)`, `nodes(p)`, `relationships(p)`.
 
-KGLite represents Cypher lists as `Value::String` of JSON (same shape as
-`collect()`); the Python layer materialises them back to lists+dicts.
-This file covers the shape contract that downstream agents rely on:
+The Python layer materialises graph values in these lists as dictionaries.
+This file covers the shape contract that downstream consumers rely on:
 
 - `length(p)` → Int64 (number of hops).
-- `nodes(p)` → list of node dicts, each carrying **every** property the
-  node exposes (0.9.35 enrichment; pre-0.9.35 dicts only had
-  `id`/`title`/`type`).
-- `relationships(p)` (and the `rels(p)` alias) → list of edge-type strings.
+- `nodes(p)` → full node dictionaries in path order.
+- `relationships(p)` (and the `rels(p)` alias) → full relationship
+  dictionaries in path order.
 """
 
 import pandas as pd
@@ -34,8 +32,7 @@ def test_length_returns_int():
 
 
 def test_nodes_returns_list_of_dicts():
-    """nodes(p) materialises into a Python list (KGLite serialises lists
-    as JSON strings which the Python layer auto-decodes)."""
+    """nodes(p) materialises into a Python list of node dictionaries."""
     kg = _build_graph()
     rows = kg.cypher("MATCH p = (a:Person {pid:1})-[:KNOWS]->(b:Person) RETURN nodes(p) AS N").to_list()
     n = rows[0]["N"]
@@ -71,9 +68,8 @@ def test_unwind_nodes_then_access_property():
     assert sorted(ages) == [28, 28, 35, 35, 42], rows
 
 
-def test_relationships_returns_list_of_strings():
-    """relationships() returns full Rel dicts. Extract `.type` to get
-    the list-of-strings shape."""
+def test_relationships_returns_list_of_dicts():
+    """relationships() returns full relationship dictionaries."""
     kg = _build_graph()
     rows = kg.cypher(
         "MATCH p = (a:Person {pid:1})-[:KNOWS*1..2]->(b:Person) RETURN relationships(p) AS R ORDER BY length(p)"
@@ -88,7 +84,7 @@ def test_rels_alias_works():
     """`rels(p)` is the short alias for `relationships(p)` (existing surface)."""
     kg = _build_graph()
     rows = kg.cypher("MATCH p = (a:Person {pid:1})-[:KNOWS]->(b:Person) RETURN rels(p) AS R").to_list()
-    # List of Rel dicts; extract .type for the legacy shape.
+    # Project the relationship type from the full relationship value.
     assert [r["type"] for r in rows[0]["R"]] == ["KNOWS"]
 
 

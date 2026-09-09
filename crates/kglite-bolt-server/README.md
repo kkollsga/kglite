@@ -41,9 +41,10 @@ documented Cypher dialect against the loaded `.kgl` graph.
   own retry.
 - **Cross-process writer lease** — a writable server takes the
   graph's exclusive writer lease before it reads the path and holds
-  it until shutdown, so a second writer (server, CLI, MCP server or
-  `kglite.open()`) is refused at startup by name instead of
-  overwriting its work at save time. `--readonly` takes no lease.
+  it until shutdown. A second writable Bolt server, CLI writer, or
+  `kglite.open()` is refused when it tries to acquire the lease; a
+  write-enabled MCP server opens without a lease and is refused on its first
+  mutation instead. `--readonly` takes no lease.
 - **Zero PyO3 in the binary** — no libpython link, no Python
   runtime required. `cargo tree -p kglite-bolt-server | rg
   pyo3` returns empty.
@@ -67,10 +68,11 @@ with driver.session() as session:
 Drivers send this under the `tx_metadata` key of BEGIN's `extra`
 dict (auto-commit runs: RUN's `extra`); hand-rolled Bolt clients may
 also place the same keys at the top level of `extra`. A write to a node
-whose *stored* type is outside `write_scope` fails the query — that covers
-`CREATE`, `MERGE`, `SET`, `REMOVE`, `DELETE`, `DETACH DELETE` and node-type
-DDL — as does a relationship write (edge `CREATE`, `DELETE r`, `SET r.p`,
-`REMOVE r.p`) with neither endpoint's type in the list; `git_sha` /
+whose *stored* type is outside `write_scope` fails the query—that covers
+`CREATE`, `INSERT`, `MERGE`, `SET`, `REMOVE`, `DELETE`, `NODETACH DELETE`,
+`DETACH DELETE`, and node-type DDL—as does a relationship write (edge
+`CREATE`/`INSERT`, `DELETE r`, `SET r.p`, `REMOVE r.p`) with neither endpoint's
+type in the list; `git_sha` /
 `modified_by` are stamped on writes to `auto_timestamp` types. All
 three are ignored by reads. Malformed values (non-list `write_scope`,
 non-string `git_sha`) fail the BEGIN/RUN with a client error.
@@ -97,7 +99,9 @@ Options:
                                refused with --readonly and for disk-mode graphs,
                                which serve the default at off instead
   --neo4j-compat               Report a Neo4j-compatible agent in the handshake
-  --auth <USER:PASS>           Basic auth credentials
+  --auth <MODE>                Authentication mode: none (default) or basic
+  --auth-user <USER>           Username required with --auth basic
+  --auth-pass <PASS>           Password required with --auth basic
   --idle-timeout <SECS>        Per-session idle timeout
   --max-sessions <N>           Max concurrent sessions
   --advertise-addr <HOST:PORT> Address advertised in routing table (for neo4j:// URIs)
@@ -110,7 +114,7 @@ Options:
 By default the server identifies honestly in the Bolt handshake:
 
 ```
-kglite-bolt-server/0.14.5
+kglite-bolt-server/<version>
 ```
 
 The official **Python** and **JavaScript** drivers accept this — they do not
@@ -120,14 +124,14 @@ a single query.
 
 ```
 UntrustedServerException: Server does not identify as a genuine Neo4j
-instance: 'kglite-bolt-server/0.14.5'
+instance: 'kglite-bolt-server/<version>'
 ```
 
 Compatibility mode makes the server present an agent that satisfies that check,
 while keeping the real product in the string:
 
 ```
-Neo4j/5.26.0 (kglite-bolt-server/0.14.5)
+Neo4j/5.26.0 (kglite-bolt-server/<version>)
 ```
 
 Two equivalent ways to turn it on — the flag wins if both are set:
@@ -149,9 +153,10 @@ your own log rather than only from a client stack trace. Detection is a hint
 only: the identity is never switched automatically on the strength of a
 client-supplied string.
 
-Compatibility mode changes only the handshake's `server` field. The `bolt_agent`
-metadata keeps reporting `kglite-bolt-server/<version>` either way, because no
-driver gates on it and the claim should not travel further than it must.
+Compatibility mode changes the handshake's `server` field and the
+`dbms.components()` row clients use for product detection. The `bolt_agent`
+metadata remains `kglite-bolt-server/<version>` either way, because no driver
+gates on it and the compatibility claim should travel no further than needed.
 
 ## Documentation
 

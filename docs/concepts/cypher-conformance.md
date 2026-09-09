@@ -6,9 +6,9 @@ optimizer-on vs optimizer-off (the differential corpus), and memory
 vs mapped vs disk (the parity oracles). Neither of those catches a
 bug where *every* code path is wrong in the same way.
 
-`scripts/cypher_conformance.py` is an empirical differential oracle —
-on-demand, opt-in, never wired into pytest or CI. It compares independently
-authored KGLite queries with a selected Neo4j database. Agreement is useful
+`scripts/cypher_conformance.py` is an on-demand behavioral comparison against
+a selected Neo4j database; it is opt-in and never wired into pytest or CI. It
+runs independently authored KGLite queries on both engines. Agreement is useful
 evidence, but is not a standards certification and does not make Neo4j the
 definition of Cypher.
 
@@ -127,8 +127,8 @@ stand out.
 ## Bolt wire conformance
 
 There's a second, sibling runner — `scripts/bolt_conformance.py` — with a
-different oracle. Instead of diffing KGLite against Neo4j (the *spec*
-oracle), it diffs the **Bolt wire path against direct in-process
+different comparison target. Instead of comparing KGLite behavior with Neo4j,
+it compares the **Bolt wire path against direct in-process
 `cypher()`**. Both sides run the same engine, so any divergence is a
 PackStream / wire round-trip bug in `kglite-bolt-server`, not a semantic
 one. Because the oracle is KGLite-in-process, **no Neo4j or Docker is

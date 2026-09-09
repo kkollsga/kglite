@@ -67,7 +67,10 @@ The model wrapper works with any provider — OpenAI, Cohere, local sentence-tra
 
 ## Structural Validators
 
-Six native Cypher procedures surface data-integrity gaps without the agent having to write the underlying `WHERE NOT EXISTS` patterns. They appear in `describe()` (in the `<rules hint="..."/>` extension and in `describe(cypher=True)`) so the agent can discover them inline with the schema.
+Fifteen native Cypher procedures surface data-integrity gaps without the agent
+having to write the underlying `WHERE NOT EXISTS` patterns. Six common
+procedures appear below; the full set is discoverable through `describe()` (in
+the `<rules hint="..."/>` extension and in `describe(cypher=True)`).
 
 | Procedure | What it finds |
 |---|---|
@@ -90,7 +93,7 @@ graph.cypher("""
 """)
 ```
 
-`missing_required_edge` and `missing_inbound_edge` validate the `(type, edge)` direction against the graph's actual schema and raise `DirectionMismatch` with a fix-suggesting message when the agent picks the wrong one (e.g. asking for inbound `IN_LICENCE` on a `Wellbore` when the edge flows outward). See [Cypher → Structural-validator CALL procedures](cypher.md#structural-validator-call-procedures) for the full surface and per-procedure docs via `describe(cypher=['orphan_node'])`.
+`missing_required_edge` and `missing_inbound_edge` validate the `(type, edge)` direction against the graph's actual schema and raise `DirectionMismatch` with a fix-suggesting message when the agent picks the wrong one (e.g. asking for inbound `IN_LICENCE` on a `Wellbore` when the edge flows outward). See [Cypher → Structural-validator CALL procedures](cypher.md#structural-validator-call-procedures) for more examples, and use `describe(cypher=['orphan_node'])` for per-procedure details.
 
 ## What `describe()` Returns
 

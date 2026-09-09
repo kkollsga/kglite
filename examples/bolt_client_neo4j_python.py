@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Query kglite-bolt-server with the standard Neo4j Python driver.
 
-Demonstrates: the Bolt ecosystem unlock — any Neo4j-aware client talks to
-KGLite over the wire with zero changes. Build a graph, save it, start the
-server, and drive it with the exact `neo4j` driver you'd point at real Neo4j.
+Demonstrates the tested Python-driver contract: build a graph, save it, start
+the server, and run supported Cypher through the same ``neo4j`` driver API used
+against a Neo4j server. Other clients may rely on protocol, product, or Cypher
+features outside KGLite's documented surface.
 
 Shows: handshake (`verify_connectivity`), scalar RETURN, parameters,
 variable-length traversal, and a whole-Node return (PackStream `Node`

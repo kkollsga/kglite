@@ -141,8 +141,8 @@ class ConstraintViolationError(ConstraintError):
     constraint — on a node, or on a relationship (NOT NULL / IS :: TYPE).
 
     The write was rejected before touching storage, so the graph is unchanged.
-    Raised by ``cypher()`` for ``CREATE`` / ``MERGE`` / ``SET`` / ``REMOVE`` and
-    by the bulk writers (``add_nodes`` and everything funnelling through it).
+    Raised by ``cypher()`` for a write that violates the declaration and by the
+    bulk node and relationship writers.
     """
 
 class ConstraintCreationError(ConstraintError):
@@ -458,7 +458,7 @@ class ResultView:
       - ``result.column(name)`` — all values for one column as a ``list``
       - ``result.to_df()`` — pandas DataFrame (full conversion)
       - ``result.columns`` — column names
-      - ``result.stats`` — mutation stats (CREATE/SET/DELETE queries only)
+      - ``result.stats`` — mutation stats for Cypher writes
 
     Indexing is **row-wise**: ``result[i]`` takes an integer (or slice);
     ``result["col"]`` is not supported (the only valid string keys are the
@@ -2875,7 +2875,7 @@ class KnowledgeGraph:
         ...
 
     def node(self, node_type: str, node_id: Any) -> Optional[dict[str, Any]]:
-        """Look up a single node by type and ID. O(1) via hash index.
+        """Look up a single node by type and ID through the identity index.
 
         Args:
             node_type: The node type (e.g. ``'User'``).
@@ -2887,11 +2887,10 @@ class KnowledgeGraph:
         ...
 
     def exists(self, node_type: str, unique_id: Any) -> bool:
-        """Return ``True`` if a node of ``node_type`` with that id exists. O(1).
+        """Return whether the identity index contains this type and id.
 
-        Uses the same hash index as ``node()`` (no scan), and mirrors its
-        id-coercion semantics: ids are integers in every storage mode, so a
-        Python ``int`` and the stored id normalize to the same key.
+        Uses the same indexed path as ``node()`` (no steady-state scan) and
+        mirrors its ID coercion semantics. Integer and string IDs are supported.
 
         Args:
             node_type: The node type (e.g. ``'User'``).
@@ -3138,8 +3137,8 @@ class KnowledgeGraph:
     def read_only(self, enabled: bool | None = None) -> bool:
         """Set or query read-only mode for the Cypher layer.
 
-        When enabled, all Cypher mutation queries (CREATE, SET, DELETE, REMOVE,
-        MERGE) are rejected with :class:`ArgumentError` (``code``
+        When enabled, all Cypher mutation queries are rejected with
+        :class:`ArgumentError` (``code``
         ``'InvalidArgument'``), and ``describe()`` announces the restriction in
         a ``<read-only>`` element (the Cypher reference it renders is
         unchanged). Read-only queries (MATCH, RETURN, CALL, etc.) are
@@ -3163,7 +3162,7 @@ class KnowledgeGraph:
     def lock_schema(self) -> KnowledgeGraph:
         """Lock the schema: Cypher must conform to the current types.
 
-        When locked, CREATE, SET, and MERGE operations are validated against
+        When locked, Cypher writes are validated against
         the graph's known node types, connection types, and property types,
         and **reads are validated too**: an unknown node label in a MATCH,
         OPTIONAL MATCH, MERGE, ``WHERE EXISTS { ... }`` pattern predicate, or
@@ -3954,8 +3953,8 @@ class KnowledgeGraph:
 
         **Cypher** (``cypher`` parameter):
 
-        - ``describe(cypher=True)`` — Compact Cypher reference: all clauses,
-          operators, functions, and procedures with 1-line descriptions.
+        - ``describe(cypher=True)`` — Compact reference for the major
+          supported Cypher clauses, operators, functions, and procedures.
         - ``describe(cypher=['cluster', 'MATCH'])`` — Detailed docs with
           parameters and examples for specific topics.
 
@@ -4008,8 +4007,8 @@ class KnowledgeGraph:
 
         Computed lazily: first access walks every edge once (O(E));
         subsequent reads return a cached snapshot in O(triples)
-        (typically <100 entries). Edge mutations — Cypher ``CREATE`` /
-        ``DELETE``, Python ``add_connections`` — invalidate the cache.
+        (typically <100 entries). Cypher relationship creation/deletion and
+        Python ``add_connections`` invalidate the cache.
 
         Returns:
             A list of 4-tuples ``[(src_type, edge_type, tgt_type, count), ...]``.
@@ -5151,7 +5150,7 @@ class KnowledgeGraph:
                 ``primary_key`` may name **any** property and means unique *and*
                 present (NODE KEY): a ``CREATE`` that duplicates or omits it is
                 rejected — use ``MERGE`` to upsert. A key on ``"id"`` is enforced
-                through the O(1) identity index; any other key is backed by a
+                through the identity index; any other key is backed by a
                 unique secondary index that persists and rebuilds on load.
 
                 ``unique`` declares additional UNIQUE constraints and accepts a
@@ -5195,8 +5194,9 @@ class KnowledgeGraph:
                     }})
 
                 A node entry may also set ``auto_timestamp: True`` to opt that
-                type into **freshness provenance**: every write (Cypher
-                ``CREATE``/``SET``/``MERGE`` and ``add_nodes``) auto-stamps an
+                type into **freshness provenance**: every applicable write
+                (including Cypher ``CREATE``/``INSERT``/``SET``/``MERGE`` and
+                ``add_nodes`` / ``add_connections``) auto-stamps an
                 ``updated_at`` timestamp, plus the caller-supplied ``git_sha`` /
                 ``modified_by`` when provided. It is off by default (writes stay
                 deterministic) and independent of ``layer`` / ``lock_schema``::
@@ -6108,11 +6108,10 @@ class KnowledgeGraph:
     # ====================================================================
 
     def create_index(self, node_type: str, property: str) -> dict[str, Any]:
-        """Create an index on a property for O(1) equality filter lookups.
+        """Create an index on a property for indexed equality lookups.
 
         On memory and mapped graphs the index is maintained incrementally by
-        every mutation (CREATE, SET, REMOVE, DELETE, MERGE), so it always
-        answers.
+        every applicable mutation, so it always answers.
 
         On a disk graph the index is a persistent mmap bundle
         (``persistent=True``) and is **not** maintained: any write to the graph
@@ -6402,21 +6401,23 @@ class KnowledgeGraph:
     ) -> Union[ResultView, pd.DataFrame, str]:
         """Execute a Cypher query.
 
-        Supports MATCH, WHERE, RETURN, ORDER BY, LIMIT, SKIP, WITH,
-        OPTIONAL MATCH, UNWIND, UNION, CREATE, SET, DELETE, DETACH DELETE,
-        REMOVE, MERGE (with ON CREATE SET / ON MATCH SET), HAVING,
-        CASE expressions, WHERE EXISTS, shortestPath(), list comprehensions,
-        CALL { ... } read subqueries (uncorrelated + correlated; v1 excludes
-        writes / UNION / unit subqueries in the body),
-        CALL...YIELD (graph algorithms: pagerank, betweenness, degree,
-        closeness, louvain, label_propagation, connected_components),
-        parameters ($param), ``!=`` operator, aggregation functions,
-        window functions (``row_number()``, ``rank()``, ``dense_rank()``
-        with ``OVER (PARTITION BY ... ORDER BY ...)``), and date arithmetic
-        (``date + N``, ``date - date``, ``date_diff(d1, d2)``).
+        Major supported clauses and features include MATCH / OPTIONAL MATCH,
+        WHERE / FILTER, RETURN / FINISH, WITH, ORDER BY, LIMIT, SKIP / OFFSET,
+        UNWIND, set operations, CREATE, strict INSERT, SET, DELETE / NODETACH
+        DELETE / DETACH DELETE, REMOVE, MERGE (with ON CREATE SET / ON MATCH
+        SET), HAVING, CASE expressions, WHERE EXISTS, shortestPath(), list
+        comprehensions, window functions, aggregation, parameters, and date
+        arithmetic. ``CALL { ... }`` read subqueries run per input row and
+        support legacy importing ``WITH`` plus modern ``CALL (x, y)``,
+        ``CALL (*)``, and ``CALL ()`` scopes; ``UNION`` / ``UNION ALL`` work
+        inside them, with ``INTERSECT`` / ``EXCEPT`` as KGLite extensions.
+        Writes, unit bodies, and ``IN TRANSACTIONS`` remain unsupported inside
+        a subquery. Ordinary ``CALL...YIELD`` procedures evaluate parameters
+        and join results per input row; ``cluster()`` is the set-input
+        exception. See ``CYPHER.md`` for the complete supported dialect and
+        its intentional divergences.
 
-        Mutation queries (CREATE, SET, DELETE, REMOVE, MERGE, and the schema
-        DDL below) store statistics on ``graph.last_mutation_stats`` with keys
+        Mutation queries store statistics on ``graph.last_mutation_stats`` with keys
         ``nodes_created``, ``relationships_created``, ``properties_set``,
         ``nodes_deleted``, ``relationships_deleted``, ``properties_removed``,
         ``indexes_added``, ``indexes_removed``, ``constraints_added``,
@@ -6605,15 +6606,16 @@ class KnowledgeGraph:
                 Applies per-call; also on :meth:`Session.execute` and
                 ``Transaction.cypher``. The perimeter, exactly:
 
-                * **Node writes** — ``CREATE``, ``MERGE``'s create arm,
+                * **Node writes** — ``CREATE``, ``INSERT``, ``MERGE``'s create arm,
                   ``SET n.p``, ``SET n += {...}``, ``SET n:Label``,
                   ``REMOVE n.p``, ``REMOVE n:Label``, ``DELETE n``,
-                  ``DETACH DELETE n``, and index/constraint DDL for a node
+                  ``NODETACH DELETE n``, ``DETACH DELETE n``, and
+                  index/constraint DDL for a node
                   type — are judged by the node's **stored type**, never by
                   a pattern label, so label smuggling cannot widen the
                   scope.
-                * **Relationship writes** — ``CREATE (a)-[:R]->(b)``,
-                  ``DELETE r``, ``SET r.p``, ``REMOVE r.p`` — are allowed
+                * **Relationship writes** — ``CREATE`` / ``INSERT`` relationship
+                  patterns, ``DELETE r``, ``SET r.p``, ``REMOVE r.p`` — are allowed
                   iff **at least one endpoint's stored type is in scope**.
                   Linking a node you own to an already-existing (matched)
                   out-of-scope node is allowed, since linking does not
@@ -7940,7 +7942,7 @@ class KnowledgeGraph:
         """Begin a read-only transaction — O(1) cost, zero memory overhead.
 
         Returns a Transaction backed by an Arc reference to the current graph
-        state. Mutations (CREATE, SET, DELETE, REMOVE, MERGE) are rejected.
+        state. Cypher mutations are rejected.
 
         Ideal for concurrent read-heavy workloads (e.g. MCP server agents)
         where you want a consistent snapshot without the cost of a full clone.
@@ -7996,8 +7998,7 @@ class Session:
         the same ``Session`` at once without blocking each other. Each call
         sees the graph as of the moment the snapshot was taken.
 
-        Read semantics match :meth:`KnowledgeGraph.cypher`. A mutation query
-        (``CREATE`` / ``SET`` / ``DELETE`` / ``REMOVE`` / ``MERGE``) raises
+        Read semantics match :meth:`KnowledgeGraph.cypher`. A mutation query raises
         :class:`ArgumentError` (``code`` ``'InvalidArgument'``) — use
         :meth:`execute` for writes. Every handle that does not take writes
         refuses with that one class and code.
@@ -8042,8 +8043,7 @@ class Session:
         ``git_sha`` and ``modified_by`` are stamped on types that opt into
         ``auto_timestamp`` provenance.
 
-        Mutations (``CREATE`` / ``SET`` / ``DELETE`` / ``REMOVE`` / ``MERGE``)
-        take the Session's writer lock for the mutation, so
+        Mutations take the Session's writer lock, so
         concurrent ``execute()`` calls run one at a time and each sees the
         prior writer's committed changes — no lost updates. Readers already
         holding snapshots keep seeing the pre-write graph. A
@@ -8164,8 +8164,7 @@ class FrozenGraph:
 
         Same read semantics as :meth:`KnowledgeGraph.cypher` —
         ``MATCH`` / ``WHERE`` / ``RETURN`` / aggregations, and semantic search
-        via ``text_score()`` / ``vector_score()``. A mutation query
-        (``CREATE`` / ``SET`` / ``DELETE`` / ``REMOVE`` / ``MERGE``) raises
+        via ``text_score()`` / ``vector_score()``. A mutation query raises
         :class:`ArgumentError` (``code`` ``'InvalidArgument'``) — a frozen
         snapshot is immutable; mutate the source graph and take a fresh
         :meth:`KnowledgeGraph.freeze`.

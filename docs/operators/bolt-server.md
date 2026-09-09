@@ -94,8 +94,9 @@ by the client, especially behind a proxy or when binding `0.0.0.0`.
 
 The backend uses native KGLite sessions/transactions, not Python or the GIL.
 Reads may auto-commit; **all writes must be explicit driver transactions** —
-an auto-commit `CREATE`/`SET`/`DELETE`/`MERGE` is rejected rather than run
-(drivers wrap writes in a transaction anyway). Concurrent writers serialize at
+an auto-commit mutation (`CREATE`/`INSERT`, `SET`/`REMOVE`, a delete form, or
+`MERGE`) is rejected rather than run. Use the driver's `execute_write`
+equivalent; a plain `session.run` remains auto-commit. Concurrent writers serialize at
 commit, and a transaction committing against a stale snapshot conflicts with a
 retriable status code, so driver-managed transactions (`execute_write` and its
 per-language equivalents) retry the unit of work by themselves; hand-rolled
@@ -311,11 +312,12 @@ checkpoint-truncates-the-log test, and every row of this matrix.
 
 ## Driver identity (`--neo4j-compat`)
 
-The server's identity surfaces in **two places that always agree**: the
-handshake `server` agent, and the `CALL dbms.components()` row (name,
-versions, edition — always `community`). Both report
-`kglite-bolt-server/<version>` by default and the Neo4j-compatible spelling
-under `--neo4j-compat`.
+The handshake `server` agent and the `CALL dbms.components()` row (name,
+versions, edition—always `community`) report `kglite-bolt-server/<version>` by
+default and the Neo4j-compatible spelling under `--neo4j-compat`. The separate
+`bolt_agent` metadata always names `kglite-bolt-server/<version>` honestly;
+compatibility mode changes only the fields clients use for their Neo4j product
+gate.
 
 Two client families need the compatible spelling:
 
@@ -324,7 +326,7 @@ Two client families need the compatible spelling:
 
   ```
   UntrustedServerException: Server does not identify as a genuine Neo4j
-  instance: 'kglite-bolt-server/0.14.5'
+  instance: 'kglite-bolt-server/<version>'
   ```
 
 - **GUI clients** (Neo4j Browser, G.V(), and other IDEs) read
@@ -344,8 +346,8 @@ KGLITE_BOLT_NEO4J_COMPAT=1 kglite-bolt-server --graph graph.kgl
 The agent then becomes `Neo4j/5.26.0 (kglite-bolt-server/<version>)` — enough of
 a Neo4j spelling to pass the driver's check, with the real product retained so
 the server stays identifiable in logs, in driver errors, and through
-`ServerInfo.agent()`. Only the `server` field changes; `bolt_agent` keeps
-reporting kglite.
+`ServerInfo.agent()`. The handshake `server` field and `dbms.components()` row
+change; `bolt_agent` keeps reporting kglite.
 
 The variable accepts `1`, `true`, `yes` or `on` (any case) — the useful form for
 container images and unit files, where adding an argument means rebuilding or

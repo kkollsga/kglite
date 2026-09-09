@@ -206,7 +206,7 @@ All node-related methods use a consistent key order: **`type`, `title`, `id`**, 
 |-----------|---------|
 | Read (`MATCH...RETURN`) | `ResultView` — lazy container, rows converted on access |
 | Read with `to_df=True` | `pandas.DataFrame` |
-| Mutation (`CREATE`, `SET`, `DELETE`, `MERGE`) | `ResultView` with `.stats` dict |
+| Mutation (for example `CREATE`/`INSERT`, `SET`/`REMOVE`, `DELETE`, or `MERGE`) | `ResultView` with `.stats` dict |
 | `EXPLAIN` prefix | `ResultView` containing the structured plan (not executed) |
 
 **Spatial return types:** `point()` values are returned as `{'latitude': float, 'longitude': float}` dicts.
@@ -260,7 +260,7 @@ Every method that returns node data uses the same dict shape:
 | `get_properties(['a','b'])` | `list[tuple]` | Flat list (see below) |
 | `collect()` | `ResultView` or grouped dict | Full node dicts |
 | `to_df()` | `DataFrame` | Columns: `type, title, id, ...props` |
-| `node(type, id)` | `dict \| None` | O(1) hash lookup |
+| `node(type, id)` | `dict \| None` | Identity-index lookup |
 
 ### Flat vs. grouped results
 

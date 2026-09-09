@@ -188,9 +188,7 @@ fn write_conventions(xml: &mut String, caps: &HashMap<String, TypeCapabilities>)
 
 fn write_read_only_notice(xml: &mut String, graph: &DirGraph) {
     if graph.read_only {
-        xml.push_str(
-            "  <read-only>Cypher mutations disabled: CREATE, SET, DELETE, REMOVE, MERGE</read-only>\n",
-        );
+        xml.push_str("  <read-only>Cypher mutations are disabled</read-only>\n");
     }
     if graph.schema_locked {
         xml.push_str(
@@ -795,7 +793,7 @@ fn write_connections_detail(
 /// The legend for every `indexed=` attribute [`index_kinds`] emits. Emitted by
 /// both `<extensions>` writers, so it lives here rather than as two literals
 /// that can disagree about what the vocabulary means.
-const INDEXING_HINT: &str = "    <indexing hint=\"Properties annotated indexed='eq' are O(log N) via MATCH (n:T {prop: value}); indexed='eq,prefix' also accelerates WHERE n.prop STARTS WITH 'x' (the sorted disk-backed string index only); indexed='range' accelerates &lt;, &lt;=, &gt;, &gt;= and ORDER BY. Prefer anchored queries over unanchored scans; Python and the MCP server apply a default Cypher deadline of 3 minutes (override per-call with timeout_ms, or globally in Python with set_default_timeout); the CLI and the Bolt server apply none.\"/>\n";
+const INDEXING_HINT: &str = "    <indexing hint=\"Properties annotated indexed='eq' serve indexed equality lookup via MATCH (n:T {prop: value}); indexed='eq,prefix' also accelerates WHERE n.prop STARTS WITH 'x' (the sorted disk-backed string index only); indexed='range' accelerates &lt;, &lt;=, &gt;, &gt;= and ORDER BY. Prefer anchored queries over unanchored scans; Python and the MCP server apply a default Cypher deadline of 3 minutes (override per-call with timeout_ms, or globally in Python with set_default_timeout); the CLI and the Bolt server apply none.\"/>\n";
 
 /// Write the `<extensions>` element. The timeseries, spatial, lexical,
 /// semantic, hybrid and connections sections appear only when the graph
@@ -833,7 +831,7 @@ fn write_extensions(xml: &mut String, graph: &DirGraph, surface: DescribeSurface
     xml.push_str("    <algorithms hint=\"CALL proc() YIELD node, col — score (pagerank/betweenness/degree/closeness), community (louvain/leiden/label_propagation), component (connected_components), coreness (k_core), coefficient (clustering_coefficient), cluster (cluster), dependency_count (ready_set — nodes whose outgoing-E dependencies all satisfy a `done` predicate). Algorithms take optional {node_type, relationship} scoping.\"/>\n");
     xml.push_str("    <rules hint=\"CALL proc(...) YIELD ... — structural validators. Unary: orphan_node, self_loop, missing_required_edge, missing_inbound_edge, duplicate_title, duplicate_id, null_property. Pair: cycle_2step, inverse_violation, parallel_edges. Schema: type_domain_violation, type_range_violation, edge_property_violation (ontology property checks). Cardinality: cardinality_violation. Triple: transitivity_violation. Projection: outline({root, root_type?, edge}) YIELD node, depth, parent_id, node_type, node_id_type, parent_type, parent_id_type, node_token, parent_token (BFS tree; tokens are result-local identity keys; render via kglite.outline). Compose with WHERE/RETURN/aggregation as normal Cypher rows.\"/>\n");
     xml.push_str(&format!(
-        "    <cypher hint=\"Standard openCypher is supported — MATCH/OPTIONAL MATCH/WHERE/WITH/UNWIND/RETURN, ORDER BY/SKIP/LIMIT, DISTINCT, variable-length paths, and the usual aggregates (count/sum/avg/min/max/collect) all work; write ordinary Cypher, not a dialect. The items listed here are KGLite EXTENSIONS on top of it: ||, =~, coalesce(), CALL kglite.cluster/kglite.pagerank/kglite.louvain/..., distance(), contains(). {} for reference, {} for detailed docs.\"/>\n",
+        "    <cypher hint=\"The supported Cypher dialect includes MATCH/OPTIONAL MATCH, WHERE/FILTER, WITH, UNWIND, RETURN/FINISH, ORDER BY with SKIP/OFFSET/LIMIT, DISTINCT, variable-length paths, scoped per-row CALL subqueries, mutations, and common aggregates. KGLite also exposes separately documented extensions. {} for the contract, {} for detailed docs.\"/>\n",
         surface.call("cypher=True", "--cypher"),
         surface.call("cypher=['topic']", "--cypher-topics topic"),
     ));
@@ -1720,7 +1718,7 @@ fn build_extreme_inventory(graph: &DirGraph, surface: DescribeSurface) -> String
     xml.push_str("    <algorithms hint=\"CALL proc() YIELD node, col — score (pagerank/betweenness/degree/closeness), community (louvain/leiden/label_propagation), component (connected_components), coreness (k_core), coefficient (clustering_coefficient), cluster (cluster), dependency_count (ready_set — nodes whose outgoing-E dependencies all satisfy a `done` predicate). Algorithms take optional {node_type, relationship} scoping.\"/>\n");
     xml.push_str("    <rules hint=\"CALL proc(...) YIELD ... — structural validators. Unary: orphan_node, self_loop, missing_required_edge, missing_inbound_edge, duplicate_title, duplicate_id, null_property. Pair: cycle_2step, inverse_violation, parallel_edges. Schema: type_domain_violation, type_range_violation, edge_property_violation (ontology property checks). Cardinality: cardinality_violation. Triple: transitivity_violation. Projection: outline({root, root_type?, edge}) YIELD node, depth, parent_id, node_type, node_id_type, parent_type, parent_id_type, node_token, parent_token (BFS tree; tokens are result-local identity keys; render via kglite.outline).\"/>\n");
     xml.push_str(&format!(
-        "    <cypher hint=\"Standard openCypher is supported — MATCH/WHERE/WITH/RETURN, ORDER BY/SKIP/LIMIT, variable-length paths and the usual aggregates all work; write ordinary Cypher, not a dialect. KGLite adds documented extensions on top. {} for reference, {} for detailed docs.\"/>\n",
+        "    <cypher hint=\"The supported Cypher dialect includes MATCH, WHERE/FILTER, WITH, RETURN/FINISH, ORDER BY with SKIP/OFFSET/LIMIT, variable-length paths, scoped per-row CALL subqueries, mutations, and common aggregates. KGLite also exposes separately documented extensions. {} for the contract, {} for detailed docs.\"/>\n",
         surface.call("cypher=True", "--cypher"),
         surface.call("cypher=['topic']", "--cypher-topics topic"),
     ));

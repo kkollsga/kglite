@@ -121,7 +121,7 @@ class TestIndexAccess:
 
 
 class TestPathFunctionReturnTypes:
-    """nodes(p) should return list of dicts, relationships(p) list of strings."""
+    """Path functions should return lists of full graph-value dictionaries."""
 
     def test_nodes_returns_list_of_dicts(self, social_graph):
         # nodes() returns full Node dicts with id/labels/properties.
@@ -136,9 +136,8 @@ class TestPathFunctionReturnTypes:
         assert "Alice" in titles
         assert "Charlie" in titles
 
-    def test_relationships_returns_list_of_strings(self, social_graph):
-        # relationships() returns full Rel dicts. Extract `.type` to
-        # get the list-of-type-strings shape.
+    def test_relationships_returns_list_of_dicts(self, social_graph):
+        # Projecting `.type` checks the type field on each full relationship.
         rows = social_graph.cypher(
             "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..5]->(b:Person {name: 'Bob'})) "
             "RETURN relationships(p)"

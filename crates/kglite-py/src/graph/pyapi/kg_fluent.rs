@@ -1123,28 +1123,13 @@ impl KnowledgeGraph {
         })
     }
 
-    /// Look up a single node by its type and ID value. O(1) after first call.
-    ///
-    /// This is much faster than select().where() for single-node lookups
-    /// because it uses a hash index instead of scanning all nodes.
-    ///
-    /// Args:
-    ///     node_type: The type of node to look up (e.g., "User", "Product")
-    ///     node_id: The ID value of the node
-    ///
-    /// Returns:
-    ///     Dict with all node properties, or None if not found
-    ///
-    /// Example:
-    ///     ```python
-    ///     user = graph.node("User", 38870)
-    ///     ```
+    /// Look up a node by type and integer or string ID through the identity index.
     #[pyo3(signature = (node_type, node_id))]
     fn node(&self, node_type: &str, node_id: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
         let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         let id_value = py_in::py_value_to_value(node_id)?;
 
-        // Read-only, O(1) typed lookup — same path as `exists()`.
+        // Read-only typed index lookup — same path as `exists()`.
         // `lookup_by_id_readonly` self-heals the id-index on a miss
         // (interior mutability in `IdIndexStore`), so no `&mut` /
         // `Arc::make_mut` is needed. The old `Arc::make_mut` route
@@ -1168,29 +1153,11 @@ impl KnowledgeGraph {
         })
     }
 
-    /// Return True if a node of ``node_type`` with the given id exists. O(1).
-    ///
-    /// Uses the same id-index as ``node()`` — no scan. Mirrors ``node()``'s
-    /// parameter shape and id-coercion semantics exactly (ids are integers in
-    /// every storage mode; a Python ``int`` and the stored id normalize to the
-    /// same key).
-    ///
-    /// Args:
-    ///     node_type: The type of node to check (e.g., "User", "Product")
-    ///     unique_id: The ID value of the node
-    ///
-    /// Returns:
-    ///     True if a matching node exists, False otherwise
-    ///
-    /// Example:
-    ///     ```python
-    ///     if graph.exists("User", 38870):
-    ///         ...
-    ///     ```
+    /// Return whether the identity index contains this type and integer or string ID.
     #[pyo3(signature = (node_type, unique_id))]
     fn exists(&self, node_type: &str, unique_id: &Bound<'_, PyAny>) -> PyResult<bool> {
         let id_value = py_in::py_value_to_value(unique_id)?;
-        // Read-only, O(1) typed lookup — see `node()` for why this must not
+        // Read-only typed index lookup — see `node()` for why this must not
         // route through `Arc::make_mut`.
         Ok(self
             .inner

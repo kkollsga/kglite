@@ -11,6 +11,11 @@ before upgrading.
 
 ### Added
 
+- **Read `CALL` subqueries support modern scope clauses and set composition.**
+  Use `CALL (x, y) { ... }` for named imports, `CALL (*)` for every outer
+  variable, or `CALL ()` for none. Modern imports remain visible through later
+  `WITH` clauses and every set arm. `UNION` / `UNION ALL` work inside the body;
+  KGLite's `INTERSECT` / `EXCEPT` extensions use the same seeded execution.
 - **Cypher 25 clause spellings `FILTER`, `OFFSET`, `NODETACH DELETE`, and
   `FINISH` are supported.** `FILTER` is the standalone `WITH * WHERE`
   equivalent, `OFFSET` is an exact `SKIP` synonym, `NODETACH DELETE` retains
@@ -20,6 +25,20 @@ before upgrading.
   labels and relationship types accept `:` or `IS`; multiple node labels use
   `&`. CREATE-only dynamic labels/types, colon-separated label chains, named
   paths, and whole-map property parameters are rejected.
+
+### Changed
+
+- **Ordinary `CALL procedure(...) YIELD ...` now obeys the incoming row
+  pipeline.** Parameters are evaluated once per input row and yielded values
+  inner-join with that row's existing bindings. A later empty stream stays
+  empty instead of invoking the procedure and resurrecting rows. `cluster()`
+  remains the explicit set-input exception and consumes the preceding cohort.
+- **Every read `CALL { ... }` body now executes once per incoming row, including
+  legacy/no-import forms.** This replaces the old global-once behavior. A body
+  returning no rows drops its outer row; an empty outer stream stays empty;
+  returned names cannot overwrite outer bindings. Legacy importing `WITH`
+  remains supported and must be repeated in each set arm. Writes, unit bodies,
+  and `IN TRANSACTIONS` remain unsupported.
 
 ## [0.17.1] - 2026-09-08
 

@@ -301,8 +301,8 @@ fn parse_read_only_connection_query(query: &str) -> PyResult<cypher::CypherQuery
     })?;
     if cypher::is_mutation_query(&parsed) {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "The 'query' parameter must be a read-only query (MATCH...RETURN). \
-             CREATE/SET/DELETE/MERGE are not allowed here.",
+            "The 'query' parameter must be read-only (for example MATCH...RETURN); \
+             mutation clauses are not allowed here.",
         ));
     }
     cypher::dynamic_labels::resolve(&mut parsed, &HashMap::new())

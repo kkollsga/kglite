@@ -8,7 +8,7 @@ use super::DescribeSurface;
 // ── Cypher tier 3: topic detail functions ──────────────────────────────────
 
 const CYPHER_TOPIC_LIST: &str = "MATCH, WHERE, FILTER, RETURN, FINISH, WITH, HAVING, ORDER BY, OFFSET, UNWIND, UNION, \
-    CALL_SUBQUERY, CASE, CREATE, INSERT, SET, DELETE, NODETACH DELETE, MERGE, EXPLAIN, PROFILE, operators, functions, patterns, spatial, \
+    CALL_SUBQUERY, CASE, CREATE, INSERT, SET, DELETE, NODETACH DELETE, REMOVE, MERGE, EXPLAIN, PROFILE, operators, functions, patterns, spatial, \
     temporal, pagerank, betweenness, degree, closeness, louvain, leiden, \
     label_propagation, connected_components, k_core, clustering_coefficient, cluster, orphan_node, self_loop, \
     cycle_2step, missing_required_edge, missing_inbound_edge, duplicate_title, \
@@ -287,7 +287,7 @@ pub(super) fn write_topic_create(xml: &mut String) {
 
 pub(super) fn write_topic_insert(xml: &mut String) {
     xml.push_str("  <INSERT>\n");
-    xml.push_str("    <desc>Create nodes and directed relationships with Cypher 25 static label/type syntax. Use &amp; between multiple node labels; dynamic labels and types are not accepted.</desc>\n");
+    xml.push_str("    <desc>Create nodes and directed relationships with Cypher 25 static label/type syntax. Introduce labels with : or IS and use &amp; between multiple node labels; a relationship has exactly one type. Dynamic labels/types, dynamic property maps, path assignment, colon-separated multiple labels, relationship type alternation, and undirected or variable-length relationships are rejected.</desc>\n");
     xml.push_str("    <examples>\n");
     xml.push_str("      <ex desc=\"node\">INSERT (n IS Person&amp;Actor {name: 'Ada'})</ex>\n");
     xml.push_str("      <ex desc=\"relationship\">INSERT (a:Person)-[r IS KNOWS {since: 2020}]-&gt;(b:Person)</ex>\n");
@@ -332,12 +332,13 @@ pub(super) fn write_topic_merge(xml: &mut String) {
 
 pub(super) fn write_topic_call_subquery(xml: &mut String) {
     xml.push_str("  <CALL_SUBQUERY>\n");
-    xml.push_str("    <desc>Nested read subquery. Uncorrelated CALL { MATCH ... RETURN ... } runs once and its rows cartesian-combine with the outer stream. Correlated CALL { WITH x ... RETURN ... } runs once per outer row with the imported variables bound. The importing WITH lists bare variables only (no aliasing/projection/aggregation). Aggregating bodies preserve the outer row with a zero value; non-aggregating bodies inner-join (zero matches drops the row). Only RETURN columns escape to the outer scope. v1 excludes writes, UNION, and unit (no-RETURN) subqueries in the body.</desc>\n");
-    xml.push_str("    <syntax>CALL { [WITH vars] &lt;body clauses&gt; RETURN ... }</syntax>\n");
+    xml.push_str("    <desc>Nested read subquery, executed once per input row even with no imports. Modern CALL (x, y), CALL (*), and CALL () scopes are explicit and global through WITH and every set arm. Legacy CALL { WITH x ... } imports bare variables in each arm. Result rows inner-join with their outer row; zero rows drop it, while an aggregate such as count returns a zero row. UNION and UNION ALL are supported in the body; INTERSECT and EXCEPT are KGLite extensions. Only terminal RETURN columns escape, and they may not collide with outer names. Writes, unit bodies, and IN TRANSACTIONS are not supported.</desc>\n");
+    xml.push_str("    <syntax>CALL [(vars | * | )] { &lt;read body ending in RETURN&gt; [UNION [ALL] ...] }</syntax>\n");
     xml.push_str("    <examples>\n");
-    xml.push_str("      <ex desc=\"uncorrelated\">CALL { MATCH (n:Person) RETURN count(n) AS total } RETURN total</ex>\n");
-    xml.push_str("      <ex desc=\"correlated per-row aggregate\">MATCH (p:Person) CALL { WITH p MATCH (p)-[:KNOWS]-&gt;(f) RETURN count(f) AS c } RETURN p.name, c</ex>\n");
-    xml.push_str("      <ex desc=\"per-row top-K\">MATCH (p:Person) CALL { WITH p MATCH (p)-[:KNOWS]-&gt;(f) RETURN f.name AS oldest ORDER BY f.age DESC LIMIT 1 } RETURN p.name, oldest</ex>\n");
+    xml.push_str("      <ex desc=\"empty scope, still per row\">MATCH (c:Company) CALL () { MATCH (n:Person) RETURN count(n) AS total } RETURN c.name, total</ex>\n");
+    xml.push_str("      <ex desc=\"modern named scope\">MATCH (p:Person) CALL (p) { MATCH (p)-[:KNOWS]-&gt;(f) RETURN count(f) AS c } RETURN p.name, c</ex>\n");
+    xml.push_str("      <ex desc=\"global scope across set arms\">MATCH (p:Person) CALL (*) { RETURN p.name AS value UNION ALL RETURN p.name + '!' AS value } RETURN value</ex>\n");
+    xml.push_str("      <ex desc=\"legacy import\">MATCH (p:Person) CALL { WITH p MATCH (p)-[:KNOWS]-&gt;(f) RETURN count(f) AS c } RETURN p.name, c</ex>\n");
     xml.push_str("    </examples>\n");
     xml.push_str("  </CALL_SUBQUERY>\n");
 }
@@ -889,7 +890,7 @@ pub(super) fn write_fluent_overview(xml: &mut String, surface: DescribeSurface) 
     xml.push_str(
         "    <method sig=\"ids()\">Lightweight retrieval: id + type + title only.</method>\n",
     );
-    xml.push_str("    <method sig=\"node(node_type, node_id)\">O(1) lookup by type + id. Returns dict or None.</method>\n");
+    xml.push_str("    <method sig=\"node(node_type, node_id)\">Indexed lookup by type + id. Returns dict or None.</method>\n");
     xml.push_str("    <method sig=\"count(group_by=None)\">Count nodes, optionally grouped by property.</method>\n");
     xml.push_str("    <method sig=\"len()\">O(1) count of selected nodes.</method>\n");
     xml.push_str("    <method sig=\"sample(n)\">Random sample as ResultView.</method>\n");
@@ -1146,7 +1147,7 @@ pub(super) fn write_fluent_topic_retrieval(xml: &mut String) {
     xml.push_str("      <m sig=\"to_gdf()\">GeoDataFrame with geometry column (requires spatial config).</m>\n");
     xml.push_str("      <m sig=\"ids()\">Lightweight: id + type + title only.</m>\n");
     xml.push_str(
-        "      <m sig=\"node(node_type, node_id)\">O(1) single-node lookup. Returns dict or None.</m>\n",
+        "      <m sig=\"node(node_type, node_id)\">Indexed single-node lookup. Returns dict or None.</m>\n",
     );
     xml.push_str(
         "      <m sig=\"count(group_by=None)\">Count, optionally grouped by property.</m>\n",
@@ -1435,7 +1436,7 @@ pub(super) fn write_fluent_topic_transactions(xml: &mut String) {
     xml.push_str("  </transactions>\n");
 }
 
-/// Tier 2: compact Cypher reference — all clauses, operators, functions, procedures.
+/// Tier 2: compact reference for the major supported Cypher surface.
 /// No examples. Ends with hint to use tier 3.
 pub(super) fn write_cypher_overview(xml: &mut String, surface: DescribeSurface) {
     xml.push_str("<cypher>\n");
@@ -1456,13 +1457,13 @@ pub(super) fn write_cypher_overview(xml: &mut String, surface: DescribeSurface) 
     xml.push_str(
         "    <clause name=\"CREATE\">Create nodes and relationships with properties.</clause>\n",
     );
-    xml.push_str("    <clause name=\"INSERT\">Cypher 25 static node/relationship insertion. Use &amp; between multiple node labels; dynamic labels/types are rejected.</clause>\n");
+    xml.push_str("    <clause name=\"INSERT\">Cypher 25 static node/relationship insertion. Use &amp; between multiple node labels and one directed relationship type. Dynamic labels/types, dynamic property maps, path assignment, colon-separated multiple labels, relationship type alternation, and undirected or variable-length relationships are rejected.</clause>\n");
     xml.push_str("    <clause name=\"SET\">Set or update node/relationship properties.</clause>\n");
     xml.push_str("    <clause name=\"DELETE\">Delete nodes/relationships. NODETACH DELETE is explicit plain DELETE; DETACH DELETE also removes incident relationships. REMOVE drops properties or labels.</clause>\n");
     xml.push_str(
         "    <clause name=\"MERGE\">Match existing or create new (upsert pattern).</clause>\n",
     );
-    xml.push_str("    <clause name=\"CALL { }\">Read subquery — runs a nested MATCH/WITH/RETURN per outer row. Uncorrelated CALL { MATCH ... RETURN ... } runs once (cartesian-combined); correlated CALL { WITH p MATCH (p)-->... RETURN count(...) AS c } runs per outer row. Importing WITH lists bare variables only. Example: MATCH (p:Person) CALL { WITH p MATCH (p)-[:KNOWS]-&gt;(f) RETURN count(f) AS c } RETURN p.name, c</clause>\n");
+    xml.push_str("    <clause name=\"CALL { }\">Read subquery executed per input row. Modern CALL (x, y), CALL (*), and CALL () imports are global through WITH and every UNION arm; legacy importing WITH uses bare variables in each arm. UNION/UNION ALL are supported; INTERSECT/EXCEPT are KGLite extensions. Writes, unit bodies, and IN TRANSACTIONS are not supported. Example: MATCH (p:Person) CALL (p) { MATCH (p)-[:KNOWS]-&gt;(f) RETURN count(f) AS c } RETURN p.name, c</clause>\n");
     xml.push_str("    <clause name=\"HAVING\">Post-aggregation filter on RETURN/WITH. Example: RETURN n.type, count(*) AS cnt HAVING cnt > 5</clause>\n");
     xml.push_str("    <clause name=\"CREATE INDEX\">Schema DDL, a standalone statement. CREATE [RANGE] INDEX [name] [IF NOT EXISTS] FOR (n:Label) ON (n.prop[, n.prop2]) — one property builds a hash equality index (serves = and IN), two or more build a composite index, and the RANGE keyword additionally builds a B-tree range index (serves &lt; &lt;= &gt; &gt;=). Index names are canonical (Label.prop, Label.(a,b)); a name given here is accepted but not stored. Counters land in last_mutation_stats.indexes_added.</clause>\n");
     xml.push_str("    <clause name=\"DROP INDEX\">DROP INDEX &lt;canonical-name&gt; [IF EXISTS], e.g. DROP INDEX Person.email — or the descriptor form DROP INDEX FOR (n:Label) ON (n.prop). Removes every structure registered under that name.</clause>\n");
@@ -1501,6 +1502,7 @@ pub(super) fn write_cypher_overview(xml: &mut String, surface: DescribeSurface) 
     xml.push_str("  </functions>\n");
 
     xml.push_str("  <procedures>\n");
+    xml.push_str("    <semantics>Ordinary CALL procedure(...) YIELD ... evaluates parameters and inner-joins yielded rows once per input row; an empty input remains empty. cluster() is the set-input exception and consumes the full preceding cohort.</semantics>\n");
     xml.push_str("    <proc name=\"pagerank\" yields=\"node, score\">PageRank centrality for all nodes.</proc>\n");
     xml.push_str("    <proc name=\"betweenness\" yields=\"node, score\">Betweenness centrality for all nodes.</proc>\n");
     xml.push_str("    <proc name=\"degree\" yields=\"node, score\">Degree centrality for all nodes.</proc>\n");
@@ -1517,8 +1519,8 @@ pub(super) fn write_cypher_overview(xml: &mut String, surface: DescribeSurface) 
     xml.push_str("  <patterns>(n:Label), (n {prop: val}), (a)-[:TYPE]-&gt;(b), (a)-[:T*1..3]-&gt;(b), [x IN list WHERE pred | expr], n {.p1, .p2}</patterns>\n");
 
     xml.push_str("  <limitations>\n");
-    xml.push_str("    <item feature=\"LOAD CSV http(s):// source\" note=\"LOAD CSV [WITH HEADERS] FROM &lt;file:// URL or local path&gt; AS row [FIELDTERMINATOR &lt;sep&gt;] IS supported as the leading clause; http(s):// is not, because the engine ships no HTTP client. Reading local files is off for remote callers unless the server enabled it. Row-local pipelines (CREATE/MERGE/SET) stream in batches; aggregate/ORDER BY/DISTINCT pipelines read the whole file, capped. CALL { } IN TRANSACTIONS is not supported.\"/>\n");
-    xml.push_str("    <item feature=\"Relationship UNIQUE / RELATIONSHIP KEY, and property types outside the accepted set\" note=\"Node constraints are UNIQUE, NOT NULL, NODE KEY and IS :: TYPE; relationship constraints are NOT NULL and IS :: TYPE, written FOR ()-[r:TYPE]-(). Both are validated against the existing data when declared and enforced on every write path (Cypher CREATE/MERGE/SET/REMOVE and bulk loads alike). IS UNIQUE and IS RELATIONSHIP KEY on a relationship are refused: KGLite has no single answer for when two relationships of a type are the same one — the bulk loader deduplicates (type, source, target) while Cypher CREATE freely makes parallel edges. IS :: accepts BOOLEAN, STRING, INTEGER, FLOAT, DATE, LOCAL DATETIME, DURATION, POINT — the type names with an exact value counterpart; LIST&lt;...&gt;, unions, zoned temporal types and decorated forms are rejected rather than approximated. For those, define_schema() plus validate_schema() audits existing data and lock_schema() rejects writes that disagree with a node type's recorded property type.\"/>\n");
+    xml.push_str("    <item feature=\"LOAD CSV http(s):// source\" note=\"LOAD CSV [WITH HEADERS] FROM &lt;file:// URL or local path&gt; AS row [FIELDTERMINATOR &lt;sep&gt;] IS supported as the leading clause; http(s):// is not, because the engine ships no HTTP client. Reading local files is off for remote callers unless the server enabled it. Row-local pipelines stream in batches, including ordinary CALL procedures; aggregates, ORDER BY, SKIP/OFFSET, LIMIT, DISTINCT, set operations, cluster(), and CALL subqueries read the whole file in one capped pass. CALL { } IN TRANSACTIONS is not supported.\"/>\n");
+    xml.push_str("    <item feature=\"Relationship UNIQUE / RELATIONSHIP KEY, and property types outside the accepted set\" note=\"Node constraints are UNIQUE, NOT NULL, NODE KEY and IS :: TYPE; relationship constraints are NOT NULL and IS :: TYPE, written FOR ()-[r:TYPE]-(). Both are validated against the existing data when declared and enforced on every write path (Cypher CREATE/INSERT/MERGE/SET/REMOVE and bulk loads alike). IS UNIQUE and IS RELATIONSHIP KEY on a relationship are refused: KGLite has no single answer for when two relationships of a type are the same one — the bulk loader deduplicates (type, source, target) while Cypher CREATE freely makes parallel edges. IS :: accepts BOOLEAN, STRING, INTEGER, FLOAT, DATE, LOCAL DATETIME, DURATION, POINT — the type names with an exact value counterpart; LIST&lt;...&gt;, unions, zoned temporal types and decorated forms are rejected rather than approximated. For those, define_schema() plus validate_schema() audits existing data and lock_schema() rejects writes that disagree with a node type's recorded property type.\"/>\n");
     xml.push_str("    <item feature=\"TEXT / FULLTEXT / POINT / VECTOR / LOOKUP INDEX\" note=\"Only equality, composite, and RANGE index DDL is served. CONTAINS/STARTS WITH need no text index; use build_text_index() + text_bm25() for ranked text retrieval and build_vector_index() for vector search; label lookup is always indexed.\"/>\n");
     xml.push_str("    <item feature=\"Primary-type mutation\" note=\"Each node has an immutable primary type plus optional secondary labels via SET n:Label / CREATE (n:A:B) / g.add_label(...). MATCH (n:A:B) AND-intersects. SET n.type writes a property; recreate or migrate the node to change its primary type.\"/>\n");
     xml.push_str("    <item feature=\"Variable-length weighted paths\" note=\"Unweighted variable-length paths (*1..3) are supported\"/>\n");

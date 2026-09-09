@@ -50,8 +50,8 @@ pub(crate) struct Cli {
     pub(crate) watch: Option<PathBuf>,
 
     /// Enable the write-mode "agent graph workbench" (single-graph mode):
-    /// `cypher_query` accepts mutations (CREATE/SET/DELETE/MERGE, optionally
-    /// `write_scope`-restricted) and the runtime graph-lifecycle tools
+    /// `cypher_query` accepts mutations (optionally `write_scope`-restricted)
+    /// and the runtime graph-lifecycle tools
     /// (`load_graph` / `create_graph` / `save_graph_as`) are registered.
     /// Off by default — read-only is the safe default for analysis servers.
     /// Equivalent to `extensions.writable: true` in the manifest; either

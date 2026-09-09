@@ -20,10 +20,14 @@ RUNNER_PATH = ROOT / "tests" / "test_cypher_clean_room_contract.py"
 DOC_PATH = ROOT / "CYPHER.md"
 CLAIM_SURFACES = [
     DOC_PATH,
+    ROOT / "README.md",
+    ROOT / "kglite" / "__init__.pyi",
     ROOT / "docs" / "index.md",
     ROOT / "docs" / "concepts" / "cypher-conformance.md",
     ROOT / "docs" / "operators" / "bolt-server.md",
     ROOT / "docs" / "operators" / "index.md",
+    ROOT / "docs" / "python" / "getting-started.md",
+    ROOT / "docs" / "python" / "guides" / "cypher.md",
     ROOT / "crates" / "kglite-bolt-server" / "README.md",
     # The two strongest historical over-claims lived OUTSIDE this gate
     # (found 2026-08-15): examples/ walkthroughs and the migration guides
@@ -231,6 +235,29 @@ def test_documented_timestamp_constructors_return_zoneless_values() -> None:
         "utc": datetime(2024, 1, 15, 8, 30),
         "local": datetime(2024, 1, 15, 10, 30),
     }
+
+
+def test_current_call_semantics_reach_public_claim_surfaces() -> None:
+    reference = DOC_PATH.read_text(encoding="utf-8")
+    stub = (ROOT / "kglite" / "__init__.pyi").read_text(encoding="utf-8")
+    getting_started = (ROOT / "docs" / "python" / "getting-started.md").read_text(encoding="utf-8")
+    bolt_example = (ROOT / "examples" / "bolt_neo4j_browser.md").read_text(encoding="utf-8")
+
+    assert "ordinary `CALL procedure(...) YIELD ...` is a row operator" in reference
+    assert "`CALL (p, q) { ... }`" in reference
+    assert "The body must be a read pipeline ending in `RETURN`" in reference
+    assert "Ordinary ``CALL...YIELD`` procedures evaluate parameters" in stub
+    assert "full Cypher coverage" not in getting_started
+    assert "Browser's query editor sends auto-commit RUNs" in bolt_example
+
+    graph = kglite.KnowledgeGraph()
+    compact = graph.describe(cypher=True)
+    detail = graph.describe(cypher=["CALL_SUBQUERY"])
+    assert "CALL (x, y)" in compact
+    assert "executed per input row" in compact
+    assert "cluster() is the set-input exception" in compact
+    assert "Modern CALL (x, y), CALL (*), and CALL ()" in detail
+    assert "Writes, unit bodies, and IN TRANSACTIONS are not supported" in detail
 
 
 def test_namespaced_and_flat_extension_function_are_equivalent():

@@ -289,7 +289,7 @@ pub fn batching_barrier(clauses: &[Clause]) -> Option<String> {
             }
             Clause::Call(_) => continue,
             Clause::CallSubquery { .. } => {
-                "an uncorrelated CALL { } subquery body runs once per invocation".to_string()
+                "a CALL { } subquery crosses the LOAD CSV batch boundary".to_string()
             }
             Clause::LoadCsv(_) => "LOAD CSV cannot appear twice".to_string(),
             Clause::Schema(_) => "schema DDL is a standalone statement".to_string(),

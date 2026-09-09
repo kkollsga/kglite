@@ -1087,9 +1087,9 @@ mod tests {
 
     #[test]
     fn test_bare_call_rejected_when_combined_with_other_clauses() {
-        // Mid-pipeline (or followed by RETURN), YIELD stays mandatory:
-        // execute_call replaces the incoming row set rather than joining, so
-        // accepting the bare form there would silently drop bound rows.
+        // Mid-pipeline (or followed by RETURN), YIELD stays mandatory so the
+        // joined procedure outputs have an explicit schema for downstream
+        // scope and collision validation.
         for q in [
             "CALL db.labels() RETURN 1",
             "MATCH (n) CALL db.labels()",

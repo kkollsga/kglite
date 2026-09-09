@@ -126,11 +126,7 @@ class TestPathBindingConsistency:
         assert sp_titles == vl_titles == ["Alice", "Bob", "Charlie", "Diana"]
 
     def test_relationships_shortest_path(self, chain_graph):
-        """relationships(p) for shortestPath returns all edge types.
-
-        Extract `.type` from each Rel dict for the legacy
-        list-of-strings shape.
-        """
+        """relationships(p) returns full relationships in shortest-path order."""
         result = chain_graph.cypher("""
             MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..5]->(d:Person {name: 'Diana'}))
             RETURN relationships(p) AS rels
@@ -138,7 +134,7 @@ class TestPathBindingConsistency:
         assert [r["type"] for r in result[0]["rels"]] == ["KNOWS", "KNOWS", "KNOWS"]
 
     def test_relationships_variable_length(self, chain_graph):
-        """relationships(p) for variable-length path returns all edge types."""
+        """relationships(p) returns full relationships in path order."""
         result = chain_graph.cypher("""
             MATCH p = (a:Person {name: 'Alice'})-[:KNOWS*1..5]->(d:Person {name: 'Diana'})
             RETURN relationships(p) AS rels

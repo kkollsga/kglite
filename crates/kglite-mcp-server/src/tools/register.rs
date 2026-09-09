@@ -267,14 +267,14 @@ fn cypher_description(csv_enabled: bool, writable: bool, pin: Option<&[String]>)
     let base: &'static str = match (csv_enabled, writable) {
         (_, true) => {
             "Query, explore, and understand the active knowledge graph with Cypher, and \
-             modify it — reads AND writes (CREATE/SET/DELETE/MERGE) are accepted; this is a \
+             modify it — reads AND mutations are accepted; this is a \
              write-enabled graph. The primary tool for structural questions: how things \
              relate, where an entity/function/type is defined, what references or calls what, \
              counts, and multi-hop paths (for code graphs: call graphs, definitions, imports — \
              navigate the codebase structure). Pass write_scope=[...] to restrict mutations \
-             to those node types: every node write (CREATE/MERGE/SET/REMOVE/DELETE/DETACH \
-             DELETE and node-type DDL) is judged by the node's stored type, and a \
-             relationship write (edge CREATE, DELETE r, SET r.p, REMOVE r.p) needs at least \
+             to those node types: every node write (CREATE, INSERT, MERGE, SET, REMOVE, DELETE, \
+             NODETACH DELETE, DETACH DELETE, and node-type DDL) is judged by the node's stored \
+             type, and a relationship write (edge CREATE/INSERT, DELETE r, SET r.p, REMOVE r.p) needs at least \
              one endpoint's type in the list. Pass params={...} to bind $placeholders — both \
              `{prop: $p}` inside a pattern and `WHERE x.prop = $p` read from it, and a \
              $name with no value is an error rather than an empty result. Mutations are in-memory; call \

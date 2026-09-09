@@ -101,9 +101,13 @@ MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a, r, b
 - **Single graph, single database.** kglite is embedded — there's no
   multi-database concept. The browser's database selector is cosmetic;
   everything runs against the one loaded `.kgl`.
-- **Writes** require `BEGIN`/`COMMIT` (the driver does this automatically)
-  and a server started without `--readonly`. Mutations land in memory; they
-  are not written back to the `.kgl` file.
+- **Writes** require an explicit `BEGIN`/`COMMIT` transaction and a server
+  started without `--readonly`. Browser's query editor sends auto-commit RUNs,
+  so mutation statements there are rejected; use a driver transaction such as
+  `session.execute_write(...)` for writes. With the default
+  `--durability normal`, acknowledged commits are appended to the WAL and recovered after a
+  process crash. The `.kgl` file itself changes only at a checkpoint
+  (`CALL db.checkpoint()`, `--checkpoint-interval`, or `--save-on-exit`).
 - **Introspection.** The sidebar's label / relationship-type / property
   lists come from `db.labels()`, `db.relationshipTypes()` and
   `db.propertyKeys()`; the schema tab renders

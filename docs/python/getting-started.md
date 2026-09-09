@@ -158,8 +158,8 @@ see {doc}`guides/data-loading`.
 - {doc}`guides/index` — guide index ranked by what you're trying to do.
 - {doc}`guides/data-loading` — full DataFrame walkthrough, conflict
   handling, hierarchies.
-- {doc}`guides/cypher` — full Cypher coverage, parameters, count
-  subqueries, semantic search.
+- {doc}`guides/cypher` — supported Cypher surface, parameters, per-row
+  subqueries, and semantic search.
 - {doc}`guides/mcp-servers` — bundled CLI, manifest customisation,
   source-file tools.
 - {doc}`core-concepts` — storage modes, return types, the

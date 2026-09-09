@@ -27,9 +27,9 @@ surface at a glance — most of what you'd reach for is here, in-process:
 
 | Area | Supported |
 |---|---|
-| **Reading** | `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY` / `SKIP` / `LIMIT`, `UNWIND`, `UNION` |
-| **Writing** | `CREATE`, `MERGE` (+ `ON CREATE` / `ON MATCH SET`), `SET`, `DELETE` / `DETACH DELETE`, `REMOVE`, `FOREACH (x IN list \| …)` |
-| **Subqueries** | `CALL { … }` (correlated + uncorrelated), `EXISTS { … }`, `COUNT { … }` |
+| **Reading** | `MATCH`, `OPTIONAL MATCH`, `WHERE` / `FILTER`, `RETURN` / `FINISH`, `WITH`, `ORDER BY` / `SKIP` / `OFFSET` / `LIMIT`, `UNWIND`, `UNION` |
+| **Writing** | `CREATE`, strict `INSERT`, `MERGE` (+ `ON CREATE` / `ON MATCH SET`), `SET`, `DELETE` / `NODETACH DELETE` / `DETACH DELETE`, `REMOVE`, `FOREACH (x IN list \| …)` |
+| **Subqueries** | Per-row `CALL { … }`, `CALL (x, y) { … }`, `CALL (*) { … }`, `CALL () { … }`, `EXISTS { … }`, `COUNT { … }` |
 | **Schema DDL** | `CREATE [RANGE] INDEX [name] [IF NOT EXISTS] FOR (n:L) ON (n.p, …)`, `DROP INDEX … [IF EXISTS]`, `SHOW INDEXES` — see [Cypher index DDL](#cypher-index-ddl) for the taxonomy mapping |
 | **Constraint DDL** | `CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:L) REQUIRE n.p IS UNIQUE \| IS NOT NULL \| IS NODE KEY \| IS :: TYPE`, `FOR ()-[r:T]-() REQUIRE r.p IS NOT NULL \| IS :: TYPE`, `DROP CONSTRAINT … [IF EXISTS]`, `SHOW CONSTRAINTS` — enforced on every write path, see [Cypher constraint DDL](#cypher-constraint-ddl) |
 | **Path finding** | variable-length `-[*1..n]->`, `shortestPath(…)`, `allShortestPaths(…)`, weighted shortest path (`CALL`) |
@@ -60,12 +60,12 @@ integers**:
 
 ```python
 graph.cypher("CREATE (:Memory {id: 'a3f9-uuid', text: 'hello'})")
-graph.cypher("MATCH (n:Memory {id: 'a3f9-uuid'}) RETURN n.text")   # O(1), indexed
+graph.cypher("MATCH (n:Memory {id: 'a3f9-uuid'}) RETURN n.text")   # indexed
 graph.cypher("MATCH (n:Memory) WHERE n.id IN $keys RETURN n", params={"keys": [...]})  # multi-probe
 ```
 
 Put your application key in `id` — **not** a custom property. An anchored lookup
-on `id` is O(1) in every storage mode; an arbitrary property (`mid`, `key`, …) is
+on `id` uses the storage mode's identity index; an arbitrary property (`mid`, `key`, …) is
 **not indexed**, so `MATCH (n {mid: $k})` is a full label scan (linear in node
 count). Two semantics to keep in mind:
 
@@ -121,6 +121,26 @@ the same name are not supported"*, matching Neo4j. A row is one name-keyed map,
 so two items sharing a name were never two columns: the collision used to be
 silent and lost **both** values. Rename one with `AS`. Names are
 case-sensitive, so `AS x` and `AS X` are two columns.
+
+### Current clause spellings
+
+KGLite accepts the Cypher 25 spellings `FILTER`, `OFFSET`, `NODETACH DELETE`,
+`FINISH`, and `INSERT`:
+
+```python
+# FILTER is a standalone row filter; OFFSET is a SKIP synonym.
+graph.cypher("MATCH (p:Person) FILTER p.active RETURN p.name OFFSET 10 LIMIT 5")
+
+# FINISH ends a read or write pipeline and deliberately returns no rows.
+graph.cypher("MATCH (p:Person) SET p.seen = true FINISH")
+
+# NODETACH DELETE is explicit plain DELETE: connected nodes are still refused.
+graph.cypher("MATCH (p:Person {id: $id}) NODETACH DELETE p", params={"id": 7})
+```
+
+`FILTER predicate` has the row behavior of `WITH * WHERE predicate` without
+changing the current columns. `FINISH` must be terminal; completed mutations
+remain visible and its `ResultView` is empty.
 
 ## WHERE Clause
 
@@ -1554,17 +1574,18 @@ on a row-local pipeline, a 5 MB and a 109 MB input both cost ~20 MB of resident
 memory.
 
 Batching is only equivalent to a single whole-file pass when every following
-clause is **row-local** — `MATCH`, `WHERE`, `UNWIND`, `CREATE`, `MERGE`, `SET`,
-`DELETE`, `REMOVE`, `FOREACH`, and non-aggregating `WITH`/`RETURN`. That covers
-the ingest shape the clause exists for, and it streams at any file size.
+clause is **row-local** — `MATCH`, `WHERE`/`FILTER`, `UNWIND`, `CREATE`/`INSERT`,
+`MERGE`, `SET`, the delete/remove forms, `FOREACH`, ordinary procedures, and
+non-aggregating `WITH`/`RETURN` (plus terminal `FINISH`). That covers the ingest
+shape the clause exists for, and it streams at any file size.
 
 A clause that reasons over the **whole result** — any aggregate, `ORDER BY`,
-`SKIP`, `LIMIT`, `DISTINCT`, `UNION`, or `CALL` — cannot be batched without
-changing the answer (`RETURN count(*)` would report one count per batch). Those
-queries read the file into a single pass instead, capped at **1,000,000 rows**:
-past that the query fails naming the clause that forced it, rather than
-exhausting memory. Restructure to a row-local pipeline, or aggregate outside
-the query.
+`SKIP`/`OFFSET`, `LIMIT`, `DISTINCT`, a set operation, `cluster()`, or a `CALL`
+subquery — cannot be batched without changing the answer (`RETURN count(*)`
+would report one count per batch). Those queries read the file into a single
+pass instead, capped at **1,000,000 rows**: past that the query fails naming the
+clause that forced it, rather than exhausting memory. Restructure to a row-local
+pipeline, or aggregate outside the query.
 
 **Not supported:** `CALL { ... } IN TRANSACTIONS` (and the older
 `USING PERIODIC COMMIT`). Batching here is automatic and internal, so there is
@@ -1739,7 +1760,10 @@ result = graph.cypher("""
 # No path → empty list (not an error)
 ```
 
-**Path functions:** `length(p)` returns hop count, `nodes(p)` returns node list, `relationships(p)` returns edge type list.
+**Path functions:** `length(p)` returns the hop count, `nodes(p)` returns full
+node values, and `relationships(p)` returns full relationship values in path
+order. Use `type(r)` (or `r.type` in a projected Python value) when you need
+only each relationship type.
 
 ### Weighted shortest path
 
@@ -1760,108 +1784,109 @@ graph.shortest_path_length("Stop", "A", "Stop", "Z")                          # 
 
 Same Louvain plumbing — `weight_property=None` falls back to BFS.
 
-## `CALL { ... }` Subqueries
+## Procedure calls and incoming rows
 
-`CALL { ... }` nests a complete read sub-pipeline (`MATCH`/`WHERE`/`WITH`/`RETURN`, including nested `CALL { ... }`) and evaluates it as part of the outer query. It is the direct expression of post-aggregation enrichment shapes that otherwise require multiple `cypher()` calls or `WITH`-chaining workarounds that collapse the per-row cardinality you wanted to keep.
-
-There are two forms, distinguished by whether the body imports outer variables.
-
-### Uncorrelated — the body imports nothing
-
-The subquery runs **exactly once**, independent of the outer row stream. Its result rows are **cartesian-producted** with the outer rows: an outer stream of *R* rows combined with a subquery returning *S* rows yields *R × S* rows.
+An ordinary `CALL procedure(...) YIELD ...` is a row operator. Parameter
+expressions are evaluated against each incoming row, the procedure runs once
+for that row, and each yielded row is inner-joined with the outer bindings.
+Multiple procedure rows multiply the outer row; no procedure rows drop it. A
+leading `CALL` receives one implicit seed row, while an empty stream later in a
+query stays empty and does not invoke the procedure.
 
 ```python
-# Leading uncorrelated — no preceding clause, so R = 1 (one seed row):
-# the result is simply the S rows the body returns.
 graph.cypher("""
-    CALL { MATCH (n:Person) RETURN count(n) AS total }
-    RETURN total
-""")
-
-# Cartesian combine — each Company row is paired with the single
-# subquery row, attaching the global person count to every company.
-graph.cypher("""
-    MATCH (c:Company)
-    CALL { MATCH (n:Person) RETURN count(n) AS people }
-    RETURN c.name AS company, people
+    UNWIND ['Person', 'Company'] AS kind
+    CALL db.property_stats({node_type: kind, property: 'name'})
+    YIELD value_count
+    RETURN kind, value_count ORDER BY kind
 """)
 ```
 
-### Correlated — an importing `WITH` brings outer variables in
+Outer bindings remain available after `CALL`; a yielded name that would
+overwrite one is rejected. `cluster()` is the explicit exception: it consumes
+the complete cohort bound by the preceding `MATCH` because that row set is the
+data being clustered.
 
-When the body's **first clause** is a `WITH` that lists outer variables, the subquery runs **once per outer row**, with those variables bound to that row's values. The subquery's result rows are joined back to *that* outer row.
+## `CALL { ... }` read subqueries
+
+A `CALL` subquery runs its read pipeline once for every incoming row, including
+when it imports no variables. A leading subquery receives one implicit seed
+row; a later empty outer stream stays empty. Each row produced by the body is
+inner-joined with its own outer row, so a body returning *k* rows emits *k*
+joined rows and `k = 0` drops that outer row. An aggregating body such as
+`RETURN count(*)` still returns one row for an empty match and therefore keeps
+the outer row with a zero.
 
 ```python
-# The canonical per-row aggregate: count each person's friends without
-# collapsing the person rows (a plain WITH ... count() would).
+# Modern named scope: p is imported and remains visible throughout the body.
 graph.cypher("""
     MATCH (p:Person)
-    CALL {
-        WITH p
+    CALL (p) {
         MATCH (p)-[:KNOWS]->(f)
         RETURN count(f) AS friend_count
     }
     RETURN p.name AS name, friend_count
 """)
 
-# Per-row top-K: keep each person's single oldest friend. ORDER BY and
-# LIMIT inside the body apply independently per outer row.
+# Empty scope imports nothing, but the body still executes once per company.
 graph.cypher("""
-    MATCH (p:Person)
-    CALL {
-        WITH p
-        MATCH (p)-[:KNOWS]->(f)
-        RETURN f.name AS oldest ORDER BY f.age DESC LIMIT 1
-    }
-    RETURN p.name AS name, oldest
+    MATCH (c:Company)
+    CALL () { MATCH (p:Person) RETURN count(p) AS people }
+    RETURN c.name AS company, people
 """)
 ```
 
-### The importing `WITH` — bare variables only
+### Scope forms
 
-The leading importing `WITH` may list **only plain variable references** — `WITH p`, `WITH p, c`. Projection, aliasing, aggregation, and a `WHERE` are all rejected in the importing position; re-project inside the body instead.
+| Form | Imported outer variables | Scope inside the body |
+|---|---|---|
+| `CALL (p, q) { ... }` | The named variables | Global: imports survive later `WITH` clauses and enter every set-operation arm |
+| `CALL (*) { ... }` | Every variable currently in scope | Global, as above |
+| `CALL () { ... }` | None | No outer names are visible; the body still runs per input row |
+| `CALL { WITH p, q ... }` | Bare names in the first `WITH` | Legacy import: each `UNION`/set arm must declare its own importing `WITH` |
+| `CALL { ... }` without an importing `WITH` | None | Legacy no-import form; runs per input row like `CALL ()` |
+
+Modern scope lists accept bare, distinct variable names only: aliases and
+expressions are rejected. Legacy importing `WITH` likewise accepts only bare
+variables—not aliases, expressions, aggregation, or a `WHERE` in the importing
+position. With modern scope, imported names stay visible after ordinary `WITH`
+projection or aggregation; with legacy scope, ordinary Cypher `WITH` scoping
+applies after the importing clause.
+
+Unimported outer names are never auto-correlated. A name used in a pattern
+inside an empty/no-import body is a fresh pattern variable, not the outer
+binding.
+
+### Set operations inside a subquery
+
+Read subqueries support `UNION` and `UNION ALL`. Every arm starts from the same
+outer seed; a modern scope applies to all arms, while a legacy import must be
+repeated at the start of each arm. All arms must return the same column names
+in the same order. KGLite also supports `INTERSECT` and `EXCEPT` in a read
+subquery as dialect extensions.
 
 ```python
-# Rejected — aliasing in the importing WITH:
-#   CALL { WITH p AS x  MATCH (x)-[:KNOWS]->(f) RETURN count(f) AS c }
-# Rejected — projection / aggregation in the importing WITH:
-#   CALL { WITH p.name AS n ... }
-#   CALL { WITH p, count(*) ... }
-# Correct — import the bare variable, re-project in the body:
 graph.cypher("""
     MATCH (p:Person)
-    CALL { WITH p RETURN p.name AS n }
-    RETURN n
+    CALL (p) {
+        RETURN p.name AS value
+        UNION ALL
+        RETURN p.name + '!' AS value
+    }
+    RETURN value ORDER BY value
 """)
 ```
 
-Import is explicit and total: an outer variable is visible inside the body **iff** it appears in the importing `WITH`. A bare `MATCH (p)-[:KNOWS]->(f)` inside the body *without* `WITH p` treats `p` as a fresh, unbound pattern variable — not the outer `p`.
+### Result scope and restrictions
 
-### Cardinality semantics
+Only columns named by each arm's terminal `RETURN` leave the body. Internal
+variables do not leak, and a returned name that collides with an outer binding
+is rejected even when the outer stream is empty.
 
-| Body shape | Per outer row | Outer row fate |
-|---|---|---|
-| Uncorrelated (any) | runs once, *S* rows | every outer row × *S* (cartesian) |
-| Correlated, **non-aggregating** body returning *k* rows | runs per row | *k* output rows (inner join); **`k = 0` drops the outer row** |
-| Correlated, **aggregating** body (`RETURN count(...)`, etc.) | runs per row | always exactly one row — `count` of an empty match is `0`, so the row **survives with the zero value** |
-
-`CALL { ... }` is an **inner join**, not an optional one: a non-aggregating body that matches nothing for an outer row removes that row from the output. An aggregating body always returns one row, so those rows survive (e.g. `friend_count = 0`). A `NULL` import (e.g. an anchor that came from an upstream `OPTIONAL MATCH` miss) runs the body with the `NULL` binding — pattern matches against `NULL` produce no rows, so the same drop-vs-zero rule applies.
-
-### Scoping
-
-- **No outer leakage except via `RETURN`.** Variables introduced *inside* the body (`f` above) are not visible after the `CALL { ... }`. Only the columns named in the body's terminal `RETURN` escape, under their `RETURN` aliases.
-- **Returned aliases must not collide with in-scope outer variables.** `CALL { ... RETURN p AS p }` when `p` is already bound outside is a compile error.
-- **No auto-correlation.** Un-imported outer names are not silently visible inside the body (see the importing-`WITH` note above).
-
-### v1 limitations
-
-| Not supported (v1) | Why / workaround |
-|---|---|
-| Writes in the body (`CALL { ... CREATE/SET/DELETE ... }`) | Rejected at validation. Per-outer-row mutation + atomicity is deferred; do writes in a separate top-level clause. |
-| Unit subquery (no terminal `RETURN`) | Deferred. The body must end in a `RETURN`. |
-| `UNION` inside the body | Rejected at validation. Run separate queries and combine outside, or use a top-level `UNION`. |
-| `CALL { ... } IN TRANSACTIONS` | Neo4j-server batching; no in-memory analogue. |
-| `CALL (x) { ... }` scope-shorthand | Use the explicit `CALL { WITH x ... }` form. |
+The body must be a read pipeline ending in `RETURN`. Writes, unit subqueries
+(no terminal `RETURN`), and `CALL { ... } IN TRANSACTIONS` are not supported;
+put writes in a top-level clause and use the documented `LOAD CSV` batching or
+an explicit transaction when you need a write batch.
 
 ## Schema Introspection (`CALL db.*`)
 
@@ -2331,7 +2356,8 @@ g.define_schema({
 > either mode; drop them with `DROP CONSTRAINT`.
 
 Every write to an opted-in type then stamps a reserved **`updated_at`** (a
-`Timestamp`) — Cypher `CREATE`/`MERGE`/`SET` and `add_nodes`/`add_connections`.
+`Timestamp`) — Cypher `CREATE`/`INSERT`/`MERGE`/`SET` and
+`add_nodes`/`add_connections`.
 Pass `git_sha` / `modified_by` to record who/where too:
 
 ```python
@@ -2453,7 +2479,7 @@ graph.cypher("""
 """)
 ```
 
-## CREATE / SET / DELETE / REMOVE / MERGE
+## CREATE / INSERT / SET / DELETE / REMOVE / MERGE
 
 ```python
 # CREATE — returns ResultView with .stats
@@ -2475,11 +2501,18 @@ graph.cypher("""
            (a)-[:KNOWS]->(b), (b)-[:KNOWS]->(a)
 """)
 
+# INSERT uses static labels/types. Multiple node labels use `&`.
+graph.cypher("""
+    INSERT (a IS Person&Actor {id: 1}), (b:Person {id: 2}),
+           (a)-[r IS KNOWS {since: 2020}]->(b)
+    RETURN labels(a), type(r), r.since
+""")
+
 # SET — update properties
 result = graph.cypher("MATCH (n:Person {name: 'Bob'}) SET n.age = 26, n.city = 'Stavanger'")
 print(result.stats['properties_set'])  # 2
 
-# DELETE — plain DELETE errors if node has relationships; DETACH removes all
+# DELETE / NODETACH DELETE error if a node has relationships; DETACH removes all
 graph.cypher("MATCH (n:Person {name: 'Alice'}) DETACH DELETE n")
 
 # REMOVE — remove properties (id/type are immutable)
@@ -2492,6 +2525,13 @@ graph.cypher("""
     ON MATCH SET n.updated = 'today'
 """)
 ```
+
+`INSERT` is deliberately stricter than `CREATE`. It accepts static node labels
+introduced by `:` or `IS`, with `&` between multiple labels, and one static,
+directed relationship type. It rejects dynamic labels/types, a dynamic property
+map, path assignment, colon-separated multiple labels, relationship type
+alternation, and undirected or variable-length relationships. Use `CREATE`
+when one of those CREATE-specific forms is intentional.
 
 ## Transactions
 
@@ -2824,7 +2864,9 @@ not speed up returning a million rows to Python.
 
 ## Indexes
 
-Create an equality index on a `(node_type, property)` pair to accelerate `MATCH (n:T {prop: value})` and `WHERE n.prop = value` to O(log N):
+Create an equality index on a `(node_type, property)` pair so
+`MATCH (n:T {prop: value})` and `WHERE n.prop = value` use an indexed lookup
+instead of scanning the type:
 
 ```python
 graph.create_index('Country', 'label')
@@ -3023,7 +3065,7 @@ mirroring Neo4j's `indexesAdded` / `indexesRemoved` summary counters.
 ### Cypher constraint DDL
 
 Neo4j 5 constraint DDL runs against KGLite and routes to **real per-write
-enforcement** — Cypher `CREATE` / `MERGE` / `SET` / `REMOVE` *and* the bulk
+enforcement** — Cypher `CREATE` / `INSERT` / `MERGE` / `SET` / `REMOVE` *and* the bulk
 loader (`add_nodes`, blueprints, `from_records`, WAL replay). A declaration is
 not documentation: once it succeeds, a violating write is rejected.
 
@@ -3105,7 +3147,7 @@ DROP CONSTRAINT knows_since
 Everything the node forms promise holds here. Declaring one **validates it
 against every existing relationship of the type** and refuses, installing
 nothing, if the data already violates it. Once installed it is enforced on
-`CREATE` (and `MERGE`'s create branch), `SET r.p` in all three spellings
+`CREATE` / `INSERT` (and `MERGE`'s create branch), `SET r.p` in all three spellings
 (`SET r.p = v`, `SET r = {…}`, `SET r += {…}`), `REMOVE r.p`, and the bulk
 `add_connections` / `replace_connections` loaders. A refused write changes
 nothing — no relationship, no connection-type metadata, and no entry in the
@@ -3661,7 +3703,7 @@ below; do not infer absence from this shorter list.
 
 | Category | Supported |
 |----------|-----------|
-| **Clauses** | `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP`, `LIMIT`, `UNWIND`, `UNION`/`UNION ALL`, `CALL { ... }` (read subqueries — uncorrelated + correlated), `CREATE`, `SET`, `DELETE`, `DETACH DELETE`, `REMOVE`, `MERGE`, `EXPLAIN`, `PROFILE` |
+| **Clauses** | `MATCH`, `OPTIONAL MATCH`, `WHERE`, `FILTER`, `RETURN`, `FINISH`, `WITH`, `ORDER BY`, `SKIP`/`OFFSET`, `LIMIT`, `UNWIND`, `UNION`/`UNION ALL`, scoped and legacy `CALL { ... }` read subqueries, `CREATE`, `INSERT`, `SET`, `DELETE`/`NODETACH DELETE`/`DETACH DELETE`, `REMOVE`, `MERGE`, `EXPLAIN`, `PROFILE` |
 | **Schema DDL** | `CREATE INDEX`, `CREATE RANGE INDEX`, `DROP INDEX`, `SHOW INDEXES`, `CREATE CONSTRAINT`, `DROP CONSTRAINT`, `SHOW CONSTRAINTS` — standalone statements; the two `SHOW` forms are reads |
 | **Patterns** | Node `(n:Type)`, relationship `-[:REL]->`, abbreviated `-->` / `--` / `<--`, variable-length `*1..3`, undirected `-[:REL]-`, properties `{key: val, key: $param, key: var}`, `p = shortestPath(...)` |
 | **WHERE** | `=`, `<>`, `<`, `>`, `<=`, `>=`, `=~` (regex, full-string), `AND`, `OR`, `NOT`, `IS NULL`, `IS NOT NULL`, `IN [...]`, `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `EXISTS { pattern WHERE ... }`, `EXISTS(( pattern ))`, inline pattern predicates, `any/all/none/single(x IN list WHERE ...)` |
@@ -3675,8 +3717,8 @@ below; do not infer absence from this shorter list.
 | **Temporal** | `date(str)`, `datetime(str)`, `localdatetime()` (timestamp values), `localtime()`/`time()` (ISO strings), `duration.between(d1, d2)`, `date_diff(d1, d2)`, `date ± N` (days), `date - date` → duration, `d.year`/`d.month`/`d.day`, `valid_at(...)`, `valid_during(...)` |
 | **Semantic** | `text_score(n, prop, query [, metric] [, options])` — scores a list `query` as a vector, embeds a string `query` via `set_embedder()`, cosine/dot_product/euclidean/poincare; `embedding_norm(n, prop)` — L2 norm (hierarchy depth) |
 | **Timeseries** | `ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_count`, `ts_at`, `ts_first`, `ts_last`, `ts_delta`, `ts_series` — date-string args with resolution validation |
-| **Mutations** | `CREATE (n:Label {props})`, `CREATE (a)-[:TYPE]->(b)`, `SET n.prop = expr`, `SET n += map`, `SET n = map`, `DELETE`, `DETACH DELETE`, `REMOVE n.prop`, `MERGE ... ON CREATE SET ... ON MATCH SET` |
-| **Procedures** | `CALL pagerank/betweenness/degree/closeness() YIELD node, score`, `CALL louvain/leiden() YIELD node, community [, level]` (multilevel, hierarchical — `leiden` guarantees well-connected communities), `CALL label_propagation() YIELD node, community`, `CALL connected_components() YIELD node, component`, `CALL k_core/coreness() YIELD node, coreness`, `CALL clustering_coefficient() YIELD node, coefficient`, `CALL cluster({method, ...}) YIELD node, cluster`, `CALL affected_tests({files: [...], max_depth?}) YIELD test_file, depth` (0.9.34+, code graphs), `CALL refresh_stats() YIELD src_type, edge_type, tgt_type, count` (0.9.35+, planner cardinality cache refresh), `CALL list_procedures()` |
+| **Mutations** | `CREATE (n:Label {props})`, strict `INSERT (n IS Label&Other {props})`, `CREATE`/`INSERT` relationships, `SET n.prop = expr`, `SET n += map`, `SET n = map`, `DELETE`, `NODETACH DELETE`, `DETACH DELETE`, `REMOVE n.prop`, `MERGE ... ON CREATE SET ... ON MATCH SET` |
+| **Procedures** | `CALL pagerank/betweenness/degree/closeness() YIELD node, score`, `CALL louvain/leiden() YIELD node, community [, level]` (multilevel, hierarchical — `leiden` guarantees well-connected communities), `CALL label_propagation() YIELD node, community`, `CALL connected_components() YIELD node, component`, `CALL k_core/coreness() YIELD node, coreness`, `CALL clustering_coefficient() YIELD node, coefficient`, `CALL cluster({method, ...}) YIELD node, cluster`, `CALL affected_tests({files: [...], max_depth?}) YIELD test_file, depth` (code graphs), `CALL refresh_stats() YIELD src_type, edge_type, tgt_type, count` (planner cardinality cache refresh), `CALL list_procedures()` |
 | **Scoped algorithms** | `connected_components`, `k_core`/`coreness`, and `clustering_coefficient` accept an optional `{node_type, relationship}` map to run over a subgraph — e.g. `CALL k_core({node_type: 'Person', relationship: ['KNOWS', 'OWNS']})`. Each field is a string or list of strings; omit the map for the whole graph. Computed lazily over the live graph (identical across memory/mapped/disk modes). |
 | **Schema** | `CALL db.labels() YIELD label`, `CALL db.relationshipTypes() YIELD relationshipType`, `CALL db.indexes() YIELD name, type, entityType, labelsOrTypes, properties, state` |
 | **Rule procedures** | `CALL orphan_node/self_loop/missing_required_edge/missing_inbound_edge/duplicate_title/duplicate_id/null_property({type[,edge\|property]}) YIELD node`, `CALL cycle_2step({type, edge}) YIELD node_a, node_b`, `CALL inverse_violation({rel_a, rel_b}) YIELD a, b`, `CALL transitivity_violation({rel}) YIELD a, b, c`, `CALL cardinality_violation({type, edge[, min, max]}) YIELD node, count`, `CALL type_domain_violation/type_range_violation({edge, expected_*}) YIELD source, target`, `CALL parallel_edges({edge}) YIELD a, b, count`, `CALL edge_property_violation() YIELD relationship, check, source, target, property, properties, exempt` (ontology declarations only) |
@@ -3700,22 +3742,25 @@ claimed openCypher-compatible subset.
 | `MATCH` | Partial | Node, relationship, variable-length, shortest-path, abbreviated (`-->`, `--`, `<--`), and relationship-unique trail patterns; not every openCypher pattern grammar form is implemented |
 | `OPTIONAL MATCH` | Covered | Null-extending optional patterns |
 | `WHERE` | Covered | Predicates preserve three-valued boolean, membership, and quantifier semantics |
+| `FILTER` | Covered | Standalone row filter; equivalent to `WITH * WHERE predicate` without changing the projected columns |
 | `RETURN` | Covered | Aliases, `DISTINCT`, expressions, and map projections |
-| `WITH` | Covered | Projection, grouping, wildcard preservation, and strict post-projection scope |
+| `FINISH` | Covered | Terminal clause that preserves completed side effects and returns no rows |
+| `WITH` | Covered | Projection, grouping, standalone `WITH *`, and strict post-projection scope |
 | `ORDER BY` | Covered | Multi-column, `ASC`/`DESC`, fused top-k optimization |
-| `SKIP` / `LIMIT` | Covered | |
+| `SKIP` / `OFFSET` / `LIMIT` | Covered | `OFFSET` is a `SKIP` synonym |
 | `UNWIND` | Covered | List expansion, works with `collect()` round-trips |
 | `UNION` / `UNION ALL` | Covered | |
 | `CREATE` | Covered | Nodes, relationships, inline properties |
+| `INSERT` | Covered | Cypher 25 static insertion: node labels use `&`; relationship types are singular and directed. Dynamic labels/types, dynamic property maps, path assignment, colon-separated multiple labels, undirected/variable-length relationships, and relationship type alternation are rejected |
 | `SET` | Covered | Property/label assignment plus `n += map` merge and `n = map` replacement |
-| `DELETE` / `DETACH DELETE` | Covered | |
+| `DELETE` / `NODETACH DELETE` / `DETACH DELETE` | Covered | `NODETACH DELETE` is the explicit spelling of plain `DELETE`; both reject deletion of a node that still has relationships |
 | `REMOVE` | Covered | Property and secondary-label removal |
 | `MERGE` | Covered | `ON CREATE SET`, `ON MATCH SET`, and pre-mutation null-property rejection |
 | `EXPLAIN` | Extension | KGLite-specific structured plan output |
 | `PROFILE` | Extension | KGLite-specific per-clause execution statistics |
 | `HAVING` | Extension | Post-aggregation filter on `RETURN`/`WITH` |
-| `CALL ... YIELD` | Extension | Namespaced KGLite procedures plus `db.*` discovery procedures |
-| `CALL { ... }` subqueries | Partial | Uncorrelated + correlated (importing `WITH`) read subqueries. v1 excludes writes in the body, unit (no-`RETURN`) subqueries, `UNION` inside the body, and `IN TRANSACTIONS`. See the `CALL { ... }` Subqueries section. |
+| `CALL ... YIELD` | Extension | Namespaced KGLite procedures plus `db.*` discovery procedures; ordinary procedures run per input row and inner-join their yielded columns. `cluster()` is the explicit set-input exception |
+| `CALL { ... }` subqueries | Partial | Per-input-row read subqueries with legacy importing `WITH` or modern `CALL (x, y)` / `CALL (*)` / `CALL ()` scope. `UNION`/`UNION ALL` bodies are supported; `INTERSECT`/`EXCEPT` there are KGLite extensions. Writes, unit bodies, and `IN TRANSACTIONS` remain unsupported |
 | `FOREACH` | Covered | Updating bodies, including nested `FOREACH` |
 | `LOAD CSV` | Partial | `LOAD CSV [WITH HEADERS] FROM <source> AS row [FIELDTERMINATOR <sep>]` over `file://` URLs and local paths, leading position only. Streams in batches for row-local pipelines; `http(s)://` and `IN TRANSACTIONS` are not supported. See [LOAD CSV](#load-csv) |
 
