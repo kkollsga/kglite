@@ -130,6 +130,18 @@ impl<'a> CypherExecutor<'a> {
         // warning on every row, and `warn` de-duplicates it there.
         let mut combined_rows: Vec<ResultRow> = Vec::new();
         let mut sub_columns: Option<Vec<String>> = None;
+        let arm_local = !globally_scoped
+            && body
+                .clauses
+                .iter()
+                .any(|clause| matches!(clause, Clause::Union(_)));
+        let arm_imports = if arm_local {
+            legacy_arm_imports(body)
+        } else {
+            import.to_vec()
+        };
+        let anchor_imports = import_pattern_anchors_in_arm(body, &arm_imports);
+        let arm_declared = arm_imports.iter().cloned().collect();
 
         for (outer_index, outer_row) in outer_rows.into_iter().enumerate() {
             // Poll the driving-row loop itself: a body that returns one row
@@ -150,22 +162,33 @@ impl<'a> CypherExecutor<'a> {
             let set_seed = SubquerySetSeed {
                 outer_row: &outer_row,
                 imports: import,
-                arm_local: !globally_scoped
-                    && body.clauses.iter().any(|c| matches!(c, Clause::Union(_))),
+                arm_local,
             };
-            let (seed, arm_imports) = self.seed_subquery_set_arm(set_seed, body);
-            let seed_set = ResultSet {
-                rows: vec![seed.clone()],
-                columns: Vec::new(),
-                lazy_return_items: None,
-            };
+            let seed = self.seed_row_from_imports(&outer_row, &arm_imports, &anchor_imports);
             // The body is optimized but NOT lazy-marked (`mark_lazy_eligibility`
             // runs only on the top-level query, never on a subquery body), so
             // `finalize_result` yields eager `Vec<Vec<Value>>` rows here.
             let body_set = if globally_scoped {
-                sub.execute_clauses_preserving(body, seed_set, &seed, import, set_seed)?
+                let seed_set = ResultSet {
+                    rows: vec![seed.clone()],
+                    columns: Vec::new(),
+                    lazy_return_items: None,
+                };
+                sub.execute_clauses_preserving(
+                    body,
+                    seed_set,
+                    &seed,
+                    import,
+                    &arm_declared,
+                    set_seed,
+                )?
             } else {
-                sub.execute_clauses(body, seed_set, &arm_imports, set_seed)?
+                let seed_set = ResultSet {
+                    rows: vec![seed],
+                    columns: Vec::new(),
+                    lazy_return_items: None,
+                };
+                sub.execute_clauses(body, seed_set, &arm_declared, set_seed)?
             };
             let body_result = sub.finalize_result(body_set)?;
 

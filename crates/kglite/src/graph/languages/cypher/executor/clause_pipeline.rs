@@ -130,18 +130,10 @@ impl CypherExecutor<'_> {
         &self,
         query: &CypherQuery,
         initial: ResultSet,
-        declared: &[String],
+        initial_declared: &HashSet<String>,
         set_seed: SubquerySetSeed<'_>,
     ) -> Result<ResultSet, String> {
-        let initial_declared = declared.iter().cloned().collect();
-        self.execute_clauses_profiled(
-            query,
-            initial,
-            None,
-            None,
-            &initial_declared,
-            Some(set_seed),
-        )
+        self.execute_clauses_profiled(query, initial, None, None, initial_declared, Some(set_seed))
     }
 
     pub(super) fn execute_clauses_preserving(
@@ -150,15 +142,15 @@ impl CypherExecutor<'_> {
         initial: ResultSet,
         source: &ResultRow,
         names: &[String],
+        initial_declared: &HashSet<String>,
         set_seed: SubquerySetSeed<'_>,
     ) -> Result<ResultSet, String> {
-        let initial_declared = names.iter().cloned().collect();
         self.execute_clauses_profiled(
             query,
             initial,
             None,
             Some((source, names)),
-            &initial_declared,
+            initial_declared,
             Some(set_seed),
         )
     }
