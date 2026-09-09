@@ -8,7 +8,7 @@ use super::DescribeSurface;
 // ── Cypher tier 3: topic detail functions ──────────────────────────────────
 
 const CYPHER_TOPIC_LIST: &str = "MATCH, WHERE, FILTER, RETURN, FINISH, WITH, HAVING, ORDER BY, OFFSET, UNWIND, UNION, \
-    CALL_SUBQUERY, CASE, CREATE, SET, DELETE, NODETACH DELETE, MERGE, EXPLAIN, PROFILE, operators, functions, patterns, spatial, \
+    CALL_SUBQUERY, CASE, CREATE, INSERT, SET, DELETE, NODETACH DELETE, MERGE, EXPLAIN, PROFILE, operators, functions, patterns, spatial, \
     temporal, pagerank, betweenness, degree, closeness, louvain, leiden, \
     label_propagation, connected_components, k_core, clustering_coefficient, cluster, orphan_node, self_loop, \
     cycle_2step, missing_required_edge, missing_inbound_edge, duplicate_title, \
@@ -46,6 +46,7 @@ pub(super) fn write_cypher_topics(
             "UNION" => write_topic_union(xml),
             "CASE" => write_topic_case(xml),
             "CREATE" => write_topic_create(xml),
+            "INSERT" => write_topic_insert(xml),
             "SET" => write_topic_set(xml),
             "DELETE" | "REMOVE" => write_topic_delete(xml),
             "MERGE" => write_topic_merge(xml),
@@ -282,6 +283,16 @@ pub(super) fn write_topic_create(xml: &mut String) {
     xml.push_str("      <ex desc=\"with properties\">MATCH (a:Field), (b:Well) WHERE a.name = b.field CREATE (b)-[:BELONGS_TO {since: 2020}]-&gt;(a)</ex>\n");
     xml.push_str("    </examples>\n");
     xml.push_str("  </CREATE>\n");
+}
+
+pub(super) fn write_topic_insert(xml: &mut String) {
+    xml.push_str("  <INSERT>\n");
+    xml.push_str("    <desc>Create nodes and directed relationships with Cypher 25 static label/type syntax. Use &amp; between multiple node labels; dynamic labels and types are not accepted.</desc>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"node\">INSERT (n IS Person&amp;Actor {name: 'Ada'})</ex>\n");
+    xml.push_str("      <ex desc=\"relationship\">INSERT (a:Person)-[r IS KNOWS {since: 2020}]-&gt;(b:Person)</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </INSERT>\n");
 }
 
 pub(super) fn write_topic_set(xml: &mut String) {
@@ -1445,6 +1456,7 @@ pub(super) fn write_cypher_overview(xml: &mut String, surface: DescribeSurface) 
     xml.push_str(
         "    <clause name=\"CREATE\">Create nodes and relationships with properties.</clause>\n",
     );
+    xml.push_str("    <clause name=\"INSERT\">Cypher 25 static node/relationship insertion. Use &amp; between multiple node labels; dynamic labels/types are rejected.</clause>\n");
     xml.push_str("    <clause name=\"SET\">Set or update node/relationship properties.</clause>\n");
     xml.push_str("    <clause name=\"DELETE\">Delete nodes/relationships. NODETACH DELETE is explicit plain DELETE; DETACH DELETE also removes incident relationships. REMOVE drops properties or labels.</clause>\n");
     xml.push_str(

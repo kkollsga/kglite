@@ -131,6 +131,16 @@
       "note": "Node and relationship creation with inline properties."
     },
     {
+      "id": "clause.insert",
+      "syntax": "INSERT",
+      "status": "covered",
+      "case_ids": [
+        "insert.node",
+        "insert.relationship"
+      ],
+      "note": "Cypher 25 graph insertion with static labels and relationship types. Multiple node labels use ampersand conjunction; dynamic labels/types, colon-separated multiple labels, named paths, and whole-map property parameters are rejected."
+    },
+    {
       "id": "clause.set",
       "syntax": "SET",
       "status": "covered",

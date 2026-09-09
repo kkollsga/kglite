@@ -89,6 +89,7 @@ pub enum CypherToken {
     Plus,       // +
     Slash,      // /
     Percent,    // %
+    Ampersand,  // &
     Pipe,       // |
     DoublePipe, // ||
 
@@ -253,6 +254,10 @@ pub fn tokenize_cypher_with_positions(input: &str) -> Result<TokenizedCypher, St
             }
             '%' => {
                 tokens.push((CypherToken::Percent, start));
+                i += 1;
+            }
+            '&' => {
+                tokens.push((CypherToken::Ampersand, start));
                 i += 1;
             }
             '|' => {
@@ -834,6 +839,7 @@ fn token_symbol(token: &CypherToken) -> Option<&'static str> {
         CypherToken::Plus => "+",
         CypherToken::Slash => "/",
         CypherToken::Percent => "%",
+        CypherToken::Ampersand => "&",
         CypherToken::Pipe => "|",
         CypherToken::DoublePipe => "||",
         CypherToken::BlockCommentOpen => "/*",
@@ -1109,5 +1115,21 @@ mod tests {
         assert_eq!(tokens[0], CypherToken::Merge);
         assert_eq!(tokens[1], CypherToken::Remove);
         assert_eq!(tokens[2], CypherToken::On);
+    }
+
+    #[test]
+    fn ampersand_is_a_distinct_insert_label_separator() {
+        assert_eq!(
+            tokenize_cypher("INSERT (:Person&Actor)").unwrap(),
+            vec![
+                CypherToken::Identifier("INSERT".to_string()),
+                CypherToken::LParen,
+                CypherToken::Colon,
+                CypherToken::Identifier("Person".to_string()),
+                CypherToken::Ampersand,
+                CypherToken::Identifier("Actor".to_string()),
+                CypherToken::RParen,
+            ]
+        );
     }
 }

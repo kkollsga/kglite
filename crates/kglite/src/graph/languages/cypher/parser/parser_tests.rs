@@ -488,6 +488,114 @@ mod tests {
         }
     }
 
+    #[test]
+    fn insert_lowers_valid_static_patterns_to_create_structures() {
+        for query in [
+            "INSERT (n:Person&Actor {id: 1})-[r:KNOWS {since: 2020}]->(m:Person)",
+            "INSERT (n IS Person&Actor)<-[r IS KNOWS]-(m IS Person)",
+        ] {
+            let parsed = parse_cypher(query).unwrap();
+            let Clause::Create(create) = &parsed.clauses[0] else {
+                panic!("INSERT must lower to CREATE execution structures")
+            };
+            let CreateElement::Node(node) = &create.patterns[0].elements[0] else {
+                panic!("first INSERT element must be a node")
+            };
+            assert_eq!(node.variable.as_deref(), Some("n"));
+            assert_eq!(node.label.as_deref(), Some("Person"));
+            assert_eq!(node.extra_labels, ["Actor"]);
+            assert!(node.label_params.is_empty());
+
+            let CreateElement::Edge(edge) = &create.patterns[0].elements[1] else {
+                panic!("second INSERT element must be a relationship")
+            };
+            assert_eq!(edge.variable.as_deref(), Some("r"));
+            assert_eq!(edge.connection_type, "KNOWS");
+            assert!(edge.type_param.is_none());
+        }
+    }
+
+    #[test]
+    fn insert_disambiguates_is_as_name_or_label_introducer() {
+        let cases = [
+            ("INSERT (IS)", Some("IS"), None),
+            ("INSERT (IS IS)", None, Some("IS")),
+            ("INSERT (IS Person)", None, Some("Person")),
+            ("INSERT (IS IS IS)", Some("IS"), Some("IS")),
+        ];
+        for (query, variable, label) in cases {
+            let parsed = parse_cypher(query).unwrap();
+            let Clause::Create(create) = &parsed.clauses[0] else {
+                panic!("INSERT must lower to CREATE")
+            };
+            let CreateElement::Node(node) = &create.patterns[0].elements[0] else {
+                panic!("INSERT node expected")
+            };
+            assert_eq!(node.variable.as_deref(), variable, "{query}");
+            assert_eq!(node.label.as_deref(), label, "{query}");
+        }
+
+        let parsed = parse_cypher("INSERT ()-[IS IS IS]->()").unwrap();
+        let Clause::Create(create) = &parsed.clauses[0] else {
+            panic!("INSERT must lower to CREATE")
+        };
+        let CreateElement::Edge(edge) = &create.patterns[0].elements[1] else {
+            panic!("INSERT relationship expected")
+        };
+        assert_eq!(edge.variable.as_deref(), Some("IS"));
+        assert_eq!(edge.connection_type, "IS");
+    }
+
+    #[test]
+    fn insert_rejects_create_only_and_non_static_pattern_forms() {
+        for query in [
+            "INSERT (n:A:B)",
+            "INSERT (n IS A:B)",
+            "INSERT (n:A&B:C)",
+            "INSERT (n:$label)",
+            "INSERT (n IS $(label))",
+            "INSERT (n $properties)",
+            "INSERT p = ()-[:R]->()",
+            "INSERT ()-[r]->()",
+            "INSERT ()-[:$type]->()",
+            "INSERT ()-[IS $(type)]->()",
+            "INSERT ()-[:A&B]->()",
+            "INSERT ()-[:A|B]->()",
+            "INSERT ()-[:R]-()",
+            "INSERT ()-[:R*2]->()",
+            "INSERT (n:A WHERE n.id = 1)",
+            "INSERT ((n)-[:R]->(m))",
+        ] {
+            assert!(
+                parse_cypher(query).is_err(),
+                "unexpectedly accepted {query}"
+            );
+        }
+    }
+
+    #[test]
+    fn insert_is_soft_in_identifier_positions_and_create_keeps_its_grammar() {
+        parse_cypher(
+            "INSERT (insert:insert {insert: 1})-[insert:insert]->(:insert) \
+             RETURN insert.insert AS insert",
+        )
+        .unwrap();
+        parse_cypher("FOREACH (insert IN [1] | INSERT (:insert {insert: insert}))").unwrap();
+
+        let create = parse_cypher("CREATE (n:A:B), (m:$label)-[:$type]->()").unwrap();
+        let Clause::Create(create) = &create.clauses[0] else {
+            panic!("CREATE control must remain CREATE")
+        };
+        let CreateElement::Node(first) = &create.patterns[0].elements[0] else {
+            panic!("CREATE node expected")
+        };
+        assert_eq!(first.extra_labels, ["B"]);
+        let CreateElement::Node(dynamic) = &create.patterns[1].elements[0] else {
+            panic!("dynamic CREATE node expected")
+        };
+        assert_eq!(dynamic.label_params.len(), 1);
+    }
+
     // ========================================================================
     // SET Clause
     // ========================================================================

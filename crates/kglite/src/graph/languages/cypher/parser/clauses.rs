@@ -303,6 +303,203 @@ impl CypherParser {
         Ok(Clause::Create(CreateClause { patterns }))
     }
 
+    /// Parse Cypher 25 `INSERT`, validating its deliberately narrower graph
+    /// pattern before lowering to the shared CREATE execution structures.
+    pub(super) fn parse_insert_clause(&mut self) -> Result<Clause, String> {
+        self.expect_soft_word("INSERT", "INSERT clause")?;
+        let mut patterns = Vec::new();
+
+        loop {
+            patterns.push(self.parse_insert_pattern()?);
+            if self.check(&CypherToken::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        Ok(Clause::Create(CreateClause { patterns }))
+    }
+
+    /// Parse one linear INSERT path. INSERT has no path selectors,
+    /// parenthesized paths, or named-path assignment.
+    fn parse_insert_pattern(&mut self) -> Result<CreatePattern, String> {
+        if matches!(self.peek(), Some(CypherToken::Identifier(_)))
+            && self.peek_at(1) == Some(&CypherToken::Equals)
+        {
+            return Err(
+                "INSERT does not allow named paths; remove the path assignment".to_string(),
+            );
+        }
+
+        let mut elements = vec![CreateElement::Node(self.parse_insert_node()?)];
+        while matches!(
+            self.peek(),
+            Some(CypherToken::Dash) | Some(CypherToken::LessThan)
+        ) {
+            elements.push(CreateElement::Edge(self.parse_insert_edge()?));
+            elements.push(CreateElement::Node(self.parse_insert_node()?));
+        }
+        Ok(CreatePattern { elements })
+    }
+
+    /// Parse an INSERT node. Labels are static, may begin with `:` or `IS`,
+    /// and use `&` exclusively for conjunction after the first label.
+    fn parse_insert_node(&mut self) -> Result<CreateNodePattern, String> {
+        self.expect(&CypherToken::LParen)?;
+        let variable = self.parse_insert_node_variable();
+        let mut label = None;
+        let mut extra_labels = Vec::new();
+
+        if self.check(&CypherToken::Colon) || self.check(&CypherToken::Is) {
+            self.advance();
+            label = Some(self.expect_name("static label after ':' or IS in INSERT")?);
+            while self.check(&CypherToken::Ampersand) {
+                self.advance();
+                extra_labels.push(self.expect_name("static label after '&' in INSERT")?);
+            }
+            if self.check(&CypherToken::Colon) {
+                return Err(
+                    "INSERT requires '&' between multiple labels; ':' may introduce only the first label"
+                        .to_string(),
+                );
+            }
+        }
+
+        let properties = if self.check(&CypherToken::LBrace) {
+            self.parse_create_properties(false)?
+        } else {
+            Vec::new()
+        };
+        if matches!(self.peek(), Some(CypherToken::Parameter(_))) {
+            return Err("INSERT properties must be an inline map, not a map parameter".to_string());
+        }
+        self.expect(&CypherToken::RParen)?;
+
+        Ok(CreateNodePattern {
+            variable,
+            label,
+            extra_labels,
+            properties,
+            label_params: Vec::new(),
+        })
+    }
+
+    /// The `IS` token may itself be a variable name. The lookahead mirrors
+    /// the grammar's unambiguous shapes: `(IS)` is a variable, `(IS A)` starts
+    /// a label expression, `(IS IS)` labels an anonymous node `IS`, and
+    /// `(IS IS IS)` binds variable `IS` with label `IS`.
+    fn parse_insert_node_variable(&mut self) -> Option<String> {
+        match self.peek() {
+            Some(CypherToken::Identifier(name)) => {
+                let name = name.clone();
+                self.advance();
+                Some(name)
+            }
+            Some(CypherToken::Is) if self.insert_is_is_variable(false) => {
+                let name = self.keyword_lexeme_at(self.pos).unwrap_or("IS").to_string();
+                self.advance();
+                Some(name)
+            }
+            _ => None,
+        }
+    }
+
+    /// Decide whether the current `IS` is a variable rather than the label or
+    /// type introducer. `relationship` selects `]` as the terminal delimiter;
+    /// nodes use `)`.
+    fn insert_is_is_variable(&self, relationship: bool) -> bool {
+        let terminal = |token: Option<&CypherToken>| {
+            if relationship {
+                matches!(
+                    token,
+                    Some(CypherToken::RBracket) | Some(CypherToken::LBrace)
+                )
+            } else {
+                matches!(token, Some(CypherToken::RParen) | Some(CypherToken::LBrace))
+            }
+        };
+        match self.peek_at(1) {
+            Some(CypherToken::Colon) => true,
+            Some(CypherToken::Is) => {
+                !terminal(self.peek_at(2)) && self.peek_at(2) != Some(&CypherToken::Ampersand)
+            }
+            next => terminal(next),
+        }
+    }
+
+    /// Parse one directed INSERT relationship with exactly one static type.
+    fn parse_insert_edge(&mut self) -> Result<CreateEdgePattern, String> {
+        let incoming = if self.check(&CypherToken::LessThan) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+        self.expect(&CypherToken::Dash)?;
+        self.expect(&CypherToken::LBracket)?;
+
+        let variable = match self.peek() {
+            Some(CypherToken::Identifier(name)) => {
+                let name = name.clone();
+                self.advance();
+                Some(name)
+            }
+            Some(CypherToken::Is) if self.insert_is_is_variable(true) => {
+                let name = self.keyword_lexeme_at(self.pos).unwrap_or("IS").to_string();
+                self.advance();
+                Some(name)
+            }
+            _ => None,
+        };
+
+        if !self.check(&CypherToken::Colon) && !self.check(&CypherToken::Is) {
+            return Err(
+                "INSERT requires exactly one static relationship type introduced by ':' or IS"
+                    .to_string(),
+            );
+        }
+        self.advance();
+        let connection_type = self.expect_name("static relationship type in INSERT")?;
+        if matches!(
+            self.peek(),
+            Some(CypherToken::Ampersand | CypherToken::Pipe | CypherToken::Colon)
+        ) {
+            return Err("INSERT relationships require exactly one static type".to_string());
+        }
+
+        let properties = if self.check(&CypherToken::LBrace) {
+            self.parse_create_properties(false)?
+        } else {
+            Vec::new()
+        };
+        if matches!(self.peek(), Some(CypherToken::Parameter(_))) {
+            return Err("INSERT properties must be an inline map, not a map parameter".to_string());
+        }
+        self.expect(&CypherToken::RBracket)?;
+        self.expect(&CypherToken::Dash)?;
+
+        let direction = if self.check(&CypherToken::GreaterThan) {
+            self.advance();
+            if incoming {
+                return Err("INSERT relationships must have exactly one direction".to_string());
+            }
+            CreateEdgeDirection::Outgoing
+        } else if incoming {
+            CreateEdgeDirection::Incoming
+        } else {
+            return Err("INSERT relationships must be directed with -> or <-".to_string());
+        };
+
+        Ok(CreateEdgePattern {
+            variable,
+            connection_type,
+            direction,
+            properties,
+            type_param: None,
+        })
+    }
+
     /// Parse a single CREATE path pattern: (node)-[edge]->(node)...
     pub(super) fn parse_create_pattern(&mut self) -> Result<CreatePattern, String> {
         let mut elements = Vec::new();
@@ -745,7 +942,7 @@ impl CypherParser {
     // ========================================================================
 
     /// `FOREACH (var IN listExpr | <update clauses>)`. The body holds only
-    /// update clauses (CREATE / SET / DELETE / REMOVE / MERGE) and nested
+    /// update clauses (CREATE / INSERT / SET / DELETE / REMOVE / MERGE) and nested
     /// FOREACH, matching Neo4j's restriction.
     pub(super) fn parse_foreach_clause(&mut self) -> Result<Clause, String> {
         self.expect(&CypherToken::Foreach)?;
@@ -759,6 +956,9 @@ impl CypherParser {
         while !self.check(&CypherToken::RParen) {
             let clause = match self.peek() {
                 Some(CypherToken::Create) => self.parse_create_clause()?,
+                Some(CypherToken::Identifier(_)) if self.peek_soft_word("INSERT") => {
+                    self.parse_insert_clause()?
+                }
                 Some(CypherToken::Set) => self.parse_set_clause()?,
                 Some(CypherToken::Delete) | Some(CypherToken::Detach) => {
                     self.parse_delete_clause()?
@@ -771,7 +971,7 @@ impl CypherParser {
                 Some(CypherToken::Foreach) => self.parse_foreach_clause()?,
                 other => {
                     return Err(format!(
-                        "FOREACH body may only contain CREATE / SET / DELETE / REMOVE / \
+                        "FOREACH body may only contain CREATE / INSERT / SET / DELETE / REMOVE / \
                          MERGE / FOREACH, got {}",
                         describe_token_opt(other)
                     ));
@@ -1065,7 +1265,8 @@ impl CypherParser {
     /// NODETACH needs a two-token lookahead so a variable with that name is
     /// not mistaken for a clause unless `DELETE` follows it.
     pub(super) fn identifier_opens_cypher25_clause(&self) -> bool {
-        self.peek_soft_word("FILTER")
+        self.peek_soft_word("INSERT")
+            || self.peek_soft_word("FILTER")
             || self.peek_soft_word("OFFSET")
             || self.peek_soft_word("FINISH")
             || self.identifier_opens_nodetach_delete()

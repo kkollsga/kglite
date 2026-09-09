@@ -585,6 +585,9 @@ impl CypherParser {
     }
 
     fn parse_cypher25_clause(&mut self) -> Result<Clause, String> {
+        if self.peek_soft_word("INSERT") {
+            return self.parse_insert_clause();
+        }
         if self.peek_soft_word("FILTER") {
             return self.parse_filter_clause();
         }

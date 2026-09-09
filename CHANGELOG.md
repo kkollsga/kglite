@@ -16,6 +16,10 @@ before upgrading.
   equivalent, `OFFSET` is an exact `SKIP` synonym, `NODETACH DELETE` retains
   plain `DELETE` relationship checks, and terminal `FINISH` preserves side
   effects while returning no result columns or rows.
+- **Cypher 25 `INSERT` creates nodes and directed relationships.** Static
+  labels and relationship types accept `:` or `IS`; multiple node labels use
+  `&`. CREATE-only dynamic labels/types, colon-separated label chains, named
+  paths, and whole-map property parameters are rejected.
 
 ## [0.17.1] - 2026-09-08
 

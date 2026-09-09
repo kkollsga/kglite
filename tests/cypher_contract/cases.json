@@ -425,6 +425,35 @@
       ]
     },
     {
+      "id": "insert.node",
+      "category": "mutation",
+      "requirement": "INSERT creates a node with statically named ampersand-separated labels and inline properties.",
+      "query": "INSERT (n IS Person&Actor {id: 1, name: 'Ada'}) RETURN n.name AS name, labels(n) AS labels",
+      "expected": [
+        {
+          "name": "Ada",
+          "labels": [
+            "Person",
+            "Actor"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "insert.relationship",
+      "category": "mutation",
+      "requirement": "INSERT creates a directed relationship with one static type and inline properties.",
+      "query": "INSERT (a:Person {id: 1})-[r IS KNOWS {since: 2020}]->(b:Person {id: 2}) RETURN a.id AS source, b.id AS target, type(r) AS kind, r.since AS since",
+      "expected": [
+        {
+          "source": 1,
+          "target": 2,
+          "kind": "KNOWS",
+          "since": 2020
+        }
+      ]
+    },
+    {
       "id": "match.undirected",
       "category": "pattern",
       "requirement": "An undirected relationship pattern can match an incoming stored relationship.",
