@@ -394,6 +394,27 @@ fn retrieval_with_alias_reaches_bm25_fusion() {
 }
 
 #[test]
+fn count_subquery_with_reaches_node_scan_top_k() {
+    let graph = with_boundary_graph();
+    let text = "MATCH (p:P) WITH p, COUNT { (p)-[:K]-() } AS deg \
+         RETURN p.title AS t, deg ORDER BY deg DESC LIMIT 2";
+    assert!(
+        !with_survives(&graph, text),
+        "WITH should be folded: {text}"
+    );
+    let mut query = parse_cypher(text).unwrap();
+    optimize(&mut query, &graph, &HashMap::new());
+    assert!(
+        query
+            .clauses
+            .iter()
+            .any(|c| matches!(c, Clause::FusedNodeScanTopK { .. })),
+        "degree COUNT WITH should be FusedNodeScanTopK: {text} plan={:?}",
+        query.clauses
+    );
+}
+
+#[test]
 fn rand_with_alias_does_not_fold() {
     let graph = with_boundary_graph();
     let text = "MATCH (p:P) WITH p, rand() AS s ORDER BY s LIMIT 2 RETURN p.title AS t";

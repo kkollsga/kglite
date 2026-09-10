@@ -196,3 +196,20 @@ class TestCountSubqueryJoinSemantics:
             "RETURN COUNT { (a)-[r1:R]->(b), (c)-[r2:R]->(d) } AS c, EXISTS { (a)-[r1:R]->(b), (c)-[r2:R]->(d) } AS e"
         ).to_list()
         assert rows == [{"c": 0, "e": False}]
+
+
+def test_undirected_count_counts_a_self_loop_once():
+    g = KnowledgeGraph()
+    g.add_nodes(pd.DataFrame({"id": [1], "name": ["a"]}), "N", "id", "name")
+    g.add_connections(pd.DataFrame({"s": [1], "d": [1]}), "R", "N", "s", "N", "d")
+    assert g.cypher("MATCH (n:N) RETURN COUNT { (n)-[:R]-() } AS c").scalar() == 1
+    assert g.cypher("MATCH (n:N) RETURN COUNT { (n)-[:R]->() } AS c").scalar() == 1
+
+
+def test_count_hop_counts_parallel_edges():
+    g = KnowledgeGraph()
+    g.add_nodes(pd.DataFrame({"id": [1, 2], "name": ["a", "b"]}), "N", "id", "name")
+    g.add_connections(pd.DataFrame({"s": [1, 1], "d": [2, 2]}), "R", "N", "s", "N", "d")
+    assert g.cypher("MATCH (n:N {id: 1}) RETURN COUNT { (n)-[:R]->() } AS c").scalar() == 2
+    assert g.cypher("MATCH (n:N {id: 1}) RETURN COUNT { (n)-[:R]-() } AS c").scalar() == 2
+    assert g.cypher("MATCH (n:N {id: 2}) RETURN COUNT { (n)-[:R]-() } AS c").scalar() == 2

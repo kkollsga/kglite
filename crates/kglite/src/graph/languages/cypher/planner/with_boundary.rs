@@ -468,6 +468,7 @@ fn is_substitutable_source(expr: &Expression) -> bool {
         | Expression::Modulo(l, r)
         | Expression::Concat(l, r) => is_substitutable_source(l) && is_substitutable_source(r),
         Expression::Negate(inner) => is_substitutable_source(inner),
+        Expression::CountSubquery { where_clause, .. } if where_clause.is_none() => true,
         Expression::FunctionCall {
             name,
             args,
@@ -570,6 +571,7 @@ fn substitute_expr(expr: &Expression, map: &HashMap<String, Expression>) -> Opti
             None => expr.clone(),
         },
         Expression::Literal(_) | Expression::Parameter(_) | Expression::Star => expr.clone(),
+        Expression::CountSubquery { .. } => expr.clone(),
         Expression::FunctionCall {
             name,
             args,

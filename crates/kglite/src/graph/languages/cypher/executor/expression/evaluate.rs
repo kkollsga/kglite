@@ -200,6 +200,13 @@ impl<'a> CypherExecutor<'a> {
         pattern: &crate::graph::core::pattern_matching::Pattern,
         row: &ResultRow,
     ) -> Result<Value, String> {
+        // Incident-edge count from a bound endpoint, without allocating a
+        // match vector. `COUNT { (p)-[:R]-() }` over every Person was
+        // materializing each neighbourhood (docs-table degree cells).
+        if let Some(count) = self.try_count_simple_pattern(pattern, &row.node_bindings)? {
+            self.budget.check_rows(count as usize, "COUNT subquery")?;
+            return Ok(Value::Int64(count));
+        }
         let matches = self.execute_count_pattern(pattern, row)?;
         let count = matches
             .iter()
