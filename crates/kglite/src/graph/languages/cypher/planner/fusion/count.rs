@@ -249,17 +249,6 @@ pub(crate) fn fuse_count_short_circuits(
             _ => return,
         };
 
-        // Both nodes must be anonymous/unfiltered
-        if src_node.node_type.is_some()
-            || src_node.multi_label_constrained()
-            || src_node.properties.is_some()
-            || tgt_node.node_type.is_some()
-            || tgt_node.multi_label_constrained()
-            || tgt_node.properties.is_some()
-        {
-            return;
-        }
-
         // Edge must have no property filters or var_length, and must be directed
         if edge.properties.is_some()
             || edge.var_length.is_some()
@@ -288,23 +277,51 @@ pub(crate) fn fuse_count_short_circuits(
         }
 
         let edge_var = edge.variable.as_deref();
+        let src_var = src_node.variable.as_deref();
+        let tgt_var = tgt_node.variable.as_deref();
+        let unlabeled_endpoints = src_node.node_type.is_none()
+            && tgt_node.node_type.is_none()
+            && !src_node.multi_label_constrained()
+            && !tgt_node.multi_label_constrained()
+            && src_node.properties.is_none()
+            && tgt_node.properties.is_none();
 
         // Sub-pattern C1: Typed edge count — MATCH ()-[r:Type]->() RETURN count(*)
+        // Schema-covered typed endpoints (`(a:Person)-[:KNOWS]->(b)` when
+        // KNOWS is exactly Person→Person) use the same type-bucket: they
+        // cannot drop or add edges relative to the unlabeled form.
         if let Some(ref edge_type) = edge.connection_type {
             if return_clause.items.len() == 1
-                && is_count_of_var_or_star(&return_clause.items[0].expression, edge_var)
+                && is_count_of_star_or_listed(
+                    &return_clause.items[0].expression,
+                    &[src_var, edge_var, tgt_var],
+                )
             {
-                let alias = return_item_column_name(&return_clause.items[0]);
-                let et = edge_type.clone();
-                query.clauses.drain(0..2);
-                query.clauses.insert(
-                    0,
-                    Clause::FusedCountTypedEdge {
-                        edge_type: et,
-                        alias,
-                    },
-                );
+                let schema_covers =
+                    graph
+                        .connection_type_metadata
+                        .get(edge_type)
+                        .is_some_and(|info| {
+                            endpoint_covers_schema_side(src_node, &info.source_types)
+                                && endpoint_covers_schema_side(tgt_node, &info.target_types)
+                        });
+                if unlabeled_endpoints || schema_covers {
+                    let alias = return_item_column_name(&return_clause.items[0]);
+                    let et = edge_type.clone();
+                    query.clauses.drain(0..2);
+                    query.clauses.insert(
+                        0,
+                        Clause::FusedCountTypedEdge {
+                            edge_type: et,
+                            alias,
+                        },
+                    );
+                }
             }
+            return;
+        }
+
+        if !unlabeled_endpoints {
             return;
         }
 
@@ -365,6 +382,32 @@ pub(crate) fn is_count_of_var_or_star(expr: &Expression, node_var: Option<&str>)
         }
     }
     false
+}
+
+/// `count(*)` or `count(v)` for a variable bound by the hop (src, edge, tgt).
+fn is_count_of_star_or_listed(expr: &Expression, vars: &[Option<&str>]) -> bool {
+    is_count_of_var_or_star(expr, None)
+        || vars
+            .iter()
+            .flatten()
+            .any(|v| is_count_of_var_or_star(expr, Some(v)))
+}
+
+/// An unlabeled hop endpoint matches every endpoint the edge type has. A
+/// single label `T` matches the type-bucket iff the schema records exactly
+/// `{T}` on that side — a second source/target type would make
+/// `MATCH (a:T)-[:R]->()` a strict subset of `MATCH ()-[r:R]->()`.
+fn endpoint_covers_schema_side(
+    node: &crate::graph::core::pattern_matching::NodePattern,
+    schema_types: &std::collections::HashSet<String>,
+) -> bool {
+    if node.properties.is_some() || node.multi_label_constrained() {
+        return false;
+    }
+    match node.node_type.as_deref() {
+        None => true,
+        Some(label) => schema_types.len() == 1 && schema_types.contains(label),
+    }
 }
 
 /// Pattern A of [`fuse_count_short_circuits`]: `MATCH (n…) RETURN <count>`

@@ -9,6 +9,12 @@ before upgrading.
 
 ## [Unreleased]
 
+### Changed
+
+- `MATCH (a:T)-[:R]->(b) RETURN count(*)` uses the stored edge-type count when
+  `R` is declared only between `T` and the other endpoint's label, the same
+  answer as `MATCH ()-[r:R]->() RETURN count(r)`.
+
 ## [0.17.2] - 2026-09-09
 
 ### Added

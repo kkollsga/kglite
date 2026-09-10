@@ -2796,6 +2796,41 @@ class TestFusedCountRegressions:
         assert g.cypher(q).to_list() == expected
         assert g.cypher(q, disabled_passes=["fuse_optional_match_aggregate"]).to_list() == expected
 
+    def test_schema_covered_typed_hop_count_fuses(self):
+        g = KnowledgeGraph()
+        g.add_nodes(
+            pd.DataFrame({"pid": [1, 2, 3], "name": ["a", "b", "c"]}),
+            "Person",
+            "pid",
+            "name",
+        )
+        g.add_connections(
+            pd.DataFrame({"f": [1, 1, 2], "t": [2, 3, 3]}),
+            "KNOWS",
+            "Person",
+            "f",
+            "Person",
+            "t",
+        )
+        q = "MATCH (a:Person)-[:KNOWS]->(b) RETURN count(*) AS n"
+        assert g.cypher(q).scalar() == 3
+        assert g.cypher(q, disabled_passes=["fuse_count_short_circuits"]).scalar() == 3
+        ops = "\n".join(str(r) for r in g.cypher(f"EXPLAIN {q}"))
+        assert "FusedCountTypedEdge" in ops
+
+    def test_two_source_type_hop_count_does_not_over_fuse(self):
+        g = KnowledgeGraph()
+        g.add_nodes(pd.DataFrame({"pid": [1, 2], "name": ["p1", "p2"]}), "Person", "pid", "name")
+        g.add_nodes(pd.DataFrame({"cid": [10], "name": ["c1"]}), "Company", "cid", "name")
+        g.add_connections(pd.DataFrame({"f": [1], "t": [2]}), "R", "Person", "f", "Person", "t")
+        g.add_connections(pd.DataFrame({"f": [10], "t": [1]}), "R", "Company", "f", "Person", "t")
+        q = "MATCH (a:Person)-[:R]->() RETURN count(*) AS n"
+        fused = g.cypher(q).scalar()
+        naive = g.cypher(q, disabled_passes=["fuse_count_short_circuits"]).scalar()
+        assert fused == naive == 1
+        ops = "\n".join(str(r) for r in g.cypher(f"EXPLAIN {q}"))
+        assert "FusedCountTypedEdge" not in ops
+
 
 class TestRelationshipIdentityContract:
     """openCypher: a relationship variable already bound on the row pins a

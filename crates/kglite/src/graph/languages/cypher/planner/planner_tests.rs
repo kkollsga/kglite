@@ -1277,6 +1277,65 @@ fn test_untyped_global_edge_count_rejects_constrained_shapes() {
     }
 }
 
+fn graph_with_conn(conn: &str, source: &str, target: &str) -> DirGraph {
+    let mut graph = DirGraph::new();
+    graph.upsert_connection_type_metadata(conn, source, target, HashMap::new());
+    graph
+}
+
+fn is_fused_typed_edge(query: &str, graph: &DirGraph) -> bool {
+    let mut parsed = parse_cypher(query).unwrap();
+    optimize(&mut parsed, graph, &HashMap::new());
+    parsed
+        .clauses
+        .iter()
+        .any(|clause| matches!(clause, Clause::FusedCountTypedEdge { .. }))
+}
+
+#[test]
+fn test_schema_covered_typed_hop_count_fuses() {
+    let graph = graph_with_conn("KNOWS", "Person", "Person");
+    for source in [
+        "MATCH (a:Person)-[:KNOWS]->(b) RETURN count(*) AS n",
+        "MATCH (:Person)-[:KNOWS]->() RETURN count(*) AS n",
+        "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN count(r) AS n",
+        "MATCH (a:Person)-[:KNOWS]->(b) RETURN count(a) AS n",
+        "MATCH ()-[r:KNOWS]->() RETURN count(*) AS n",
+    ] {
+        assert!(
+            is_fused_typed_edge(source, &graph),
+            "schema-covered hop must fuse to FusedCountTypedEdge: {source}"
+        );
+    }
+}
+
+#[test]
+fn test_schema_covered_typed_hop_count_bails_when_uncovered() {
+    let mut graph = DirGraph::new();
+    graph.upsert_connection_type_metadata("R", "Person", "X", HashMap::new());
+    graph.upsert_connection_type_metadata("R", "Company", "X", HashMap::new());
+    let uncovered = [
+        "MATCH (a:Person)-[:R]->() RETURN count(*) AS n",
+        "MATCH (:Person)-[:R]->() RETURN count(*) AS n",
+        "MATCH (a:Person {id: 1})-[:KNOWS]->() RETURN count(*) AS n",
+        "MATCH (a)-[:KNOWS]->(a) RETURN count(*) AS n",
+        "MATCH (a:Person)-[:KNOWS]-() RETURN count(*) AS n",
+        "MATCH (a:Person)-[:KNOWS]->(b) RETURN count(DISTINCT a) AS n",
+    ];
+    let knows = graph_with_conn("KNOWS", "Person", "Person");
+    for source in uncovered {
+        let g = if source.contains(":R]") {
+            &graph
+        } else {
+            &knows
+        };
+        assert!(
+            !is_fused_typed_edge(source, g),
+            "uncovered hop must not fuse to FusedCountTypedEdge: {source}"
+        );
+    }
+}
+
 #[test]
 fn test_fuse_match_return_aggregate_property_group_topk() {
     let mut query = parse_cypher(

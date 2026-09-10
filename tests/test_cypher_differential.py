@@ -471,6 +471,12 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     ),
     ("trigger_count_short_circuit", "social_graph", "MATCH (p:Person) RETURN count(*) AS n", None),
     (
+        "trigger_count_short_circuit_typed_hop",
+        "social_graph",
+        "MATCH (a:Person)-[:KNOWS]->(b) RETURN count(*) AS n",
+        None,
+    ),
+    (
         "count_all_edges_untyped",
         "social_graph",
         "MATCH ()-[r]->() RETURN count(r) AS n",
@@ -5763,6 +5769,7 @@ PASS_SECONDARY_TRIGGER_CASES: dict[str, str] = {
     "desugar_multi_match_return_aggregate": "multi_match_two_property_group",
     "push_limit_into_aggregate": "trigger_push_limit_into_aggregate_with",
     "fuse_anchored_edge_count": "trigger_anchored_edge_count_reverse",
+    "fuse_count_short_circuits": "trigger_count_short_circuit_typed_hop",
     "fuse_match_with_aggregate_top_k": "trigger_match_with_top_k_ascending",
     "fold_aliasing_with": "aliasing_with_top_k_ascending",
     "reorder_predicates_by_cost": "trigger_predicate_reorder_or",
