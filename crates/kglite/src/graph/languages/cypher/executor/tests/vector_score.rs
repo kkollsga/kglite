@@ -515,6 +515,7 @@ fn whole_type_exact_entry_sorts_second_call_and_parks_distinct_keys() {
         Clause::FusedVectorScoreTopK {
             return_clause: return_clause.clone(),
             score_item_index: 2,
+            score_call: return_clause.items[2].expression.clone(),
             descending: true,
             limit: 1,
         },

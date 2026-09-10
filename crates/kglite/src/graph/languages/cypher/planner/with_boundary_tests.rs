@@ -342,3 +342,43 @@ fn the_folded_plans_answer_absolute_values() {
         ]
     );
 }
+
+fn fuses_vector_top_k(graph: &DirGraph, text: &str) -> bool {
+    let params = HashMap::new();
+    let mut query = parse_cypher(text).unwrap();
+    optimize(&mut query, graph, &params);
+    query
+        .clauses
+        .iter()
+        .any(|c| matches!(c, Clause::FusedVectorScoreTopK { .. }))
+}
+
+#[test]
+fn retrieval_with_alias_reaches_vector_fusion() {
+    let graph = DirGraph::new();
+    for text in [
+        "MATCH (n:Doc) WITH n, vector_score(n, 'summary_emb', $q) AS s \
+         ORDER BY s DESC LIMIT 10 RETURN n.id AS id, s",
+        "MATCH (n:Doc) WITH n, vector_score(n, 'summary_emb', $q) AS s \
+         ORDER BY s DESC LIMIT 10 RETURN n.id AS id",
+    ] {
+        assert!(
+            !with_survives(&graph, text),
+            "WITH should be folded: {text}"
+        );
+        assert!(
+            fuses_vector_top_k(&graph, text),
+            "vector top-K should fuse: {text}"
+        );
+    }
+}
+
+#[test]
+fn rand_with_alias_does_not_fold() {
+    let graph = with_boundary_graph();
+    let text = "MATCH (p:P) WITH p, rand() AS s ORDER BY s LIMIT 2 RETURN p.title AS t";
+    assert!(
+        with_survives(&graph, text),
+        "rand() is not substitutable, so the WITH must stand"
+    );
+}

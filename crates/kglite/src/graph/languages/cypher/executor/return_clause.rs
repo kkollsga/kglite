@@ -363,13 +363,13 @@ impl<'a> CypherExecutor<'a> {
         &self,
         return_clause: &ReturnClause,
         score_item_index: usize,
+        score_call: &Expression,
         sort_keys: &[FusedSortKey],
         limit: usize,
         result_set: ResultSet,
     ) -> Result<ResultSet, String> {
         if !result_set.rows.is_empty() && limit > 0 {
-            let score_expr =
-                self.fold_constants_expr(&return_clause.items[score_item_index].expression);
+            let score_expr = self.fold_constants_expr(score_call);
             let descending = sort_keys.first().is_some_and(|key| !key.ascending);
             if let Some(rs) = self.try_text_index_fused_top_k(
                 &score_expr,

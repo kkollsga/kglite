@@ -171,6 +171,17 @@ pub(crate) fn fuse_node_scan_top_k(
             i += 1;
             continue;
         };
+        // Unfiltered retrieval top-k belongs to HNSW / BM25 fusion. A
+        // residual WHERE still needs this scan (the retrieval trial
+        // declines anything but `[Match, FusedVectorScoreTopK]`).
+        if where_idx.is_none()
+            && sort_keys
+                .iter()
+                .any(|key| is_retrieval_score_call(&key.expression))
+        {
+            i += 1;
+            continue;
+        }
 
         // LIMIT must be positive literal integer
         let limit_val = if let Clause::Limit(l) = &query.clauses[limit_idx] {
@@ -261,6 +272,7 @@ pub(crate) fn fuse_vector_score_order_limit(query: &mut CypherQuery) {
             Clause::FusedVectorScoreTopK {
                 return_clause,
                 score_item_index: shape.score_index,
+                score_call: shape.score_call,
                 descending: shape.descending,
                 limit: shape.limit,
             },
@@ -310,6 +322,7 @@ pub(crate) fn fuse_text_bm25_order_limit(query: &mut CypherQuery) {
             Clause::FusedTextBm25TopK {
                 return_clause,
                 score_item_index: shape.score_index,
+                score_call: shape.score_call,
                 sort_keys,
                 limit: shape.limit,
             },
@@ -319,9 +332,19 @@ pub(crate) fn fuse_text_bm25_order_limit(query: &mut CypherQuery) {
 }
 
 /// What [`match_scored_order_limit`] extracts from a fusable three-clause span.
+fn is_retrieval_score_call(expr: &Expression) -> bool {
+    matches!(
+        expr,
+        Expression::FunctionCall { name, .. }
+            if matches!(name.as_str(), "vector_score" | "text_score" | "text_bm25")
+    )
+}
+
 struct ScoredShape {
-    /// Index of the RETURN item holding the scoring call.
+    /// Index of the RETURN item holding the scoring call, or `usize::MAX`
+    /// when only ORDER BY names the call.
     score_index: usize,
+    score_call: Expression,
     descending: bool,
     nulls: NullsPlacement,
     limit: usize,
@@ -352,34 +375,44 @@ fn match_scored_order_limit(clauses: &[Clause], i: usize, function: &str) -> Opt
     {
         return None;
     }
-    let (score_index, alias) = r
-        .items
-        .iter()
-        .enumerate()
-        .find(|(_, item)| {
-            matches!(
-                &item.expression,
-                Expression::FunctionCall { name, .. } if name == function
-            )
-        })
-        .map(|(index, item)| (index, return_item_column_name(item)))?;
-
     if o.items.len() != 1 {
         return None;
     }
-    let sort_name = match &o.items[0].expression {
-        Expression::Variable(v) => v.clone(),
-        other => expression_to_column_name(other),
+    let scored_call = |expr: &Expression| -> bool {
+        matches!(
+            expr,
+            Expression::FunctionCall { name, .. } if name == function
+        )
     };
-    if sort_name != alias {
+    let from_return = r
+        .items
+        .iter()
+        .enumerate()
+        .find(|(_, item)| scored_call(&item.expression));
+    let (score_index, score_call) = if let Some((index, item)) = from_return {
+        let alias = return_item_column_name(item);
+        let sort_name = match &o.items[0].expression {
+            Expression::Variable(v) => v.clone(),
+            other => expression_to_column_name(other),
+        };
+        // After an aliasing-WITH fold, ORDER BY carries the substituted
+        // FunctionCall rather than the alias name.
+        if sort_name != alias && !scored_call(&o.items[0].expression) {
+            return None;
+        }
+        (index, item.expression.clone())
+    } else if scored_call(&o.items[0].expression) {
+        (usize::MAX, o.items[0].expression.clone())
+    } else {
         return None;
-    }
+    };
     let limit = match &l.count {
         Expression::Literal(Value::Int64(n)) if *n > 0 => *n as usize,
         _ => return None,
     };
     Some(ScoredShape {
         score_index,
+        score_call,
         descending: !o.items[0].ascending,
         nulls: o.items[0].effective_nulls(),
         limit,

@@ -100,20 +100,27 @@ impl<'a> CypherExecutor<'a> {
             [Clause::Match(matched), Clause::FusedVectorScoreTopK {
                 return_clause,
                 score_item_index,
+                score_call,
                 descending: true,
                 limit,
-            }, ..] => {
-                self.try_vector_retrieval_entry(matched, return_clause, *score_item_index, *limit)
-            }
+            }, ..] => self.try_vector_retrieval_entry(
+                matched,
+                return_clause,
+                *score_item_index,
+                score_call,
+                *limit,
+            ),
             [Clause::Match(matched), Clause::FusedTextBm25TopK {
                 return_clause,
                 score_item_index,
+                score_call,
                 sort_keys,
                 limit,
             }, ..] => self.try_text_retrieval_entry(
                 matched,
                 return_clause,
                 *score_item_index,
+                score_call,
                 sort_keys,
                 *limit,
             ),
@@ -148,6 +155,7 @@ impl<'a> CypherExecutor<'a> {
         matched: &MatchClause,
         return_clause: &ReturnClause,
         score_item_index: usize,
+        score_call: &Expression,
         limit: usize,
     ) -> Result<Option<ResultSet>, String> {
         if limit == 0 {
@@ -164,8 +172,7 @@ impl<'a> CypherExecutor<'a> {
         else {
             unreachable!("plain retrieval population is a whole type");
         };
-        let score_expr =
-            self.fold_constants_expr(&return_clause.items[score_item_index].expression);
+        let score_expr = self.fold_constants_expr(score_call);
         let seed = population.row(0);
         let Some(args) = self.constant_vector_args(&score_expr, &seed)? else {
             return Ok(None);
@@ -671,6 +678,7 @@ impl<'a> CypherExecutor<'a> {
         &self,
         return_clause: &ReturnClause,
         score_item_index: usize,
+        score_call: &Expression,
         descending: bool,
         limit: usize,
         result_set: ResultSet,
@@ -688,8 +696,7 @@ impl<'a> CypherExecutor<'a> {
             });
         }
 
-        let score_expr =
-            self.fold_constants_expr(&return_clause.items[score_item_index].expression);
+        let score_expr = self.fold_constants_expr(score_call);
 
         // HNSW fast path: when the score is `vector_score` over a single type
         // whose store carries a built index, search the index instead of scoring
@@ -721,7 +728,7 @@ impl<'a> CypherExecutor<'a> {
             } else {
                 NullsPlacement::Last
             },
-            return_item: Some(score_item_index),
+            return_item: (score_item_index < return_clause.items.len()).then_some(score_item_index),
         }];
         self.execute_fused_order_by_top_k(return_clause, &sort_keys, limit, result_set)
     }

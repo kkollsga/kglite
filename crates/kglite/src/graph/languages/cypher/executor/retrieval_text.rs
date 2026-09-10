@@ -37,24 +37,22 @@ impl CypherExecutor<'_> {
         matched: &MatchClause,
         return_clause: &ReturnClause,
         score_item_index: usize,
+        score_call: &Expression,
         sort_keys: &[FusedSortKey],
         limit: usize,
     ) -> Result<Option<ResultSet>, String> {
         let [key] = sort_keys else {
             return Ok(None);
         };
-        if limit == 0
-            || key.ascending
-            || key.nulls != NullsPlacement::First
-            || key.return_item != Some(score_item_index)
-        {
+        let sorts_by_score = key.return_item == Some(score_item_index)
+            || (key.return_item.is_none() && score_item_index == usize::MAX);
+        if limit == 0 || key.ascending || key.nulls != NullsPlacement::First || !sorts_by_score {
             return Ok(None);
         }
         let Some(population) = self.plain_retrieval_population(matched)? else {
             return Ok(None);
         };
-        let score_expr =
-            self.fold_constants_expr(&return_clause.items[score_item_index].expression);
+        let score_expr = self.fold_constants_expr(score_call);
         self.try_text_index_fused_top_k(
             &score_expr,
             true,

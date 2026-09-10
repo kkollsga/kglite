@@ -243,11 +243,11 @@ fn predicate_has_aggregate(pred: &Predicate) -> bool {
 ///   `group_limit_hint` — none of those is a 1:1 projection.
 /// - **F2** an item expression outside the substitutable algebra (property
 ///   access, variable, literal, parameter, arithmetic, concat, negation) or
-///   reading a variable not bound before the WITH. A function call is
-///   excluded rather than classified: substitution can duplicate an item into
-///   both the RETURN and the ORDER BY, and a non-deterministic call evaluated
-///   twice may disagree. **F3** (window functions) falls out of the same
-///   allow-list.
+///   reading a variable not bound before the WITH. Function calls are
+///   excluded except `vector_score` / `text_score` / `text_bm25`, whose
+///   results are determined by stored indexes plus constant arguments, so
+///   duplicating the call into RETURN and ORDER BY cannot disagree.
+///   **F3** (window functions) falls out of the same allow-list.
 /// - **F4** a downstream reference to a pre-WITH variable the projection does
 ///   not carry. That is a Cypher scope error (`WITH p.id AS i … ORDER BY
 ///   p.age` raises `Undefined variable 'p'`) and must stay one.
@@ -468,6 +468,16 @@ fn is_substitutable_source(expr: &Expression) -> bool {
         | Expression::Modulo(l, r)
         | Expression::Concat(l, r) => is_substitutable_source(l) && is_substitutable_source(r),
         Expression::Negate(inner) => is_substitutable_source(inner),
+        Expression::FunctionCall {
+            name,
+            args,
+            distinct,
+        } if !*distinct
+            && matches!(name.as_str(), "vector_score" | "text_score" | "text_bm25")
+            && args.iter().all(is_substitutable_source) =>
+        {
+            true
+        }
         _ => false,
     }
 }

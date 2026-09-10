@@ -10,6 +10,7 @@ import kglite
 SPECIALIZED_ORACLE_IDS = {
     "spatial_join",
     "vector_score_top_k",
+    "vector_score_with_top_k",
     "text_score_top_k",
     "text_score_vector_top_k",
 }
@@ -216,6 +217,23 @@ ORACLES = {
         "params": {"query_vector": [1.0, 0.0]},
         "ids": [1, 2],
     },
+    "vector_score_with_top_k": {
+        "fixture": "specialized_vector_graph",
+        "pass": "fuse_vector_score_order_limit",
+        "disable": [
+            "fuse_vector_score_order_limit",
+            "fuse_order_by_top_k",
+            "fold_aliasing_with",
+            "hoist_terminal_return_over_with_top_k",
+        ],
+        "operator": "FusedVectorScoreTopK",
+        "query": (
+            "MATCH (d:Doc) WITH d, vector_score(d, 'summary_emb', $query_vector) AS score "
+            "ORDER BY score DESC LIMIT 2 RETURN d.id AS id, score"
+        ),
+        "params": {"query_vector": [1.0, 0.0]},
+        "ids": [1, 2],
+    },
     "text_score_top_k": {
         "fixture": "specialized_vector_graph",
         "pass": "fuse_vector_score_order_limit",
@@ -319,6 +337,21 @@ def test_vector_top_k_equal_scores_preserve_input_order():
     naive = graph.cypher(query, disable_optimizer=True).to_list()
     assert [row["id"] for row in optimized] == [0, 1]
     assert optimized == naive
+
+
+def test_vector_with_dropping_score_still_fuses(specialized_vector_graph):
+    query = (
+        "MATCH (d:Doc) WITH d, vector_score(d, 'summary_emb', $query_vector) AS s "
+        "ORDER BY s DESC LIMIT 2 RETURN d.id AS id"
+    )
+    params = {"query_vector": [1.0, 0.0]}
+    rows = specialized_vector_graph.cypher(query, params=params).to_list()
+    naive = specialized_vector_graph.cypher(query, params=params, disable_optimizer=True).to_list()
+    assert [row["id"] for row in rows] == [1, 2]
+    assert "s" not in rows[0] and "score" not in rows[0]
+    assert rows == naive
+    plan = _plan(specialized_vector_graph, query, params=params)
+    assert "FusedVectorScoreTopK" in plan
 
 
 @pytest.mark.parametrize("indexed", [False, True])

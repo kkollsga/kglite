@@ -698,11 +698,13 @@ impl<'a> CypherExecutor<'a> {
             Clause::FusedVectorScoreTopK {
                 return_clause,
                 score_item_index,
+                score_call,
                 descending,
                 limit,
             } => self.execute_fused_vector_score_top_k(
                 return_clause,
                 *score_item_index,
+                score_call,
                 *descending,
                 *limit,
                 result_set,
@@ -710,11 +712,13 @@ impl<'a> CypherExecutor<'a> {
             Clause::FusedTextBm25TopK {
                 return_clause,
                 score_item_index,
+                score_call,
                 sort_keys,
                 limit,
             } => self.execute_fused_text_bm25_top_k(
                 return_clause,
                 *score_item_index,
+                score_call,
                 sort_keys,
                 *limit,
                 result_set,

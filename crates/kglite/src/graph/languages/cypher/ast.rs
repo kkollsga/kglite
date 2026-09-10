@@ -114,7 +114,12 @@ pub enum Clause {
     /// Projects RETURN expressions only for the k surviving rows.
     FusedVectorScoreTopK {
         return_clause: ReturnClause,
+        /// RETURN item that is the scoring call, or `usize::MAX` when ORDER BY
+        /// holds the call and RETURN does not project it.
         score_item_index: usize,
+        /// The `vector_score(...)` call used to retrieve, independent of whether
+        /// RETURN projects it.
+        score_call: Expression,
         descending: bool,
         limit: usize,
     },
@@ -129,7 +134,12 @@ pub enum Clause {
     /// still cost the same as one containing a near-stopword.
     FusedTextBm25TopK {
         return_clause: ReturnClause,
+        /// RETURN item that is the scoring call, or `usize::MAX` when ORDER BY
+        /// holds the call and RETURN does not project it.
         score_item_index: usize,
+        /// The `text_bm25(...)` call used to retrieve, independent of whether
+        /// RETURN projects it.
+        score_call: Expression,
         /// The keys [`FusedOrderByTopK`](Clause::FusedOrderByTopK) would have
         /// carried. They travel with this clause because the executor's index
         /// path is allowed to decline — a filtered subset, a stale index — and

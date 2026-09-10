@@ -193,15 +193,10 @@ pub fn generate_explain_result(query: &CypherQuery, graph: &DirGraph) -> result:
         // after its own row, and the column stays contiguous.
         let step = (rows.len() + 1) as i64;
         let mut operation = executor::clause_display_name(clause);
-        if let Clause::FusedVectorScoreTopK {
-            return_clause,
-            score_item_index,
-            ..
-        } = clause
-        {
+        if let Clause::FusedVectorScoreTopK { score_call, .. } = clause {
             operation.push_str(&format!(
                 " [requested={}]",
-                requested_vector_policy(&return_clause.items[*score_item_index].expression)
+                requested_vector_policy(score_call)
             ));
         }
         let est = match clause {

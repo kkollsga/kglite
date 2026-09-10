@@ -14,6 +14,9 @@ before upgrading.
 - `MATCH (a:T)-[:R]->(b) RETURN count(*)` uses the stored edge-type count when
   `R` is declared only between `T` and the other endpoint's label, the same
   answer as `MATCH ()-[r:R]->() RETURN count(r)`.
+- `WITH n, vector_score(...) AS s ORDER BY s LIMIT k` (and the `text_score` /
+  `text_bm25` spellings) uses the same index path as projecting the score in
+  `RETURN`, including when `RETURN` drops the alias.
 
 ## [0.17.2] - 2026-09-09
 
