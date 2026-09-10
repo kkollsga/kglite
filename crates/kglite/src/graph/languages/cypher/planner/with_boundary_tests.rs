@@ -374,6 +374,26 @@ fn retrieval_with_alias_reaches_vector_fusion() {
 }
 
 #[test]
+fn retrieval_with_alias_reaches_bm25_fusion() {
+    let graph = DirGraph::new();
+    let text = "MATCH (n:Doc) WITH n, text_bm25(n, 'body', 'q') AS s \
+         ORDER BY s DESC LIMIT 10 RETURN n.id AS id";
+    assert!(
+        !with_survives(&graph, text),
+        "WITH should be folded: {text}"
+    );
+    let mut query = parse_cypher(text).unwrap();
+    optimize(&mut query, &graph, &HashMap::new());
+    assert!(
+        query
+            .clauses
+            .iter()
+            .any(|c| matches!(c, Clause::FusedTextBm25TopK { .. })),
+        "BM25 top-K should fuse: {text}"
+    );
+}
+
+#[test]
 fn rand_with_alias_does_not_fold() {
     let graph = with_boundary_graph();
     let text = "MATCH (p:P) WITH p, rand() AS s ORDER BY s LIMIT 2 RETURN p.title AS t";
