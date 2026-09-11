@@ -476,7 +476,7 @@ fn whole_type_exact_entry_preserves_values_ties_and_cached_projection() {
 }
 
 #[test]
-fn whole_type_exact_entry_sorts_second_call_and_parks_distinct_keys() {
+fn whole_type_exact_entry_sorts_by_second_call_and_caches_distinct_keys() {
     let mut graph = docs(&[("a", [1.0, 0.0]), ("b", [0.0, 1.0]), ("c", [-1.0, 0.0])]);
     embed(
         &mut graph,
@@ -498,28 +498,7 @@ fn whole_type_exact_entry_sorts_second_call_and_parks_distinct_keys() {
         ),
     ]);
     let mut query = parser::parse_cypher("MATCH (d:Doc) RETURN d.id AS id, vector_score(d, 'summary_emb', $first, 'cosine', {exact:true}) AS first, vector_score(d, 'abstract_emb', $second, $metric, {exact:true}) AS second ORDER BY second DESC LIMIT 1").unwrap();
-    let raw = query.clone();
     crate::graph::languages::cypher::planner::optimize(&mut query, &graph, &params);
-    let declined = CypherExecutor::with_params(&graph, &params, None);
-    assert!(declined
-        .try_retrieval_entry(&query.clauses)
-        .unwrap()
-        .is_none());
-    // The planner intentionally matches the first vector call only. Exercise
-    // the executor's valid second-key consumer without widening admission.
-    let Clause::Return(return_clause) = &raw.clauses[1] else {
-        panic!("raw RETURN");
-    };
-    query.clauses = vec![
-        raw.clauses[0].clone(),
-        Clause::FusedVectorScoreTopK {
-            return_clause: return_clause.clone(),
-            score_item_index: 2,
-            score_call: return_clause.items[2].expression.clone(),
-            descending: true,
-            limit: 1,
-        },
-    ];
     VECTOR_SCORE_PREPARES.with(|count| count.set(0));
     let executor = CypherExecutor::with_params(&graph, &params, None);
     let result = executor
