@@ -98,7 +98,7 @@ def test_graph_copy_cow_correctness_mapped():
 #: (run on each platform; the script writes whichever entry matches the
 #: current host).
 BINARY_SIZE_BASELINES = {
-    "darwin": 23_425_648,  # 0.17.3 darwin baseline
+    "darwin": 23_425_664,  # 0.17.3 darwin baseline
     "linux": 28_810_000,  # estimate: the post-code_tree Linux estimate (30.2 MB)
     # scaled by the same −4.6% the macOS loader removal measured. Both
     # removals deliberately recaptured DOWNWARD so the +10% budget guards
@@ -488,7 +488,8 @@ def test_binary_size_regression():
                       individual contributions.
 
 
-      - 0.17.3:       23,425,648 bytes — **unchanged** from the prior baseline; this release moved no code size.
+      - 0.17.3:       23,425,664 bytes — query-fusion binding/score repairs and mapped COUNT admission;
+                       16 bytes above the prior recorded baseline.
 
     Raising the baseline is a deliberate act — every bump should
     be accompanied by an updated growth note above. For a precise
