@@ -59,8 +59,8 @@ Regenerate with `python scripts/render_docs_facts.py`. CI checks this file for d
 
 ## Current tracked benchmark capture
 
-- Captured: `2026-09-11T08:24:06.032373+00:00`
-- Source commit: `f7ebc7866838928cee1d2bfe26d43d42491264a8` (dirty: `true`)
+- Captured: `2026-09-11T14:20:45.581158+00:00`
+- Source commit: `ea06b81042aa16429d7c4dfbb6d89d4dafa180d2` (dirty: `false`)
 - Platform: `Darwin 25.6.0 arm64`
 - CPU: `Apple M4`
 - Python: `CPython 3.14.3`

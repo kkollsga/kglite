@@ -49,15 +49,21 @@
       "status": "accepted"
     },
     "0_17_3.json": {
+      "evidence": "Release review ea06b810: two clean-source release runs passed all 37 cells at +20% min, no heavy tails. Run 1 median +2.48%, worst +13.85%; run 2 median +8.38%, worst +12.89%. Select run 1 by controls: MATCH +0.02%, WHERE -1.78%, hop1 +1.41%; repeat MATCH +10.11% and WHERE +7.71% show environmental offset during overlapping Bolt compilation. Recorded load 2.84/3.15/3.13. Original canonical preserved as 0_17_3_before_review.json. Separate 100-round mapped probe verifies top-K 8.857 ms and filter 10.221 ms with exact oracles and retained WITH. Benchmark qualification is not publication approval.",
+      "platform": "Darwin/arm64",
+      "sha256": "d473d9e50fb98269142130c976008e3144555d1ecca2b9e3510921053c2da727",
+      "status": "accepted"
+    },
+    "0_17_3_before_review.json": {
       "evidence": "Release 0.17.3, 2026-09-11: two complete 37-cell release captures agree (refresh-release-constants then make bench-check). hop1_deg3_memory collapsed 8.78ms to 0.9us both runs from FusedCountTypedEdge. Other cells within 8% across repeats; none near 20%. Load 1.98/2.22/2.54; no simultaneous native build.",
       "platform": "Darwin/arm64",
       "sha256": "6156953e18d3878ac472491b240a8e59dca864e798fc212df247499e819019fe",
       "status": "accepted"
     },
     "current.json": {
-      "evidence": "Release 0.17.3, 2026-09-11: two complete 37-cell release captures agree (refresh-release-constants then make bench-check). hop1_deg3_memory collapsed 8.78ms to 0.9us both runs from FusedCountTypedEdge. Other cells within 8% across repeats; none near 20%. Load 1.98/2.22/2.54; no simultaneous native build.",
+      "evidence": "Release review ea06b810: two clean-source release runs passed all 37 cells at +20% min, no heavy tails. Run 1 median +2.48%, worst +13.85%; run 2 median +8.38%, worst +12.89%. Select run 1 by controls: MATCH +0.02%, WHERE -1.78%, hop1 +1.41%; repeat MATCH +10.11% and WHERE +7.71% show environmental offset during overlapping Bolt compilation. Recorded load 2.84/3.15/3.13. Original canonical preserved as 0_17_3_before_review.json. Separate 100-round mapped probe verifies top-K 8.857 ms and filter 10.221 ms with exact oracles and retained WITH. Benchmark qualification is not publication approval.",
       "platform": "Darwin/arm64",
-      "sha256": "6156953e18d3878ac472491b240a8e59dca864e798fc212df247499e819019fe",
+      "sha256": "d473d9e50fb98269142130c976008e3144555d1ecca2b9e3510921053c2da727",
       "status": "accepted"
     },
     "current.linux.json": {
