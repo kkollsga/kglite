@@ -9,6 +9,8 @@ before upgrading.
 
 ## [Unreleased]
 
+## [0.17.3] - 2026-09-11
+
 ### Changed
 
 - `MATCH (a:T)-[:R]->(b) RETURN count(*)` uses the stored edge-type count when

@@ -48,10 +48,16 @@
       "sha256": "5ea1667353f9615e634cd0311e3695189f5d62af81600704bd8d5c01d4f203f6",
       "status": "accepted"
     },
-    "current.json": {
-      "evidence": "Release 0.17.2, 2026-09-09: two complete 37-cell release captures (100 minimum rounds, 20 warmups) agree against accepted 0.17.1: median min delta -1.10%/-2.50%, worst regression +5.80%/+5.10%, none near 20%, zero heavy-tail cells. Cypher controls stayed within -3.08%..0.00% across both runs. Captured under active desktop load 5.53/2.86/2.53 (aggregate process CPU 41%) then 2.24/2.65/2.55 (43%); no simultaneous native build during measurements. The anchor remains red only for the pre-existing 0.17.0 complete-snapshot normalization correctness cost: disk_dir_reopen_fresh +293.5% vs accepted 0.16.24, but -1.2%/-2.6% in these runs vs 0.17.1 and about +4% vs accepted 0.17.0; all other anchor cells are below 30% (next load_kgl +20.8%).",
+    "0_17_3.json": {
+      "evidence": "Release 0.17.3, 2026-09-11: two complete 37-cell release captures agree (refresh-release-constants then make bench-check). hop1_deg3_memory collapsed 8.78ms to 0.9us both runs from FusedCountTypedEdge. Other cells within 8% across repeats; none near 20%. Load 1.98/2.22/2.54; no simultaneous native build.",
       "platform": "Darwin/arm64",
-      "sha256": "5ea1667353f9615e634cd0311e3695189f5d62af81600704bd8d5c01d4f203f6",
+      "sha256": "6156953e18d3878ac472491b240a8e59dca864e798fc212df247499e819019fe",
+      "status": "accepted"
+    },
+    "current.json": {
+      "evidence": "Release 0.17.3, 2026-09-11: two complete 37-cell release captures agree (refresh-release-constants then make bench-check). hop1_deg3_memory collapsed 8.78ms to 0.9us both runs from FusedCountTypedEdge. Other cells within 8% across repeats; none near 20%. Load 1.98/2.22/2.54; no simultaneous native build.",
+      "platform": "Darwin/arm64",
+      "sha256": "6156953e18d3878ac472491b240a8e59dca864e798fc212df247499e819019fe",
       "status": "accepted"
     },
     "current.linux.json": {
@@ -74,7 +80,7 @@
     }
   },
   "references": {
-    "Darwin/arm64": "0_17_2.json",
+    "Darwin/arm64": "0_17_3.json",
     "Linux/x86_64": "reference_0_17_0_cells.linux.json"
   },
   "schema_version": 1
