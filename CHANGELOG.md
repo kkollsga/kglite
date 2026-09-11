@@ -19,9 +19,10 @@ before upgrading.
 - `WITH n, vector_score(...) AS s ORDER BY s LIMIT k` (and the `text_score` /
   `text_bm25` spellings) uses the same index path as projecting the score in
   `RETURN`, including when `RETURN` drops the alias.
-- `COUNT { (n)-[:R]-() }` from a bound node uses the incident-edge counter
-  instead of materializing matches. `WITH n, COUNT { hop } AS d ORDER BY d
-  LIMIT k` folds into the node-scan top-k operator.
+- In memory and disk storage, `COUNT { (n)-[:R]-() }` from a bound node
+  uses the incident-edge counter instead of materializing matches. Mapped
+  storage retains its faster matcher path. `WITH n, COUNT { hop } AS d
+  ORDER BY d LIMIT k` folds into the node-scan top-k operator.
 - Undirected `EXISTS { (n)-[:R]-() }` and `WHERE (n)-[:R]-()` use the same
   bound-endpoint edge probe as the directed spelling. Typed
   `MATCH (a)-[:R]-(b) RETURN count(*)` uses the edge-type count (each

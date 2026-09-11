@@ -200,7 +200,9 @@ impl<'a> CypherExecutor<'a> {
         pattern: &crate::graph::core::pattern_matching::Pattern,
         row: &ResultRow,
     ) -> Result<Value, String> {
-        if self.incident_scan_respects_bindings(pattern, row) {
+        // Mapped's sparse type-index probes cost more per driving row than
+        // its materializing matcher for these graph-wide COUNT subqueries.
+        if !self.graph.graph.is_mapped() && self.incident_scan_respects_bindings(pattern, row) {
             if let Some(count) = self.try_count_simple_pattern(pattern, &row.node_bindings)? {
                 self.budget.check_rows(count as usize, "COUNT subquery")?;
                 return Ok(Value::Int64(count));
