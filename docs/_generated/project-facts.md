@@ -66,4 +66,4 @@ Regenerate with `python scripts/render_docs_facts.py`. CI checks this file for d
 - Python: `CPython 3.14.3`
 - pytest-benchmark schema/plugin version: `5.2.3`
 - Recorded benchmarks: `37`
-- Reference qualification: `pending`; approved comparison capture: `0_17_2.json`
+- Reference qualification: `accepted`; approved comparison capture: `0_17_3.json`
