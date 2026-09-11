@@ -104,6 +104,15 @@ fn simple_node_edge_node(pattern: &Pattern) -> Option<(&NodePattern, &EdgePatter
     Some((node_a, edge, node_b))
 }
 
+struct ExistsHop<'a> {
+    bound_idx: NodeIndex,
+    interned_conn: Option<InternedKey>,
+    conn_filter: &'a crate::graph::core::pattern_matching::pattern::ConnTypeFilter,
+    other_node: &'a NodePattern,
+    other_var: &'a Option<String>,
+    where_clause: &'a Option<Box<Predicate>>,
+}
+
 /// The node index a match bound to `var`, if it bound one.
 ///
 /// The dedup routes read the target's identity off a `PatternMatch` before
@@ -914,119 +923,123 @@ impl<'a> CypherExecutor<'a> {
         // sweep used to answer "no such edge" for a node whose only match
         // was on a later branch.
         let conn_filter = edge.conn_filter();
-        let interned_conn = conn_filter.hint();
-
-        // Pre-allocate a mutable row for WHERE evaluation (avoids clone per edge)
-        let (has_where, mut eval_row) = if where_clause.is_some() {
+        let hop = ExistsHop {
+            bound_idx,
+            interned_conn: conn_filter.hint(),
+            conn_filter: &conn_filter,
+            other_node,
+            other_var,
+            where_clause,
+        };
+        let mut eval_row = where_clause.is_some().then(|| {
             let mut r = row.clone();
             if let Some(ref var) = other_var {
-                r.node_bindings.insert(var.clone(), NodeIndex::new(0)); // placeholder
+                r.node_bindings.insert(var.clone(), NodeIndex::new(0));
             }
-            (true, r)
-        } else {
-            (false, ResultRow::new()) // unused placeholder
-        };
+            r
+        });
 
         for &direction in directions {
-            for edge_ref in
-                self.graph
-                    .graph
-                    .edges_directed_filtered(bound_idx, direction, interned_conn)
-            {
-                if !conn_filter.accepts(edge_ref.weight().connection_type) {
-                    continue;
-                }
-
-                let other_idx = if direction == Direction::Outgoing {
-                    edge_ref.target()
-                } else {
-                    edge_ref.source()
-                };
-
-                // Union-correct label check (primary OR secondary carriage,
-                // alternation-aware) — see `node_satisfies_pattern_labels`.
-                if !self.node_satisfies_pattern_labels(other_idx, other_node) {
-                    continue;
-                }
-
-                // Check target node inline properties — bail to slow path
-                // for non-trivial matchers (EqualsParam, EqualsVar, etc.)
-                if let Some(ref props) = other_node.properties {
-                    if let Some(nd) = self.graph.graph.node_view(other_idx) {
-                        let mut all_match = true;
-                        // Resolve aliases against the target node's type so
-                        // `{id: 20}` / `{nid: 'Q76'}` / `{title: 'X'}` all reach
-                        // the right column: `id` lives in the id_column, not the
-                        // property map, so an unresolved get_property("id")
-                        // silently dropped EXISTS inline-property predicates.
-                        let tgt_type_str = nd.node_type_str(&self.graph.interner);
-                        for (key, matcher) in props {
-                            let resolved = self.graph.resolve_alias(tgt_type_str, key);
-                            let val: Option<std::borrow::Cow<'_, Value>> = if resolved == "id" {
-                                Some(nd.id())
-                            } else if resolved == "title" {
-                                Some(nd.title())
-                            } else if let Some(v) = nd.get_property(resolved) {
-                                // Stored property wins (KG-1).
-                                Some(v)
-                            } else {
-                                match crate::graph::schema::soft_alias_fallback(resolved) {
-                                    Some(crate::graph::schema::SoftAliasFallback::Title) => {
-                                        Some(nd.title())
-                                    }
-                                    Some(crate::graph::schema::SoftAliasFallback::TypeString) => {
-                                        Some(std::borrow::Cow::Owned(Value::String(
-                                            tgt_type_str.to_string(),
-                                        )))
-                                    }
-                                    None => None,
-                                }
-                            };
-                            let ok = match matcher {
-                                PropertyMatcher::Equals(expected) => {
-                                    val.as_deref().is_some_and(|v| {
-                                        crate::graph::core::filtering::values_equal(v, expected)
-                                    })
-                                }
-                                PropertyMatcher::In(values) => {
-                                    val.as_deref().is_some_and(|v| values.matches(v))
-                                }
-                                // Complex matchers — fall back to slow path
-                                _ => return None,
-                            };
-                            if !ok {
-                                all_match = false;
-                                break;
-                            }
-                        }
-                        if !all_match {
-                            continue;
-                        }
-                    } else {
-                        continue;
-                    }
-                }
-
-                if has_where {
-                    if let Some(ref var) = other_var {
-                        eval_row.node_bindings.insert(var.clone(), other_idx);
-                    }
-                    match self.evaluate_predicate(
-                        where_clause
-                            .as_ref()
-                            .expect("invariant: has_where guards Some(where_clause)"),
-                        &eval_row,
-                    ) {
-                        Ok(true) => {}
-                        Ok(false) => continue,
-                        Err(e) => return Some(Err(e)),
-                    }
-                }
-
-                return Some(Ok(true));
+            match self.exists_hit_in_direction(&hop, direction, eval_row.as_mut()) {
+                None => return None,
+                Some(Ok(true)) => return Some(Ok(true)),
+                Some(Err(e)) => return Some(Err(e)),
+                Some(Ok(false)) => {}
             }
         }
         Some(Ok(false))
+    }
+
+    /// One direction of [`Self::try_fast_exists_check`]. `None` means a
+    /// matcher the sweep cannot honor — caller falls back.
+    fn exists_hit_in_direction(
+        &self,
+        hop: &ExistsHop<'_>,
+        direction: Direction,
+        mut eval_row: Option<&mut ResultRow>,
+    ) -> Option<Result<bool, String>> {
+        for edge_ref in
+            self.graph
+                .graph
+                .edges_directed_filtered(hop.bound_idx, direction, hop.interned_conn)
+        {
+            if !hop.conn_filter.accepts(edge_ref.weight().connection_type) {
+                continue;
+            }
+            let other_idx = if direction == Direction::Outgoing {
+                edge_ref.target()
+            } else {
+                edge_ref.source()
+            };
+            if !self.node_satisfies_pattern_labels(other_idx, hop.other_node) {
+                continue;
+            }
+            match self.exists_peer_properties_match(other_idx, hop.other_node) {
+                None => return None,
+                Some(false) => continue,
+                Some(true) => {}
+            }
+            if let Some(row) = eval_row.as_deref_mut() {
+                if let Some(ref var) = hop.other_var {
+                    row.node_bindings.insert(var.clone(), other_idx);
+                }
+                match self.evaluate_predicate(
+                    hop.where_clause
+                        .as_ref()
+                        .expect("invariant: eval_row is Some iff WHERE is present"),
+                    row,
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+            return Some(Ok(true));
+        }
+        Some(Ok(false))
+    }
+
+    /// Inline `{id|title|prop}` on the unbound EXISTS peer. `None` = matcher
+    /// the fast path cannot honor.
+    fn exists_peer_properties_match(
+        &self,
+        other_idx: NodeIndex,
+        other_node: &crate::graph::core::pattern_matching::NodePattern,
+    ) -> Option<bool> {
+        let Some(ref props) = other_node.properties else {
+            return Some(true);
+        };
+        let nd = self.graph.graph.node_view(other_idx)?;
+        let tgt_type_str = nd.node_type_str(&self.graph.interner);
+        for (key, matcher) in props {
+            let resolved = self.graph.resolve_alias(tgt_type_str, key);
+            let val: Option<std::borrow::Cow<'_, Value>> = if resolved == "id" {
+                Some(nd.id())
+            } else if resolved == "title" {
+                Some(nd.title())
+            } else if let Some(v) = nd.get_property(resolved) {
+                Some(v)
+            } else {
+                match crate::graph::schema::soft_alias_fallback(resolved) {
+                    Some(crate::graph::schema::SoftAliasFallback::Title) => Some(nd.title()),
+                    Some(crate::graph::schema::SoftAliasFallback::TypeString) => Some(
+                        std::borrow::Cow::Owned(Value::String(tgt_type_str.to_string())),
+                    ),
+                    None => None,
+                }
+            };
+            let ok = match matcher {
+                PropertyMatcher::Equals(expected) => val
+                    .as_deref()
+                    .is_some_and(|v| crate::graph::core::filtering::values_equal(v, expected)),
+                PropertyMatcher::In(values) => val.as_deref().is_some_and(|v| values.matches(v)),
+                _ => return None,
+            };
+            if !ok {
+                return Some(false);
+            }
+        }
+        Some(true)
     }
 
     /// Count matches of a simple 3-element `Node-Edge-Node` pattern from a
