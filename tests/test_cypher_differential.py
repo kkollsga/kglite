@@ -489,6 +489,20 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         None,
     ),
     (
+        "aliasing_with_count_topk_parameter",
+        "social_graph",
+        "MATCH (p:Person) WITH p, COUNT { (p)-[:KNOWS]-() } AS degree "
+        "RETURN p.person_id AS id, degree ORDER BY degree DESC, id LIMIT $k",
+        {"k": 5},
+    ),
+    (
+        "hoisted_with_count_topk_parameter",
+        "social_graph",
+        "MATCH (p:Person) WITH p, COUNT { (p)-[:KNOWS]-() } AS degree "
+        "ORDER BY degree DESC, p.person_id LIMIT $k RETURN p.person_id AS id, degree",
+        {"k": 5},
+    ),
+    (
         "trigger_count_short_circuit_typed_hop",
         "social_graph",
         "MATCH (a:Person)-[:KNOWS]->(b) RETURN count(*) AS n",

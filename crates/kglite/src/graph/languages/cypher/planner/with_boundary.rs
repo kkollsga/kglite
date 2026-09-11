@@ -24,6 +24,7 @@ use super::simplification::{
     collect_predicate_refs,
 };
 use super::PassCtx;
+use crate::graph::storage::GraphRead;
 use std::collections::{HashMap, HashSet};
 
 /// **Pass:** `hoist_with_where` — **Precondition:** a `Clause::Match`
@@ -263,8 +264,10 @@ fn predicate_has_aggregate(pred: &Predicate) -> bool {
 ///   carrying a `HAVING`.
 /// - **F7** an alias that shadows a pre-WITH variable (`WITH p.x AS p`), where
 ///   substitution would capture.
-pub(super) fn pass_fold_aliasing_with(query: &mut CypherQuery, _ctx: &PassCtx) {
-    fold_aliasing_with(query)
+/// - **F8** a COUNT subquery on mapped storage. Folding can duplicate its
+///   materializing fallback into RETURN and ORDER BY for every input row.
+pub(super) fn pass_fold_aliasing_with(query: &mut CypherQuery, ctx: &PassCtx) {
+    fold_aliasing_with(query, !ctx.graph.graph.is_mapped())
 }
 
 /// **Pass:** `hoist_terminal_return_over_with_top_k` — **Precondition:** the
@@ -289,13 +292,13 @@ pub(super) fn pass_fold_aliasing_with(query: &mut CypherQuery, _ctx: &PassCtx) {
 /// (that is the other pass's shape); **E2** a `DISTINCT`, aggregating,
 /// window-carrying or `HAVING`-carrying terminal `RETURN`, none of which is
 /// 1:1; **E3** falls out of F2–F4.
-pub(super) fn pass_hoist_terminal_return_over_with_top_k(query: &mut CypherQuery, _ctx: &PassCtx) {
-    hoist_terminal_return_over_with_top_k(query)
+pub(super) fn pass_hoist_terminal_return_over_with_top_k(query: &mut CypherQuery, ctx: &PassCtx) {
+    hoist_terminal_return_over_with_top_k(query, !ctx.graph.graph.is_mapped())
 }
 
 /// The `Clause::With` at `i` folds away, its aliases substituted into the
 /// terminal `RETURN [ORDER BY] [SKIP] [LIMIT]` that follows it.
-fn fold_aliasing_with(query: &mut CypherQuery) {
+fn fold_aliasing_with(query: &mut CypherQuery, permit_count_subquery: bool) {
     let Some(i) = foldable_with_index(query) else {
         return;
     };
@@ -305,7 +308,7 @@ fn fold_aliasing_with(query: &mut CypherQuery) {
     {
         return;
     }
-    let Some(substitutions) = alias_substitutions(query, i) else {
+    let Some(substitutions) = alias_substitutions(query, i, permit_count_subquery) else {
         return;
     };
     let Some(rewritten) = substitute_tail(tail, &substitutions) else {
@@ -316,7 +319,7 @@ fn fold_aliasing_with(query: &mut CypherQuery) {
 
 /// The `Clause::With` at `i` folds away and the terminal `RETURN` moves ahead
 /// of the ordering block it followed.
-fn hoist_terminal_return_over_with_top_k(query: &mut CypherQuery) {
+fn hoist_terminal_return_over_with_top_k(query: &mut CypherQuery, permit_count_subquery: bool) {
     let Some(i) = foldable_with_index(query) else {
         return;
     };
@@ -344,7 +347,7 @@ fn hoist_terminal_return_over_with_top_k(query: &mut CypherQuery) {
     {
         return;
     }
-    let Some(substitutions) = alias_substitutions(query, i) else {
+    let Some(substitutions) = alias_substitutions(query, i, permit_count_subquery) else {
         return;
     };
     // Rewrite the tail in RETURN-first order, then reorder.
@@ -392,7 +395,11 @@ fn is_ordering_clause(clause: &Clause) -> bool {
 /// The alias → defining-expression map for the WITH at `i`, or `None` when
 /// F2, F4 or F7 refuses, or when there is no alias to substitute (a
 /// pass-through, which `fold_pass_through_with` owns).
-fn alias_substitutions(query: &CypherQuery, i: usize) -> Option<HashMap<String, Expression>> {
+fn alias_substitutions(
+    query: &CypherQuery,
+    i: usize,
+    permit_count_subquery: bool,
+) -> Option<HashMap<String, Expression>> {
     let Clause::With(w) = &query.clauses[i] else {
         return None;
     };
@@ -406,7 +413,7 @@ fn alias_substitutions(query: &CypherQuery, i: usize) -> Option<HashMap<String, 
     let mut has_alias = false;
     for item in &w.items {
         // F2 — the item must be substitutable and evaluable before the WITH.
-        if !is_substitutable_source(&item.expression) {
+        if !is_substitutable_source(&item.expression, permit_count_subquery) {
             return None;
         }
         let mut refs: HashSet<String> = HashSet::new();
@@ -456,7 +463,7 @@ fn alias_substitutions(query: &CypherQuery, i: usize) -> Option<HashMap<String, 
 
 /// F2's allow-list: the expression shapes a WITH item may carry and still be
 /// safe to move to an earlier evaluation point and possibly duplicate.
-fn is_substitutable_source(expr: &Expression) -> bool {
+fn is_substitutable_source(expr: &Expression, permit_count_subquery: bool) -> bool {
     match expr {
         Expression::Variable(_)
         | Expression::PropertyAccess { .. }
@@ -467,16 +474,25 @@ fn is_substitutable_source(expr: &Expression) -> bool {
         | Expression::Multiply(l, r)
         | Expression::Divide(l, r)
         | Expression::Modulo(l, r)
-        | Expression::Concat(l, r) => is_substitutable_source(l) && is_substitutable_source(r),
-        Expression::Negate(inner) => is_substitutable_source(inner),
-        Expression::CountSubquery { where_clause, .. } if where_clause.is_none() => true,
+        | Expression::Concat(l, r) => {
+            is_substitutable_source(l, permit_count_subquery)
+                && is_substitutable_source(r, permit_count_subquery)
+        }
+        Expression::Negate(inner) => is_substitutable_source(inner, permit_count_subquery),
+        Expression::CountSubquery { where_clause, .. }
+            if permit_count_subquery && where_clause.is_none() =>
+        {
+            true
+        }
         Expression::FunctionCall {
             name,
             args,
             distinct,
         } if !*distinct
             && matches!(name.as_str(), "vector_score" | "text_score" | "text_bm25")
-            && args.iter().all(is_substitutable_source) =>
+            && args
+                .iter()
+                .all(|arg| is_substitutable_source(arg, permit_count_subquery)) =>
         {
             true
         }

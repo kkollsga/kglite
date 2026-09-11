@@ -21,8 +21,9 @@ before upgrading.
   `RETURN`, including when `RETURN` drops the alias.
 - In memory and disk storage, `COUNT { (n)-[:R]-() }` from a bound node
   uses the incident-edge counter instead of materializing matches. Mapped
-  storage retains its faster matcher path. `WITH n, COUNT { hop } AS d
-  ORDER BY d LIMIT k` folds into the node-scan top-k operator.
+  storage retains its faster matcher path and evaluates a `WITH` count alias
+  once per input row. In memory and disk storage, these aliases can fold
+  into the following projection and ordering.
 - Undirected `EXISTS { (n)-[:R]-() }` and `WHERE (n)-[:R]-()` use the same
   bound-endpoint edge probe as the directed spelling. Typed
   `MATCH (a)-[:R]-(b) RETURN count(*)` uses the edge-type count (each
