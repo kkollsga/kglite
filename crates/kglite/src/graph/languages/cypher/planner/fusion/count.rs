@@ -249,12 +249,14 @@ pub(crate) fn fuse_count_short_circuits(
             _ => return,
         };
 
-        // Edge must have no property filters or var_length, and must be directed
+        // Edge must have no property filters or var_length. Untyped
+        // undirected `()-[r]-()` is not fused this pass (would need a
+        // whole-graph self-loop count). Typed undirected is `2n - loops`.
         if edge.properties.is_some()
             || edge.var_length.is_some()
             || edge.connection_types.is_some()
             || edge.edge_filter.is_some()
-            || edge.direction == EdgeDirection::Both
+            || (edge.direction == EdgeDirection::Both && edge.connection_type.is_none())
         {
             return;
         }
@@ -308,12 +310,14 @@ pub(crate) fn fuse_count_short_circuits(
                 if unlabeled_endpoints || schema_covers {
                     let alias = return_item_column_name(&return_clause.items[0]);
                     let et = edge_type.clone();
+                    let undirected = edge.direction == EdgeDirection::Both;
                     query.clauses.drain(0..2);
                     query.clauses.insert(
                         0,
                         Clause::FusedCountTypedEdge {
                             edge_type: et,
                             alias,
+                            undirected,
                         },
                     );
                 }

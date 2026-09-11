@@ -889,25 +889,26 @@ impl<'a> CypherExecutor<'a> {
             .as_ref()
             .and_then(|v| row.node_bindings.get(v).copied());
 
-        let (bound_idx, other_node, other_var, direction) = match (a_bound, b_bound) {
-            (Some(idx), None) => {
-                let dir = match edge.direction {
-                    EdgeDirection::Outgoing => Direction::Outgoing,
-                    EdgeDirection::Incoming => Direction::Incoming,
-                    EdgeDirection::Both => return None,
-                };
-                (idx, node_b, &node_b.variable, dir)
-            }
-            (None, Some(idx)) => {
-                let dir = match edge.direction {
-                    EdgeDirection::Outgoing => Direction::Incoming,
-                    EdgeDirection::Incoming => Direction::Outgoing,
-                    EdgeDirection::Both => return None,
-                };
-                (idx, node_a, &node_a.variable, dir)
-            }
-            _ => return None, // both bound or neither — fall back
-        };
+        let (bound_idx, other_node, other_var, directions): (NodeIndex, _, _, &[Direction]) =
+            match (a_bound, b_bound) {
+                (Some(idx), None) => {
+                    let dirs: &[Direction] = match edge.direction {
+                        EdgeDirection::Outgoing => &[Direction::Outgoing],
+                        EdgeDirection::Incoming => &[Direction::Incoming],
+                        EdgeDirection::Both => &[Direction::Outgoing, Direction::Incoming],
+                    };
+                    (idx, node_b, &node_b.variable, dirs)
+                }
+                (None, Some(idx)) => {
+                    let dirs: &[Direction] = match edge.direction {
+                        EdgeDirection::Outgoing => &[Direction::Incoming],
+                        EdgeDirection::Incoming => &[Direction::Outgoing],
+                        EdgeDirection::Both => &[Direction::Outgoing, Direction::Incoming],
+                    };
+                    (idx, node_a, &node_a.variable, dirs)
+                }
+                _ => return None, // both bound or neither — fall back
+            };
 
         // `[:A|B]`: the singular field holds only the first branch, so this
         // sweep used to answer "no such edge" for a node whose only match
@@ -926,100 +927,104 @@ impl<'a> CypherExecutor<'a> {
             (false, ResultRow::new()) // unused placeholder
         };
 
-        for edge_ref in
-            self.graph
-                .graph
-                .edges_directed_filtered(bound_idx, direction, interned_conn)
-        {
-            if !conn_filter.accepts(edge_ref.weight().connection_type) {
-                continue;
-            }
-
-            let other_idx = if direction == Direction::Outgoing {
-                edge_ref.target()
-            } else {
-                edge_ref.source()
-            };
-
-            // Union-correct label check (primary OR secondary carriage,
-            // alternation-aware) — see `node_satisfies_pattern_labels`.
-            if !self.node_satisfies_pattern_labels(other_idx, other_node) {
-                continue;
-            }
-
-            // Check target node inline properties — bail to slow path
-            // for non-trivial matchers (EqualsParam, EqualsVar, etc.)
-            if let Some(ref props) = other_node.properties {
-                if let Some(nd) = self.graph.graph.node_view(other_idx) {
-                    let mut all_match = true;
-                    // Resolve aliases against the target node's type so
-                    // `{id: 20}` / `{nid: 'Q76'}` / `{title: 'X'}` all reach
-                    // the right column: `id` lives in the id_column, not the
-                    // property map, so an unresolved get_property("id")
-                    // silently dropped EXISTS inline-property predicates.
-                    let tgt_type_str = nd.node_type_str(&self.graph.interner);
-                    for (key, matcher) in props {
-                        let resolved = self.graph.resolve_alias(tgt_type_str, key);
-                        let val: Option<std::borrow::Cow<'_, Value>> = if resolved == "id" {
-                            Some(nd.id())
-                        } else if resolved == "title" {
-                            Some(nd.title())
-                        } else if let Some(v) = nd.get_property(resolved) {
-                            // Stored property wins (KG-1).
-                            Some(v)
-                        } else {
-                            match crate::graph::schema::soft_alias_fallback(resolved) {
-                                Some(crate::graph::schema::SoftAliasFallback::Title) => {
-                                    Some(nd.title())
-                                }
-                                Some(crate::graph::schema::SoftAliasFallback::TypeString) => {
-                                    Some(std::borrow::Cow::Owned(Value::String(
-                                        tgt_type_str.to_string(),
-                                    )))
-                                }
-                                None => None,
-                            }
-                        };
-                        let ok = match matcher {
-                            PropertyMatcher::Equals(expected) => val.as_deref().is_some_and(|v| {
-                                crate::graph::core::filtering::values_equal(v, expected)
-                            }),
-                            PropertyMatcher::In(values) => {
-                                val.as_deref().is_some_and(|v| values.matches(v))
-                            }
-                            // Complex matchers — fall back to slow path
-                            _ => return None,
-                        };
-                        if !ok {
-                            all_match = false;
-                            break;
-                        }
-                    }
-                    if !all_match {
-                        continue;
-                    }
-                } else {
+        for &direction in directions {
+            for edge_ref in
+                self.graph
+                    .graph
+                    .edges_directed_filtered(bound_idx, direction, interned_conn)
+            {
+                if !conn_filter.accepts(edge_ref.weight().connection_type) {
                     continue;
                 }
-            }
 
-            if has_where {
-                if let Some(ref var) = other_var {
-                    eval_row.node_bindings.insert(var.clone(), other_idx);
-                }
-                match self.evaluate_predicate(
-                    where_clause
-                        .as_ref()
-                        .expect("invariant: has_where guards Some(where_clause)"),
-                    &eval_row,
-                ) {
-                    Ok(true) => {}
-                    Ok(false) => continue,
-                    Err(e) => return Some(Err(e)),
-                }
-            }
+                let other_idx = if direction == Direction::Outgoing {
+                    edge_ref.target()
+                } else {
+                    edge_ref.source()
+                };
 
-            return Some(Ok(true));
+                // Union-correct label check (primary OR secondary carriage,
+                // alternation-aware) — see `node_satisfies_pattern_labels`.
+                if !self.node_satisfies_pattern_labels(other_idx, other_node) {
+                    continue;
+                }
+
+                // Check target node inline properties — bail to slow path
+                // for non-trivial matchers (EqualsParam, EqualsVar, etc.)
+                if let Some(ref props) = other_node.properties {
+                    if let Some(nd) = self.graph.graph.node_view(other_idx) {
+                        let mut all_match = true;
+                        // Resolve aliases against the target node's type so
+                        // `{id: 20}` / `{nid: 'Q76'}` / `{title: 'X'}` all reach
+                        // the right column: `id` lives in the id_column, not the
+                        // property map, so an unresolved get_property("id")
+                        // silently dropped EXISTS inline-property predicates.
+                        let tgt_type_str = nd.node_type_str(&self.graph.interner);
+                        for (key, matcher) in props {
+                            let resolved = self.graph.resolve_alias(tgt_type_str, key);
+                            let val: Option<std::borrow::Cow<'_, Value>> = if resolved == "id" {
+                                Some(nd.id())
+                            } else if resolved == "title" {
+                                Some(nd.title())
+                            } else if let Some(v) = nd.get_property(resolved) {
+                                // Stored property wins (KG-1).
+                                Some(v)
+                            } else {
+                                match crate::graph::schema::soft_alias_fallback(resolved) {
+                                    Some(crate::graph::schema::SoftAliasFallback::Title) => {
+                                        Some(nd.title())
+                                    }
+                                    Some(crate::graph::schema::SoftAliasFallback::TypeString) => {
+                                        Some(std::borrow::Cow::Owned(Value::String(
+                                            tgt_type_str.to_string(),
+                                        )))
+                                    }
+                                    None => None,
+                                }
+                            };
+                            let ok = match matcher {
+                                PropertyMatcher::Equals(expected) => {
+                                    val.as_deref().is_some_and(|v| {
+                                        crate::graph::core::filtering::values_equal(v, expected)
+                                    })
+                                }
+                                PropertyMatcher::In(values) => {
+                                    val.as_deref().is_some_and(|v| values.matches(v))
+                                }
+                                // Complex matchers — fall back to slow path
+                                _ => return None,
+                            };
+                            if !ok {
+                                all_match = false;
+                                break;
+                            }
+                        }
+                        if !all_match {
+                            continue;
+                        }
+                    } else {
+                        continue;
+                    }
+                }
+
+                if has_where {
+                    if let Some(ref var) = other_var {
+                        eval_row.node_bindings.insert(var.clone(), other_idx);
+                    }
+                    match self.evaluate_predicate(
+                        where_clause
+                            .as_ref()
+                            .expect("invariant: has_where guards Some(where_clause)"),
+                        &eval_row,
+                    ) {
+                        Ok(true) => {}
+                        Ok(false) => continue,
+                        Err(e) => return Some(Err(e)),
+                    }
+                }
+
+                return Some(Ok(true));
+            }
         }
         Some(Ok(false))
     }

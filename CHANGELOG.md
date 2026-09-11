@@ -20,6 +20,10 @@ before upgrading.
 - `COUNT { (n)-[:R]-() }` from a bound node uses the incident-edge counter
   instead of materializing matches. `WITH n, COUNT { hop } AS d ORDER BY d
   LIMIT k` folds into the node-scan top-k operator.
+- Undirected `EXISTS { (n)-[:R]-() }` and `WHERE (n)-[:R]-()` use the same
+  bound-endpoint edge probe as the directed spelling. Typed
+  `MATCH (a)-[:R]-(b) RETURN count(*)` uses the edge-type count (each
+  directed edge twice, minus self-loops).
 
 ## [0.17.2] - 2026-09-09
 

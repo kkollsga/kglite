@@ -454,8 +454,16 @@ fn fused_count_display_name(clause: &Clause) -> String {
         Clause::FusedCountLabelUnion { labels, .. } => {
             format!("FusedCountLabelUnion :{}", labels.join("|"))
         }
-        Clause::FusedCountTypedEdge { edge_type, .. } => {
-            format!("FusedCountTypedEdge :{edge_type}")
+        Clause::FusedCountTypedEdge {
+            edge_type,
+            undirected,
+            ..
+        } => {
+            if *undirected {
+                format!("FusedCountTypedEdge :{edge_type} undirected")
+            } else {
+                format!("FusedCountTypedEdge :{edge_type}")
+            }
         }
         Clause::FusedCountAnchoredEdges {
             anchor_idx,

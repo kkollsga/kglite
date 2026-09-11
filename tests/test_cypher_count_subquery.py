@@ -206,6 +206,18 @@ def test_undirected_count_counts_a_self_loop_once():
     assert g.cypher("MATCH (n:N) RETURN COUNT { (n)-[:R]->() } AS c").scalar() == 1
 
 
+def test_undirected_typed_edge_count_is_twice_minus_self_loops():
+    g = KnowledgeGraph()
+    g.add_nodes(pd.DataFrame({"id": [1, 2], "name": ["a", "b"]}), "N", "id", "name")
+    g.add_connections(pd.DataFrame({"s": [1, 1], "d": [2, 1]}), "R", "N", "s", "N", "d")
+    q = "MATCH ()-[r:R]-() RETURN count(r) AS n"
+    assert g.cypher(q).scalar() == 3
+    assert g.cypher(q, disabled_passes=["fuse_count_short_circuits"]).scalar() == 3
+    q2 = "MATCH (a:N)-[:R]-(b) RETURN count(*) AS n"
+    assert g.cypher(q2).scalar() == 3
+    assert g.cypher(q2, disabled_passes=["fuse_count_short_circuits"]).scalar() == 3
+
+
 def test_count_hop_counts_parallel_edges():
     g = KnowledgeGraph()
     g.add_nodes(pd.DataFrame({"id": [1, 2], "name": ["a", "b"]}), "N", "id", "name")

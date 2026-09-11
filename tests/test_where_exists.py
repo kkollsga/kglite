@@ -112,6 +112,23 @@ class TestWhereExists:
         names = [row["p.name"] for row in result]
         assert names == ["Alice", "Bob"]
 
+    def test_exists_undirected_includes_incoming(self, social_graph):
+        result = social_graph.cypher("""
+            MATCH (p:Person)
+            WHERE EXISTS { (p)-[:KNOWS]-() }
+            RETURN p.name
+            ORDER BY p.name
+        """)
+        names = [row["p.name"] for row in result]
+        assert names == ["Alice", "Bob", "Charlie"]
+        patterned = social_graph.cypher("""
+            MATCH (p:Person)
+            WHERE (p)-[:KNOWS]-()
+            RETURN p.name
+            ORDER BY p.name
+        """)
+        assert [row["p.name"] for row in patterned] == names
+
     def test_exists_with_label_filter(self, social_graph):
         """Find people who purchased something."""
         result = social_graph.cypher("""

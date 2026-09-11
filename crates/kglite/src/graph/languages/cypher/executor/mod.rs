@@ -562,9 +562,24 @@ impl<'a> CypherExecutor<'a> {
         &self,
         edge_type: &str,
         alias: &str,
+        undirected: bool,
     ) -> Result<ResultSet, String> {
         let counts = self.graph.get_edge_type_counts();
-        let count = counts.get(edge_type).copied().unwrap_or(0) as i64;
+        let n = counts.get(edge_type).copied().unwrap_or(0) as i64;
+        let count = if undirected {
+            // `()-[r:T]-()` / `(a)-[:T]-(b)` with distinct ends: each
+            // directed edge matches twice, a self-loop once → `2n - loops`.
+            let key = InternedKey::from_str(edge_type);
+            let loops = self
+                .graph
+                .graph
+                .edge_endpoint_keys()
+                .filter(|(src, tgt, ct)| *ct == key && src == tgt)
+                .count() as i64;
+            2 * n - loops
+        } else {
+            n
+        };
         self.budget
             .check_work(count as usize, "fused typed edge count")?;
         Ok(single_count_result(alias, count))
@@ -645,9 +660,11 @@ impl<'a> CypherExecutor<'a> {
             Clause::FusedCountLabelUnion { labels, alias } => {
                 self.execute_fused_count_label_union(labels, alias)
             }
-            Clause::FusedCountTypedEdge { edge_type, alias } => {
-                self.execute_fused_count_typed_edge(edge_type, alias)
-            }
+            Clause::FusedCountTypedEdge {
+                edge_type,
+                alias,
+                undirected,
+            } => self.execute_fused_count_typed_edge(edge_type, alias, *undirected),
             Clause::FusedCountAnchoredEdges {
                 anchor_idx,
                 anchor_direction,

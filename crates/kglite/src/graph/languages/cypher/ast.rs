@@ -256,6 +256,10 @@ pub enum Clause {
     FusedCountTypedEdge {
         edge_type: String,
         alias: String,
+        /// `MATCH ()-[r:T]-()` / `(a)-[:T]-(b)` with distinct endpoints
+        /// matches each directed edge twice, except a self-loop once:
+        /// `2n - self_loops`. Directed `->` stays `false`.
+        undirected: bool,
     },
     /// Optimizer-generated: MATCH (var)-[r:TYPE?]->({id: VAL}) RETURN count(var)
     /// (or the symmetric incoming form) → O(log D) CSR offset subtraction on

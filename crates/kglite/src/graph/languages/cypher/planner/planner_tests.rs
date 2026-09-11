@@ -1307,6 +1307,16 @@ fn test_schema_covered_typed_hop_count_fuses() {
             "schema-covered hop must fuse to FusedCountTypedEdge: {source}"
         );
     }
+    for source in [
+        "MATCH (a:Person)-[:KNOWS]-(b) RETURN count(*) AS n",
+        "MATCH (:Person)-[:KNOWS]-() RETURN count(*) AS n",
+        "MATCH ()-[r:KNOWS]-() RETURN count(r) AS n",
+    ] {
+        assert!(
+            is_fused_typed_edge(source, &graph),
+            "undirected schema-covered hop must fuse: {source}"
+        );
+    }
 }
 
 #[test]
@@ -1319,7 +1329,7 @@ fn test_schema_covered_typed_hop_count_bails_when_uncovered() {
         "MATCH (:Person)-[:R]->() RETURN count(*) AS n",
         "MATCH (a:Person {id: 1})-[:KNOWS]->() RETURN count(*) AS n",
         "MATCH (a)-[:KNOWS]->(a) RETURN count(*) AS n",
-        "MATCH (a:Person)-[:KNOWS]-() RETURN count(*) AS n",
+        "MATCH (a)-[r]-() RETURN count(r) AS n",
         "MATCH (a:Person)-[:KNOWS]->(b) RETURN count(DISTINCT a) AS n",
     ];
     let knows = graph_with_conn("KNOWS", "Person", "Person");
