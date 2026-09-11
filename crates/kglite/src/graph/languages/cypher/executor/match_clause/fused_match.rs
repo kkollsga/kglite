@@ -74,9 +74,12 @@ impl<'a> CypherExecutor<'a> {
 
             for pattern in &match_clause.patterns {
                 // Fast-path: direct edge traversal when one end is pre-bound
-                if let Some(fast_count) =
+                let fast_count = if self.incident_scan_respects_bindings(pattern, row) {
                     self.try_count_simple_pattern(pattern, &row.node_bindings)?
-                {
+                } else {
+                    None
+                };
+                if let Some(fast_count) = fast_count {
                     match_count += fast_count;
                 } else {
                     // Fusing the count away does not stop the expansion
@@ -84,13 +87,14 @@ impl<'a> CypherExecutor<'a> {
                     // vector for one driving row before counting it, and
                     // unlike the group-key scans below it is reachable with a
                     // variable-length edge.
+                    let resolved = self.resolve_pattern_vars(pattern, row);
                     let matches = self
                         .materializing_executor(
                             None,
                             &row.node_bindings,
                             "OPTIONAL MATCH count expansion",
                         )
-                        .execute(pattern)?;
+                        .execute(&resolved)?;
 
                     for m in &matches {
                         if self.bindings_compatible(row, m) {

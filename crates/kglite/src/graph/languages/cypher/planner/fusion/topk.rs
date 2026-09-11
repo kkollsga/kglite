@@ -331,7 +331,6 @@ pub(crate) fn fuse_text_bm25_order_limit(query: &mut CypherQuery) {
     }
 }
 
-/// What [`match_scored_order_limit`] extracts from a fusable three-clause span.
 fn is_retrieval_score_call(expr: &Expression) -> bool {
     matches!(
         expr,
@@ -340,9 +339,10 @@ fn is_retrieval_score_call(expr: &Expression) -> bool {
     )
 }
 
+/// What [`match_scored_order_limit`] extracts from a fusable three-clause span.
 struct ScoredShape {
-    /// Index of the RETURN item holding the scoring call, or `usize::MAX`
-    /// when only ORDER BY names the call.
+    /// RETURN item that can reuse the retrieved score, or `usize::MAX` to
+    /// evaluate RETURN independently of the ordered call.
     score_index: usize,
     score_call: Expression,
     descending: bool,
@@ -355,8 +355,8 @@ struct ScoredShape {
 ///
 /// Written once rather than twice because the *bail set* is the delicate part
 /// and two copies of it would drift: RETURN uses DISTINCT or contains an
-/// aggregate; no item calls `function`; ORDER BY has other than exactly one
-/// item, or sorts by something that is not the scored item's column name;
+/// aggregate; ORDER BY has other than exactly one item, or sorts by neither
+/// a `function` call nor a projected score's column name;
 /// LIMIT is not a positive integer literal.
 ///
 /// Read-only — the caller rewrites only after every check has passed.
@@ -384,25 +384,21 @@ fn match_scored_order_limit(clauses: &[Clause], i: usize, function: &str) -> Opt
             Expression::FunctionCall { name, .. } if name == function
         )
     };
-    let from_return = r
-        .items
-        .iter()
-        .enumerate()
-        .find(|(_, item)| scored_call(&item.expression));
-    let (score_index, score_call) = if let Some((index, item)) = from_return {
-        let alias = return_item_column_name(item);
-        let sort_name = match &o.items[0].expression {
-            Expression::Variable(v) => v.clone(),
-            other => expression_to_column_name(other),
-        };
-        // After an aliasing-WITH fold, ORDER BY carries the substituted
-        // FunctionCall rather than the alias name.
-        if sort_name != alias && !scored_call(&o.items[0].expression) {
-            return None;
-        }
+    let sort_expr = &o.items[0].expression;
+    let sort_name = match sort_expr {
+        Expression::Variable(v) => v.clone(),
+        other => expression_to_column_name(other),
+    };
+    let from_return = r.items.iter().enumerate().find(|(_, item)| {
+        scored_call(&item.expression) && return_item_column_name(item) == sort_name
+    });
+    let (score_index, score_call) = if scored_call(sort_expr) {
+        // The ordered call may use different arguments from a projected
+        // score, even when that projection's alias resembles the call.
+        // Retrieve by this call and evaluate RETURN on the winners.
+        (usize::MAX, sort_expr.clone())
+    } else if let Some((index, item)) = from_return {
         (index, item.expression.clone())
-    } else if scored_call(&o.items[0].expression) {
-        (usize::MAX, o.items[0].expression.clone())
     } else {
         return None;
     };

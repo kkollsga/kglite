@@ -471,6 +471,24 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     ),
     ("trigger_count_short_circuit", "social_graph", "MATCH (p:Person) RETURN count(*) AS n", None),
     (
+        "typed_count_incoming_schema_orientation",
+        "social_graph",
+        "MATCH (p:Person)<-[:WORKS_AT]-() RETURN count(*) AS n",
+        None,
+    ),
+    (
+        "typed_count_undirected_schema_orientation",
+        "social_graph",
+        "MATCH (p:Person)-[:WORKS_AT]-() RETURN count(*) AS n",
+        None,
+    ),
+    (
+        "aliasing_with_correlated_count_rename",
+        "social_graph",
+        "MATCH (p:Person) WITH p AS x RETURN x.id AS id, COUNT { (x)-[:KNOWS]->() } AS n ORDER BY id",
+        None,
+    ),
+    (
         "trigger_count_short_circuit_typed_hop",
         "social_graph",
         "MATCH (a:Person)-[:KNOWS]->(b) RETURN count(*) AS n",
@@ -3592,6 +3610,21 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         None,
     ),
     # ── fused count / distinct-hint regression shapes (0.12.x) ──────────
+    (
+        "optional_count_bound_anchor_constraint",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p {name: 'missing'})-[r:KNOWS]->() "
+        "WITH p, count(r) AS c RETURN p.name AS n, c ORDER BY n",
+        None,
+    ),
+    (
+        "two_match_count_bound_anchor_constraint",
+        "social_graph",
+        "MATCH (p:Person)-[:WORKS_AT]->(c:Company) "
+        "MATCH (p {name: 'missing'})-[r:KNOWS]->() "
+        "WITH p, count(r) AS c RETURN p.name AS n, c ORDER BY n",
+        None,
+    ),
     (
         # push_distinct_into_match with a residual (multi-variable) WHERE:
         # `a.age + b.age > 50` can't be pushed into the pattern, so it is

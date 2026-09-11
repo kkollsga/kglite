@@ -553,8 +553,8 @@ fn pass_fuse_anchored_edge_count(query: &mut CypherQuery, ctx: &PassCtx) {
 /// singleton `{Person}`. WHY-BAIL: `DISTINCT`, `HAVING`, a path assignment,
 /// more than one pattern, an inline property filter or a repeated variable,
 /// a multi-label `(n:A:B)` (needs an intersection the O(1) bucket count
-/// cannot express), undirected or `[:A|B]` edges, and a typed endpoint
-/// whose connection-type schema is not exactly that one label.
+/// cannot express), untyped undirected or `[:A|B]` edges, and a typed endpoint
+/// whose connection-type schema does not cover every counted orientation.
 fn pass_fuse_count_short_circuits(query: &mut CypherQuery, ctx: &PassCtx) {
     fuse_count_short_circuits(query, ctx.graph.has_secondary_labels, ctx.graph)
 }

@@ -242,10 +242,11 @@ fn predicate_has_aggregate(pred: &Predicate) -> bool {
 ///   (`hoist_with_where` runs first and clears the ones it can), or a stamped
 ///   `group_limit_hint` — none of those is a 1:1 projection.
 /// - **F2** an item expression outside the substitutable algebra (property
-///   access, variable, literal, parameter, arithmetic, concat, negation) or
+///   access, variable, literal, parameter, arithmetic, concat, negation,
+///   unfiltered COUNT subquery) or
 ///   reading a variable not bound before the WITH. Function calls are
 ///   excluded except `vector_score` / `text_score` / `text_bm25`, whose
-///   results are determined by stored indexes plus constant arguments, so
+///   results are determined by stored indexes and the row's arguments, so
 ///   duplicating the call into RETURN and ORDER BY cannot disagree.
 ///   **F3** (window functions) falls out of the same allow-list.
 /// - **F4** a downstream reference to a pre-WITH variable the projection does
@@ -571,7 +572,11 @@ fn substitute_expr(expr: &Expression, map: &HashMap<String, Expression>) -> Opti
             None => expr.clone(),
         },
         Expression::Literal(_) | Expression::Parameter(_) | Expression::Star => expr.clone(),
-        Expression::CountSubquery { .. } => expr.clone(),
+        // Patterns have their own binding scope. Copying a downstream COUNT
+        // through a node rename would turn its correlated node into a new
+        // local binding. A COUNT supplied by a WITH alias still substitutes
+        // through the Variable arm, where it retains its original scope.
+        Expression::CountSubquery { .. } => return None,
         Expression::FunctionCall {
             name,
             args,

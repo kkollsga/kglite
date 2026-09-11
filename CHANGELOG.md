@@ -27,6 +27,15 @@ before upgrading.
   `MATCH (a)-[:R]-(b) RETURN count(*)` uses the edge-type count (each
   directed edge twice, minus self-loops).
 
+### Fixed
+
+- Correlated `EXISTS` patterns now honor labels and inline properties added
+  to an already-bound endpoint, and preserve null relationship bindings from
+  `OPTIONAL MATCH`, instead of accepting any incident edge. A subquery `WHERE`
+  can read its locally named relationship.
+- Fused `OPTIONAL MATCH` counts and two-`MATCH` aggregates now honor labels
+  and inline properties repeated on an already-bound endpoint.
+
 ## [0.17.2] - 2026-09-09
 
 ### Added

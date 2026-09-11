@@ -809,18 +809,6 @@ impl<'a> CypherExecutor<'a> {
         })
     }
 
-    /// Fast path for EXISTS / NOT EXISTS: when the subquery is a single
-    /// 3-element pattern (node-edge-node) with exactly one node already bound
-    /// from the outer row, we can check edge existence directly via
-    /// `edges_directed_filtered()` instead of creating a full PatternExecutor.
-    /// Returns `Some(true/false)` if the fast path applies, `None` otherwise.
-    /// Union-correct label test for the anchored fast paths: a node
-    /// satisfies the pattern when ANY alternation branch (or the single
-    /// type) holds — through primary type OR secondary carriage — and every
-    /// `:A:B` extra holds. The primary-only compares this replaces missed
-    /// secondary carriers: the EXISTS fast path answered "no rows" for
-    /// `(a)-[:E]->(:VIP)` when :VIP was carried as a secondary label
-    /// (pinned red-first in the differential corpus, 2026-08-26).
     /// True when a primary-type-only compare would under-match this
     /// pattern: it is alternation/AND-chain shaped, or its single label has
     /// secondary carriers.
@@ -855,38 +843,70 @@ impl<'a> CypherExecutor<'a> {
             .all(|l| self.graph.node_has_label(idx, InternedKey::from_str(l)))
     }
 
+    /// Incident scans consume node_bindings only and assume the anchor's
+    /// constraints were already checked. Correlated subqueries can add new
+    /// anchor filters, projected node/null bindings, or a pinned relationship;
+    /// those require the full matcher and its bindings_compatible check.
+    pub(super) fn incident_scan_respects_bindings(
+        &self,
+        pattern: &Pattern,
+        row: &ResultRow,
+    ) -> bool {
+        let Some((node_a, edge, node_b)) = simple_node_edge_node(pattern) else {
+            return false;
+        };
+        if edge
+            .variable
+            .as_deref()
+            .is_some_and(|v| row.edge_bindings.contains_key(v) || row.projected.contains_key(v))
+        {
+            return false;
+        }
+        for node in [node_a, node_b] {
+            // The incident counter cannot resolve peer properties against
+            // projected scalars or another bound node's properties.
+            if node.properties.as_ref().is_some_and(|props| {
+                props.values().any(|matcher| {
+                    matches!(
+                        matcher,
+                        PropertyMatcher::EqualsVar(_) | PropertyMatcher::EqualsNodeProp { .. }
+                    )
+                })
+            }) {
+                return false;
+            }
+            if let Some(var) = node.variable.as_deref() {
+                if row.node_bindings.contains_key(var) {
+                    if node.properties.is_some()
+                        || node.node_type.is_some()
+                        || node.multi_label_constrained()
+                    {
+                        return false;
+                    }
+                } else if row.projected.contains_key(var) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Probe a single hop from exactly one bound node; decline shapes whose
+    /// constraints require the full matcher.
     pub(super) fn try_fast_exists_check(
         &self,
         patterns: &[Pattern],
         where_clause: &Option<Box<Predicate>>,
         row: &ResultRow,
     ) -> Option<Result<bool, String>> {
-        if patterns.len() != 1 {
+        if patterns.len() != 1 || !self.incident_scan_respects_bindings(&patterns[0], row) {
             return None;
         }
         let (node_a, edge, node_b) = simple_node_edge_node(&patterns[0])?;
-
-        // A pre-bound relationship variable pins the pattern to exactly
-        // that edge; the direct edges_directed sweep below never checks
-        // edge identity, so fall back to the full executor (whose
-        // bindings_compatible enforces it).
-        if let Some(var) = edge.variable.as_deref() {
-            if row_bound_edge(row, var).is_some() {
-                return None;
-            }
-        }
-
-        // Same for node variables carried only as projected VALUES
-        // (`UNWIND collect(n) AS n` → Value::Node, or an OPTIONAL MATCH
-        // miss → projected Null): they constrain the pattern to exactly
-        // that node (or to nothing, for Null). The sweep below only
-        // consults `node_bindings`, so fall back to the full executor.
-        for np in [node_a, node_b] {
-            if let Some(var) = np.variable.as_deref() {
-                if !row.node_bindings.contains_key(var) && row.projected.contains_key(var) {
-                    return None;
-                }
-            }
+        // The probe binds only the peer node for WHERE evaluation. A named
+        // relationship may be read by the predicate and needs the full row.
+        if where_clause.is_some() && edge.variable.is_some() {
+            return None;
         }
 
         let a_bound = node_a

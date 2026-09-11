@@ -304,8 +304,7 @@ pub(crate) fn fuse_count_short_circuits(
                         .connection_type_metadata
                         .get(edge_type)
                         .is_some_and(|info| {
-                            endpoint_covers_schema_side(src_node, &info.source_types)
-                                && endpoint_covers_schema_side(tgt_node, &info.target_types)
+                            schema_covers_hop(src_node, tgt_node, edge.direction, info)
                         });
                 if unlabeled_endpoints || schema_covers {
                     let alias = return_item_column_name(&return_clause.items[0]);
@@ -411,6 +410,30 @@ fn endpoint_covers_schema_side(
     match node.node_type.as_deref() {
         None => true,
         Some(label) => schema_types.len() == 1 && schema_types.contains(label),
+    }
+}
+
+fn schema_covers_hop(
+    left: &crate::graph::core::pattern_matching::NodePattern,
+    right: &crate::graph::core::pattern_matching::NodePattern,
+    direction: crate::graph::core::pattern_matching::EdgeDirection,
+    info: &crate::graph::schema::ConnectionTypeInfo,
+) -> bool {
+    use crate::graph::core::pattern_matching::EdgeDirection;
+    let forward = || {
+        endpoint_covers_schema_side(left, &info.source_types)
+            && endpoint_covers_schema_side(right, &info.target_types)
+    };
+    let reverse = || {
+        endpoint_covers_schema_side(left, &info.target_types)
+            && endpoint_covers_schema_side(right, &info.source_types)
+    };
+    match direction {
+        EdgeDirection::Outgoing => forward(),
+        EdgeDirection::Incoming => reverse(),
+        // The doubled bucket includes both orientations; both must satisfy
+        // the endpoint labels before using it.
+        EdgeDirection::Both => forward() && reverse(),
     }
 }
 

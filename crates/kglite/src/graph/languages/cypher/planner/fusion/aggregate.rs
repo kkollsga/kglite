@@ -1208,6 +1208,18 @@ pub(crate) fn fuse_node_scan_aggregate(
     }
 }
 
+/// Extract an M2 count-anchor variable only when the degree counter can honor
+/// every constraint on that node from its pre-bound identity alone.
+fn bound_count_anchor_variable(element: &PatternElement) -> Option<String> {
+    let PatternElement::Node(node) = element else {
+        return None;
+    };
+    if node.node_type.is_some() || node.properties.is_some() || node.multi_label_constrained() {
+        return None;
+    }
+    node.variable.clone()
+}
+
 /// Try to fold `[Match(M1), Match(M2), With(W)]` at position `i` into a
 /// single `FusedMatchWithAggregate { match_clause: M1, with_clause: W,
 /// secondary_match: Some(M2) }`. Returns true on success (clauses are
@@ -1218,9 +1230,9 @@ pub(crate) fn fuse_node_scan_aggregate(
 /// 1. The three clauses at `i`, `i+1`, `i+2` are `Match, Match, With`.
 /// 2. M1 is a 3-element pattern with no edge property filter and no
 ///    var-length edge.
-/// 3. M2 is a 3-element pattern. M2's first node shares a variable with M1
-///    (M1's first or last node), so the fused executor can use the M1
-///    binding as the count anchor.
+/// 3. M2 is a 3-element pattern. M2's unconstrained first node shares a
+///    variable with M1 (M1's first or last node), so the fused executor can
+///    use the M1 binding as the count anchor.
 /// 4. M2's edge has no var-length and no property filter (the count
 ///    fast-path can't apply edge predicates).
 /// 5. W is non-DISTINCT, has at least one `count()` aggregate referencing
@@ -1287,9 +1299,9 @@ fn try_fuse_two_match_with_aggregate(query: &mut CypherQuery, i: usize) -> bool 
             return false;
         }
         let pat = &m2.patterns[0];
-        let m2_first_var = match &pat.elements[0] {
-            PatternElement::Node(np) => np.variable.clone(),
-            _ => return false,
+        let m2_first_var = match bound_count_anchor_variable(&pat.elements[0]) {
+            Some(variable) => Some(variable),
+            None => return false,
         };
         let edge = match &pat.elements[1] {
             PatternElement::Edge(ep) => ep,
