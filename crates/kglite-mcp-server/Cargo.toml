@@ -51,7 +51,7 @@ path = "src/main.rs"
 # of an error-shaped success body. Same release also runs the result
 # postprocess hook on the error arm, so our identity/rebuild footers still
 # reach an agent reading a failure.
-# 0.4.8 is the compile floor now: its strict skill grammar rejects unknown
+# 0.4.8 introduced strict skill grammar that rejects unknown
 # `applies_when` predicates instead of activating a mistyped gate everywhere.
 # The 0.4.7 `resolve_source_roots_lenient` and
 # `ServerOptions::with_unresolved_source_roots` APIs are also required by
@@ -61,7 +61,10 @@ path = "src/main.rs"
 # would silently search none of them — and the source tools cannot name the
 # missing root in their own reply, leaving the diagnosis on stderr where the
 # calling agent cannot read it.
-mcp-methods = { version = "0.4.8", default-features = false, features = ["server"] }
+# 0.4.9 is the response-contract floor: final dispatch budgets builtin, typed
+# and custom routes, advertises collision-safe larger/full controls, and
+# retains expandable results without replaying their handlers.
+mcp-methods = { version = "0.4.9", default-features = false, features = ["server"] }
 
 # kglite (pure-Rust core) — no pyo3 in the resulting binary, no
 # libpython link. The 0.10.1 lift moved KnowledgeGraph +

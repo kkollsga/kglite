@@ -2259,9 +2259,9 @@ dependencies = [
 
 [[package]]
 name = "mcp-methods"
-version = "0.4.8"
+version = "0.4.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bff1a460997aa714ab45ad88fc5dbfcbcaee4983e84b2512d2461a6d281c2386"
+checksum = "140792f5b2f41ef005ea26c180869d05afda7174a22d0aedec22708fadfa879f"
 dependencies = [
  "anyhow",
  "clap",

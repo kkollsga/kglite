@@ -53,6 +53,9 @@ mod tools_allow;
 mod value_codecs;
 mod watcher;
 
+#[cfg(test)]
+mod response_budget_contract;
+
 pub(crate) use activation::*;
 pub(crate) use boot::*;
 pub(crate) use bundled_overrides::*;

@@ -172,7 +172,10 @@ mod bundled_override_tests {
             .call_tool(CallToolRequestParams::new("ping"))
             .await
             .expect_err("hidden route must reject direct calls");
-        assert!(error.to_string().contains("tool not found"));
+        assert!(
+            error.to_string().contains("Unknown tool"),
+            "hidden route rejection changed unexpectedly: {error}"
+        );
 
         client.cancel().await.expect("stop MCP client");
         server_handle.abort();
