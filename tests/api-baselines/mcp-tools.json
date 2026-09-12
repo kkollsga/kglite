@@ -2,10 +2,29 @@
   "graph_readonly": [
     {
       "name": "cypher_query",
-      "description": "Query, explore, and understand the active knowledge graph with Cypher \u2014 the primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Pass params={...} to bind $placeholders \u2014 both `{prop: $p}` inside a pattern and `WHERE x.prop = $p` read from it, and a $name with no value is an error rather than an empty result. Returns up to 15 rows inline; append FORMAT CSV for a CSV body capped at 200 rows, with a notice naming the true total \u2014 narrow the query to fit, or ask the operator to enable extensions.csv_http_server for a fetch URL carrying the complete result.",
+      "description": "Query, explore, and understand the active knowledge graph with Cypher \u2014 the primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Pass params={...} to bind $placeholders \u2014 both `{prop: $p}` inside a pattern and `WHERE x.prop = $p` read from it, and a $name with no value is an error rather than an empty result. Returns up to 15 rows inline; append FORMAT CSV for a CSV body capped at 200 rows, with a notice naming the true total \u2014 narrow the query to fit, or ask the operator to enable extensions.csv_http_server for a fetch URL carrying the complete result.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "params": {
             "additionalProperties": true,
             "description": "Values for the `$name` placeholders in `query`, as a JSON object \u2014\n`{\"flag\": \"NO\", \"min\": 3}`. Both spellings bind from here: the inline\nproperty map (`MATCH (v:Vessel {flag: $flag})`) and the `WHERE` clause\n(`WHERE v.flag = $flag`). A parameter named in the query but absent\nhere is an error, never an empty result. Accepts strings, numbers,\nbooleans, null, and arrays/objects of those; a value is bound as data,\nso it can never be read as Cypher syntax.",
@@ -31,13 +50,56 @@
         "required": [
           "query"
         ],
-        "title": "ReadCypherArgs",
+        "type": "object"
+      }
+    },
+    {
+      "name": "expand_response",
+      "description": "Inspect retained output without rerunning a tool. Use result_id from a preview; path is a JSON Pointer into its payload; offset selects items/fields/Unicode characters. response.mode=full returns the original inline result (empty path) or a complete selected value. Results are session-scoped and expire/evict as disclosed in the preview.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "offset": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "default": "",
+            "type": "string"
+          },
+          "response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "result_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result_id"
+        ],
         "type": "object"
       }
     },
     {
       "name": "graph_overview",
-      "description": "Inspect and explore the active graph's schema \u2014 start here to understand a codebase or dataset: node types, properties, connections, sample values, and a per-type example query (anchored on each type's real identifier property). With no args returns the inventory; pass types=[...] / connections=true|[...] / cypher=true|[...] for drill-down.",
+      "description": "Inspect and explore the active graph's schema \u2014 start here to understand a codebase or dataset: node types, properties, connections, sample values, and a per-type example query (anchored on each type's real identifier property). With no args returns the inventory; pass types=[...] / connections=true|[...] / cypher=true|[...] for drill-down.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$defs": {
           "DetailSelection": {
@@ -56,6 +118,25 @@
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "connections": {
             "anyOf": [
               {
@@ -95,10 +176,29 @@
     },
     {
       "name": "grep",
-      "description": "Search source files using ripgrep. `pattern` is a regex (Rust syntax). `glob` filters file paths (e.g. \"*.py\"). `context` adds N surrounding lines per match. Set `case_insensitive=true` for case-insensitive matching. `max_results` caps total matches (default 50).",
+      "description": "Search source files using ripgrep. `pattern` is a regex (Rust syntax). `glob` filters file paths (e.g. \"*.py\"). `context` adds N surrounding lines per match. Set `case_insensitive=true` for case-insensitive matching. `max_results` caps total matches (default 50).\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "case_insensitive": {
             "default": false,
             "description": "Case-insensitive matching.",
@@ -140,10 +240,29 @@
     },
     {
       "name": "list_source",
-      "description": "List directory contents under the configured source root. `path` is resolved against the first source root (\".\" lists the root itself). `depth` controls recursion (1 = flat ls, 2+ = tree). `glob` filters entry names. `dirs_only=true` shows only directories.",
+      "description": "List directory contents under the configured source root. `path` is resolved against the first source root (\".\" lists the root itself). `depth` controls recursion (1 = flat ls, 2+ = tree). `glob` filters entry names. `dirs_only=true` shows only directories.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "depth": {
             "default": 1,
             "description": "Recursion depth (1 = flat ls; 2+ = tree).",
@@ -174,10 +293,29 @@
     },
     {
       "name": "ping",
-      "description": "Liveness probe \u2014 returns 'pong' (or echoes `message` if supplied). Use to confirm the server framework is wired correctly before relying on graph- or source-aware tools.",
+      "description": "Liveness probe \u2014 returns 'pong' (or echoes `message` if supplied). Use to confirm the server framework is wired correctly before relying on graph- or source-aware tools.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "message": {
             "description": "Optional message to echo back. Defaults to \"pong\".",
             "type": [
@@ -191,10 +329,29 @@
     },
     {
       "name": "read_source",
-      "description": "Read a file from the configured source root(s). Pass `start_line`/`end_line` to slice, `grep` to filter to matching lines, `max_chars` to cap output. Pass `rev` (a tag, branch, or commit SHA) to read the file's content at that git revision via `git show` instead of the working tree \u2014 useful for comparing a file across releases (requires a git repo source root). Path traversal attempts are rejected. Available only when source roots are configured.",
+      "description": "Read a file from the configured source root(s). Pass `start_line`/`end_line` to slice, `grep` to filter to matching lines, `max_chars` to cap output. Pass `rev` (a tag, branch, or commit SHA) to read the file's content at that git revision via `git show` instead of the working tree \u2014 useful for comparing a file across releases (requires a git repo source root). Path traversal attempts are rejected. Available only when source roots are configured.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "end_line": {
             "description": "End line (1-indexed, inclusive). Defaults to end-of-file.",
             "format": "uint",
@@ -267,10 +424,29 @@
     },
     {
       "name": "reload_graph",
-      "description": "Re-read the served graph file from disk, replacing the in-memory graph \u2014 use this when the file has been rebuilt by another process and queries are returning stale results. The path is the one this server was started on. If this server has unsaved in-memory changes the reload is refused, because it would discard them: call save_graph first to keep them, or pass discard_unsaved=true to drop them and serve the file as it is on disk. If the re-read fails, the current graph stays active and the error is returned.",
+      "description": "Re-read the served graph file from disk, replacing the in-memory graph \u2014 use this when the file has been rebuilt by another process and queries are returning stale results. The path is the one this server was started on. If this server has unsaved in-memory changes the reload is refused, because it would discard them: call save_graph first to keep them, or pass discard_unsaved=true to drop them and serve the file as it is on disk. If the re-read fails, the current graph stays active and the error is returned.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "discard_unsaved": {
             "default": false,
             "description": "Set `true` to throw away this server's unsaved in-memory changes and\nserve the file as it is on disk. Without it, a reload that would\ndiscard unsaved changes is refused instead \u2014 call `save_graph` first to\nkeep them, or `save_graph_as` to keep them somewhere else. There is no\nmerge: the in-memory version and the file are alternatives.",
@@ -285,7 +461,7 @@
   "graph_writable": [
     {
       "name": "create_graph",
-      "description": "Create a fresh, empty graph bound to a path (its save_graph target) and make it active. storage = memory (default) | mapped | disk. Refused while this server has unsaved changes \u2014 call save_graph first to keep them, or reload_graph(discard_unsaved=true) to drop them. Write-enabled servers only.",
+      "description": "Create a fresh, empty graph bound to a path (its save_graph target) and make it active. storage = memory (default) | mapped | disk. Refused while this server has unsaved changes \u2014 call save_graph first to keep them, or reload_graph(discard_unsaved=true) to drop them. Write-enabled servers only.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$defs": {
           "StorageArg": {
@@ -299,6 +475,25 @@
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "path": {
             "description": "Path the new empty graph is bound to (its `save_graph` target).",
             "type": "string"
@@ -324,10 +519,29 @@
     },
     {
       "name": "cypher_query",
-      "description": "Query, explore, and understand the active knowledge graph with Cypher, and modify it \u2014 reads AND mutations are accepted; this is a write-enabled graph. The primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Pass write_scope=[...] to restrict mutations to those node types: every node write (CREATE, INSERT, MERGE, SET, REMOVE, DELETE, NODETACH DELETE, DETACH DELETE, and node-type DDL) is judged by the node's stored type, and a relationship write (edge CREATE/INSERT, DELETE r, SET r.p, REMOVE r.p) needs at least one endpoint's type in the list. Pass params={...} to bind $placeholders \u2014 both `{prop: $p}` inside a pattern and `WHERE x.prop = $p` read from it, and a $name with no value is an error rather than an empty result. Mutations are in-memory; call save_graph to persist. Returns up to 15 rows inline; append FORMAT CSV for a CSV body capped at 200 rows with a notice naming the true total \u2014 narrow the query to fit.",
+      "description": "Query, explore, and understand the active knowledge graph with Cypher, and modify it \u2014 reads AND mutations are accepted; this is a write-enabled graph. The primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Pass write_scope=[...] to restrict mutations to those node types: every node write (CREATE, INSERT, MERGE, SET, REMOVE, DELETE, NODETACH DELETE, DETACH DELETE, and node-type DDL) is judged by the node's stored type, and a relationship write (edge CREATE/INSERT, DELETE r, SET r.p, REMOVE r.p) needs at least one endpoint's type in the list. Pass params={...} to bind $placeholders \u2014 both `{prop: $p}` inside a pattern and `WHERE x.prop = $p` read from it, and a $name with no value is an error rather than an empty result. Mutations are in-memory; call save_graph to persist. Returns up to 15 rows inline; append FORMAT CSV for a CSV body capped at 200 rows with a notice naming the true total \u2014 narrow the query to fit.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "git_sha": {
             "description": "Freshness provenance for this write (write-enabled servers only): the git\ncommit SHA the agent is working against, stamped as `updated_at`'s\ncompanion on writes to `auto_timestamp` node/edge types \u2014 so a node can\nrecord \"describes the code as of sha X\". Optional; ignored on reads.",
             "type": [
@@ -377,15 +591,77 @@
         "required": [
           "query"
         ],
-        "title": "CypherArgs",
+        "type": "object"
+      }
+    },
+    {
+      "name": "expand_response",
+      "description": "Inspect retained output without rerunning a tool. Use result_id from a preview; path is a JSON Pointer into its payload; offset selects items/fields/Unicode characters. response.mode=full returns the original inline result (empty path) or a complete selected value. Results are session-scoped and expire/evict as disclosed in the preview.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "offset": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "default": "",
+            "type": "string"
+          },
+          "response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "result_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result_id"
+        ],
         "type": "object"
       }
     },
     {
       "name": "explore",
-      "description": "One-call codebase exploration. Lexically ranks Function / Class / Interface nodes against `query`, takes the top entries, 2-hop traverses CALLS / USES_TYPE / HAS_METHOD / DEFINES / REFERENCES_FN, and returns a markdown report with entry points, a relationship map, and grouped source slices. Designed to replace chains of grep + read calls when answering 'how does X work' over a code graph.",
+      "description": "One-call codebase exploration. Lexically ranks Function / Class / Interface nodes against `query`, takes the top entries, 2-hop traverses CALLS / USES_TYPE / HAS_METHOD / DEFINES / REFERENCES_FN, and returns a markdown report with entry points, a relationship map, and grouped source slices. Designed to replace chains of grep + read calls when answering 'how does X work' over a code graph.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "include_source": {
             "description": "Whether to include grouped source slices for the entry points. Default true.",
             "type": [
@@ -422,7 +698,7 @@
     },
     {
       "name": "graph_overview",
-      "description": "Inspect and explore the active graph's schema \u2014 start here to understand a codebase or dataset: node types, properties, connections, sample values, and a per-type example query (anchored on each type's real identifier property). With no args returns the inventory; pass types=[...] / connections=true|[...] / cypher=true|[...] for drill-down.",
+      "description": "Inspect and explore the active graph's schema \u2014 start here to understand a codebase or dataset: node types, properties, connections, sample values, and a per-type example query (anchored on each type's real identifier property). With no args returns the inventory; pass types=[...] / connections=true|[...] / cypher=true|[...] for drill-down.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$defs": {
           "DetailSelection": {
@@ -441,6 +717,25 @@
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "connections": {
             "anyOf": [
               {
@@ -480,10 +775,29 @@
     },
     {
       "name": "grep",
-      "description": "Search source files using ripgrep. `pattern` is a regex (Rust syntax). `glob` filters file paths (e.g. \"*.py\"). `context` adds N surrounding lines per match. Set `case_insensitive=true` for case-insensitive matching. `max_results` caps total matches (default 50).",
+      "description": "Search source files using ripgrep. `pattern` is a regex (Rust syntax). `glob` filters file paths (e.g. \"*.py\"). `context` adds N surrounding lines per match. Set `case_insensitive=true` for case-insensitive matching. `max_results` caps total matches (default 50).\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "case_insensitive": {
             "default": false,
             "description": "Case-insensitive matching.",
@@ -525,10 +839,29 @@
     },
     {
       "name": "list_source",
-      "description": "List directory contents under the configured source root. `path` is resolved against the first source root (\".\" lists the root itself). `depth` controls recursion (1 = flat ls, 2+ = tree). `glob` filters entry names. `dirs_only=true` shows only directories.",
+      "description": "List directory contents under the configured source root. `path` is resolved against the first source root (\".\" lists the root itself). `depth` controls recursion (1 = flat ls, 2+ = tree). `glob` filters entry names. `dirs_only=true` shows only directories.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "depth": {
             "default": 1,
             "description": "Recursion depth (1 = flat ls; 2+ = tree).",
@@ -559,10 +892,29 @@
     },
     {
       "name": "load_graph",
-      "description": "Load a .kgl file as the new active graph (replaces the current one). Refused while this server has unsaved changes \u2014 call save_graph first to keep them, or reload_graph(discard_unsaved=true) to drop them. Write-enabled servers only.",
+      "description": "Load a .kgl file as the new active graph (replaces the current one). Refused while this server has unsaved changes \u2014 call save_graph first to keep them, or reload_graph(discard_unsaved=true) to drop them. Write-enabled servers only.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "path": {
             "description": "Path to a `.kgl` file (or disk-graph directory) to load as the new\nactive graph, replacing the current one. Unsaved in-memory changes to\nthe previous graph are discarded \u2014 call `save_graph` first to keep them.",
             "type": "string"
@@ -577,10 +929,29 @@
     },
     {
       "name": "ping",
-      "description": "Liveness probe \u2014 returns 'pong' (or echoes `message` if supplied). Use to confirm the server framework is wired correctly before relying on graph- or source-aware tools.",
+      "description": "Liveness probe \u2014 returns 'pong' (or echoes `message` if supplied). Use to confirm the server framework is wired correctly before relying on graph- or source-aware tools.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "message": {
             "description": "Optional message to echo back. Defaults to \"pong\".",
             "type": [
@@ -594,9 +965,28 @@
     },
     {
       "name": "read_code_source",
-      "description": "Read source code by fully-qualified entity name. Resolves the name through the active graph's `graph.source()` (which uses the code-graph node attributes), then reads the corresponding file slice from the configured source root(s). Equivalent to cypher \u2192 graph.source \u2192 read_source in a single MCP call. Same line-range / grep / max_chars filters as `read_source`.",
+      "description": "Read source code by fully-qualified entity name. Resolves the name through the active graph's `graph.source()` (which uses the code-graph node attributes), then reads the corresponding file slice from the configured source root(s). Equivalent to cypher \u2192 graph.source \u2192 read_source in a single MCP call. Same line-range / grep / max_chars filters as `read_source`.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "end_line": {
             "description": "Override the entity's end line (1-indexed, inclusive). Defaults to the entity's defined end.",
             "minimum": 0,
@@ -656,10 +1046,29 @@
     },
     {
       "name": "read_source",
-      "description": "Read a file from the configured source root(s). Pass `start_line`/`end_line` to slice, `grep` to filter to matching lines, `max_chars` to cap output. Pass `rev` (a tag, branch, or commit SHA) to read the file's content at that git revision via `git show` instead of the working tree \u2014 useful for comparing a file across releases (requires a git repo source root). Path traversal attempts are rejected. Available only when source roots are configured.",
+      "description": "Read a file from the configured source root(s). Pass `start_line`/`end_line` to slice, `grep` to filter to matching lines, `max_chars` to cap output. Pass `rev` (a tag, branch, or commit SHA) to read the file's content at that git revision via `git show` instead of the working tree \u2014 useful for comparing a file across releases (requires a git repo source root). Path traversal attempts are rejected. Available only when source roots are configured.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "end_line": {
             "description": "End line (1-indexed, inclusive). Defaults to end-of-file.",
             "format": "uint",
@@ -732,10 +1141,29 @@
     },
     {
       "name": "reload_graph",
-      "description": "Re-read the served graph file from disk, replacing the in-memory graph \u2014 use this when the file has been rebuilt by another process and queries are returning stale results. The path is the one this server was started on. If this server has unsaved in-memory changes the reload is refused, because it would discard them: call save_graph first to keep them, or pass discard_unsaved=true to drop them and serve the file as it is on disk. If the re-read fails, the current graph stays active and the error is returned.",
+      "description": "Re-read the served graph file from disk, replacing the in-memory graph \u2014 use this when the file has been rebuilt by another process and queries are returning stale results. The path is the one this server was started on. If this server has unsaved in-memory changes the reload is refused, because it would discard them: call save_graph first to keep them, or pass discard_unsaved=true to drop them and serve the file as it is on disk. If the re-read fails, the current graph stays active and the error is returned.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "discard_unsaved": {
             "default": false,
             "description": "Set `true` to throw away this server's unsaved in-memory changes and\nserve the file as it is on disk. Without it, a reload that would\ndiscard unsaved changes is refused instead \u2014 call `save_graph` first to\nkeep them, or `save_graph_as` to keep them somewhere else. There is no\nmerge: the in-memory version and the file are alternatives.",
@@ -748,10 +1176,29 @@
     },
     {
       "name": "save_graph",
-      "description": "Persist the active graph to its source .kgl file (single-graph mode only). With nothing unsaved to write this is a no-op that reports \"Nothing to save\" and leaves the file untouched, so other servers reading the same graph are not made to re-read it; pass force=true to rewrite it anyway.",
+      "description": "Persist the active graph to its source .kgl file (single-graph mode only). With nothing unsaved to write this is a no-op that reports \"Nothing to save\" and leaves the file untouched, so other servers reading the same graph are not made to re-read it; pass force=true to rewrite it anyway.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "force": {
             "description": "Rewrite the file even when this server has nothing unsaved \u2014 e.g. to\nre-encode it with the running library version. Without it a save with\nnothing to write returns \"Nothing to save\" and leaves the file alone,\nso peers serving the same graph are not made to re-read it.",
             "type": [
@@ -766,10 +1213,29 @@
     },
     {
       "name": "save_graph_as",
-      "description": "Save the active graph to an explicit path and rebind the save target there. Write-enabled servers only.",
+      "description": "Save the active graph to an explicit path and rebind the save target there. Write-enabled servers only.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "path": {
             "description": "Path to save the active graph to; also becomes the new `save_graph`\ntarget.",
             "type": "string"
@@ -786,7 +1252,7 @@
   "graph_writable_scoped": [
     {
       "name": "create_graph",
-      "description": "Create a fresh, empty graph bound to a path (its save_graph target) and make it active. storage = memory (default) | mapped | disk. Refused while this server has unsaved changes \u2014 call save_graph first to keep them, or reload_graph(discard_unsaved=true) to drop them. Write-enabled servers only.",
+      "description": "Create a fresh, empty graph bound to a path (its save_graph target) and make it active. storage = memory (default) | mapped | disk. Refused while this server has unsaved changes \u2014 call save_graph first to keep them, or reload_graph(discard_unsaved=true) to drop them. Write-enabled servers only.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$defs": {
           "StorageArg": {
@@ -800,6 +1266,25 @@
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "path": {
             "description": "Path the new empty graph is bound to (its `save_graph` target).",
             "type": "string"
@@ -825,10 +1310,29 @@
     },
     {
       "name": "cypher_query",
-      "description": "Query, explore, and understand the active knowledge graph with Cypher, and modify it \u2014 reads AND mutations are accepted; this is a write-enabled graph. The primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Pass write_scope=[...] to restrict mutations to those node types: every node write (CREATE, INSERT, MERGE, SET, REMOVE, DELETE, NODETACH DELETE, DETACH DELETE, and node-type DDL) is judged by the node's stored type, and a relationship write (edge CREATE/INSERT, DELETE r, SET r.p, REMOVE r.p) needs at least one endpoint's type in the list. Pass params={...} to bind $placeholders \u2014 both `{prop: $p}` inside a pattern and `WHERE x.prop = $p` read from it, and a $name with no value is an error rather than an empty result. Mutations are in-memory; call save_graph to persist. Returns up to 15 rows inline; append FORMAT CSV for a CSV body capped at 200 rows with a notice naming the true total \u2014 narrow the query to fit. This server's operator has pinned write_scope to [Person, City]: a write_scope you pass is intersected with it and can only narrow it, omitting write_scope leaves the pinned scope in force, and a write with nothing left in scope is refused.",
+      "description": "Query, explore, and understand the active knowledge graph with Cypher, and modify it \u2014 reads AND mutations are accepted; this is a write-enabled graph. The primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Pass write_scope=[...] to restrict mutations to those node types: every node write (CREATE, INSERT, MERGE, SET, REMOVE, DELETE, NODETACH DELETE, DETACH DELETE, and node-type DDL) is judged by the node's stored type, and a relationship write (edge CREATE/INSERT, DELETE r, SET r.p, REMOVE r.p) needs at least one endpoint's type in the list. Pass params={...} to bind $placeholders \u2014 both `{prop: $p}` inside a pattern and `WHERE x.prop = $p` read from it, and a $name with no value is an error rather than an empty result. Mutations are in-memory; call save_graph to persist. Returns up to 15 rows inline; append FORMAT CSV for a CSV body capped at 200 rows with a notice naming the true total \u2014 narrow the query to fit. This server's operator has pinned write_scope to [Person, City]: a write_scope you pass is intersected with it and can only narrow it, omitting write_scope leaves the pinned scope in force, and a write with nothing left in scope is refused.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "git_sha": {
             "description": "Freshness provenance for this write (write-enabled servers only): the git\ncommit SHA the agent is working against, stamped as `updated_at`'s\ncompanion on writes to `auto_timestamp` node/edge types \u2014 so a node can\nrecord \"describes the code as of sha X\". Optional; ignored on reads.",
             "type": [
@@ -878,15 +1382,77 @@
         "required": [
           "query"
         ],
-        "title": "CypherArgs",
+        "type": "object"
+      }
+    },
+    {
+      "name": "expand_response",
+      "description": "Inspect retained output without rerunning a tool. Use result_id from a preview; path is a JSON Pointer into its payload; offset selects items/fields/Unicode characters. response.mode=full returns the original inline result (empty path) or a complete selected value. Results are session-scoped and expire/evict as disclosed in the preview.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "offset": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "default": "",
+            "type": "string"
+          },
+          "response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "result_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result_id"
+        ],
         "type": "object"
       }
     },
     {
       "name": "explore",
-      "description": "One-call codebase exploration. Lexically ranks Function / Class / Interface nodes against `query`, takes the top entries, 2-hop traverses CALLS / USES_TYPE / HAS_METHOD / DEFINES / REFERENCES_FN, and returns a markdown report with entry points, a relationship map, and grouped source slices. Designed to replace chains of grep + read calls when answering 'how does X work' over a code graph.",
+      "description": "One-call codebase exploration. Lexically ranks Function / Class / Interface nodes against `query`, takes the top entries, 2-hop traverses CALLS / USES_TYPE / HAS_METHOD / DEFINES / REFERENCES_FN, and returns a markdown report with entry points, a relationship map, and grouped source slices. Designed to replace chains of grep + read calls when answering 'how does X work' over a code graph.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "include_source": {
             "description": "Whether to include grouped source slices for the entry points. Default true.",
             "type": [
@@ -923,7 +1489,7 @@
     },
     {
       "name": "graph_overview",
-      "description": "Inspect and explore the active graph's schema \u2014 start here to understand a codebase or dataset: node types, properties, connections, sample values, and a per-type example query (anchored on each type's real identifier property). With no args returns the inventory; pass types=[...] / connections=true|[...] / cypher=true|[...] for drill-down.",
+      "description": "Inspect and explore the active graph's schema \u2014 start here to understand a codebase or dataset: node types, properties, connections, sample values, and a per-type example query (anchored on each type's real identifier property). With no args returns the inventory; pass types=[...] / connections=true|[...] / cypher=true|[...] for drill-down.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$defs": {
           "DetailSelection": {
@@ -942,6 +1508,25 @@
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "connections": {
             "anyOf": [
               {
@@ -981,10 +1566,29 @@
     },
     {
       "name": "grep",
-      "description": "Search source files using ripgrep. `pattern` is a regex (Rust syntax). `glob` filters file paths (e.g. \"*.py\"). `context` adds N surrounding lines per match. Set `case_insensitive=true` for case-insensitive matching. `max_results` caps total matches (default 50).",
+      "description": "Search source files using ripgrep. `pattern` is a regex (Rust syntax). `glob` filters file paths (e.g. \"*.py\"). `context` adds N surrounding lines per match. Set `case_insensitive=true` for case-insensitive matching. `max_results` caps total matches (default 50).\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "case_insensitive": {
             "default": false,
             "description": "Case-insensitive matching.",
@@ -1026,10 +1630,29 @@
     },
     {
       "name": "list_source",
-      "description": "List directory contents under the configured source root. `path` is resolved against the first source root (\".\" lists the root itself). `depth` controls recursion (1 = flat ls, 2+ = tree). `glob` filters entry names. `dirs_only=true` shows only directories.",
+      "description": "List directory contents under the configured source root. `path` is resolved against the first source root (\".\" lists the root itself). `depth` controls recursion (1 = flat ls, 2+ = tree). `glob` filters entry names. `dirs_only=true` shows only directories.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "depth": {
             "default": 1,
             "description": "Recursion depth (1 = flat ls; 2+ = tree).",
@@ -1060,10 +1683,29 @@
     },
     {
       "name": "load_graph",
-      "description": "Load a .kgl file as the new active graph (replaces the current one). Refused while this server has unsaved changes \u2014 call save_graph first to keep them, or reload_graph(discard_unsaved=true) to drop them. Write-enabled servers only.",
+      "description": "Load a .kgl file as the new active graph (replaces the current one). Refused while this server has unsaved changes \u2014 call save_graph first to keep them, or reload_graph(discard_unsaved=true) to drop them. Write-enabled servers only.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "path": {
             "description": "Path to a `.kgl` file (or disk-graph directory) to load as the new\nactive graph, replacing the current one. Unsaved in-memory changes to\nthe previous graph are discarded \u2014 call `save_graph` first to keep them.",
             "type": "string"
@@ -1078,10 +1720,29 @@
     },
     {
       "name": "ping",
-      "description": "Liveness probe \u2014 returns 'pong' (or echoes `message` if supplied). Use to confirm the server framework is wired correctly before relying on graph- or source-aware tools.",
+      "description": "Liveness probe \u2014 returns 'pong' (or echoes `message` if supplied). Use to confirm the server framework is wired correctly before relying on graph- or source-aware tools.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "message": {
             "description": "Optional message to echo back. Defaults to \"pong\".",
             "type": [
@@ -1095,9 +1756,28 @@
     },
     {
       "name": "read_code_source",
-      "description": "Read source code by fully-qualified entity name. Resolves the name through the active graph's `graph.source()` (which uses the code-graph node attributes), then reads the corresponding file slice from the configured source root(s). Equivalent to cypher \u2192 graph.source \u2192 read_source in a single MCP call. Same line-range / grep / max_chars filters as `read_source`.",
+      "description": "Read source code by fully-qualified entity name. Resolves the name through the active graph's `graph.source()` (which uses the code-graph node attributes), then reads the corresponding file slice from the configured source root(s). Equivalent to cypher \u2192 graph.source \u2192 read_source in a single MCP call. Same line-range / grep / max_chars filters as `read_source`.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "end_line": {
             "description": "Override the entity's end line (1-indexed, inclusive). Defaults to the entity's defined end.",
             "minimum": 0,
@@ -1157,10 +1837,29 @@
     },
     {
       "name": "read_source",
-      "description": "Read a file from the configured source root(s). Pass `start_line`/`end_line` to slice, `grep` to filter to matching lines, `max_chars` to cap output. Pass `rev` (a tag, branch, or commit SHA) to read the file's content at that git revision via `git show` instead of the working tree \u2014 useful for comparing a file across releases (requires a git repo source root). Path traversal attempts are rejected. Available only when source roots are configured.",
+      "description": "Read a file from the configured source root(s). Pass `start_line`/`end_line` to slice, `grep` to filter to matching lines, `max_chars` to cap output. Pass `rev` (a tag, branch, or commit SHA) to read the file's content at that git revision via `git show` instead of the working tree \u2014 useful for comparing a file across releases (requires a git repo source root). Path traversal attempts are rejected. Available only when source roots are configured.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "end_line": {
             "description": "End line (1-indexed, inclusive). Defaults to end-of-file.",
             "format": "uint",
@@ -1233,10 +1932,29 @@
     },
     {
       "name": "reload_graph",
-      "description": "Re-read the served graph file from disk, replacing the in-memory graph \u2014 use this when the file has been rebuilt by another process and queries are returning stale results. The path is the one this server was started on. If this server has unsaved in-memory changes the reload is refused, because it would discard them: call save_graph first to keep them, or pass discard_unsaved=true to drop them and serve the file as it is on disk. If the re-read fails, the current graph stays active and the error is returned.",
+      "description": "Re-read the served graph file from disk, replacing the in-memory graph \u2014 use this when the file has been rebuilt by another process and queries are returning stale results. The path is the one this server was started on. If this server has unsaved in-memory changes the reload is refused, because it would discard them: call save_graph first to keep them, or pass discard_unsaved=true to drop them and serve the file as it is on disk. If the re-read fails, the current graph stays active and the error is returned.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "discard_unsaved": {
             "default": false,
             "description": "Set `true` to throw away this server's unsaved in-memory changes and\nserve the file as it is on disk. Without it, a reload that would\ndiscard unsaved changes is refused instead \u2014 call `save_graph` first to\nkeep them, or `save_graph_as` to keep them somewhere else. There is no\nmerge: the in-memory version and the file are alternatives.",
@@ -1249,10 +1967,29 @@
     },
     {
       "name": "save_graph",
-      "description": "Persist the active graph to its source .kgl file (single-graph mode only). With nothing unsaved to write this is a no-op that reports \"Nothing to save\" and leaves the file untouched, so other servers reading the same graph are not made to re-read it; pass force=true to rewrite it anyway.",
+      "description": "Persist the active graph to its source .kgl file (single-graph mode only). With nothing unsaved to write this is a no-op that reports \"Nothing to save\" and leaves the file untouched, so other servers reading the same graph are not made to re-read it; pass force=true to rewrite it anyway.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "force": {
             "description": "Rewrite the file even when this server has nothing unsaved \u2014 e.g. to\nre-encode it with the running library version. Without it a save with\nnothing to write returns \"Nothing to save\" and leaves the file alone,\nso peers serving the same graph are not made to re-read it.",
             "type": [
@@ -1267,10 +2004,29 @@
     },
     {
       "name": "save_graph_as",
-      "description": "Save the active graph to an explicit path and rebind the save target there. Write-enabled servers only.",
+      "description": "Save the active graph to an explicit path and rebind the save target there. Write-enabled servers only.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "path": {
             "description": "Path to save the active graph to; also becomes the new `save_graph`\ntarget.",
             "type": "string"
@@ -1287,10 +2043,29 @@
   "local_workspace": [
     {
       "name": "cypher_query",
-      "description": "Query, explore, and understand the active knowledge graph with Cypher \u2014 the primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Pass params={...} to bind $placeholders \u2014 both `{prop: $p}` inside a pattern and `WHERE x.prop = $p` read from it, and a $name with no value is an error rather than an empty result. Returns up to 15 rows inline; append FORMAT CSV for a CSV body capped at 200 rows, with a notice naming the true total \u2014 narrow the query to fit, or ask the operator to enable extensions.csv_http_server for a fetch URL carrying the complete result.",
+      "description": "Query, explore, and understand the active knowledge graph with Cypher \u2014 the primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Pass params={...} to bind $placeholders \u2014 both `{prop: $p}` inside a pattern and `WHERE x.prop = $p` read from it, and a $name with no value is an error rather than an empty result. Returns up to 15 rows inline; append FORMAT CSV for a CSV body capped at 200 rows, with a notice naming the true total \u2014 narrow the query to fit, or ask the operator to enable extensions.csv_http_server for a fetch URL carrying the complete result.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "params": {
             "additionalProperties": true,
             "description": "Values for the `$name` placeholders in `query`, as a JSON object \u2014\n`{\"flag\": \"NO\", \"min\": 3}`. Both spellings bind from here: the inline\nproperty map (`MATCH (v:Vessel {flag: $flag})`) and the `WHERE` clause\n(`WHERE v.flag = $flag`). A parameter named in the query but absent\nhere is an error, never an empty result. Accepts strings, numbers,\nbooleans, null, and arrays/objects of those; a value is bound as data,\nso it can never be read as Cypher syntax.",
@@ -1316,15 +2091,77 @@
         "required": [
           "query"
         ],
-        "title": "ReadCypherArgs",
+        "type": "object"
+      }
+    },
+    {
+      "name": "expand_response",
+      "description": "Inspect retained output without rerunning a tool. Use result_id from a preview; path is a JSON Pointer into its payload; offset selects items/fields/Unicode characters. response.mode=full returns the original inline result (empty path) or a complete selected value. Results are session-scoped and expire/evict as disclosed in the preview.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "offset": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "default": "",
+            "type": "string"
+          },
+          "response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "result_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result_id"
+        ],
         "type": "object"
       }
     },
     {
       "name": "explore",
-      "description": "One-call codebase exploration. Lexically ranks Function / Class / Interface nodes against `query`, takes the top entries, 2-hop traverses CALLS / USES_TYPE / HAS_METHOD / DEFINES / REFERENCES_FN, and returns a markdown report with entry points, a relationship map, and grouped source slices. Designed to replace chains of grep + read calls when answering 'how does X work' over a code graph.",
+      "description": "One-call codebase exploration. Lexically ranks Function / Class / Interface nodes against `query`, takes the top entries, 2-hop traverses CALLS / USES_TYPE / HAS_METHOD / DEFINES / REFERENCES_FN, and returns a markdown report with entry points, a relationship map, and grouped source slices. Designed to replace chains of grep + read calls when answering 'how does X work' over a code graph.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "include_source": {
             "description": "Whether to include grouped source slices for the entry points. Default true.",
             "type": [
@@ -1361,7 +2198,7 @@
     },
     {
       "name": "graph_overview",
-      "description": "Inspect and explore the active graph's schema \u2014 start here to understand a codebase or dataset: node types, properties, connections, sample values, and a per-type example query (anchored on each type's real identifier property). With no args returns the inventory; pass types=[...] / connections=true|[...] / cypher=true|[...] for drill-down.",
+      "description": "Inspect and explore the active graph's schema \u2014 start here to understand a codebase or dataset: node types, properties, connections, sample values, and a per-type example query (anchored on each type's real identifier property). With no args returns the inventory; pass types=[...] / connections=true|[...] / cypher=true|[...] for drill-down.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$defs": {
           "DetailSelection": {
@@ -1380,6 +2217,25 @@
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "connections": {
             "anyOf": [
               {
@@ -1419,10 +2275,29 @@
     },
     {
       "name": "grep",
-      "description": "Search source files using ripgrep. `pattern` is a regex (Rust syntax). `glob` filters file paths (e.g. \"*.py\"). `context` adds N surrounding lines per match. Set `case_insensitive=true` for case-insensitive matching. `max_results` caps total matches (default 50).",
+      "description": "Search source files using ripgrep. `pattern` is a regex (Rust syntax). `glob` filters file paths (e.g. \"*.py\"). `context` adds N surrounding lines per match. Set `case_insensitive=true` for case-insensitive matching. `max_results` caps total matches (default 50).\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "case_insensitive": {
             "default": false,
             "description": "Case-insensitive matching.",
@@ -1464,10 +2339,29 @@
     },
     {
       "name": "list_source",
-      "description": "List directory contents under the configured source root. `path` is resolved against the first source root (\".\" lists the root itself). `depth` controls recursion (1 = flat ls, 2+ = tree). `glob` filters entry names. `dirs_only=true` shows only directories.",
+      "description": "List directory contents under the configured source root. `path` is resolved against the first source root (\".\" lists the root itself). `depth` controls recursion (1 = flat ls, 2+ = tree). `glob` filters entry names. `dirs_only=true` shows only directories.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "depth": {
             "default": 1,
             "description": "Recursion depth (1 = flat ls; 2+ = tree).",
@@ -1498,10 +2392,29 @@
     },
     {
       "name": "ping",
-      "description": "Liveness probe \u2014 returns 'pong' (or echoes `message` if supplied). Use to confirm the server framework is wired correctly before relying on graph- or source-aware tools.",
+      "description": "Liveness probe \u2014 returns 'pong' (or echoes `message` if supplied). Use to confirm the server framework is wired correctly before relying on graph- or source-aware tools.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "message": {
             "description": "Optional message to echo back. Defaults to \"pong\".",
             "type": [
@@ -1515,9 +2428,28 @@
     },
     {
       "name": "read_code_source",
-      "description": "Read source code by fully-qualified entity name. Resolves the name through the active graph's `graph.source()` (which uses the code-graph node attributes), then reads the corresponding file slice from the configured source root(s). Equivalent to cypher \u2192 graph.source \u2192 read_source in a single MCP call. Same line-range / grep / max_chars filters as `read_source`.",
+      "description": "Read source code by fully-qualified entity name. Resolves the name through the active graph's `graph.source()` (which uses the code-graph node attributes), then reads the corresponding file slice from the configured source root(s). Equivalent to cypher \u2192 graph.source \u2192 read_source in a single MCP call. Same line-range / grep / max_chars filters as `read_source`.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "end_line": {
             "description": "Override the entity's end line (1-indexed, inclusive). Defaults to the entity's defined end.",
             "minimum": 0,
@@ -1577,10 +2509,29 @@
     },
     {
       "name": "read_source",
-      "description": "Read a file from the configured source root(s). Pass `start_line`/`end_line` to slice, `grep` to filter to matching lines, `max_chars` to cap output. Pass `rev` (a tag, branch, or commit SHA) to read the file's content at that git revision via `git show` instead of the working tree \u2014 useful for comparing a file across releases (requires a git repo source root). Path traversal attempts are rejected. Available only when source roots are configured.",
+      "description": "Read a file from the configured source root(s). Pass `start_line`/`end_line` to slice, `grep` to filter to matching lines, `max_chars` to cap output. Pass `rev` (a tag, branch, or commit SHA) to read the file's content at that git revision via `git show` instead of the working tree \u2014 useful for comparing a file across releases (requires a git repo source root). Path traversal attempts are rejected. Available only when source roots are configured.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "end_line": {
             "description": "End line (1-indexed, inclusive). Defaults to end-of-file.",
             "format": "uint",
@@ -1653,7 +2604,7 @@
     },
     {
       "name": "set_root_dir",
-      "description": "Swap the active source root (local-workspace mode only). Pass `path` to a directory; the framework canonicalises it, rebinds the source tools (`read_source`, `grep`, `list_source`), and fires the post-activate hook so any downstream graph rebuilds against the new root. Pass `revs` (an integer N, or a list of git revspecs) to load multiple revisions of the root into one graph \u2014 N loads the newest N stable release tags of the dominant tag family plus HEAD (prereleases and unrelated tag families skipped); requires the root to be a git repo. Inventory persists across swaps; SHA-gating skips rebuilds when the same root is re-bound with no content changes.",
+      "description": "Swap the active source root (local-workspace mode only). Pass `path` to a directory; the framework canonicalises it, rebinds the source tools (`read_source`, `grep`, `list_source`), and fires the post-activate hook so any downstream graph rebuilds against the new root. Pass `revs` (an integer N, or a list of git revspecs) to load multiple revisions of the root into one graph \u2014 N loads the newest N stable release tags of the dominant tag family plus HEAD (prereleases and unrelated tag families skipped); requires the root to be a git repo. Inventory persists across swaps; SHA-gating skips rebuilds when the same root is re-bound with no content changes.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$defs": {
           "RevsRequest": {
@@ -1677,6 +2628,25 @@
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "path": {
             "description": "Absolute or relative path to bind as the new source root.",
             "type": "string"
@@ -1704,10 +2674,29 @@
   "manifest_tool": [
     {
       "name": "cypher_query",
-      "description": "Query, explore, and understand the active knowledge graph with Cypher \u2014 the primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Pass params={...} to bind $placeholders \u2014 both `{prop: $p}` inside a pattern and `WHERE x.prop = $p` read from it, and a $name with no value is an error rather than an empty result. Returns up to 15 rows inline; append FORMAT CSV for a CSV body capped at 200 rows, with a notice naming the true total \u2014 narrow the query to fit, or ask the operator to enable extensions.csv_http_server for a fetch URL carrying the complete result.",
+      "description": "Query, explore, and understand the active knowledge graph with Cypher \u2014 the primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Pass params={...} to bind $placeholders \u2014 both `{prop: $p}` inside a pattern and `WHERE x.prop = $p` read from it, and a $name with no value is an error rather than an empty result. Returns up to 15 rows inline; append FORMAT CSV for a CSV body capped at 200 rows, with a notice naming the true total \u2014 narrow the query to fit, or ask the operator to enable extensions.csv_http_server for a fetch URL carrying the complete result.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "params": {
             "additionalProperties": true,
             "description": "Values for the `$name` placeholders in `query`, as a JSON object \u2014\n`{\"flag\": \"NO\", \"min\": 3}`. Both spellings bind from here: the inline\nproperty map (`MATCH (v:Vessel {flag: $flag})`) and the `WHERE` clause\n(`WHERE v.flag = $flag`). A parameter named in the query but absent\nhere is an error, never an empty result. Accepts strings, numbers,\nbooleans, null, and arrays/objects of those; a value is bound as data,\nso it can never be read as Cypher syntax.",
@@ -1733,13 +2722,56 @@
         "required": [
           "query"
         ],
-        "title": "ReadCypherArgs",
+        "type": "object"
+      }
+    },
+    {
+      "name": "expand_response",
+      "description": "Inspect retained output without rerunning a tool. Use result_id from a preview; path is a JSON Pointer into its payload; offset selects items/fields/Unicode characters. response.mode=full returns the original inline result (empty path) or a complete selected value. Results are session-scoped and expire/evict as disclosed in the preview.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "offset": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "default": "",
+            "type": "string"
+          },
+          "response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "result_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result_id"
+        ],
         "type": "object"
       }
     },
     {
       "name": "graph_overview",
-      "description": "Inspect and explore the active graph's schema \u2014 start here to understand a codebase or dataset: node types, properties, connections, sample values, and a per-type example query (anchored on each type's real identifier property). With no args returns the inventory; pass types=[...] / connections=true|[...] / cypher=true|[...] for drill-down.",
+      "description": "Inspect and explore the active graph's schema \u2014 start here to understand a codebase or dataset: node types, properties, connections, sample values, and a per-type example query (anchored on each type's real identifier property). With no args returns the inventory; pass types=[...] / connections=true|[...] / cypher=true|[...] for drill-down.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$defs": {
           "DetailSelection": {
@@ -1758,6 +2790,25 @@
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "connections": {
             "anyOf": [
               {
@@ -1797,10 +2848,29 @@
     },
     {
       "name": "grep",
-      "description": "Search source files using ripgrep. `pattern` is a regex (Rust syntax). `glob` filters file paths (e.g. \"*.py\"). `context` adds N surrounding lines per match. Set `case_insensitive=true` for case-insensitive matching. `max_results` caps total matches (default 50).",
+      "description": "Search source files using ripgrep. `pattern` is a regex (Rust syntax). `glob` filters file paths (e.g. \"*.py\"). `context` adds N surrounding lines per match. Set `case_insensitive=true` for case-insensitive matching. `max_results` caps total matches (default 50).\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "case_insensitive": {
             "default": false,
             "description": "Case-insensitive matching.",
@@ -1842,10 +2912,29 @@
     },
     {
       "name": "list_source",
-      "description": "List directory contents under the configured source root. `path` is resolved against the first source root (\".\" lists the root itself). `depth` controls recursion (1 = flat ls, 2+ = tree). `glob` filters entry names. `dirs_only=true` shows only directories.",
+      "description": "List directory contents under the configured source root. `path` is resolved against the first source root (\".\" lists the root itself). `depth` controls recursion (1 = flat ls, 2+ = tree). `glob` filters entry names. `dirs_only=true` shows only directories.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "depth": {
             "default": 1,
             "description": "Recursion depth (1 = flat ls; 2+ = tree).",
@@ -1876,21 +2965,61 @@
     },
     {
       "name": "people_in_city",
-      "description": "Find people in one city.",
+      "description": "Find people in one city.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "city": {
           "description": "Exact city name.",
           "required": true,
           "type": "string"
+        },
+        "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
         }
       }
     },
     {
       "name": "ping",
-      "description": "Liveness probe \u2014 returns 'pong' (or echoes `message` if supplied). Use to confirm the server framework is wired correctly before relying on graph- or source-aware tools.",
+      "description": "Liveness probe \u2014 returns 'pong' (or echoes `message` if supplied). Use to confirm the server framework is wired correctly before relying on graph- or source-aware tools.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "message": {
             "description": "Optional message to echo back. Defaults to \"pong\".",
             "type": [
@@ -1904,10 +3033,29 @@
     },
     {
       "name": "read_source",
-      "description": "Read a file from the configured source root(s). Pass `start_line`/`end_line` to slice, `grep` to filter to matching lines, `max_chars` to cap output. Pass `rev` (a tag, branch, or commit SHA) to read the file's content at that git revision via `git show` instead of the working tree \u2014 useful for comparing a file across releases (requires a git repo source root). Path traversal attempts are rejected. Available only when source roots are configured.",
+      "description": "Read a file from the configured source root(s). Pass `start_line`/`end_line` to slice, `grep` to filter to matching lines, `max_chars` to cap output. Pass `rev` (a tag, branch, or commit SHA) to read the file's content at that git revision via `git show` instead of the working tree \u2014 useful for comparing a file across releases (requires a git repo source root). Path traversal attempts are rejected. Available only when source roots are configured.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "end_line": {
             "description": "End line (1-indexed, inclusive). Defaults to end-of-file.",
             "format": "uint",
@@ -1980,10 +3128,29 @@
     },
     {
       "name": "reload_graph",
-      "description": "Re-read the served graph file from disk, replacing the in-memory graph \u2014 use this when the file has been rebuilt by another process and queries are returning stale results. The path is the one this server was started on. If this server has unsaved in-memory changes the reload is refused, because it would discard them: call save_graph first to keep them, or pass discard_unsaved=true to drop them and serve the file as it is on disk. If the re-read fails, the current graph stays active and the error is returned.",
+      "description": "Re-read the served graph file from disk, replacing the in-memory graph \u2014 use this when the file has been rebuilt by another process and queries are returning stale results. The path is the one this server was started on. If this server has unsaved in-memory changes the reload is refused, because it would discard them: call save_graph first to keep them, or pass discard_unsaved=true to drop them and serve the file as it is on disk. If the re-read fails, the current graph stays active and the error is returned.\nResponses default to 16384 serialized bytes. Set _response.mode=full for complete inline output or _response.max_bytes for a larger per-call budget. Previews include calls to expand retained evidence without rerunning this tool.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "_response": {
+            "additionalProperties": false,
+            "description": "Default 16384 serialized result bytes. Use mode=full for complete inline output, or max_bytes for a larger one-call budget. Tool/query limits still apply.",
+            "properties": {
+              "max_bytes": {
+                "minimum": 4096,
+                "type": "integer"
+              },
+              "mode": {
+                "default": "bounded",
+                "enum": [
+                  "bounded",
+                  "full"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "discard_unsaved": {
             "default": false,
             "description": "Set `true` to throw away this server's unsaved in-memory changes and\nserve the file as it is on disk. Without it, a reload that would\ndiscard unsaved changes is refused instead \u2014 call `save_graph` first to\nkeep them, or `save_graph_as` to keep them somewhere else. There is no\nmerge: the in-memory version and the file are alternatives.",

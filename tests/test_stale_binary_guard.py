@@ -21,6 +21,7 @@ from tests.conftest import (
     _FORMAT_SOURCES,
     _REPO_ROOT,
     binary_skip_reason,
+    newest_binary_source,
     newest_format_source,
 )
 
@@ -82,6 +83,43 @@ def test_a_touched_format_source_alone_turns_a_fresh_binary_stale(tmp_path, monk
     os.utime(wal, (3_000, 3_000))
     reason = binary_skip_reason("srv", binary, "make dev")
     assert reason is not None and "wal.rs" in reason
+
+
+def test_a_touched_mcp_source_turns_a_fresh_mcp_binary_stale(tmp_path, monkeypatch):
+    """Tool discovery changed without a manifest edit in the budget rollout."""
+    root_manifest = tmp_path / "Cargo.toml"
+    lockfile = tmp_path / "Cargo.lock"
+    mcp_dir = tmp_path / "crates" / "kglite-mcp-server"
+    core_dir = tmp_path / "crates" / "kglite"
+    (mcp_dir / "src").mkdir(parents=True)
+    (core_dir / "src").mkdir(parents=True)
+    crate_manifest = mcp_dir / "Cargo.toml"
+    boot = mcp_dir / "src" / "boot.rs"
+    parameter_presence = core_dir / "src" / "parameter_presence.rs"
+    for path in (root_manifest, lockfile, crate_manifest, boot, parameter_presence):
+        path.write_text("x", encoding="utf-8")
+        os.utime(path, (1_000, 1_000))
+    monkeypatch.setattr("tests.conftest._FORMAT_SOURCES", (root_manifest,))
+    monkeypatch.setattr("tests.conftest._BINARY_CRATES", {"kglite-mcp-server": "kglite-mcp-server"})
+    monkeypatch.setattr("tests.conftest._REPO_ROOT", tmp_path)
+
+    binary = _binary_at(tmp_path, 2_000)
+    assert binary_skip_reason("kglite-mcp-server", binary, "make test-mcp") is None
+
+    os.utime(boot, (3_000, 3_000))
+    assert newest_binary_source("kglite-mcp-server") == boot
+    reason = binary_skip_reason("kglite-mcp-server", binary, "make test-mcp")
+    assert reason is not None and "boot.rs" in reason
+
+    os.utime(boot, (1_000, 1_000))
+    os.utime(parameter_presence, (4_000, 4_000))
+    reason = binary_skip_reason("kglite-mcp-server", binary, "make test-mcp")
+    assert reason is not None and "parameter_presence.rs" in reason
+
+    os.utime(parameter_presence, (1_000, 1_000))
+    os.utime(lockfile, (5_000, 5_000))
+    reason = binary_skip_reason("kglite-mcp-server", binary, "make test-mcp")
+    assert reason is not None and "Cargo.lock" in reason
 
 
 def test_an_unbuilt_binary_is_reported_as_unbuilt(tmp_path):

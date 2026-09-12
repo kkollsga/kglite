@@ -1695,6 +1695,7 @@ class TestToolsAllowlist:
     """
 
     ALLOWED = {"cypher_query", "graph_overview", "ping"}
+    FRAMEWORK_TOOLS = {"expand_response"}
     GITHUB_TOOLS = {"github_api", "github_issues", "screen_stargazers"}
 
     @pytest.fixture
@@ -1738,7 +1739,7 @@ class TestToolsAllowlist:
         assert self.ALLOWED < open_names
         assert {"grep", "read_source", "list_source"} <= open_names
 
-        assert self._tool_names(kgl, allowed) == self.ALLOWED
+        assert self._tool_names(kgl, allowed) == self.ALLOWED | self.FRAMEWORK_TOOLS
 
     def test_a_dropped_tool_is_rejected_on_call_not_merely_unlisted(self, deployment: tuple[Path, Path, Path, Path]):
         kgl, allowed, _, _ = deployment
@@ -1749,7 +1750,7 @@ class TestToolsAllowlist:
         )
         try:
             assert "pong" in _text_content(client.call_tool("ping")).lower()
-            with pytest.raises(RuntimeError, match="tool not found"):
+            with pytest.raises(RuntimeError, match="Unknown tool"):
                 client.call_tool("grep", {"pattern": "anything"})
         finally:
             client.shutdown()
@@ -1781,7 +1782,7 @@ class TestToolsAllowlist:
         # Belt-and-braces: the allowlist independently pins the surface, so it
         # holds even if the framework default ever regresses back to token-keyed.
         assert self._tool_names(kgl, allowed, token="dummy-value") == self._tool_names(kgl, allowed)
-        assert self._tool_names(kgl, allowed, token="dummy-value") == self.ALLOWED
+        assert self._tool_names(kgl, allowed, token="dummy-value") == self.ALLOWED | self.FRAMEWORK_TOOLS
 
     def test_builtins_github_opt_in_registers_the_github_tools(self, deployment: tuple[Path, Path, Path, Path]):
         """The other half of default-off: opting in must actually work.

@@ -43,6 +43,13 @@ _FORMAT_SOURCES = (
     _REPO_ROOT / "crates" / "kglite" / "src" / "serde_codec" / "mod.rs",
 )
 
+_BINARY_CRATES = {
+    "kglite-mcp-server": "kglite-mcp-server",
+    "kglite shell binary": "kglite-cli",
+    "kglite CLI": "kglite-cli",
+    "kglite-bolt-server": "kglite-bolt-server",
+}
+
 # Markers whose tests legitimately run long (30GB mapped graphs, multi-GB
 # model downloads, sustained load). Everything else falls under the 120 s
 # per-test hang ceiling set in pyproject.toml [tool.pytest.ini_options].
@@ -123,6 +130,20 @@ def newest_format_source() -> Path:
     return max(present, key=lambda path: path.stat().st_mtime)
 
 
+def newest_binary_source(name: str) -> Path:
+    """Newest format or binding source that can change a built binary's contract."""
+    candidates = list(_FORMAT_SOURCES)
+    crate = _BINARY_CRATES.get(name)
+    if crate is not None:
+        candidates.extend((_REPO_ROOT / "Cargo.lock", _REPO_ROOT / "crates" / crate / "Cargo.toml"))
+        candidates.extend((_REPO_ROOT / "crates" / crate / "src").rglob("*.rs"))
+        candidates.extend((_REPO_ROOT / "crates" / "kglite" / "src").rglob("*.rs"))
+    present = [path for path in candidates if path.exists()]
+    if not present:
+        raise RuntimeError(f"no source found for workspace binary {name}")
+    return max(present, key=lambda path: path.stat().st_mtime)
+
+
 def binary_skip_reason(name: str, binary: Path, build_hint: str) -> str | None:
     """Skip reason for a binary-backed suite, or None when it should run.
 
@@ -134,7 +155,7 @@ def binary_skip_reason(name: str, binary: Path, build_hint: str) -> str | None:
     """
     if not binary.exists():
         return f"{name} not built (expected at {binary}). Build with: {build_hint}"
-    newest = newest_format_source()
+    newest = newest_binary_source(name)
     if binary.stat().st_mtime < newest.stat().st_mtime:
         return (
             f"{name} at {binary} predates {newest.relative_to(_REPO_ROOT)} (stale build) — rebuild with: {build_hint}"
