@@ -60,10 +60,16 @@
       "sha256": "6156953e18d3878ac472491b240a8e59dca864e798fc212df247499e819019fe",
       "status": "accepted"
     },
-    "current.json": {
-      "evidence": "Release review ea06b810: two clean-source release runs passed all 37 cells at +20% min, no heavy tails. Run 1 median +2.48%, worst +13.85%; run 2 median +8.38%, worst +12.89%. Select run 1 by controls: MATCH +0.02%, WHERE -1.78%, hop1 +1.41%; repeat MATCH +10.11% and WHERE +7.71% show environmental offset during overlapping Bolt compilation. Recorded load 2.84/3.15/3.13. Original canonical preserved as 0_17_3_before_review.json. Separate 100-round mapped probe verifies top-K 8.857 ms and filter 10.221 ms with exact oracles and retained WITH. Benchmark qualification is not publication approval.",
+    "0_17_4.json": {
+      "evidence": "Release 0.17.4, 2026-09-13: two complete 37-cell release captures (100 minimum rounds, 20 warmups) agree closely: repeat median min delta -0.85%, worst +2.22%, best -5.78%, with zero heavy-tail cells. Controls MATCH -0.01%, WHERE -0.66%, hop1 +0.48%. Initial capture recorded on Mac16,10 under active desktop load 2.72/2.31/2.38 (WindowServer 18.5%, Codex 11.5%, Transmission 3.7%); no simultaneous native build during measurement. CI exact-head governed retake separately passed 37 workloads against published 0.13.2, with grouped target/source +8.86%/+7.39%, WHERE control -6.59%, and matched CPU clocks within 0.03%.",
       "platform": "Darwin/arm64",
-      "sha256": "d473d9e50fb98269142130c976008e3144555d1ecca2b9e3510921053c2da727",
+      "sha256": "c3094d74b41cbc7f12be9da11149dbf7ff0351bc98711f83ad144dd44cf1c0ed",
+      "status": "accepted"
+    },
+    "current.json": {
+      "evidence": "Release 0.17.4, 2026-09-13: two complete 37-cell release captures (100 minimum rounds, 20 warmups) agree closely: repeat median min delta -0.85%, worst +2.22%, best -5.78%, with zero heavy-tail cells. Controls MATCH -0.01%, WHERE -0.66%, hop1 +0.48%. Initial capture recorded on Mac16,10 under active desktop load 2.72/2.31/2.38 (WindowServer 18.5%, Codex 11.5%, Transmission 3.7%); no simultaneous native build during measurement. CI exact-head governed retake separately passed 37 workloads against published 0.13.2, with grouped target/source +8.86%/+7.39%, WHERE control -6.59%, and matched CPU clocks within 0.03%.",
+      "platform": "Darwin/arm64",
+      "sha256": "c3094d74b41cbc7f12be9da11149dbf7ff0351bc98711f83ad144dd44cf1c0ed",
       "status": "accepted"
     },
     "current.linux.json": {
@@ -86,7 +92,7 @@
     }
   },
   "references": {
-    "Darwin/arm64": "0_17_3.json",
+    "Darwin/arm64": "0_17_4.json",
     "Linux/x86_64": "reference_0_17_0_cells.linux.json"
   },
   "schema_version": 1

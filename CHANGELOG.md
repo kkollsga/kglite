@@ -9,11 +9,20 @@ before upgrading.
 
 ## [Unreleased]
 
+## [0.17.4] - 2026-09-13
+
 ### Added
 
+- MCP query responses now use the canonical bounded response envelope, retain
+  complete results for targeted expansion, and publish navigation actions for
+  rows, columns, diagnostics, coverage, and observed values.
 - The CLI can emit bounded, canonical JSON agent responses for queries and
   writes, retain complete response envelopes for ten minutes, and expand them
   later by opaque handle without reopening or replaying the graph operation.
+  JSONL sessions offer the same behavior through explicit per-request agent
+  format and `response_expand`; ordinary JSON, CSV, and session output remain
+  complete. The new bounded-response guide documents targeted MCP and CLI
+  retrieval, cache lifecycles, and query-limit coverage.
 
 ### Fixed
 
@@ -24,14 +33,16 @@ before upgrading.
   diagnostics, and changing the direct schema-lock flag cannot reuse an
   unlocked plan. A rejected structured-shape schema leaves the prior schema
   and its constraints unchanged.
+- CLI agent failures remain a single bounded structured response across the
+  native and Python entry points, with a nonzero process status and clean
+  standard error.
+
+### Changed
+
 - Failed live writes restore their statement data while conservatively
   invalidating an already-materialized optimistic transaction; an unused
   transaction remains a no-op commit. Public result-view and concurrency docs
   now describe the storage-specific snapshot and conflict behavior.
-  JSONL sessions offer the same behavior through explicit per-request agent
-  format and `response_expand`; ordinary JSON, CSV, and session output remain
-  complete. The new bounded-response guide documents targeted MCP and CLI
-  retrieval, cache lifecycles, and query-limit coverage.
 
 ## [0.17.3] - 2026-09-11
 
