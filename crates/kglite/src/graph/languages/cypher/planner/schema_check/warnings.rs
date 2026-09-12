@@ -14,6 +14,7 @@ use crate::datatypes::values::Value;
 use crate::graph::core::pattern_matching::{EdgeDirection, NodePattern, Pattern, PatternElement};
 use crate::graph::mutation::validation::did_you_mean;
 use crate::graph::schema::{DirGraph, InternedKey};
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -821,11 +822,30 @@ pub enum QueryWarningSink {
 const SINK_STDERR: u8 = 0;
 const SINK_SILENT: u8 = 1;
 
-/// Process-global, because the emit sites are deep inside the executor and
-/// the plan-cache path, and threading a presentation choice through
-/// `ExecuteOptions` would put it on every binding's hot argument struct for a
-/// setting no caller varies per query.
+/// Process-wide default. A synchronous binding operation can override it for
+/// its own thread with [`with_query_warning_sink`] without changing peers.
 static SINK: AtomicU8 = AtomicU8::new(SINK_STDERR);
+
+thread_local! {
+    static SCOPED_SINK: Cell<Option<QueryWarningSink>> = const { Cell::new(None) };
+}
+
+struct ScopedSinkRestore(Option<QueryWarningSink>);
+
+impl Drop for ScopedSinkRestore {
+    fn drop(&mut self) {
+        SCOPED_SINK.set(self.0);
+    }
+}
+
+/// Run one synchronous operation with a warning-echo policy local to this
+/// thread. Nested scopes and unwinding restore the preceding policy.
+pub fn with_query_warning_sink<R>(sink: QueryWarningSink, operation: impl FnOnce() -> R) -> R {
+    let restore = ScopedSinkRestore(SCOPED_SINK.replace(Some(sink)));
+    let result = operation();
+    drop(restore);
+    result
+}
 
 /// Select where query-warning echoes go, process-wide. Read the current value
 /// back with [`query_warning_sink`].
@@ -839,8 +859,11 @@ pub fn set_query_warning_sink(sink: QueryWarningSink) {
     );
 }
 
-/// The sink [`emit_query_warnings`] is currently writing to.
+/// The effective sink for this thread: scoped override, then global default.
 pub fn query_warning_sink() -> QueryWarningSink {
+    if let Some(sink) = SCOPED_SINK.get() {
+        return sink;
+    }
     match SINK.load(Ordering::Relaxed) {
         SINK_SILENT => QueryWarningSink::Silent,
         _ => QueryWarningSink::Stderr,
@@ -860,6 +883,9 @@ pub fn query_warning_sink() -> QueryWarningSink {
 ///
 /// [`QueryDiagnostics::warnings`]: crate::graph::languages::cypher::result::QueryDiagnostics::warnings
 pub(crate) fn emit_query_warnings(warnings: &[String]) {
+    if warnings.is_empty() {
+        return;
+    }
     if query_warning_sink() == QueryWarningSink::Silent {
         return;
     }
@@ -1303,5 +1329,50 @@ mod tests {
             1,
             "sink did not restore"
         );
+    }
+
+    #[test]
+    fn scoped_sink_is_nested_panic_safe_and_thread_local() {
+        let _guard = SINK_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        set_query_warning_sink(QueryWarningSink::Stderr);
+        let muted = "scoped-muted-41c9".to_string();
+        let peer = "scoped-peer-echo-41c9".to_string();
+        with_query_warning_sink(QueryWarningSink::Silent, || {
+            assert_eq!(query_warning_sink(), QueryWarningSink::Silent);
+            emit_query_warnings(std::slice::from_ref(&muted));
+            with_query_warning_sink(QueryWarningSink::Stderr, || {
+                assert_eq!(query_warning_sink(), QueryWarningSink::Stderr);
+            });
+            assert_eq!(query_warning_sink(), QueryWarningSink::Silent);
+            let peer_message = peer.clone();
+            std::thread::spawn(move || {
+                assert_eq!(query_warning_sink(), QueryWarningSink::Stderr);
+                emit_query_warnings(std::slice::from_ref(&peer_message));
+            })
+            .join()
+            .unwrap();
+        });
+        assert!(echo_recorder::matching(&muted).is_empty());
+        assert_eq!(echo_recorder::matching(&peer).len(), 1);
+        assert_eq!(query_warning_sink(), QueryWarningSink::Stderr);
+
+        let unwind = std::panic::catch_unwind(|| {
+            with_query_warning_sink(QueryWarningSink::Silent, || panic!("scope probe"));
+        });
+        assert!(unwind.is_err());
+        assert_eq!(query_warning_sink(), QueryWarningSink::Stderr);
+
+        with_query_warning_sink(QueryWarningSink::Stderr, || {
+            std::thread::spawn(|| set_query_warning_sink(QueryWarningSink::Silent))
+                .join()
+                .unwrap();
+            assert_eq!(query_warning_sink(), QueryWarningSink::Stderr);
+        });
+        assert_eq!(query_warning_sink(), QueryWarningSink::Silent);
+        with_query_warning_sink(QueryWarningSink::Stderr, || {
+            assert_eq!(query_warning_sink(), QueryWarningSink::Stderr);
+        });
+        assert_eq!(query_warning_sink(), QueryWarningSink::Silent);
+        set_query_warning_sink(QueryWarningSink::Stderr);
     }
 }

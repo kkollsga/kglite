@@ -7,6 +7,7 @@
 //! Pure-Rust binary over `kglite::api::*` (no libpython link), mirroring the
 //! kglite-bolt-server / kglite-mcp-server crate pattern.
 
+mod agent_response;
 mod exec;
 mod format;
 mod helper;
@@ -35,6 +36,22 @@ use kglite::api::{DirGraph, Value};
 
 use crate::exec::QueryOptions;
 use crate::format::Mode;
+
+#[derive(Debug)]
+struct ReportedAgentFailure;
+
+impl std::fmt::Display for ReportedAgentFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("agent operation failed")
+    }
+}
+
+impl std::error::Error for ReportedAgentFailure {}
+
+/// Whether the CLI already emitted a bounded structured failure for this error.
+pub fn is_reported_agent_failure(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<ReportedAgentFailure>().is_some()
+}
 
 /// How long a save-capable invocation waits for a peer to release the graph.
 ///
@@ -118,6 +135,12 @@ enum Command {
         /// legitimately run for hours. 0 is the same as omitting it.
         #[arg(long)]
         timeout_ms: Option<u64>,
+        /// Serialized-byte budget for agent output (minimum 4096).
+        #[arg(long, conflicts_with = "response_full")]
+        response_max_bytes: Option<usize>,
+        /// Return the complete agent envelope inline.
+        #[arg(long)]
+        response_full: bool,
     },
     /// Run a write-capable Cypher statement against a `.kgl` graph.
     Write {
@@ -148,6 +171,12 @@ enum Command {
         /// legitimately run for hours. 0 is the same as omitting it.
         #[arg(long)]
         timeout_ms: Option<u64>,
+        /// Serialized-byte budget for agent output (minimum 4096).
+        #[arg(long, conflicts_with = "response_full")]
+        response_max_bytes: Option<usize>,
+        /// Return the complete agent envelope inline.
+        #[arg(long)]
+        response_full: bool,
     },
     /// Print the dependency frontier from `CALL ready_set(...)`.
     ReadySet {
@@ -272,14 +301,72 @@ enum Command {
         #[arg(long)]
         set: Option<u32>,
     },
+    /// Retrieve or purge retained agent-response evidence.
+    #[command(subcommand)]
+    Response(ResponseCommand),
 }
 
-#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+#[derive(Subcommand, Debug)]
+enum ResponseCommand {
+    /// Expand retained evidence without opening a graph or rerunning a query.
+    Expand {
+        /// Opaque handle emitted by an earlier agent response.
+        handle: String,
+        /// JSON Pointer into the retained canonical envelope.
+        #[arg(long, default_value = "")]
+        path: String,
+        /// Array item, object field, or Unicode-character offset.
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        /// Serialized-byte budget for this expansion (minimum 4096).
+        #[arg(long, conflicts_with = "response_full")]
+        response_max_bytes: Option<usize>,
+        /// Return the complete selected value inline; offset must be zero.
+        #[arg(long)]
+        response_full: bool,
+    },
+    /// Remove retained evidence across every workspace namespace.
+    Purge {
+        /// Confirm that the complete per-user response cache is removed.
+        #[arg(long, required = true)]
+        all: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 enum OutputFormat {
     #[default]
     Table,
     Csv,
     Json,
+    Agent,
+}
+
+fn validate_agent_cli(cli: &Cli) -> Result<()> {
+    let controls = match &cli.command {
+        Some(Command::Query {
+            format,
+            response_max_bytes,
+            response_full,
+            ..
+        })
+        | Some(Command::Write {
+            format,
+            response_max_bytes,
+            response_full,
+            ..
+        }) => Some((*format, *response_max_bytes, *response_full)),
+        _ => None,
+    };
+    if let Some((format, max_bytes, full)) = controls {
+        if format != OutputFormat::Agent && (max_bytes.is_some() || full) {
+            anyhow::bail!("--response-max-bytes and --response-full require --format agent");
+        }
+        if format == OutputFormat::Agent {
+            agent_response::AgentOptions { max_bytes, full }.validate()?;
+        }
+    }
+    Ok(())
 }
 
 impl From<OutputFormat> for Mode {
@@ -288,6 +375,7 @@ impl From<OutputFormat> for Mode {
             OutputFormat::Table => Mode::Table,
             OutputFormat::Csv => Mode::Csv,
             OutputFormat::Json => Mode::Json,
+            OutputFormat::Agent => unreachable!("agent output uses its structured renderer"),
         }
     }
 }
@@ -309,15 +397,32 @@ where
 {
     let cli = Cli::parse_from(args);
 
+    validate_agent_cli(&cli)?;
+
     if let Some(Command::Query {
         graph,
         query,
         format,
         parallel,
         timeout_ms,
+        response_max_bytes,
+        response_full,
     }) = &cli.command
     {
-        run_query(graph, query, (*format).into(), *parallel, *timeout_ms)?;
+        if *format == OutputFormat::Agent {
+            run_agent_query(
+                graph,
+                query,
+                *parallel,
+                *timeout_ms,
+                agent_response::AgentOptions {
+                    max_bytes: *response_max_bytes,
+                    full: *response_full,
+                },
+            )?;
+        } else {
+            run_query(graph, query, (*format).into(), *parallel, *timeout_ms)?;
+        }
         return Ok(());
     }
     if let Some(Command::Write {
@@ -329,21 +434,31 @@ where
         git_sha,
         modified_by,
         timeout_ms,
+        response_max_bytes,
+        response_full,
     }) = &cli.command
     {
-        run_write(
-            graph,
-            query,
-            (*format).into(),
-            *save,
-            exec::QueryOptions {
-                write_scope: exec::parse_write_scope(write_scope.as_deref()),
-                git_sha: git_sha.clone(),
-                modified_by: modified_by.clone(),
-                timeout_ms: *timeout_ms,
-                ..exec::QueryOptions::default()
-            },
-        )?;
+        let options = exec::QueryOptions {
+            write_scope: exec::parse_write_scope(write_scope.as_deref()),
+            git_sha: git_sha.clone(),
+            modified_by: modified_by.clone(),
+            timeout_ms: *timeout_ms,
+            ..exec::QueryOptions::default()
+        };
+        if *format == OutputFormat::Agent {
+            run_agent_write(
+                graph,
+                query,
+                *save,
+                options,
+                agent_response::AgentOptions {
+                    max_bytes: *response_max_bytes,
+                    full: *response_full,
+                },
+            )?;
+        } else {
+            run_write(graph, query, (*format).into(), *save, options)?;
+        }
         return Ok(());
     }
     if let Some(Command::ReadySet {
@@ -445,6 +560,9 @@ where
             None => migrate::print_version(graph),
         };
     }
+    if let Some(Command::Response(command)) = &cli.command {
+        return run_response(command);
+    }
 
     let (graph, ownership) = match &cli.graph {
         Some(path) => {
@@ -523,6 +641,138 @@ fn run_query(
         &outcome,
         format::stdout_cell_cap(),
     ))?;
+    Ok(())
+}
+
+fn run_agent_query(
+    path: &Path,
+    query: &str,
+    parallel: bool,
+    timeout_ms: Option<u64>,
+    response: agent_response::AgentOptions,
+) -> Result<()> {
+    let operation = kglite::api::cypher::with_query_warning_sink(
+        kglite::api::cypher::QueryWarningSink::Silent,
+        || {
+            let graph = load_graph(path)?;
+            let (_, is_mutation) = kglite::api::cypher::parse_with_mutation_check(query)
+                .map_err(|error| anyhow::anyhow!("Cypher parse error: {error}"))?;
+            if is_mutation {
+                anyhow::bail!("query is read-only; use `kglite write` for mutations");
+            }
+            let params = HashMap::new();
+            exec::execute_readonly(
+                &graph,
+                query,
+                &params,
+                &QueryOptions {
+                    parallel,
+                    timeout_ms,
+                    ..QueryOptions::default()
+                },
+            )
+            .context("Cypher execution failed")
+        },
+    );
+    emit_agent_operation(path, query, operation, response)
+}
+
+fn run_agent_write(
+    path: &Path,
+    query: &str,
+    persist: bool,
+    options: exec::QueryOptions,
+    response: agent_response::AgentOptions,
+) -> Result<()> {
+    let operation = kglite::api::cypher::with_query_warning_sink(
+        kglite::api::cypher::QueryWarningSink::Silent,
+        || {
+            let (mut graph, mut ownership) = if persist {
+                let (graph, ownership) = open_owned(path, Some(StorageMode::Memory))?;
+                (graph, Some(ownership))
+            } else {
+                let graph = open_or_create_graph(path, None)
+                    .with_context(|| format!("failed to open or create {}", path.display()))?
+                    .graph;
+                (graph, None)
+            };
+            let params = HashMap::new();
+            let outcome = exec::execute(&mut graph, query, &params, &options)
+                .context("Cypher execution failed")?;
+            if let Some(ownership) = ownership.as_mut() {
+                ownership
+                    .publish(&mut graph)
+                    .map_err(|refusal| write_refusal(path, refusal))?;
+            }
+            Ok(outcome)
+        },
+    );
+    emit_agent_operation(path, query, operation, response)
+}
+
+fn emit_agent_operation(
+    path: &Path,
+    query: &str,
+    operation: Result<kglite::api::session::ExecuteOutcome>,
+    response: agent_response::AgentOptions,
+) -> Result<()> {
+    let (envelope, error) = match operation {
+        Ok(outcome) => (
+            agent_response::result_envelope(&outcome, query, path),
+            false,
+        ),
+        Err(error) => (agent_response::error_envelope(&error, query, path), true),
+    };
+    let root = agent_response::cache_root()?;
+    let namespace = agent_response::namespace(path);
+    let rendered = agent_response::present(root, &namespace, envelope, error, response);
+    exec::write_stdout(&serde_json::to_string(&rendered)?)?;
+    if error {
+        Err(ReportedAgentFailure.into())
+    } else {
+        Ok(())
+    }
+}
+
+fn run_response(command: &ResponseCommand) -> Result<()> {
+    let root = agent_response::cache_root()?;
+    match command {
+        ResponseCommand::Expand {
+            handle,
+            path,
+            offset,
+            response_max_bytes,
+            response_full,
+        } => {
+            let expanded = match agent_response::expand(
+                root,
+                handle,
+                path.clone(),
+                *offset,
+                agent_response::AgentOptions {
+                    max_bytes: *response_max_bytes,
+                    full: *response_full,
+                },
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    let value = serde_json::json!({
+                        "content": [{"type":"text","text":"Retained response expansion failed"}],
+                        "structuredContent": {"schema_version":1,"kind":"response_error","diagnostics":{"errors":[{"message":format!("{error:#}")}]}},
+                        "isError": true
+                    });
+                    exec::write_stdout(&serde_json::to_string(&value)?)?;
+                    return Err(ReportedAgentFailure.into());
+                }
+            };
+            exec::write_stdout(&serde_json::to_string(&expanded)?)?;
+        }
+        ResponseCommand::Purge { all } => {
+            debug_assert!(*all, "clap requires --all");
+            agent_response::purge(root)?;
+            exec::write_stdout("{\"ok\":true,\"purged\":\"all\"}")?;
+        }
+    }
     Ok(())
 }
 
@@ -1076,7 +1326,8 @@ fn cypher_string(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::session_save;
+    use super::{session_save, validate_agent_cli, Cli};
+    use clap::Parser;
     use kglite::api::io::{GraphFileIdentity, WriteOwnership};
     use kglite::api::DirGraph;
     use std::fs;
@@ -1107,5 +1358,62 @@ mod tests {
             "unexpected refusal text: {error}"
         );
         assert_eq!(fs::read(&graph).unwrap(), b"competing writer");
+    }
+
+    #[test]
+    fn agent_response_controls_validate_before_command_execution() {
+        let valid = Cli::try_parse_from([
+            "kglite",
+            "query",
+            "missing.kgl",
+            "RETURN 1",
+            "--format",
+            "agent",
+            "--response-max-bytes",
+            "4096",
+        ])
+        .unwrap();
+        validate_agent_cli(&valid).unwrap();
+
+        let below_minimum = Cli::try_parse_from([
+            "kglite",
+            "write",
+            "missing.kgl",
+            "CREATE (:N)",
+            "--format",
+            "agent",
+            "--response-max-bytes",
+            "4095",
+        ])
+        .unwrap();
+        assert!(validate_agent_cli(&below_minimum).is_err());
+
+        let wrong_format = Cli::try_parse_from([
+            "kglite",
+            "write",
+            "missing.kgl",
+            "CREATE (:N)",
+            "--response-full",
+        ])
+        .unwrap();
+        assert!(validate_agent_cli(&wrong_format).is_err());
+    }
+
+    #[test]
+    fn clap_rejects_conflicting_agent_controls_and_requires_purge_all() {
+        assert!(Cli::try_parse_from([
+            "kglite",
+            "query",
+            "missing.kgl",
+            "RETURN 1",
+            "--format",
+            "agent",
+            "--response-full",
+            "--response-max-bytes",
+            "8192",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from(["kglite", "response", "purge"]).is_err());
+        assert!(Cli::try_parse_from(["kglite", "response", "purge", "--all"]).is_ok());
     }
 }

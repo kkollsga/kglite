@@ -750,7 +750,7 @@ pub mod api {
         /// unaffected; this only moves the `warning:` line off stderr, for a
         /// binding that presents warnings itself.
         pub use crate::graph::languages::cypher::planner::schema_check::{
-            query_warning_sink, set_query_warning_sink, QueryWarningSink,
+            query_warning_sink, set_query_warning_sink, with_query_warning_sink, QueryWarningSink,
         };
         pub use crate::graph::languages::cypher::planner::simplification::rewrite_text_score;
         pub use crate::graph::languages::cypher::query_features;

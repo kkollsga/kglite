@@ -9,6 +9,12 @@ before upgrading.
 
 ## [Unreleased]
 
+### Added
+
+- The CLI can emit bounded, canonical JSON agent responses for queries and
+  writes, retain complete response envelopes for ten minutes, and expand them
+  later by opaque handle without reopening or replaying the graph operation.
+
 ## [0.17.3] - 2026-09-11
 
 ### Changed

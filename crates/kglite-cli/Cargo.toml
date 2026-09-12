@@ -62,5 +62,12 @@ clap = { version = "4.3", features = ["derive"] }
 # 1.0.5 (Context for Option, used by kglite-cli); 1.0.47 covers all.
 anyhow = "1.0.47"
 
+# Agent result envelopes use mcp-methods' renderer only. Keep server features
+# disabled so the standalone CLI does not acquire an async/MCP runtime.
+mcp-methods = { version = "0.4.9", default-features = false }
+
+# Opaque retained-result handles come directly from the operating system RNG.
+getrandom = "0.3"
+
 [dev-dependencies]
 tempfile = "3.10.0"

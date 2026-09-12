@@ -90,7 +90,9 @@ mod warnings;
 pub(crate) use type_mismatch::strict_type_error;
 pub use warnings::collect_unknown_pattern_warnings;
 pub(crate) use warnings::{collect_query_warnings, emit_query_warnings, strict_read_error};
-pub use warnings::{query_warning_sink, set_query_warning_sink, QueryWarningSink};
+pub use warnings::{
+    query_warning_sink, set_query_warning_sink, with_query_warning_sink, QueryWarningSink,
+};
 
 /// Built-in fields valid on any node type, tolerated without a metadata
 /// entry — mirrors BUILTIN_FIELDS in `mutation/validation.rs`.

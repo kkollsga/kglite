@@ -734,6 +734,7 @@ pub fn kglite::api::cypher::planner::schema_check::collect_unknown_pattern_warni
 pub fn kglite::api::cypher::planner::schema_check::query_warning_sink() -> kglite::api::cypher::QueryWarningSink
 pub fn kglite::api::cypher::planner::schema_check::set_query_warning_sink(sink: kglite::api::cypher::QueryWarningSink)
 pub fn kglite::api::cypher::planner::schema_check::validate_schema(query: &kglite::api::cypher::CypherQuery, graph: &kglite::api::DirGraph) -> core::result::Result<(), kglite::api::cypher::planner::schema_check::SchemaError>
+pub fn kglite::api::cypher::planner::schema_check::with_query_warning_sink<R>(sink: kglite::api::cypher::QueryWarningSink, operation: impl core::ops::function::FnOnce() -> R) -> R
 pub mod kglite::api::cypher::planner::simplification
 pub struct kglite::api::cypher::planner::simplification::TextScoreRewrite
 pub kglite::api::cypher::planner::simplification::TextScoreRewrite::texts_to_embed: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
@@ -1041,6 +1042,7 @@ pub fn kglite::api::cypher::resolve_node_property(node: kglite::api::NodeView<'_
 pub fn kglite::api::cypher::rewrite_text_score(query: &mut kglite::api::cypher::CypherQuery, params: &std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>) -> core::result::Result<kglite::api::cypher::planner::simplification::TextScoreRewrite, alloc::string::String>
 pub fn kglite::api::cypher::set_query_warning_sink(sink: kglite::api::cypher::QueryWarningSink)
 pub fn kglite::api::cypher::validate_schema(query: &kglite::api::cypher::CypherQuery, graph: &kglite::api::DirGraph) -> core::result::Result<(), kglite::api::cypher::planner::schema_check::SchemaError>
+pub fn kglite::api::cypher::with_query_warning_sink<R>(sink: kglite::api::cypher::QueryWarningSink, operation: impl core::ops::function::FnOnce() -> R) -> R
 pub mod kglite::api::durable
 pub enum kglite::api::durable::CaptureOrigin
 pub kglite::api::durable::CaptureOrigin::Create
