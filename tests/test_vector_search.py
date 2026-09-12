@@ -1582,7 +1582,7 @@ class TestCypherTextScoreVectorQuery:
 
     def test_unknown_param_still_rejected(self):
         graph = self._make_graph()
-        with pytest.raises(kglite.KgError, match="not found"):
+        with pytest.raises(kglite.KgError, match=r"Missing parameter: \$missing"):
             graph.cypher("MATCH (n:Doc) RETURN text_score(n, 'summary', $missing) AS score")
 
     def test_non_numeric_vector_elements_rejected(self):

@@ -13,13 +13,15 @@ import sys
 
 def main(argv: list[str] | None = None) -> int:
     """Run the bundled Rust CLI with ``argv`` or ``sys.argv[1:]``."""
-    from kglite import _run_cli
+    from kglite.kglite import _CliReportedAgentFailure, _run_cli
 
     args = list(sys.argv[1:] if argv is None else argv)
     try:
         _run_cli(args)
     except KeyboardInterrupt:
         return 130
+    except _CliReportedAgentFailure:
+        return 1
     except RuntimeError as exc:
         print(f"kglite: {exc}", file=sys.stderr)
         return 1

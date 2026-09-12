@@ -17,7 +17,14 @@ BASELINE = ROOT / "tests" / "api-baselines" / "python-api.json"
 # was the only member, and the stub's `@runtime_checkable` Protocol is now a
 # real export — `from kglite import EmbeddingModel` used to raise.
 TYPING_ONLY: set[str] = set()
-STUB_INTERNAL = {"_backend_is_forked", "_fail_wal_append", "_wal_next_lsn", "_run_cli", "_run_mcp_server"}
+STUB_INTERNAL = {
+    "_backend_is_forked",
+    "_CliReportedAgentFailure",
+    "_fail_wal_append",
+    "_wal_next_lsn",
+    "_run_cli",
+    "_run_mcp_server",
+}
 NONCONSTRUCTIBLE = {"FrozenGraph", "ResultIter", "ResultView", "Session", "Transaction"}
 
 

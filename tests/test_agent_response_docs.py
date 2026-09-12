@@ -25,8 +25,8 @@ def _run(args: list[str], *, cwd: Path, env: dict[str, str]) -> subprocess.Compl
 
 
 def test_agent_response_guide_names_the_implemented_contract() -> None:
-    guide = (ROOT / "docs/operators/agent-responses.md").read_text()
-    readme = (ROOT / "README.md").read_text()
+    guide = (ROOT / "docs/operators/agent-responses.md").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
     for text in (
         "16,384",
         "4,096",

@@ -53,6 +53,18 @@ pub fn is_reported_agent_failure(error: &anyhow::Error) -> bool {
     error.downcast_ref::<ReportedAgentFailure>().is_some()
 }
 
+/// Convert a completed CLI run to the standalone process contract.
+pub fn exit_code(result: Result<()>) -> std::process::ExitCode {
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) if is_reported_agent_failure(&error) => std::process::ExitCode::FAILURE,
+        Err(error) => {
+            eprintln!("Error: {error:#}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
 /// How long a save-capable invocation waits for a peer to release the graph.
 ///
 /// Taken *before* the graph is read, and deliberately long: two `kglite write
@@ -192,8 +204,8 @@ enum Command {
         #[arg(long)]
         node_type: Option<String>,
         /// Output format.
-        #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
-        format: OutputFormat,
+        #[arg(long, value_enum, default_value_t = ReadySetFormat::Table)]
+        format: ReadySetFormat,
     },
     /// Print the XML graph description used by agents for structure discovery.
     Describe {
@@ -340,6 +352,24 @@ enum OutputFormat {
     Csv,
     Json,
     Agent,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+enum ReadySetFormat {
+    #[default]
+    Table,
+    Csv,
+    Json,
+}
+
+impl From<ReadySetFormat> for Mode {
+    fn from(value: ReadySetFormat) -> Self {
+        match value {
+            ReadySetFormat::Table => Mode::Table,
+            ReadySetFormat::Csv => Mode::Csv,
+            ReadySetFormat::Json => Mode::Json,
+        }
+    }
 }
 
 fn validate_agent_cli(cli: &Cli) -> Result<()> {
@@ -1646,5 +1676,23 @@ mod tests {
         .is_err());
         assert!(Cli::try_parse_from(["kglite", "response", "purge"]).is_err());
         assert!(Cli::try_parse_from(["kglite", "response", "purge", "--all"]).is_ok());
+    }
+
+    #[test]
+    fn ready_set_rejects_agent_format_during_parsing() {
+        let parsed = Cli::try_parse_from([
+            "kglite",
+            "ready-set",
+            "missing.kgl",
+            "--done",
+            "true",
+            "--format",
+            "agent",
+        ]);
+        let error = parsed.expect_err("ready-set agent output is outside the supported surface");
+        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
+        assert!(error
+            .to_string()
+            .contains("possible values: table, csv, json"));
     }
 }

@@ -43,7 +43,7 @@ pub(crate) fn cache_root() -> Result<PathBuf> {
         return Ok(PathBuf::from(root));
     }
     #[cfg(target_os = "windows")]
-    let base = std::env::var_os("LOCALAPPDATA");
+    let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
     #[cfg(target_os = "macos")]
     let base = std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Library/Caches"));
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -52,8 +52,7 @@ pub(crate) fn cache_root() -> Result<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")));
     #[cfg(not(any(unix, target_os = "windows")))]
     let base: Option<PathBuf> = None;
-    base.map(PathBuf::from)
-        .map(|path| path.join("kglite/agent-responses"))
+    base.map(|path| path.join("kglite/agent-responses"))
         .ok_or_else(|| anyhow!("cannot determine the per-user cache directory"))
 }
 

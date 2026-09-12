@@ -112,12 +112,27 @@ def test_expression_errors_are_exact(expression_graph: kglite.KnowledgeGraph, qu
 
 def test_binary_operands_fail_left_to_right(expression_graph: kglite.KnowledgeGraph) -> None:
     with pytest.raises(kglite.CypherExecutionError) as left_first:
-        expression_graph.cypher("RETURN $missing + [0]['x'] AS value").to_list()
-    assert str(left_first.value) == "Cypher execution error: Missing parameter: $missing"
+        expression_graph.cypher("RETURN [0][1.5] + [0]['x'] AS value").to_list()
+    assert str(left_first.value).startswith("Cypher execution error: List index must be an integer")
 
     with pytest.raises(kglite.CypherExecutionError) as right_second:
-        expression_graph.cypher("RETURN [0]['x'] + $missing AS value").to_list()
+        expression_graph.cypher("RETURN [0]['x'] + [0][1.5] AS value").to_list()
     assert str(right_second.value).startswith("Cypher execution error: String index requires")
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "RETURN $missing + [0]['x'] AS value",
+        "RETURN [0]['x'] + $missing AS value",
+    ],
+)
+def test_parameter_presence_precedes_binary_operand_evaluation(
+    expression_graph: kglite.KnowledgeGraph, query: str
+) -> None:
+    with pytest.raises(kglite.CypherExecutionError) as caught:
+        expression_graph.cypher(query).to_list()
+    assert str(caught.value) == "Cypher execution error: Missing parameter: $missing"
 
 
 def test_count_subquery_honors_the_shared_budget(

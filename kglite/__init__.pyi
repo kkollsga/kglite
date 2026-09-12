@@ -1362,6 +1362,9 @@ def _run_cli(argv: list[str]) -> None:
     """
     ...
 
+class _CliReportedAgentFailure(Exception):
+    """Private console sentinel for an already-emitted structured failure."""
+
 def _run_mcp_server(argv: list[str], embedder_factory: Optional[Callable[[str], EmbeddingModel]] = None) -> None:
     """Run the bundled `kglite-mcp-server` in-process; block until it exits.
 

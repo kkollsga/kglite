@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -26,6 +27,59 @@ def test_python_module_launcher_forwards_help_to_rust() -> None:
     assert "query" in result.stdout
     assert "session" in result.stdout
     assert "skill" not in result.stdout
+
+
+def test_python_module_agent_failure_is_structured_once(tmp_path: Path) -> None:
+    graph_path = tmp_path / "agent-error.kgl"
+    kglite.KnowledgeGraph().save(str(graph_path))
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kglite.cli",
+            "query",
+            str(graph_path),
+            "RETURN $missing",
+            "--format",
+            "agent",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert result.stderr == ""
+    response = json.loads(result.stdout)
+    assert response["isError"] is True
+    assert response["structuredContent"]["diagnostics"]["errors"]
+
+
+def test_python_module_ordinary_failure_still_uses_stderr(tmp_path: Path) -> None:
+    graph_path = tmp_path / "ordinary-error.kgl"
+    kglite.KnowledgeGraph().save(str(graph_path))
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kglite.cli",
+            "query",
+            str(graph_path),
+            "RETURN $missing",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert result.stderr.startswith("kglite: ")
+    assert "$missing" in result.stderr
 
 
 def test_wheel_cli_installs_no_skill(tmp_path: Path) -> None:

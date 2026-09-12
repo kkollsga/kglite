@@ -40,6 +40,13 @@ use graph::pyapi::result_view::{ResultIter, ResultView};
 use graph::pyapi::session::Session;
 use graph::{KnowledgeGraph, Transaction};
 
+pyo3::create_exception!(
+    kglite,
+    _CliReportedAgentFailure,
+    pyo3::exceptions::PyException,
+    "Private sentinel: the CLI already emitted a structured agent failure."
+);
+
 /// Curated Rust-side façade, and the **only** stable Rust API this wrapper
 /// promises to keep: every other module in this crate is private, and the
 /// internals behind these re-exports move between minor releases. Breakage
@@ -840,8 +847,15 @@ fn _run_cli(py: Python<'_>, argv: Vec<String>) -> PyResult<()> {
     let mut full = Vec::with_capacity(argv.len() + 1);
     full.push("kglite".to_string());
     full.extend(argv);
-    py.detach(|| kglite_cli::run(full))
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{e:#}")))
+    match py.detach(|| kglite_cli::run(full)) {
+        Ok(()) => Ok(()),
+        Err(error) if kglite_cli::is_reported_agent_failure(&error) => {
+            Err(PyErr::new::<_CliReportedAgentFailure, _>(()))
+        }
+        Err(error) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "{error:#}"
+        ))),
+    }
 }
 
 /// Run the bundled MCP server in-process and block until it exits.
@@ -932,6 +946,10 @@ fn kglite(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_backend_is_forked, m)?)?;
     m.add_function(wrap_pyfunction!(_fail_wal_append, m)?)?;
     m.add_function(wrap_pyfunction!(_wal_next_lsn, m)?)?;
+    m.add(
+        "_CliReportedAgentFailure",
+        py.get_type::<_CliReportedAgentFailure>(),
+    )?;
     m.add_function(wrap_pyfunction!(_run_cli, m)?)?;
     #[cfg(feature = "mcp-server")]
     m.add_function(wrap_pyfunction!(_run_mcp_server, m)?)?;
