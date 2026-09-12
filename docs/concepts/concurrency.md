@@ -40,6 +40,13 @@ wait; once a reader has its snapshot, a later commit does not change it.
 transactions may work independently, but a stale commit returns a conflict;
 production bindings should not use last-writer-wins.
 
+The version check is deliberately conservative. A live mutation attempt obtains
+mutable ownership before statement execution and advances the owner version. If
+that statement later fails, its data changes roll back atomically, but the
+version advance remains. A transaction that already created a mutable working
+copy therefore conflicts at commit; a transaction that never materialized a
+working copy remains a no-op commit. Treat the conflict as a retry boundary.
+
 ## Disk generations and processes
 
 Disk mode publishes immutable generations. Readers resolve `CURRENT` once and

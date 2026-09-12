@@ -97,13 +97,12 @@ def test_mutation_deadline_raises_typed_timeout():
 
 @requires_posix_sigint
 def test_session_mutation_cancel_is_atomic():
-    """A `Session.execute` mutation interrupted by Ctrl-C is atomic: the
-    transactional working copy is discarded on abort, so the graph is either
-    fully mutated (it finished) or unchanged (it was cancelled) — never partial.
+    """A `Session.execute` mutation interrupted by Ctrl-C leaves no partial write.
 
-    (Live `KnowledgeGraph` / `Transaction` mutations are deliberately NOT
-    cancellable — they mutate in place / unreliably roll back — so this
-    invariant is only guaranteed for the `Session` path.)
+    Session wires SIGINT into the canonical statement execution path. Live
+    `KnowledgeGraph` and `Transaction` mutations use the same statement rollback
+    mechanism for execution/deadline/work-budget failures, but do not install a
+    SIGINT cancellation token. This test pins the Session-specific signal policy.
     """
     g = _scan_graph(4_000_000)
     s = g.session()

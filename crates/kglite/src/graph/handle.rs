@@ -622,16 +622,16 @@ pub fn make_dir_graph_mut_preserving_lineage(arc: &mut Arc<DirGraph>) -> &mut Di
 /// **Cost when other `Arc<DirGraph>` references exist** (a snapshot held by an
 /// open transaction, a clone held by a still-alive `ResultView`, a `freeze()`):
 ///
-/// * **Memory mode — a copy-on-write fork, not a copy.** The backend forks to
-///   an overlay over the shared data and the indexes layer over shared levels,
-///   so the write is O(write) and the overlay folds back on the first write
-///   after the last reader drops. See `docs/rust/structural-sharing.md`, and
-///   `held_reference_clone_tests` below for the executable form.
-/// * **Mapped and disk modes still deep-copy**, so a lingering reference there
-///   does cost a full copy — every node, edge and index — on the first write.
+/// * **Memory mode** forks eligible graphs into an overlay over shared data and
+///   shared index levels. A graph whose slot state fails the `can_fork`
+///   precondition retains the deep-copy fallback. See
+///   `docs/rust/structural-sharing.md` and `held_reference_clone_tests` below.
+/// * **Mapped mode** clones its owned graph state and derived-index shells but
+///   shares column stores through `Arc`.
+/// * **Disk mode** remaps published immutable mmap arrays and copies mutation
+///   overlays. Arrays still backed by heap vectors clone their contents.
 /// * An adjacency edit (adding or removing an edge, deleting a node) is not
-///   overlay-expressible and **flattens** the fork: one copy, paid once per
-///   fork rather than once per statement.
+///   overlay-expressible on a memory fork and flattens that fork.
 pub fn make_dir_graph_mut(arc: &mut Arc<DirGraph>) -> &mut DirGraph {
     let graph = make_dir_graph_mut_preserving_lineage(arc);
     // A deferred load left the declared indexes unbuilt. Build them *here*,

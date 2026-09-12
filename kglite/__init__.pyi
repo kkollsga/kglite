@@ -424,10 +424,12 @@ class ResultView:
 
     **Deferred results hold the graph open.** To serve rows later, a deferred
     view keeps a reference to the graph it was queried from. Writing to that
-    graph while such a view is still alive copies the whole graph (every node,
-    edge, index and embedding) so the view keeps seeing the data it was built
-    from. On a large graph that copy costs tens of milliseconds and it repeats
-    every time the pattern recurs.
+    graph while such a view is still alive clones its graph shell so the view
+    keeps seeing the data it was built from. Eligible memory graphs use a
+    copy-on-write overlay, with a deep-copy fallback for incompatible slot
+    state. Mapped graphs share column stores while cloning other owned state;
+    disk graphs remap published mmap arrays and copy mutation overlays, while
+    heap-backed arrays still clone.
 
     Very small results — roughly a couple of dozen values, so a single-entity
     lookup or a handful of rows — are converted up front and hold no graph

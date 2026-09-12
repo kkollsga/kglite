@@ -159,12 +159,12 @@ impl ResultView {
     /// **Small results materialise immediately and keep no graph reference.**
     /// A retained lazy view pins the `Arc<DirGraph>` it was built from, so the
     /// next write through the owning `KnowledgeGraph` finds a shared Arc and
-    /// has to fork. On a memory backend that fork is copy-on-write and costs
-    /// O(the write) (`storage/forked.rs`); on `Mapped` and `Disk` it is still a
-    /// deep clone of the entire graph — every node, edge, index and embedding —
-    /// so there the ordinary read-then-write request handler
-    /// (`rows = g.cypher(...)` then `g.cypher("... SET ...")`, with `rows`
-    /// still in scope) pays a whole-graph copy *per request*.
+    /// has to clone its graph shell. Eligible memory graphs fork into an
+    /// overlay, with a deep-copy fallback for slot states that cannot fold
+    /// safely. Mapped graphs share column stores while cloning other owned
+    /// state. Disk graphs remap published mmap arrays and copy mutation
+    /// overlays, while heap-backed arrays still clone their contents. See
+    /// `kglite_core::api::make_dir_graph_mut` for the complete clone contract.
     ///
     /// Within `EAGER_MATERIALISE_MAX_CELLS` the projection is bounded and
     /// cheap, so paying it up front beats risking that fork and the view

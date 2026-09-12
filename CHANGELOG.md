@@ -24,6 +24,10 @@ before upgrading.
   diagnostics, and changing the direct schema-lock flag cannot reuse an
   unlocked plan. A rejected structured-shape schema leaves the prior schema
   and its constraints unchanged.
+- Failed live writes restore their statement data while conservatively
+  invalidating an already-materialized optimistic transaction; an unused
+  transaction remains a no-op commit. Public result-view and concurrency docs
+  now describe the storage-specific snapshot and conflict behavior.
   JSONL sessions offer the same behavior through explicit per-request agent
   format and `response_expand`; ordinary JSON, CSV, and session output remain
   complete. The new bounded-response guide documents targeted MCP and CLI

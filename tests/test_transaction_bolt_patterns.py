@@ -191,9 +191,10 @@ class TestReadOnlyTransaction:
 class TestAutoCommitContract:
     """`graph.cypher()` outside a transaction is auto-commit per call.
 
-    Bolt servers MUST NOT expose this to clients — they wrap each session's
-    statements in BEGIN/COMMIT to preserve atomicity. These tests pin the
-    contract so the binding-implementer docs can reference the exact shape.
+    Each successful call is visible independently, while a failed statement
+    rolls back its own changes. Bolt servers use BEGIN/COMMIT when clients need
+    one transaction to span multiple statements. These tests pin the contract
+    so the binding-implementer docs can reference the exact shape.
     """
 
     def test_each_cypher_call_is_independently_visible(self, graph_with_people):
@@ -202,35 +203,17 @@ class TestAutoCommitContract:
         graph_with_people.cypher("CREATE (:Person {id: 11, name: 'AC2'})")
         assert _count_people(graph_with_people) == 4
 
-    def test_partial_mutation_visible_when_multi_statement_fails(self, graph_with_people):
-        """Single cypher() call with multiple CREATE statements: if a later one
-        fails (e.g. typed-property validation), earlier CREATEs are already in
-        the graph. This is the contract a Bolt server wraps in BEGIN/COMMIT."""
-        # Build a query that creates two nodes then fails on a parse-time
-        # error (using an invalid expression on the third clause). The
-        # parser catches it before any execution, so neither prior CREATE
-        # is visible — wrong shape. Use a runtime error instead.
-        baseline = _count_people(graph_with_people)
-        # CREATE clauses that succeed, then a SET on a non-existent label
-        # (succeeds with 0 rows in cypher's lenient mode). To trigger a
-        # genuine mid-statement runtime failure, use parameter mismatch.
-        # The cleanest case: a procedure call requiring a missing arg.
-        try:
+    def test_failed_auto_commit_statement_restores_exact_state(self, graph_with_people):
+        """A late error rolls back its statement; earlier successful calls remain."""
+        before = graph_with_people.cypher("MATCH (p:Person) RETURN p.id AS id, p.name AS name ORDER BY id").to_list()
+        with pytest.raises(kglite.CypherExecutionError, match=r"duration\(\)") as failure:
             graph_with_people.cypher(
-                "CREATE (:Person {id: 90, name: 'BeforeFail'}) "
-                "WITH count(*) AS c "
-                "CALL orphan_node({wrong_kwarg: 'X'}) YIELD node "
-                "RETURN count(node)"
+                "CREATE (:Person {id: 90, name: 'BeforeFail'}), "
+                "(:Person {id: 91, name: duration({months: 2147483648})})"
             )
-        except kglite.KgError:
-            pass
-        # The CREATE before the failing CALL IS now in the graph — auto-commit.
-        # This is the contract a Bolt server must wrap to provide atomicity.
-        post = _count_people(graph_with_people)
-        # Contract: at least one CREATE landed despite the downstream
-        # CALL failure. Bolt servers wrap statements in begin()/commit()
-        # exactly because of this.
-        assert post >= baseline
+        assert failure.value.code == "CypherExecution"
+        after = graph_with_people.cypher("MATCH (p:Person) RETURN p.id AS id, p.name AS name ORDER BY id").to_list()
+        assert after == before
 
 
 # ── Timeouts ───────────────────────────────────────────────────────────

@@ -230,6 +230,46 @@ def test_disjoint_transactions_still_conflict_by_design():
     assert kg.cypher("MATCH (n:N {id: 1}) RETURN n.v AS v").to_list() == [{"v": 111}]
 
 
+def _n_rows(kg):
+    return kg.cypher("MATCH (n:N) RETURN n.id AS id, n.v AS v ORDER BY id").to_list()
+
+
+def test_failed_live_write_conflicts_with_pending_mutating_transaction():
+    """OCC observes a failed live write after a transaction materializes changes."""
+    kg = _two_node_graph()
+    tx = kg.begin()
+    tx.cypher("MATCH (n:N {id: 1}) SET n.v = 111")
+    live_before = _n_rows(kg)
+    with pytest.raises(kglite.CypherExecutionError, match=r"duration\(\)") as failure:
+        kg.cypher("CREATE (:N {id: 90, v: 90}), (:N {id: 91, v: duration({months: 2147483648})})")
+    assert failure.value.code == "CypherExecution"
+    assert _n_rows(kg) == live_before
+    with pytest.raises(kglite.TransactionConflictError) as conflict:
+        tx.commit()
+    assert conflict.value.code == "TransactionConflict"
+    assert _n_rows(kg) == live_before
+
+
+def test_failed_live_write_leaves_live_data_unchanged():
+    kg = _two_node_graph()
+    before = _n_rows(kg)
+    with pytest.raises(kglite.CypherExecutionError, match=r"duration\(\)"):
+        kg.cypher("CREATE (:N {id: 90, v: 90}), (:N {id: 91, v: duration({months: 2147483648})})")
+    assert _n_rows(kg) == before
+
+
+def test_failed_live_write_does_not_conflict_with_unused_transaction_control():
+    """An unused transaction returns before the OCC comparison."""
+    kg = _two_node_graph()
+    tx = kg.begin()
+    live_before = _n_rows(kg)
+    with pytest.raises(kglite.CypherExecutionError, match=r"duration\(\)"):
+        kg.cypher("CREATE (:N {id: 90, v: 90}), (:N {id: 91, v: duration({months: 2147483648})})")
+    assert _n_rows(kg) == live_before
+    tx.commit()
+    assert _n_rows(kg) == live_before
+
+
 # ─── C. The retry loop, end to end ──────────────────────────────────────────
 
 

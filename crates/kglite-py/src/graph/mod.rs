@@ -997,10 +997,13 @@ pub(crate) fn parse_inline_timeseries(
 /// Get a mutable `DirGraph` out of the `Arc`. `Arc::make_mut` hands back a
 /// mutable reference in place when this is the only reference.
 ///
-/// WARNING: if other `Arc` references exist (a `ResultView` still in Python
-/// scope, a cloned `KnowledgeGraph`), this deep-clones the entire `DirGraph`
-/// — nodes, edges and indices. Fine in read-heavy workloads, but a lingering
-/// reference causes unexpected memory spikes on mutation.
+/// If another reference exists (a retained `ResultView`, transaction snapshot,
+/// or cloned `KnowledgeGraph`), the clone mechanism depends on storage. An
+/// eligible memory graph forks into an overlay, with a deep-copy fallback when
+/// its slot state cannot be folded safely. A mapped graph shares its column
+/// stores while cloning other owned state. A disk graph remaps published mmap
+/// arrays and copies mutation overlays; heap-backed arrays still clone. See
+/// `kglite_core::api::make_dir_graph_mut` for the full contract.
 pub(crate) use kglite_core::api::make_dir_graph_mut as get_graph_mut;
 
 /// Resolve the `selection_only` argument shared by every export entry point
