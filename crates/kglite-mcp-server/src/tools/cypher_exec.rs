@@ -17,8 +17,8 @@ use crate::tools::*;
 /// Complete native evidence retained behind the MCP text presentation.
 ///
 /// Rows stay positional so duplicate column names and query order survive.
-/// Phase 3 adds domain navigation; this Phase 2 envelope establishes the
-/// stable paths and completeness metadata that navigation will describe.
+/// The navigation directory names only schema paths and observed counts; it
+/// does not infer semantic groups from column names or values.
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct CypherResultEnvelope {
     pub(crate) schema_version: u8,
@@ -30,6 +30,7 @@ pub(crate) struct CypherResultEnvelope {
     pub(crate) identity: CypherIdentity,
     pub(crate) operation: CypherOperation,
     pub(crate) representation: CypherRepresentation,
+    pub(crate) navigation: serde_json::Value,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -37,6 +38,8 @@ pub(crate) struct CypherCoverage {
     pub(crate) executed_rows: usize,
     pub(crate) engine_row_limit: Option<usize>,
     pub(crate) rows_before_engine_limit: Option<u64>,
+    pub(crate) query_literal_limits: Vec<i64>,
+    pub(crate) literal_limit_status: &'static str,
     pub(crate) database_population: &'static str,
 }
 
@@ -57,6 +60,8 @@ pub(crate) struct CypherOperation {
 pub(crate) struct CypherRepresentation {
     pub(crate) text_complete: bool,
     pub(crate) text_kind: &'static str,
+    pub(crate) text_rows: usize,
+    pub(crate) text_row_limit: Option<usize>,
 }
 
 /// Human-compatible text plus the complete structured result used for
@@ -100,6 +105,7 @@ impl CypherToolOutput {
 
 pub(crate) fn cypher_tool_output(
     outcome: &ExecuteOutcome,
+    query: &str,
     text: String,
     identity_footer: String,
 ) -> CypherToolOutput {
@@ -123,6 +129,18 @@ pub(crate) fn cypher_tool_output(
         })
         .collect::<Vec<Vec<serde_json::Value>>>();
     let output_csv = outcome.output_format == cypher::OutputFormat::Csv;
+    let features = cypher::query_features(query).expect("executed Cypher query parses");
+    let literal_limit_status = if features.literal_limits.is_empty() {
+        "no_literal_limit"
+    } else if features
+        .literal_limits
+        .iter()
+        .any(|limit| *limit >= 0 && rows.len() == *limit as usize)
+    {
+        "executed_rows_match_a_literal_limit"
+    } else {
+        "executed_rows_do_not_match_a_literal_limit"
+    };
     let text_complete = if output_csv {
         result.rows.len() <= INLINE_CSV_ROW_LIMIT
             && !text.starts_with("FORMAT CSV:")
@@ -130,6 +148,17 @@ pub(crate) fn cypher_tool_output(
     } else {
         result.rows.len() <= 15
     };
+    let text_rows = if output_csv {
+        if text.starts_with("FORMAT CSV:") {
+            0
+        } else {
+            result.rows.len().min(INLINE_CSV_ROW_LIMIT)
+        }
+    } else {
+        result.rows.len().min(15)
+    };
+    let executed_rows = rows.len();
+    let navigation = cypher_navigation(&result.columns, &rows, text_rows);
     CypherToolOutput {
         text,
         structured: CypherResultEnvelope {
@@ -137,9 +166,11 @@ pub(crate) fn cypher_tool_output(
             kind: "cypher_result",
             columns: result.columns.clone(),
             coverage: CypherCoverage {
-                executed_rows: rows.len(),
+                executed_rows,
                 engine_row_limit,
                 rows_before_engine_limit,
+                query_literal_limits: features.literal_limits,
+                literal_limit_status,
                 database_population: "unknown",
             },
             rows,
@@ -156,9 +187,98 @@ pub(crate) fn cypher_tool_output(
             representation: CypherRepresentation {
                 text_complete,
                 text_kind: if output_csv { "csv" } else { "row_preview" },
+                text_rows,
+                text_row_limit: Some(if output_csv { INLINE_CSV_ROW_LIMIT } else { 15 }),
             },
+            navigation,
         },
     }
+}
+
+fn cypher_navigation(
+    columns: &[String],
+    rows: &[Vec<serde_json::Value>],
+    text_rows: usize,
+) -> serde_json::Value {
+    const COLUMN_LIMIT: usize = 24;
+    const LABEL_LIMIT: usize = 128;
+    serde_json::json!({
+        "schema_version": 1,
+        "available": {
+            "row_count": rows.len(),
+            "column_count": columns.len(),
+            "columns": columns.iter().take(COLUMN_LIMIT)
+                .map(|name| name.chars().take(LABEL_LIMIT).collect::<String>())
+                .collect::<Vec<_>>(),
+            "sections": [
+                {"json_pointer":"/columns","description":"ordered column names"},
+                {"json_pointer":"/rows","description":"positional rows in original order"},
+                {"json_pointer":"/diagnostics","description":"engine diagnostics and warnings"},
+                {"json_pointer":"/coverage","description":"query and executor limit facts"},
+                {"json_pointer":"/identity","description":"active graph and response steering"},
+                {"json_pointer":"/operation","description":"read/write and output format"},
+                {"json_pointer":"/representation","description":"text presentation completeness"}
+            ]
+        },
+        "omissions": {
+            "column_names": columns.len().saturating_sub(COLUMN_LIMIT),
+            "complete_column_names_at": "/columns"
+        },
+        "targets": [
+            {"purpose":"continue rows after the text presentation","json_pointer":"/rows","offset":text_rows,"response":{"mode":"bounded","max_bytes":4096}},
+            {"purpose":"inspect ordered column names","json_pointer":"/columns","offset":0,"response":{"mode":"bounded","max_bytes":4096}},
+            {"purpose":"inspect warnings and execution facts","json_pointer":"/diagnostics","offset":0,"response":{"mode":"bounded","max_bytes":4096}},
+            {"purpose":"inspect query and executor limits","json_pointer":"/coverage","offset":0,"response":{"mode":"bounded","max_bytes":4096}}
+        ],
+        "observed_value_targets": observed_value_targets(rows),
+        "composition": "Copy one target's json_pointer, offset and response into the framework's advertised selected_value arguments. Keep its session-specific name and result_id unchanged."
+    })
+}
+
+fn observed_value_targets(rows: &[Vec<serde_json::Value>]) -> Vec<serde_json::Value> {
+    fn escape(segment: &str) -> String {
+        segment.replace('~', "~0").replace('/', "~1")
+    }
+    fn visit(
+        value: &serde_json::Value,
+        pointer: String,
+        depth: usize,
+        targets: &mut Vec<serde_json::Value>,
+    ) {
+        const TARGET_LIMIT: usize = 16;
+        if targets.len() >= TARGET_LIMIT {
+            return;
+        }
+        match value {
+            serde_json::Value::Array(values) if depth < 6 => {
+                for (index, value) in values.iter().enumerate() {
+                    visit(value, format!("{pointer}/{index}"), depth + 1, targets);
+                }
+            }
+            serde_json::Value::Object(values) if depth < 6 => {
+                for (name, value) in values {
+                    visit(
+                        value,
+                        format!("{pointer}/{}", escape(name)),
+                        depth + 1,
+                        targets,
+                    );
+                }
+            }
+            _ => targets.push(serde_json::json!({
+                "json_pointer": pointer,
+                "offset": 0,
+                "response": {"mode":"bounded","max_bytes":4096}
+            })),
+        }
+    }
+    let mut targets = Vec::new();
+    for (row, values) in rows.iter().take(2).enumerate() {
+        for (column, value) in values.iter().enumerate() {
+            visit(value, format!("/rows/{row}/{column}"), 0, &mut targets);
+        }
+    }
+    targets
 }
 
 #[cfg(test)]
@@ -180,12 +300,76 @@ mod structured_output_tests {
             output_format: cypher::OutputFormat::Default,
             explain: false,
         };
-        let output = cypher_tool_output(&outcome, "preview".into(), "identity".into());
+        let output = cypher_tool_output(
+            &outcome,
+            "RETURN null AS first, 7 AS second",
+            "preview".into(),
+            "identity".into(),
+        );
         assert_eq!(output.structured.columns, ["duplicate", "duplicate"]);
         assert_eq!(
             output.structured.rows,
             vec![vec![serde_json::Value::Null, serde_json::json!(7)]]
         );
+    }
+
+    #[test]
+    fn conversion_distinguishes_engine_truncation_from_query_limits() {
+        let outcome = ExecuteOutcome {
+            result: cypher::CypherResult {
+                columns: vec!["n".into()],
+                rows: vec![vec![Value::Int64(1)]],
+                stats: None,
+                profile: None,
+                diagnostics: Some(cypher::QueryDiagnostics {
+                    row_limit: Some(1),
+                    total_rows: Some(40),
+                    warnings: vec!["row_limit retained 1 of 40 rows".into()],
+                    ..Default::default()
+                }),
+                lazy: None,
+            },
+            is_mutation: false,
+            output_format: cypher::OutputFormat::Default,
+            explain: false,
+        };
+        let output = cypher_tool_output(
+            &outcome,
+            "UNWIND range(1,40) AS n RETURN n",
+            "preview".into(),
+            "identity".into(),
+        );
+        assert_eq!(output.structured.coverage.engine_row_limit, Some(1));
+        assert_eq!(
+            output.structured.coverage.rows_before_engine_limit,
+            Some(40)
+        );
+        assert_eq!(
+            output.structured.coverage.literal_limit_status,
+            "no_literal_limit"
+        );
+        assert_eq!(output.structured.coverage.database_population, "unknown");
+    }
+
+    #[test]
+    fn navigation_bounds_high_cardinality_columns_and_empty_results() {
+        let columns = (0..80)
+            .map(|index| format!("column_{index}_{}", "界".repeat(300)))
+            .collect::<Vec<_>>();
+        let navigation = cypher_navigation(&columns, &[], 0);
+        assert_eq!(navigation["available"]["row_count"], 0);
+        assert_eq!(navigation["available"]["column_count"], 80);
+        assert_eq!(
+            navigation["available"]["columns"].as_array().unwrap().len(),
+            24
+        );
+        assert_eq!(navigation["omissions"]["column_names"], 56);
+        assert_eq!(navigation["targets"][0]["offset"], 0);
+        assert!(navigation["observed_value_targets"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(serde_json::to_vec(&navigation).unwrap().len() < 16_384);
     }
 }
 

@@ -76,6 +76,7 @@ pub(crate) fn run_cypher_tool_output(
     let identity = graph.identity_footer();
     Ok(cypher_tool_output(
         &outcome,
+        query,
         format!("{rendered}{identity}"),
         identity,
     ))
@@ -222,12 +223,13 @@ pub(crate) fn run_cypher_write_output(
             // the wrong graph has no later call that can tell it so.
             identity
         );
-        return Ok(cypher_tool_output(&outcome, text, identity));
+        return Ok(cypher_tool_output(&outcome, query, text, identity));
     }
     let rendered = render_cypher_output(&outcome.result, output_csv, csv_http)?;
     let identity = active.identity_footer();
     Ok(cypher_tool_output(
         &outcome,
+        query,
         format!("{rendered}{identity}"),
         identity,
     ))

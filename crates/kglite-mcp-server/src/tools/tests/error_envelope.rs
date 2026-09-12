@@ -50,7 +50,7 @@ fn kglite_server_with_csv(
         OverviewDecorations::default(),
         csv,
     );
-    server
+    crate::boot::apply_response_preview(server)
 }
 
 fn writable_builtins() -> Builtins {
@@ -115,6 +115,20 @@ fn text_of(result: &CallToolResult) -> String {
         .filter_map(|block| block.as_text().map(|t| t.text.clone()))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn outlined_field<'a>(outline: &'a serde_json::Value, location: &str) -> &'a serde_json::Value {
+    if let Some(value) = outline
+        .get("value")
+        .and_then(|value| value.pointer(location))
+    {
+        return value;
+    }
+    outline["fields"]
+        .as_array()
+        .and_then(|fields| fields.iter().find(|field| field["location"] == location))
+        .and_then(|field| field.get("value"))
+        .unwrap_or_else(|| panic!("missing outlined field {location}: {outline}"))
 }
 
 #[track_caller]
@@ -219,7 +233,7 @@ async fn structured_conversion_preserves_duplicate_columns_null_types_and_nested
     ))
     .await;
     let nested = json!({
-        "deep": [null, true, 7, 1.5, {"key": "z".repeat(8_000)}]
+        "deep": [null, true, 7, 1.5, {"a/b~c": "z".repeat(8_000)}]
     });
     let bounded = call_client(
         &client,
@@ -234,10 +248,58 @@ async fn structured_conversion_preserves_duplicate_columns_null_types_and_nested
     let body = text_of(&bounded);
     let preview: serde_json::Value = serde_json::from_str(&body)
         .unwrap_or_else(|error| panic!("budget preview ({error}): {body}"));
-    let action = &preview["response_budget"]["next"]["selected_value"];
+    let budget = &preview["response_budget"];
+    let action = &budget["next"]["selected_value"];
+    let directory_pointer = outlined_field(&budget["domain_guidance"], "/coverage")
+        ["navigation_json_pointer"]
+        .as_str()
+        .expect("guidance points to omitted navigation directory");
+    let directory = call_client(&client, action["name"].as_str().unwrap(), {
+        let mut args = action["arguments"].clone();
+        args["path"] = json!(directory_pointer);
+        args
+    })
+    .await;
+    let navigation: serde_json::Value = serde_json::from_str(&text_of(&directory)).unwrap();
+    let target = navigation["observed_value_targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|target| {
+            target["json_pointer"]
+                .as_str()
+                .is_some_and(|pointer| pointer.ends_with("/deep/4/a~1b~0c"))
+        })
+        .expect("returned nested target");
+    assert_eq!(target["json_pointer"], "/rows/0/1/deep/4/a~1b~0c");
     let selected = call_client(&client, action["name"].as_str().unwrap(), {
         let mut args = action["arguments"].clone();
-        args["path"] = json!("/rows/0/1/deep/4/key");
+        args["path"] = target["json_pointer"].clone();
+        args["offset"] = target["offset"].clone();
+        args["response"] = target["response"].clone();
+        args
+    })
+    .await;
+    let selected_preview: serde_json::Value = serde_json::from_str(&text_of(&selected)).unwrap();
+    let page = &selected_preview["response_budget"]["next"]["page"];
+    let continued = call_client(
+        &client,
+        page["name"].as_str().unwrap(),
+        page["arguments"].clone(),
+    )
+    .await;
+    let continued_preview: serde_json::Value = serde_json::from_str(&text_of(&continued)).unwrap();
+    assert!(
+        continued_preview["response_budget"]["preview"]["offset"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+
+    let selected = call_client(&client, action["name"].as_str().unwrap(), {
+        let mut args = action["arguments"].clone();
+        args["path"] = target["json_pointer"].clone();
+        args["response"] = json!({"mode":"full"});
         args
     })
     .await;
@@ -314,6 +376,143 @@ async fn retained_mutation_survives_a_later_graph_change_without_replay() {
         .execute_cypher_read("MATCH (n:MutationMarker) RETURN count(n)", HashMap::new())
         .unwrap();
     assert_eq!(markers.result.rows, vec![vec![Value::Int64(1)]]);
+}
+
+#[tokio::test]
+async fn navigation_targets_compose_with_the_advertised_collision_safe_action() {
+    let mut active = fresh_active();
+    let params = HashMap::new();
+    let opts = kglite::api::session::ExecuteOptions::eager(&params);
+    for index in 0..48 {
+        kglite::api::session::execute_mut(
+            kglite::api::make_dir_graph_mut(active.kg.dir_mut()),
+            &format!(
+                "CREATE (:Navigable {{id:{index}, body:'{}'}})",
+                "界".repeat(600)
+            ),
+            &opts,
+        )
+        .unwrap();
+    }
+    let mut server = McpServer::new(Default::default());
+    server.register_typed_tool(
+        "expand_response",
+        "domain collision",
+        |_: ReadCypherArgs| "domain route".to_string(),
+    );
+    register(
+        &mut server,
+        state_with_active(active),
+        Builtins::default(),
+        OverviewDecorations::default(),
+        Arc::default(),
+    );
+    let client = boot(crate::boot::apply_response_preview(server)).await;
+    let bounded = call_client(
+        &client,
+        "cypher_query",
+        json!({"query":"MATCH (n:Navigable) RETURN n.id AS id, n.body AS body ORDER BY id"}),
+    )
+    .await;
+    assert!(serde_json::to_vec(&bounded).unwrap().len() <= 16_384);
+    let preview: serde_json::Value = serde_json::from_str(&text_of(&bounded)).unwrap();
+    let budget = &preview["response_budget"];
+    let advertised_name = budget["next"]["selected_value"]["name"]
+        .as_str()
+        .expect("advertised expansion name");
+    assert!(!advertised_name.is_empty());
+    assert_ne!(advertised_name, "expand_response");
+    let navigation = &budget["domain_guidance"]["value"]["navigation"];
+    assert_eq!(navigation["available"]["row_count"], 48);
+    let target = &navigation["targets"][0];
+    let expansion_name = budget["next"]["selected_value"]["name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut arguments = budget["next"]["selected_value"]["arguments"].clone();
+    arguments["path"] = target["json_pointer"].clone();
+    arguments["offset"] = target["offset"].clone();
+    arguments["response"] = target["response"].clone();
+    let page = call_client(&client, &expansion_name, arguments).await;
+    assert!(serde_json::to_vec(&page).unwrap().len() <= 4096);
+    let page_preview: serde_json::Value = serde_json::from_str(&text_of(&page)).unwrap();
+    assert_eq!(page_preview["response_budget"]["preview"]["offset"], 15);
+
+    let mut directory_args = budget["next"]["selected_value"]["arguments"].clone();
+    directory_args["path"] = json!("/navigation");
+    let directory = call_client(&client, &expansion_name, directory_args).await;
+    let directory: serde_json::Value = serde_json::from_str(&text_of(&directory)).unwrap();
+    assert_eq!(
+        directory["available"]["sections"][1]["json_pointer"],
+        "/rows"
+    );
+}
+
+#[tokio::test]
+async fn query_limit_coverage_stays_observed_and_database_population_unknown() {
+    let mut active = fresh_active();
+    let params = HashMap::new();
+    let opts = kglite::api::session::ExecuteOptions::eager(&params);
+    kglite::api::session::execute_mut(
+        kglite::api::make_dir_graph_mut(active.kg.dir_mut()),
+        &format!(
+            "UNWIND range(1,120) AS i CREATE (:Function {{id:i, access:'write', body:'{}'}})",
+            "w".repeat(200)
+        ),
+        &opts,
+    )
+    .unwrap();
+    kglite::api::session::execute_mut(
+        kglite::api::make_dir_graph_mut(active.kg.dir_mut()),
+        "CREATE (:Function {id:121, access:'read', body:'read-side evidence'})",
+        &opts,
+    )
+    .unwrap();
+    let state = state_with_active(active);
+    let client = boot(kglite_server(state.clone(), Builtins::default())).await;
+    for (query, expected) in [
+        ("UNWIND range(1,3) AS n RETURN n", "no_literal_limit"),
+        (
+            "UNWIND range(1,3) AS n RETURN n LIMIT 5",
+            "executed_rows_do_not_match_a_literal_limit",
+        ),
+        (
+            "UNWIND range(1,3) AS n RETURN n LIMIT 3",
+            "executed_rows_match_a_literal_limit",
+        ),
+    ] {
+        let result = call_client(
+            &client,
+            "cypher_query",
+            json!({"query":query,"_response":{"mode":"full"}}),
+        )
+        .await;
+        let coverage = &result.structured_content.as_ref().unwrap()["coverage"];
+        assert_eq!(coverage["literal_limit_status"], expected);
+        assert_eq!(coverage["database_population"], "unknown");
+    }
+
+    let limited = call_client(
+        &client,
+        "cypher_query",
+        json!({
+            "query":"MATCH (caller:Function) WHERE caller.access='write' RETURN caller.id, caller.body ORDER BY caller.id LIMIT 120",
+            "_response":{"mode":"full"}
+        }),
+    )
+    .await;
+    let coverage = &limited.structured_content.as_ref().unwrap()["coverage"];
+    assert_eq!(coverage["executed_rows"], 120);
+    assert_eq!(coverage["query_literal_limits"], json!([120]));
+    assert_eq!(
+        coverage["literal_limit_status"],
+        "executed_rows_match_a_literal_limit"
+    );
+    assert_eq!(coverage["database_population"], "unknown");
+    let population = state
+        .execute_cypher_read("MATCH (n:Function) RETURN count(n)", HashMap::new())
+        .unwrap();
+    assert_eq!(population.result.rows, vec![vec![Value::Int64(121)]]);
 }
 
 #[tokio::test]

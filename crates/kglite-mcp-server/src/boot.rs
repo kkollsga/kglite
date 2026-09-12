@@ -7,6 +7,115 @@ use mcp_methods::server::{Manifest, ResultCtx, ServerOptions};
 use crate::tools::GraphState;
 use crate::*;
 
+const NAVIGATION_WARNING_LIMIT: usize = 8;
+const NAVIGATION_TEXT_LIMIT: usize = 256;
+
+/// Bounded, schema-derived guidance for retained Cypher evidence.
+///
+/// This names only paths that exist in the versioned result envelope. Column
+/// names and warnings are observations, not inferred semantic groups. The
+/// framework retains the complete result and supplies the session-specific
+/// expansion handle around this guidance.
+pub(crate) fn response_preview_guidance(
+    tool: &str,
+    _arguments: &serde_json::Value,
+    result: &serde_json::Value,
+) -> serde_json::Value {
+    let Some(payload) = result.get("structuredContent") else {
+        return if result.get("isError").and_then(serde_json::Value::as_bool) == Some(true) {
+            serde_json::json!({
+                "summary": "The tool failed; inspect the retained error text before retrying.",
+                "errors": [{"kind":"error","json_pointer":"/content/0/text"}]
+            })
+        } else {
+            serde_json::Value::Null
+        };
+    };
+    if payload.get("kind").and_then(serde_json::Value::as_str) != Some("cypher_result") {
+        return serde_json::Value::Null;
+    }
+    let rows = payload
+        .get("rows")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    let warnings = payload
+        .pointer("/diagnostics/warnings")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let shorten = |value: &serde_json::Value| {
+        let text = value.as_str().unwrap_or_default();
+        serde_json::Value::String(text.chars().take(NAVIGATION_TEXT_LIMIT).collect())
+    };
+    let identity = payload.get("identity").map(|value| {
+        let field = |name| value.get(name).map(&shorten).unwrap_or(serde_json::Value::Null);
+        serde_json::json!({
+            "footer": field("footer"),
+            "rebuild_warning": field("rebuild_warning"),
+            "steering": value.get("steering").and_then(serde_json::Value::as_array)
+                .map(|values| values.iter().take(NAVIGATION_WARNING_LIMIT).map(&shorten).collect::<Vec<_>>())
+                .unwrap_or_default()
+        })
+    });
+    serde_json::json!({
+        "schema": {"kind":"cypher_result","version":payload.get("schema_version")},
+        "summary": format!("{tool} retained {rows} executed row(s) in original order."),
+        "coverage": {
+            "query_and_executor": payload.get("coverage"),
+            "navigation_json_pointer": "/navigation"
+        },
+        "warnings": warnings.iter().take(NAVIGATION_WARNING_LIMIT).map(shorten).collect::<Vec<_>>(),
+        "identity": identity,
+        "navigation": payload.get("navigation"),
+        "omissions": {
+            "warnings": warnings.len().saturating_sub(NAVIGATION_WARNING_LIMIT),
+            "guidance_is_bounded": true,
+            "complete_navigation_at": "/navigation",
+            "complete_values_remain_at": ["/columns", "/rows", "/diagnostics"]
+        },
+    })
+}
+
+pub(crate) fn apply_response_preview(
+    server: mcp_methods::server::McpServer,
+) -> mcp_methods::server::McpServer {
+    server.with_response_preview_hook(std::sync::Arc::new(response_preview_guidance))
+}
+
+#[cfg(test)]
+mod response_preview_tests {
+    use super::*;
+
+    #[test]
+    fn guidance_prioritizes_and_bounds_warnings_identity_and_errors() {
+        let warnings = (0..40)
+            .map(|index| format!("warning {index}: {}", "界".repeat(2_000)))
+            .collect::<Vec<_>>();
+        let result = serde_json::json!({
+            "structuredContent": {
+                "kind":"cypher_result", "schema_version":1, "rows":[],
+                "diagnostics":{"warnings":warnings},
+                "coverage":{"database_population":"unknown"},
+                "identity":{"footer":"f".repeat(2_000),"rebuild_warning":"r".repeat(2_000),"steering":[]},
+                "navigation":{"schema_version":1,"available":{"row_count":0},"targets":[]}
+            },
+            "isError":false
+        });
+        let guidance = response_preview_guidance("cypher_query", &serde_json::json!({}), &result);
+        assert_eq!(guidance["omissions"]["warnings"], 32);
+        assert_eq!(guidance["warnings"].as_array().unwrap().len(), 8);
+        assert!(guidance["warnings"][0].as_str().unwrap().chars().count() <= NAVIGATION_TEXT_LIMIT);
+        assert!(serde_json::to_vec(&guidance).unwrap().len() < 16_384);
+
+        let error = response_preview_guidance(
+            "cypher_query",
+            &serde_json::json!({}),
+            &serde_json::json!({"isError":true,"content":[{"type":"text","text":"failed"}]}),
+        );
+        assert_eq!(error["errors"][0]["json_pointer"], "/content/0/text");
+    }
+}
+
 /// Graph-aware steering footer for a builtin tool result — the content behind
 /// the `with_result_postprocess` hook wired in [`run`]. Only fires against an
 /// active code graph (Function/Class present); everything else returns `None`,

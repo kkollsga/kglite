@@ -784,7 +784,7 @@ pub(crate) async fn run_async(
         write_scope,
     );
 
-    let mut server = McpServer::new(options);
+    let mut server = apply_response_preview(McpServer::new(options));
     // `repo_management` needs no gate here since mcp-methods 0.4.7:
     // `McpServer::new` registers it only for `kind: github` workspaces, so
     // local-workspace (and graph/bare) servers never carry the route. The

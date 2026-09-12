@@ -214,6 +214,7 @@ mod tests {
         let mut server = McpServer::new(Default::default());
         register_cypher_tools(&mut server, &manifest, make_runner(state, Arc::default()))
             .expect("register manifest tools");
+        let server = crate::boot::apply_response_preview(server);
 
         let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
         let server_handle = tokio::spawn(async move { server.serve(server_transport).await });
@@ -242,6 +243,10 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
+            5000
+        );
+        assert_eq!(
+            restored.structured_content.as_ref().unwrap()["navigation"]["available"]["row_count"],
             5000
         );
 
