@@ -8,8 +8,186 @@ use kglite::api::cypher;
 use kglite::api::cypher::ValueCodec;
 use kglite::api::session::ExecuteOutcome;
 use kglite::api::{KnowledgeGraph, Value};
+use rmcp::model::{CallToolResult, ContentBlock};
+use schemars::JsonSchema;
+use serde::Serialize;
 
 use crate::tools::*;
+
+/// Complete native evidence retained behind the MCP text presentation.
+///
+/// Rows stay positional so duplicate column names and query order survive.
+/// Phase 3 adds domain navigation; this Phase 2 envelope establishes the
+/// stable paths and completeness metadata that navigation will describe.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct CypherResultEnvelope {
+    pub(crate) schema_version: u8,
+    pub(crate) kind: &'static str,
+    pub(crate) columns: Vec<String>,
+    pub(crate) rows: Vec<Vec<serde_json::Value>>,
+    pub(crate) diagnostics: Option<serde_json::Value>,
+    pub(crate) coverage: CypherCoverage,
+    pub(crate) identity: CypherIdentity,
+    pub(crate) operation: CypherOperation,
+    pub(crate) representation: CypherRepresentation,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct CypherCoverage {
+    pub(crate) executed_rows: usize,
+    pub(crate) engine_row_limit: Option<usize>,
+    pub(crate) rows_before_engine_limit: Option<u64>,
+    pub(crate) database_population: &'static str,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct CypherIdentity {
+    pub(crate) footer: String,
+    pub(crate) rebuild_warning: Option<String>,
+    pub(crate) steering: Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct CypherOperation {
+    pub(crate) mutation: bool,
+    pub(crate) output_format: &'static str,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct CypherRepresentation {
+    pub(crate) text_complete: bool,
+    pub(crate) text_kind: &'static str,
+}
+
+/// Human-compatible text plus the complete structured result used for
+/// response budgeting and expansion.
+pub(crate) struct CypherToolOutput {
+    pub(crate) text: String,
+    pub(crate) structured: CypherResultEnvelope,
+}
+
+impl CypherToolOutput {
+    pub(crate) fn with_rebuild_warning(mut self, state: &GraphState) -> Self {
+        if let Some(note) = state.rebuild_error_note() {
+            self.text = format!("{}\n\n{note}", self.text);
+            self.structured.identity.rebuild_warning = Some(note);
+        }
+        self
+    }
+
+    pub(crate) fn with_result_steering(
+        mut self,
+        state: &GraphState,
+        arguments: &serde_json::Value,
+    ) -> Self {
+        if let Some(note) =
+            crate::boot::graph_result_footer(state, "cypher_query", arguments, &self.text)
+        {
+            self.text = format!("{}\n\n{note}", self.text);
+            self.structured.identity.steering.push(note);
+        }
+        self
+    }
+
+    pub(crate) fn into_call_tool_result(self) -> CallToolResult {
+        let structured = serde_json::to_value(self.structured)
+            .expect("Cypher result envelope contains only serializable values");
+        let mut result = CallToolResult::success(vec![ContentBlock::text(self.text)]);
+        result.structured_content = Some(structured);
+        result
+    }
+}
+
+pub(crate) fn cypher_tool_output(
+    outcome: &ExecuteOutcome,
+    text: String,
+    identity_footer: String,
+) -> CypherToolOutput {
+    let result = &outcome.result;
+    let diagnostics = result
+        .diagnostics
+        .as_ref()
+        .map(|value| serde_json::json!(value));
+    let (engine_row_limit, rows_before_engine_limit) = result
+        .diagnostics
+        .as_ref()
+        .map(|d| (d.row_limit, d.total_rows))
+        .unwrap_or((None, None));
+    let rows = result
+        .rows
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(kglite::api::param::kglite_value_to_json)
+                .collect()
+        })
+        .collect::<Vec<Vec<serde_json::Value>>>();
+    let output_csv = outcome.output_format == cypher::OutputFormat::Csv;
+    let text_complete = if output_csv {
+        result.rows.len() <= INLINE_CSV_ROW_LIMIT
+            && !text.starts_with("FORMAT CSV:")
+            && !text.contains("FORMAT CSV truncated:")
+    } else {
+        result.rows.len() <= 15
+    };
+    CypherToolOutput {
+        text,
+        structured: CypherResultEnvelope {
+            schema_version: 1,
+            kind: "cypher_result",
+            columns: result.columns.clone(),
+            coverage: CypherCoverage {
+                executed_rows: rows.len(),
+                engine_row_limit,
+                rows_before_engine_limit,
+                database_population: "unknown",
+            },
+            rows,
+            diagnostics,
+            identity: CypherIdentity {
+                footer: identity_footer,
+                rebuild_warning: None,
+                steering: Vec::new(),
+            },
+            operation: CypherOperation {
+                mutation: outcome.is_mutation,
+                output_format: if output_csv { "csv" } else { "rows" },
+            },
+            representation: CypherRepresentation {
+                text_complete,
+                text_kind: if output_csv { "csv" } else { "row_preview" },
+            },
+        },
+    }
+}
+
+#[cfg(test)]
+mod structured_output_tests {
+    use super::*;
+
+    #[test]
+    fn conversion_keeps_duplicate_column_positions() {
+        let outcome = ExecuteOutcome {
+            result: cypher::CypherResult {
+                columns: vec!["duplicate".into(), "duplicate".into()],
+                rows: vec![vec![Value::Null, Value::Int64(7)]],
+                stats: None,
+                profile: None,
+                diagnostics: None,
+                lazy: None,
+            },
+            is_mutation: false,
+            output_format: cypher::OutputFormat::Default,
+            explain: false,
+        };
+        let output = cypher_tool_output(&outcome, "preview".into(), "identity".into());
+        assert_eq!(output.structured.columns, ["duplicate", "duplicate"]);
+        assert_eq!(
+            output.structured.rows,
+            vec![vec![serde_json::Value::Null, serde_json::json!(7)]]
+        );
+    }
+}
 
 impl GraphState {
     /// Run a parameterised Cypher template against the active graph.
@@ -35,6 +213,21 @@ impl GraphState {
             .map_err(|error| cypher_tool_error(&error)),
             Err(error) => Err(legacy_cypher_error(&error)),
         }
+    }
+
+    pub(crate) fn run_cypher_template_output(
+        &self,
+        template: &str,
+        args: &serde_json::Map<String, serde_json::Value>,
+        csv_http: &crate::csv_http::CsvHttpState,
+    ) -> Result<CypherToolOutput, String> {
+        let params = params_from_json(Some(args))?;
+        self.ensure_graph_fresh();
+        self.with_active(|graph| {
+            run_cypher_tool_output(graph, template, params, self.exec_policy(), csv_http)
+        })
+        .unwrap_or_else(|| Err(legacy_cypher_error(&CypherRunError::NoActiveGraph)))
+        .map(|output| output.with_rebuild_warning(self))
     }
 
     /// Execute read-only Cypher and preserve its structured outcome.
@@ -177,6 +370,7 @@ pub(crate) fn execute_cypher_inner(
 /// between read and write paths based on `is_mutation_query`; on success
 /// returns the rendered tool body (capped CSV when `FORMAT CSV` is in the
 /// query, inline 15-row preview otherwise).
+#[cfg(test)]
 pub(crate) fn run_cypher_inner(
     kg: &KnowledgeGraph,
     query: &str,

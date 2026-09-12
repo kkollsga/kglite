@@ -34,13 +34,21 @@ use super::*;
 
 /// Build a server carrying only KGLite's own routes.
 fn kglite_server(state: GraphState, builtins: Builtins) -> McpServer {
+    kglite_server_with_csv(state, builtins, Arc::default())
+}
+
+fn kglite_server_with_csv(
+    state: GraphState,
+    builtins: Builtins,
+    csv: Arc<crate::csv_http::CsvHttpState>,
+) -> McpServer {
     let mut server = McpServer::new(Default::default());
     register(
         &mut server,
         state,
         builtins,
         OverviewDecorations::default(),
-        Arc::default(),
+        csv,
     );
     server
 }
@@ -77,6 +85,29 @@ async fn call(
     result
 }
 
+async fn boot(server: McpServer) -> rmcp::service::RunningService<rmcp::RoleClient, ()> {
+    let (server_transport, client_transport) = tokio::io::duplex(1024 * 1024);
+    tokio::spawn(async move {
+        let service = server.serve(server_transport).await.expect("serve");
+        let _ = service.waiting().await;
+    });
+    ().serve(client_transport).await.expect("start MCP client")
+}
+
+async fn call_client(
+    client: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    name: &str,
+    arguments: serde_json::Value,
+) -> CallToolResult {
+    let params = CallToolRequestParams::new(name.to_string()).with_arguments(
+        arguments
+            .as_object()
+            .expect("tool arguments object")
+            .clone(),
+    );
+    client.call_tool(params).await.expect("tool call")
+}
+
 fn text_of(result: &CallToolResult) -> String {
     result
         .content
@@ -105,6 +136,296 @@ fn assert_success(result: &CallToolResult) -> String {
         text_of(result)
     );
     text_of(result)
+}
+
+#[tokio::test]
+async fn cypher_budget_retains_complete_native_rows_for_targeted_and_full_expansion() {
+    let mut active = fresh_active();
+    let params = HashMap::new();
+    let opts = kglite::api::session::ExecuteOptions::eager(&params);
+    for index in 0..48 {
+        kglite::api::session::execute_mut(
+            kglite::api::make_dir_graph_mut(active.kg.dir_mut()),
+            &format!(
+                "CREATE (:Evidence {{id: {index}, body: '{}'}})",
+                "e".repeat(600)
+            ),
+            &opts,
+        )
+        .expect("seed evidence row");
+    }
+    let state = state_with_active(active);
+    let client = boot(kglite_server(state, Builtins::default())).await;
+    let bounded = call_client(
+        &client,
+        "cypher_query",
+        json!({"query":"MATCH (n:Evidence) RETURN n.id AS id, n.body AS body ORDER BY id"}),
+    )
+    .await;
+    let preview: serde_json::Value =
+        serde_json::from_str(&bounded.content[0].as_text().expect("budget preview").text)
+            .expect("JSON budget preview");
+    let budget = &preview["response_budget"];
+    assert_eq!(budget["complete"], false);
+
+    let targeted = call_client(
+        &client,
+        budget["next"]["selected_value"]["name"].as_str().unwrap(),
+        {
+            let mut args = budget["next"]["selected_value"]["arguments"].clone();
+            args["path"] = json!("/rows/47/0");
+            args
+        },
+    )
+    .await;
+    assert_eq!(text_of(&targeted), "47");
+    let row_sixteen = call_client(
+        &client,
+        budget["next"]["selected_value"]["name"].as_str().unwrap(),
+        {
+            let mut args = budget["next"]["selected_value"]["arguments"].clone();
+            args["path"] = json!("/rows/16/0");
+            args
+        },
+    )
+    .await;
+    assert_eq!(text_of(&row_sixteen), "16");
+
+    let full = call_client(
+        &client,
+        budget["next"]["full_result"]["name"].as_str().unwrap(),
+        budget["next"]["full_result"]["arguments"].clone(),
+    )
+    .await;
+    let structured = full
+        .structured_content
+        .as_ref()
+        .expect("complete Cypher envelope");
+    assert_eq!(structured["rows"].as_array().unwrap().len(), 48);
+    assert_eq!(structured["columns"], json!(["id", "body"]));
+    assert_eq!(structured["coverage"]["executed_rows"], 48);
+    assert_eq!(structured["coverage"]["database_population"], "unknown");
+    assert_eq!(structured["representation"]["text_complete"], false);
+    let footer = structured["identity"]["footer"].as_str().unwrap();
+    assert!(footer.contains("active graph:"));
+    assert!(text_of(&full).ends_with(footer));
+}
+
+#[tokio::test]
+async fn structured_conversion_preserves_duplicate_columns_null_types_and_nested_selection() {
+    let client = boot(kglite_server(
+        state_with_active(fresh_active()),
+        Builtins::default(),
+    ))
+    .await;
+    let nested = json!({
+        "deep": [null, true, 7, 1.5, {"key": "z".repeat(8_000)}]
+    });
+    let bounded = call_client(
+        &client,
+        "cypher_query",
+        json!({
+            "query": "RETURN null AS absent, $nested AS nested",
+            "params": {"nested": nested},
+            "_response": {"max_bytes": 4096}
+        }),
+    )
+    .await;
+    let body = text_of(&bounded);
+    let preview: serde_json::Value = serde_json::from_str(&body)
+        .unwrap_or_else(|error| panic!("budget preview ({error}): {body}"));
+    let action = &preview["response_budget"]["next"]["selected_value"];
+    let selected = call_client(&client, action["name"].as_str().unwrap(), {
+        let mut args = action["arguments"].clone();
+        args["path"] = json!("/rows/0/1/deep/4/key");
+        args
+    })
+    .await;
+    assert_eq!(
+        text_of(&selected),
+        serde_json::to_string(&"z".repeat(8_000)).unwrap()
+    );
+
+    let full_action = &preview["response_budget"]["next"]["full_result"];
+    let full = call_client(
+        &client,
+        full_action["name"].as_str().unwrap(),
+        full_action["arguments"].clone(),
+    )
+    .await;
+    let value = full.structured_content.unwrap();
+    assert_eq!(value["columns"], json!(["absent", "nested"]));
+    assert!(value["rows"][0][0].is_null());
+    assert_eq!(value["rows"][0][1]["deep"][1], true);
+    assert_eq!(value["rows"][0][1]["deep"][2], 7);
+    assert_eq!(value["rows"][0][1]["deep"][3], 1.5);
+}
+
+#[tokio::test]
+async fn retained_mutation_survives_a_later_graph_change_without_replay() {
+    let state = state_with_active(fresh_active());
+    let client = boot(kglite_server(state.clone(), writable_builtins())).await;
+    let bounded = call_client(
+        &client,
+        "cypher_query",
+        json!({"query": format!(
+            "UNWIND range(0,47) AS i CREATE (:Snapshot {{id:i, body:'{}'}}) \
+             RETURN i AS id, '{}' AS body ORDER BY id",
+            "s".repeat(600),
+            "s".repeat(600)
+        )}),
+    )
+    .await;
+    let preview: serde_json::Value = serde_json::from_str(&text_of(&bounded)).unwrap();
+    let action = preview["response_budget"]["next"]["selected_value"].clone();
+
+    let mutation = call_client(
+        &client,
+        "cypher_query",
+        json!({
+            "query":"MATCH (n:Snapshot {id:47}) DELETE n CREATE (:MutationMarker {id:1})"
+        }),
+    )
+    .await;
+    assert_success(&mutation);
+    let selected = call_client(&client, action["name"].as_str().unwrap(), {
+        let mut args = action["arguments"].clone();
+        args["path"] = json!("/rows/47/0");
+        args
+    })
+    .await;
+    assert_eq!(text_of(&selected), "47");
+
+    let count = state
+        .execute_cypher_read(
+            "MATCH (n:Snapshot) RETURN count(n) AS count",
+            HashMap::new(),
+        )
+        .unwrap();
+    assert!(matches!(count.result.rows[0][0], Value::Int64(47)));
+    let live = state
+        .execute_cypher_read(
+            "MATCH (n:Snapshot) WHERE n.id = 47 RETURN n.id",
+            HashMap::new(),
+        )
+        .unwrap();
+    assert!(live.result.rows.is_empty());
+    let markers = state
+        .execute_cypher_read("MATCH (n:MutationMarker) RETURN count(n)", HashMap::new())
+        .unwrap();
+    assert_eq!(markers.result.rows, vec![vec![Value::Int64(1)]]);
+}
+
+#[tokio::test]
+async fn csv_text_cap_does_not_truncate_the_structured_result() {
+    let state = state_with_active(fresh_active());
+    let client = boot(kglite_server(state, Builtins::default())).await;
+    let result = call_client(
+        &client,
+        "cypher_query",
+        json!({
+            "query": format!(
+                "UNWIND range(1, {}) AS n RETURN n FORMAT CSV",
+                INLINE_CSV_ROW_LIMIT + 47
+            ),
+            "_response": {"mode": "full"}
+        }),
+    )
+    .await;
+    let structured = result
+        .structured_content
+        .as_ref()
+        .expect("complete CSV envelope");
+    assert_eq!(
+        structured["rows"].as_array().unwrap().len(),
+        INLINE_CSV_ROW_LIMIT + 47
+    );
+    assert_eq!(structured["operation"]["output_format"], "csv");
+    assert_eq!(structured["representation"]["text_complete"], false);
+    assert!(text_of(&result).contains("FORMAT CSV truncated:"));
+}
+
+#[tokio::test]
+async fn csv_download_and_failed_write_keep_complete_structured_rows() {
+    let rows = INLINE_CSV_ROW_LIMIT + 47;
+    let dir = tempfile::tempdir().unwrap();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let states = [
+        crate::csv_http::CsvHttpState::Up(Arc::new(crate::csv_http::CsvHttpConfig {
+            port: 8765,
+            dir: dir.path().to_path_buf(),
+            cors_origin: None,
+        })),
+        crate::csv_http::CsvHttpState::Up(Arc::new(crate::csv_http::CsvHttpConfig {
+            port: 1,
+            dir: file.path().join("unmakeable"),
+            cors_origin: None,
+        })),
+    ];
+    for (index, csv) in states.into_iter().enumerate() {
+        let client = boot(kglite_server_with_csv(
+            state_with_active(fresh_active()),
+            Builtins::default(),
+            Arc::new(csv),
+        ))
+        .await;
+        let result = call_client(
+            &client,
+            "cypher_query",
+            json!({
+                "query": format!("UNWIND range(1, {rows}) AS n RETURN n FORMAT CSV"),
+                "_response": {"mode": "full"}
+            }),
+        )
+        .await;
+        let structured = result.structured_content.as_ref().unwrap();
+        assert_eq!(structured["rows"].as_array().unwrap().len(), rows);
+        assert_eq!(structured["representation"]["text_complete"], false);
+        let text = text_of(&result);
+        if index == 0 {
+            assert!(text.contains("Fetch with: curl"), "{text}");
+        } else {
+            assert!(text.contains("FORMAT CSV truncated:"), "{text}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn cypher_discovery_and_qualified_name_steering_match_route_capability() {
+    for (builtins, read_only, destructive) in [
+        (Builtins::default(), true, false),
+        (writable_builtins(), false, true),
+    ] {
+        let client = boot(kglite_server(state_with_active(fresh_active()), builtins)).await;
+        let listed = client.list_tools(None).await.expect("list tools");
+        let cypher = listed
+            .tools
+            .iter()
+            .find(|tool| tool.name == "cypher_query")
+            .expect("cypher_query discovery");
+        let annotations = cypher.annotations.as_ref().expect("route annotations");
+        assert_eq!(annotations.read_only_hint, Some(read_only));
+        assert_eq!(annotations.destructive_hint, Some(destructive));
+        assert!(cypher.output_schema.is_some());
+    }
+
+    let client = boot(kglite_server(
+        state_with_active(fresh_active()),
+        Builtins::default(),
+    ))
+    .await;
+    let result = call_client(
+        &client,
+        "cypher_query",
+        json!({"query":"RETURN 'pkg.symbol' AS qualified_name"}),
+    )
+    .await;
+    let tip = "Tip: `read_code_source(qualified_name=…)` pulls a matched symbol's source body.";
+    assert!(text_of(&result).ends_with(tip));
+    assert_eq!(
+        result.structured_content.as_ref().unwrap()["identity"]["steering"][0],
+        tip
+    );
 }
 
 #[tokio::test]

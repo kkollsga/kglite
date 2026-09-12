@@ -3,13 +3,68 @@
 //! MCP route.
 
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use kglite::api::storage::StorageMode;
 use mcp_methods::server::McpServer;
+use rmcp::handler::server::router::tool::ToolRoute;
+use rmcp::handler::server::tool::ToolCallContext;
+use rmcp::model::{CallToolResponse, CallToolResult, ContentBlock, Tool, ToolAnnotations};
+use rmcp::ErrorData as McpError;
+use serde::de::DeserializeOwned;
 
 use crate::recipe_queries::CatalogSummary;
 use crate::tools::*;
+
+type DynFut<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
+fn register_cypher_tool<A>(
+    server: &mut McpServer,
+    description: &'static str,
+    writable: bool,
+    handler: impl Fn(A) -> Result<CypherToolOutput, String> + Send + Sync + 'static,
+) where
+    A: DeserializeOwned + schemars::JsonSchema + Send + 'static,
+{
+    let tool = Tool::new_with_raw(
+        "cypher_query",
+        Some(description.into()),
+        Arc::new(serde_json::Map::new()),
+    )
+    .with_input_schema::<A>()
+    .with_output_schema::<CypherResultEnvelope>()
+    .with_annotations(
+        ToolAnnotations::new()
+            .read_only(!writable)
+            .destructive(writable)
+            .idempotent(false)
+            .open_world(false),
+    );
+    let handler = Arc::new(handler);
+    server.tool_router_mut().add_route(ToolRoute::new_dyn(
+        tool,
+        move |ctx: ToolCallContext<'_, McpServer>| -> DynFut<'_, Result<CallToolResponse, McpError>> {
+            let handler = handler.clone();
+            let arguments = ctx.arguments.clone();
+            Box::pin(async move {
+                let args = serde_json::from_value(serde_json::Value::Object(
+                    arguments.unwrap_or_default(),
+                ));
+                let result = match args {
+                    Ok(args) => match handler(args) {
+                        Ok(output) => output.into_call_tool_result(),
+                        Err(text) => CallToolResult::error(vec![ContentBlock::text(text)]),
+                    },
+                    Err(error) => CallToolResult::error(vec![ContentBlock::text(format!(
+                        "Invalid arguments: {error}"
+                    ))]),
+                };
+                Ok(result.into())
+            })
+        },
+    ));
+}
 
 /// Builtins toggled by the manifest's `builtins:` block.
 #[derive(Clone, Debug, Default)]
@@ -382,53 +437,57 @@ pub fn register(
     let cypher_desc =
         cypher_description(csv.config().is_some(), writable, operator_scope.as_deref());
     if writable {
-        server.register_typed_tool_fallible::<CypherArgs, _>(
-            "cypher_query",
-            cypher_desc,
-            move |args| {
-                let csv = csv.clone();
-                s.ensure_graph_fresh();
-                let policy = s.exec_policy().with_timeout_ms(args.timeout_ms);
-                let scope = args.write_scope.clone();
-                let git_sha = args.git_sha.clone();
-                let modified_by = args.modified_by.clone();
-                let authz = WriteAuthz {
-                    operator_scope: operator_scope.as_deref(),
-                    agent_scope: scope.as_deref(),
-                    git_sha: git_sha.as_deref(),
-                    modified_by: modified_by.as_deref(),
-                };
-                let params = match params_from_json(args.params.as_ref()) {
-                    Ok(params) => params,
-                    Err(error) => return map_body(Err(error), |body| s.with_rebuild_warning(body)),
-                };
-                let body = s
-                    .with_active_mut(|active| {
-                        run_cypher_write(active, &args.query, params, authz, policy, &csv)
-                            .map_err(|e| cypher_tool_error(&e))
-                    })
-                    .unwrap_or_else(|| Err(NO_GRAPH.to_string()));
-                map_body(body, |body| s.with_rebuild_warning(body))
-            },
-        );
+        register_cypher_tool::<CypherArgs>(server, cypher_desc, true, move |args| {
+            let raw_args = serde_json::to_value(&args).expect("Cypher arguments serialize");
+            let csv = csv.clone();
+            s.ensure_graph_fresh();
+            let policy = s.exec_policy().with_timeout_ms(args.timeout_ms);
+            let scope = args.write_scope.clone();
+            let git_sha = args.git_sha.clone();
+            let modified_by = args.modified_by.clone();
+            let authz = WriteAuthz {
+                operator_scope: operator_scope.as_deref(),
+                agent_scope: scope.as_deref(),
+                git_sha: git_sha.as_deref(),
+                modified_by: modified_by.as_deref(),
+            };
+            let params = match params_from_json(args.params.as_ref()) {
+                Ok(params) => params,
+                Err(error) => return Err(s.with_rebuild_warning(error)),
+            };
+            let body = s
+                .with_active_mut(|active| {
+                    run_cypher_write_output(active, &args.query, params, authz, policy, &csv)
+                        .map_err(|e| cypher_tool_error(&e))
+                })
+                .unwrap_or_else(|| Err(NO_GRAPH.to_string()));
+            body.map(|output| {
+                output
+                    .with_rebuild_warning(&s)
+                    .with_result_steering(&s, &raw_args)
+            })
+            .map_err(|error| s.with_rebuild_warning(error))
+        });
     } else {
-        server.register_typed_tool_fallible::<ReadCypherArgs, _>(
-            "cypher_query",
-            cypher_desc,
-            move |args| {
-                let csv = csv.clone();
-                s.ensure_graph_fresh();
-                let policy = s.exec_policy().with_timeout_ms(args.timeout_ms);
-                let params = match params_from_json(args.params.as_ref()) {
-                    Ok(params) => params,
-                    Err(error) => return map_body(Err(error), |body| s.with_rebuild_warning(body)),
-                };
-                let body = s
-                    .with_active(|g| run_cypher_tool(g, &args.query, params, policy, &csv))
-                    .unwrap_or_else(|| Err(NO_GRAPH.to_string()));
-                map_body(body, |body| s.with_rebuild_warning(body))
-            },
-        );
+        register_cypher_tool::<ReadCypherArgs>(server, cypher_desc, false, move |args| {
+            let raw_args = serde_json::to_value(&args).expect("Cypher arguments serialize");
+            let csv = csv.clone();
+            s.ensure_graph_fresh();
+            let policy = s.exec_policy().with_timeout_ms(args.timeout_ms);
+            let params = match params_from_json(args.params.as_ref()) {
+                Ok(params) => params,
+                Err(error) => return Err(s.with_rebuild_warning(error)),
+            };
+            let body = s
+                .with_active(|g| run_cypher_tool_output(g, &args.query, params, policy, &csv))
+                .unwrap_or_else(|| Err(NO_GRAPH.to_string()));
+            body.map(|output| {
+                output
+                    .with_rebuild_warning(&s)
+                    .with_result_steering(&s, &raw_args)
+            })
+            .map_err(|error| s.with_rebuild_warning(error))
+        });
     }
     crate::raw_query_routes::protect_query_route(
         server,

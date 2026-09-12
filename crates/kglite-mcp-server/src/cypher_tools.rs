@@ -1,16 +1,14 @@
 //! YAML-declared `tools[].cypher` registration for kglite-mcp-server.
 //!
-//! mcp-methods 0.3.23 deliberately keeps the framework domain-agnostic
+//! mcp-methods deliberately keeps the framework domain-agnostic
 //! — it parses `ToolSpec::Cypher` entries from the manifest but doesn't
 //! know how to run Cypher. We use the framework's now-public
 //! `build_tool_attr` plus rmcp's `ToolRoute::new_dyn` directly to turn
 //! each entry into a registered MCP tool whose handler dispatches
 //! into the active graph's `cypher()` Python method.
 //!
-//! Per the 0.3.23 ack: "every domain-specific helper we add puts
-//! pressure on the framework to know about query languages, runner
-//! protocols, and graph-engine error shapes. None of that belongs
-//! here." — so this module owns the boundary.
+//! Query languages, runner protocols, and graph-engine error shapes remain
+//! at this boundary rather than entering the framework.
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -36,8 +34,9 @@ type DynFut<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 /// refuses, no active graph. The route surfaces it in an MCP error envelope
 /// (`isError: true`) with the text unchanged, so a programmatic client can
 /// branch on the failure instead of pattern-matching prose.
-pub type CypherRunner =
-    Arc<dyn Fn(&str, &Map<String, Value>) -> Result<String, String> + Send + Sync + 'static>;
+pub type CypherRunner = Arc<
+    dyn Fn(&str, &Map<String, Value>) -> Result<CallToolResult, String> + Send + Sync + 'static,
+>;
 
 /// Build a runner backed by the given `GraphState`. The runner forwards
 /// to [`GraphState::run_cypher_template`] which calls into the pure-Rust
@@ -49,7 +48,9 @@ pub fn make_runner(
     csv_http: Arc<crate::csv_http::CsvHttpState>,
 ) -> CypherRunner {
     Arc::new(move |template: &str, args: &Map<String, Value>| {
-        state.run_cypher_template(template, args, &csv_http)
+        state
+            .run_cypher_template_output(template, args, &csv_http)
+            .map(crate::tools::CypherToolOutput::into_call_tool_result)
     })
 }
 
@@ -93,7 +94,8 @@ pub fn register_cypher_tools(
                 .as_deref()
                 .map(|s| std::borrow::Cow::Owned(s.to_string())),
             Arc::new(schema),
-        );
+        )
+        .with_output_schema::<crate::tools::CypherResultEnvelope>();
         let route_name = spec.name.clone();
         let template = spec.cypher.clone();
         let runner = runner.clone();
@@ -109,7 +111,7 @@ pub fn register_cypher_tools(
                     // agent reads the identical failure prose while a
                     // programmatic client can branch on `isError`.
                     let result = match runner(&template, &args) {
-                        Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
+                        Ok(output) => output,
                         Err(text) => CallToolResult::error(vec![ContentBlock::text(text)]),
                     };
                     Ok(result.into())
@@ -172,7 +174,10 @@ mod tests {
         .expect("run manifest Cypher tool");
 
         assert_eq!(builds.load(Ordering::SeqCst), 2, "dirty graph was rebuilt");
-        assert_eq!(output, "1 row(s):\ngeneration\n2\n");
+        let text = &output.content[0].as_text().unwrap().text;
+        assert!(text.starts_with("1 row(s):\ngeneration\n2\n"));
+        assert!(text.contains("active graph:"));
+        assert_eq!(output.structured_content.as_ref().unwrap()["rows"][0][0], 2);
     }
 
     fn manifest_with_two_templates() -> (tempfile::TempDir, Manifest) {
@@ -183,7 +188,7 @@ mod tests {
             "tools:\n\
              \x20 - name: answers\n\
              \x20   description: Answers.\n\
-             \x20   cypher: RETURN 1 AS n\n\
+             \x20   cypher: UNWIND range(1, 5000) AS n RETURN n\n\
              \x20 - name: broken\n\
              \x20   description: Does not parse.\n\
              \x20   cypher: RETURN @\n",
@@ -221,6 +226,23 @@ mod tests {
         assert!(
             matches!(ok.is_error, None | Some(false)),
             "an answering template is a success"
+        );
+        let preview: Value = serde_json::from_str(&ok.content[0].as_text().unwrap().text)
+            .expect("manifest result is budgeted JSON");
+        let full = &preview["response_budget"]["next"]["full_result"];
+        let restored = client
+            .call_tool(
+                rmcp::model::CallToolRequestParams::new(full["name"].as_str().unwrap().to_string())
+                    .with_arguments(full["arguments"].as_object().unwrap().clone()),
+            )
+            .await
+            .expect("expand retained manifest result");
+        assert_eq!(
+            restored.structured_content.as_ref().unwrap()["rows"]
+                .as_array()
+                .unwrap()
+                .len(),
+            5000
         );
 
         let failed = client

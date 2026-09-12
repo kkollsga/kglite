@@ -48,6 +48,7 @@ pub(crate) fn wipe_temp_dir(dir: &std::path::Path) {
 /// failure, the read-only refusal — carrying the exact text the agent reads.
 /// The route puts it in an MCP error envelope; the bytes are the same either
 /// way.
+#[cfg(test)]
 pub(crate) fn run_cypher_tool(
     graph: &ActiveGraph,
     query: &str,
@@ -55,13 +56,29 @@ pub(crate) fn run_cypher_tool(
     policy: ExecPolicy<'_>,
     csv_http: &crate::csv_http::CsvHttpState,
 ) -> Result<String, String> {
-    match run_cypher_inner(&graph.kg, query, params, policy, csv_http) {
-        // Compact identity footer so a query result self-identifies its
-        // graph (agents often go straight to cypher_query without a prior
-        // graph_overview, where a stale active root would otherwise hide).
-        Ok(s) => Ok(format!("{s}{}", graph.identity_footer())),
-        Err(e) => Err(cypher_tool_error(&e)),
-    }
+    run_cypher_tool_output(graph, query, params, policy, csv_http).map(|output| output.text)
+}
+
+pub(crate) fn run_cypher_tool_output(
+    graph: &ActiveGraph,
+    query: &str,
+    params: HashMap<String, kglite::api::Value>,
+    policy: ExecPolicy<'_>,
+    csv_http: &crate::csv_http::CsvHttpState,
+) -> Result<CypherToolOutput, String> {
+    let outcome = execute_cypher_inner(&graph.kg, query, params, policy)
+        .map_err(|error| cypher_tool_error(&error.to_string()))?;
+    let rendered = render_cypher_output(
+        &outcome.result,
+        outcome.output_format == cypher::OutputFormat::Csv,
+        csv_http,
+    )?;
+    let identity = graph.identity_footer();
+    Ok(cypher_tool_output(
+        &outcome,
+        format!("{rendered}{identity}"),
+        identity,
+    ))
 }
 
 /// Write-enabled Cypher path (only reachable when the server is `--writable`).
@@ -71,6 +88,7 @@ pub(crate) fn run_cypher_tool(
 /// the operator's boot-time pin and the agent's per-call argument. Mutations
 /// land on the live active graph (in-memory) so subsequent queries observe
 /// them; persistence is the separate `save_graph` step.
+#[cfg(test)]
 pub(crate) fn run_cypher_write(
     active: &mut ActiveGraph,
     query: &str,
@@ -79,6 +97,18 @@ pub(crate) fn run_cypher_write(
     policy: ExecPolicy<'_>,
     csv_http: &crate::csv_http::CsvHttpState,
 ) -> Result<String, String> {
+    run_cypher_write_output(active, query, params, authz, policy, csv_http)
+        .map(|output| output.text)
+}
+
+pub(crate) fn run_cypher_write_output(
+    active: &mut ActiveGraph,
+    query: &str,
+    params: HashMap<String, kglite::api::Value>,
+    authz: WriteAuthz<'_>,
+    policy: ExecPolicy<'_>,
+    csv_http: &crate::csv_http::CsvHttpState,
+) -> Result<CypherToolOutput, String> {
     let (pre_parsed, is_mutation) =
         kglite::api::cypher::parse_with_mutation_check(query).map_err(|e| e.to_string())?;
     if !is_mutation {
@@ -90,7 +120,7 @@ pub(crate) fn run_cypher_write(
         // `run_cypher_tool` already applies `cypher_tool_error`; the write
         // route re-applies it in `register.rs`, which is a no-op because the
         // prefix is only added to a message that does not already carry it.
-        return run_cypher_tool(active, query, params, policy, csv_http);
+        return run_cypher_tool_output(active, query, params, policy, csv_http);
     }
     let output_csv = pre_parsed.output_format == kglite::api::cypher::OutputFormat::Csv;
     // Refusal before any mutation runs: an empty effective scope is answered
@@ -182,18 +212,25 @@ pub(crate) fn run_cypher_write(
         // block itself — a write whose MATCH names a type that does not exist
         // reports "OK (no changes)", which is the single most misleading
         // response the write tool can give without it.
-        return Ok(format!(
+        let identity = active.identity_footer();
+        let text = format!(
             "{}{}{}",
             format_mutation_ack(&outcome.result),
             cypher_diagnostics_block(&outcome.result),
             // The read path has self-identified its graph since the footer
             // shipped; a write needs it more, not less — an agent that mutates
             // the wrong graph has no later call that can tell it so.
-            active.identity_footer()
-        ));
+            identity
+        );
+        return Ok(cypher_tool_output(&outcome, text, identity));
     }
     let rendered = render_cypher_output(&outcome.result, output_csv, csv_http)?;
-    Ok(format!("{rendered}{}", active.identity_footer()))
+    let identity = active.identity_footer();
+    Ok(cypher_tool_output(
+        &outcome,
+        format!("{rendered}{identity}"),
+        identity,
+    ))
 }
 
 /// One-line acknowledgement of a write that returned no rows, summarising the
