@@ -17,6 +17,9 @@ before upgrading.
 
 ### Fixed
 
+- Missing Cypher parameters are rejected from the parsed query before planning
+  and execution, so an empty match, subquery, or mutation can no longer hide an
+  unbound value by producing zero rows.
 - Installing or clearing a declared schema now refreshes cached query
   diagnostics, and changing the direct schema-lock flag cannot reuse an
   unlocked plan. A rejected structured-shape schema leaves the prior schema

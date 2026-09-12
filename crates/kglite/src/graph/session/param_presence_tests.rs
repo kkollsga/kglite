@@ -4,8 +4,8 @@
 //! rows and no error, while the same predicate written `WHERE v.flag = $flag`
 //! raised `Missing parameter: $flag`. Zero rows is the worst possible answer
 //! here: the caller reads it as "the graph has no NO-flagged vessels" when the
-//! graph has 91 of them. See `cypher::dynamic_labels` for why the check lives
-//! in that pass and not in the matcher.
+//! graph has 91 of them. Presence is checked once over the parsed AST before
+//! planning, so candidate cardinality cannot decide whether the error appears.
 //!
 //! The trap this module exists for is the **plan cache**, which is why these
 //! tests are here and not only in the pass's own unit tests. `cacheable`
@@ -14,10 +14,11 @@
 //! *second* call would be served from the cache, skip the parse, skip this
 //! pass, and silently revert to the old empty-result behaviour.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::execute::{execute_mut, execute_read, ExecuteOptions};
 use crate::datatypes::Value;
+use crate::error::KgError;
 use crate::graph::dir_graph::DirGraph;
 use crate::graph::languages::cypher::plan_cache;
 use crate::graph::languages::cypher::plan_cache::instrumentation;
@@ -71,6 +72,182 @@ fn row_count(graph: &DirGraph, query: &str, p: &HashMap<String, Value>) -> i64 {
         Value::Int64(n) => *n,
         other => panic!("expected a count, got {other:?}"),
     }
+}
+
+const MISSING_WHERE_QUERY: &str =
+    "MATCH (n:Person) WHERE n.age >= $min RETURN n.name ORDER BY n.name LIMIT 5";
+
+fn person_graph(populated: bool) -> DirGraph {
+    let mut graph = DirGraph::new();
+    if populated {
+        let bindings = empty_params();
+        execute_mut(
+            &mut graph,
+            "CREATE (:Person {age: 30, name: 'Ada'})",
+            &ExecuteOptions::eager(&bindings),
+        )
+        .unwrap();
+    }
+    graph
+}
+
+fn assert_missing_where_parameter(populated: bool, optimize: bool) {
+    let graph = person_graph(populated);
+    let bindings = empty_params();
+    let disabled: HashSet<String> = if optimize {
+        HashSet::new()
+    } else {
+        crate::graph::languages::cypher::planner::all_pass_names()
+            .into_iter()
+            .collect()
+    };
+    let mut options = ExecuteOptions::eager(&bindings);
+    if !optimize {
+        options.disabled_passes = Some(&disabled);
+    }
+    for _ in 0..2 {
+        match execute_read(&graph, MISSING_WHERE_QUERY, &options) {
+            Err(KgError::CypherExecution { message, .. }) => {
+                assert_eq!(message, "Missing parameter: $min")
+            }
+            Err(other) => panic!("expected CypherExecution, got {other:?}"),
+            Ok(outcome) => panic!("missing parameter succeeded: {:?}", outcome.result.rows),
+        }
+    }
+}
+
+#[test]
+fn missing_where_parameter_errors_with_empty_candidates_optimized() {
+    assert_missing_where_parameter(false, true);
+}
+
+#[test]
+fn missing_where_parameter_errors_with_empty_candidates_unoptimized() {
+    assert_missing_where_parameter(false, false);
+}
+
+#[test]
+fn missing_where_parameter_errors_with_populated_candidates_optimized() {
+    assert_missing_where_parameter(true, true);
+}
+
+#[test]
+fn missing_where_parameter_errors_with_populated_candidates_unoptimized() {
+    assert_missing_where_parameter(true, false);
+}
+
+#[test]
+fn where_parameter_controls_preserve_supplied_null_and_literal_values() {
+    let graph = person_graph(true);
+    assert_eq!(
+        row_count(
+            &graph,
+            "MATCH (n:Person) WHERE n.age >= $min RETURN count(n)",
+            &params(&[("min", Value::Int64(20))])
+        ),
+        1
+    );
+    let null_bindings = params(&[("min", Value::Null)]);
+    let null_rows = execute_read(
+        &graph,
+        "MATCH (n:Person) WHERE n.age >= $min RETURN n.name",
+        &ExecuteOptions::eager(&null_bindings),
+    )
+    .unwrap()
+    .result
+    .rows;
+    assert!(null_rows.is_empty(), "{null_rows:?}");
+    assert_eq!(
+        row_count(
+            &graph,
+            "MATCH (n:Person) WHERE n.name = '$min' RETURN count(n)",
+            &empty_params()
+        ),
+        0
+    );
+}
+
+#[test]
+fn missing_where_parameter_errors_in_zero_row_subquery() {
+    let graph = person_graph(true);
+    let zero_row_subquery =
+        "CALL { MATCH (n:Person) WHERE false WITH n WHERE n.age >= $min RETURN n } RETURN n";
+    let error = read_err(&graph, zero_row_subquery, &empty_params());
+    assert!(error.contains("Missing parameter: $min"), "{error}");
+}
+
+#[test]
+fn missing_where_parameter_mutation_has_no_side_effect() {
+    let mut mutation_graph = DirGraph::new();
+    let bindings = empty_params();
+    let error = match execute_mut(
+        &mut mutation_graph,
+        "MATCH (n:Person) WHERE n.age >= $min CREATE (:Touched)",
+        &ExecuteOptions::eager(&bindings),
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("missing parameter mutation must fail"),
+    };
+    assert!(matches!(error, KgError::CypherExecution { .. }));
+    assert_eq!(
+        row_count(
+            &mutation_graph,
+            "MATCH (n:Touched) RETURN count(n)",
+            &empty_params()
+        ),
+        0
+    );
+}
+
+#[test]
+fn missing_parameters_are_found_in_every_expression_container() {
+    let graph = person_graph(true);
+    for query in [
+        "RETURN $missing",
+        "WITH $missing AS x RETURN x",
+        "RETURN 1 AS x ORDER BY $missing",
+        "RETURN 1 SKIP $missing",
+        "RETURN 1 LIMIT $missing",
+        "UNWIND $missing AS x RETURN x",
+        "RETURN coalesce([$missing][0], 0)",
+        "RETURN {value: $missing}.value",
+        "RETURN CASE WHEN true THEN $missing ELSE 0 END",
+        "RETURN reduce(acc = 0, x IN [$missing] | acc + x)",
+        "RETURN [1, 2][$missing..]",
+        "CALL { RETURN $missing AS x } RETURN x",
+    ] {
+        let error = read_err(&graph, query, &empty_params());
+        assert_eq!(error, "Cypher execution error: Missing parameter: $missing");
+    }
+}
+
+#[test]
+fn multiple_missing_parameters_have_deterministic_order() {
+    let graph = person_graph(true);
+    let error = read_err(&graph, "RETURN $z, $a, $m", &empty_params());
+    assert_eq!(error, "Cypher execution error: Missing parameter: $a");
+}
+
+#[test]
+fn missing_foreach_list_parameter_has_no_side_effect() {
+    let mut graph = person_graph(false);
+    let bindings = empty_params();
+    let error = match execute_mut(
+        &mut graph,
+        "FOREACH (x IN $missing | CREATE (:Touched {value: x}))",
+        &ExecuteOptions::eager(&bindings),
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("missing FOREACH parameter must fail"),
+    };
+    assert_eq!(
+        error.to_string(),
+        "Cypher execution error: Missing parameter: $missing"
+    );
+    assert_eq!(
+        row_count(&graph, "MATCH (n:Touched) RETURN count(n)", &empty_params()),
+        0
+    );
 }
 
 #[test]
@@ -169,7 +346,7 @@ fn the_same_unbound_query_raises_on_every_call() {
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let graph = fleet();
-    let query = "MATCH (v:Vessel {flag: $flag}) RETURN count(v) AS c";
+    let query = "MATCH (v:Vessel) WHERE v.flag = $flag RETURN count(v) AS c";
 
     instrumentation::reset();
     let first = read_err(&graph, query, &empty_params());
@@ -215,7 +392,9 @@ fn a_clean_query_still_hits_the_plan_cache() {
     assert_eq!(row_count(&graph, query, &empty_params()), 3);
     assert_eq!(row_count(&graph, query, &empty_params()), 3);
     let stats = instrumentation::totals().read;
+    assert_eq!(stats.lookups, 2, "{stats:?}");
     assert_eq!(stats.hits, 1, "{stats:?}");
+    assert_eq!(stats.insertions, 1, "{stats:?}");
 }
 
 /// Every read-pattern position the check covers, exercised end-to-end rather
@@ -237,11 +416,10 @@ fn every_read_pattern_position_raises_end_to_end() {
     }
 }
 
-/// Write patterns reach the same message by the evaluator's route, so the
-/// contract "an unbound parameter always raises" holds across all four
-/// clauses the eval named.
+/// Write patterns use the same pre-execution presence check as reads, so an
+/// unbound value is rejected before a mutation can begin.
 #[test]
-fn write_clauses_raise_through_the_evaluator() {
+fn write_clauses_raise_through_shared_presence_validation() {
     let p = empty_params();
     let opts = ExecuteOptions::eager(&p);
     for query in [

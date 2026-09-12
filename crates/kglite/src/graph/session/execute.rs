@@ -685,15 +685,11 @@ struct PreparedQuery {
 /// stored post lazy-marking for this `lazy_eligible`, so a hit is a pure `Arc`
 /// clone. The caller gates on the `cacheable` predicate.
 ///
-/// A hit also skips `dynamic_labels::resolve`, which is where an unbound
-/// `$parameter` — a label position or an inline property-map value — is
-/// rejected. That is sound rather than a hole: an entry only exists because
-/// some earlier call reached the end of `prepare` with `params` empty, and that
-/// call ran the pass against the same empty map, which binds nothing. So a
-/// cached plan provably contains no parameter reference at all, and a hit is
-/// only consulted when `params` is empty. A statement that *does* reference one
-/// errors above the insert and leaves nothing behind, so its second call misses
-/// and raises again. Pinned by `session::param_presence_tests`.
+/// A hit also skips parameter-presence validation. That is sound because an
+/// entry only exists after the full parsed AST was checked against the same
+/// empty parameter map. A statement that references any parameter errors above
+/// the insert, so a repeated unbound statement misses and raises again. Pinned
+/// by `session::param_presence_tests`.
 ///
 /// The warnings come out of the entry rather than being recomputed: recomputing
 /// needs the parsed AST, and not skipping the parse is exactly what this early
@@ -765,6 +761,13 @@ fn prepare(
     // (`MATCH (v {flag: $flag})`), which the matcher's `bool`-returning filter
     // could only answer as "no match". See `cypher::dynamic_labels`.
     cypher::dynamic_labels::resolve(&mut parsed, opts.params)?;
+
+    if let Some(name) = cypher::parameter_presence::first_missing_parameter(&parsed, opts.params) {
+        return Err(KgError::CypherExecution {
+            message: format!("Missing parameter: ${name}"),
+            position: None,
+        });
+    }
 
     // value_codecs: decode operator-declared literals bound to a codec'd
     // property (`{id:'Q42'}` / `WHERE n.id = 'Q42'` → `42`) BEFORE anything

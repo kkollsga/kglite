@@ -65,16 +65,15 @@
 //! and hands out clones, so a resolved label can never be served to a later
 //! call with different parameters.
 //!
-//! The presence check inherits that argument, which is what lets it run *after*
-//! the plan-cache lookup instead of before it (running it before would force
-//! the parse the cache exists to skip). An entry is only ever inserted by a
-//! call whose `params` were empty and which reached the end of `prepare`; this
-//! pass runs before that point and rejects *every* parameter reference when
-//! `params` is empty, since an empty map binds nothing. So no cached entry can
-//! contain an unbound reference, and a hit — which is only consulted when
-//! `params` is empty — cannot be hiding one. A second call of the same
-//! unbound text finds no entry (the first errored before insertion) and raises
-//! again; `session::param_presence_tests` pins that from the cache counters.
+//! Presence validation inherits that argument, which is what lets it run
+//! *after* the plan-cache lookup instead of before it (running it before would
+//! force the parse the cache exists to skip). This pass first resolves dynamic
+//! names and checks inline pattern maps; the following AST-wide presence walk
+//! checks every remaining parameter reference. Both run before insertion. So
+//! no cached entry can contain an unbound reference, and a hit — consulted only
+//! when `params` is empty — cannot hide one. A second call of the same unbound
+//! text finds no entry (the first errored before insertion) and raises again;
+//! `session::param_presence_tests` pins that from the cache counters.
 
 // Every function below is one step of the same walk and returns
 // `Result<(), KgError>`; KgError carries structured query context, so it trips
