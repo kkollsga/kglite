@@ -701,8 +701,13 @@ struct PreparedQuery {
 /// — they are a pure function of `(query, graph schema)` and the key pins the
 /// graph state. Stderr repeats them per call, as it did when every call parsed.
 fn cached_plan(graph: &DirGraph, query: &str, opts: &ExecuteOptions<'_>) -> Option<PreparedQuery> {
-    let cached =
-        cypher::plan_cache::get(graph.graph_id(), graph.version(), opts.lazy_eligible, query)?;
+    let cached = cypher::plan_cache::get(
+        graph.graph_id(),
+        graph.version(),
+        graph.schema_locked,
+        opts.lazy_eligible,
+        query,
+    )?;
     cypher::emit_query_warnings(&cached.warnings);
     Some(PreparedQuery {
         plan: cached.plan,
@@ -896,6 +901,7 @@ fn prepare(
         cypher::plan_cache::insert(
             graph.graph_id(),
             graph.version(),
+            graph.schema_locked,
             opts.lazy_eligible,
             query,
             plan.clone(),

@@ -25,9 +25,12 @@
 use std::collections::HashMap;
 
 use super::execute::{execute_mut, execute_read, ExecuteOptions};
+use super::Session;
 use crate::datatypes::Value;
 use crate::error::KgError;
 use crate::graph::dir_graph::DirGraph;
+use crate::graph::languages::cypher::plan_cache;
+use crate::graph::languages::cypher::plan_cache::instrumentation;
 use crate::graph::schema::{NodeSchemaDefinition, SchemaDefinition, SchemaInstall};
 
 fn empty_params() -> HashMap<String, Value> {
@@ -440,6 +443,174 @@ fn mixed_locked() -> DirGraph {
 }
 
 const CROSS_TYPE: &str = "MATCH (p:Person) WHERE p.age > 'forty' RETURN p";
+
+fn person_age_schema() -> SchemaDefinition {
+    let mut node = NodeSchemaDefinition::default();
+    node.field_types.insert("age".into(), "integer".into());
+    let mut schema = SchemaDefinition::default();
+    schema.node_schemas.insert("Person".into(), node);
+    schema
+}
+
+fn assert_schema_age_warning(warnings: &[String]) {
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].contains("Person.age (schema-defined integer)"),
+        "{warnings:?}"
+    );
+    assert!(
+        warnings[0].contains("STRING literal 'forty'"),
+        "{warnings:?}"
+    );
+}
+
+#[test]
+fn schema_install_refreshes_warm_type_diagnostics() {
+    let session = Session::new(seeded());
+    assert!(run(&session.snapshot(), CROSS_TYPE).unwrap().is_empty());
+    session
+        .write()
+        .set_schema(person_age_schema(), SchemaInstall::Replace)
+        .unwrap();
+    assert_schema_age_warning(&run(&session.snapshot(), CROSS_TYPE).unwrap());
+}
+
+#[test]
+fn clear_schema_refreshes_warm_type_diagnostics() {
+    let session = Session::new(schema_defined());
+    assert_schema_age_warning(&run(&session.snapshot(), CROSS_TYPE).unwrap());
+    session.write().clear_schema();
+    assert!(run(&session.snapshot(), CROSS_TYPE).unwrap().is_empty());
+}
+
+#[test]
+fn schema_install_with_held_snapshot_does_not_mask_unique_owner_case() {
+    let session = Session::new(seeded());
+    assert!(run(&session.snapshot(), CROSS_TYPE).unwrap().is_empty());
+    let held = session.snapshot();
+    session
+        .write()
+        .set_schema(person_age_schema(), SchemaInstall::Replace)
+        .unwrap();
+    assert_schema_age_warning(&run(&session.snapshot(), CROSS_TYPE).unwrap());
+    assert!(run(&held, CROSS_TYPE).unwrap().is_empty());
+}
+
+#[test]
+fn rejected_schema_install_preserves_warm_diagnostics() {
+    let params = empty_params();
+    let options = ExecuteOptions::eager(&params);
+    let mut graph = seeded();
+    execute_mut(&mut graph, "CREATE (:Person {id: 5, age: 30})", &options).unwrap();
+    let session = Session::new(graph);
+    assert!(run(&session.snapshot(), CROSS_TYPE).unwrap().is_empty());
+
+    let mut node = NodeSchemaDefinition {
+        primary_key: Some("age".into()),
+        ..NodeSchemaDefinition::default()
+    };
+    node.field_types.insert("age".into(), "integer".into());
+    let mut schema = SchemaDefinition::default();
+    schema.node_schemas.insert("Person".into(), node);
+    assert!(session
+        .write()
+        .set_schema(schema, SchemaInstall::Replace)
+        .is_err());
+
+    assert!(session.snapshot().get_schema().is_none());
+    assert!(run(&session.snapshot(), CROSS_TYPE).unwrap().is_empty());
+}
+
+#[test]
+fn malformed_shape_schema_rejection_preserves_installed_schema() {
+    let session = Session::new(schema_defined());
+    assert_schema_age_warning(&run(&session.snapshot(), CROSS_TYPE).unwrap());
+
+    let mut malformed = person_age_schema();
+    malformed
+        .node_schemas
+        .get_mut("Person")
+        .unwrap()
+        .field_types
+        .insert("age".into(), "list<".into());
+    assert!(session
+        .write()
+        .set_schema(malformed, SchemaInstall::Replace)
+        .is_err());
+
+    let snapshot = session.snapshot();
+    assert_eq!(
+        snapshot.get_schema().unwrap().node_schemas["Person"].field_types["age"],
+        "integer"
+    );
+    assert_schema_age_warning(&run(&snapshot, CROSS_TYPE).unwrap());
+}
+
+#[test]
+fn direct_schema_lock_rejects_cold_unknown_label() {
+    let mut graph = seeded();
+    graph.schema_locked = true;
+    let message = strict_error(&graph, "MATCH (p:Persn) RETURN p");
+    assert!(message.contains("Unknown node type 'Persn'"), "{message}");
+}
+
+#[test]
+fn direct_schema_lock_rejects_warm_unknown_label() {
+    let mut graph = seeded();
+    let query = "MATCH (p:Persn) RETURN p";
+    for _ in 0..2 {
+        let warnings = accepted(&graph, query);
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|warning| warning.contains("Persn"))
+                .count(),
+            1,
+            "{warnings:?}"
+        );
+    }
+    graph.schema_locked = true;
+    let message = strict_error(&graph, query);
+    assert!(message.contains("Unknown node type 'Persn'"), "{message}");
+}
+
+#[test]
+fn schema_lock_cache_key_preserves_same_state_warning_hits() {
+    let _guard = plan_cache::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    plan_cache::clear_for_tests();
+    let mut graph = seeded();
+    let unknown_node = "MATCH (p:Persn) RETURN p";
+
+    instrumentation::reset();
+    for _ in 0..2 {
+        assert_eq!(
+            accepted(&graph, unknown_node)
+                .iter()
+                .filter(|warning| warning.contains("Persn"))
+                .count(),
+            1
+        );
+    }
+    assert_eq!(instrumentation::totals().read.hits, 1);
+
+    graph.schema_locked = true;
+    assert!(strict_error(&graph, unknown_node).contains("Unknown node type 'Persn'"));
+
+    let unknown_relationship = "MATCH (:Person)-[:KNOWZ]->(:Paper) RETURN count(*) AS count";
+    instrumentation::reset();
+    for _ in 0..2 {
+        assert_eq!(
+            accepted(&graph, unknown_relationship)
+                .iter()
+                .filter(|warning| warning.contains("KNOWZ"))
+                .count(),
+            1
+        );
+    }
+    assert_eq!(instrumentation::totals().read.hits, 1);
+}
 
 #[test]
 fn locked_schema_rejects_a_declared_type_mismatch() {

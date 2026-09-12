@@ -13,7 +13,8 @@ use kglite::api::session::{execute_mut, ExecuteOptions};
 use kglite::api::DirGraph;
 use kglite_c::{
     kglite_abi_version, kglite_blueprint_build, kglite_compute_schema_json,
-    kglite_create_edges_batch, kglite_cypher_result_columns_json, kglite_cypher_result_free,
+    kglite_create_edges_batch, kglite_cypher_result_columns_json,
+    kglite_cypher_result_diagnostics_json, kglite_cypher_result_free,
     kglite_cypher_result_row_count, kglite_cypher_result_rows_json, kglite_free_bytes,
     kglite_free_string, kglite_graph_free, kglite_graph_from_bytes, kglite_graph_new,
     kglite_graph_to_bytes, kglite_load_file, kglite_open_or_create_graph_in_mode,
@@ -1412,6 +1413,32 @@ fn query_rows(session: *mut KgliteSession, query: &str, params: &str) -> serde_j
     rows
 }
 
+fn query_warning_json(session: *mut KgliteSession, query: &str) -> serde_json::Value {
+    let query = CString::new(query).unwrap();
+    let mut result: *mut KgliteCypherResult = std::ptr::null_mut();
+    let mut error: *const c_char = std::ptr::null();
+    let status = unsafe {
+        kglite_session_execute_read(
+            session,
+            query.as_ptr(),
+            std::ptr::null(),
+            &mut result,
+            &mut error,
+        )
+    };
+    assert_eq!(status, KgliteStatusCode::Ok);
+    assert!(error.is_null());
+    let diagnostics_json = unsafe { kglite_cypher_result_diagnostics_json(result) };
+    let diagnostics: serde_json::Value =
+        serde_json::from_str(unsafe { CStr::from_ptr(diagnostics_json).to_str().unwrap() })
+            .unwrap();
+    unsafe {
+        kglite_free_string(diagnostics_json);
+        kglite_cypher_result_free(result);
+    }
+    diagnostics["warnings"].clone()
+}
+
 /// End-to-end: packed-float ingest → build index → query with a raw query
 /// vector through `vector_score`, asserting the ranking. The ordering
 /// assertion is the readback that catches a packed-float offset bug —
@@ -1921,6 +1948,31 @@ fn define_schema_installs_constraints_readable_through_the_abi() {
         err.unwrap_or_default().to_lowercase().contains("email"),
         "the rejection must name the offending property"
     );
+    unsafe { kglite_session_free(session) };
+}
+
+#[test]
+fn define_schema_invalidates_warm_plan_diagnostics() {
+    let session = empty_session();
+    assert_eq!(
+        try_mutate(session, "CREATE (:Person {age: 30})").0,
+        KgliteStatusCode::Ok
+    );
+    let query = "MATCH (p:Person) WHERE p.age > 'forty' RETURN p";
+    assert_eq!(query_warning_json(session, query), serde_json::json!([]));
+
+    let (status, error) = define_schema(
+        session,
+        r#"{"nodes":{"Person":{"types":{"age":"integer"}}}}"#,
+        Some("replace"),
+    );
+    assert_eq!(status, KgliteStatusCode::Ok, "{error:?}");
+    let warnings = query_warning_json(session, query);
+    assert_eq!(warnings.as_array().unwrap().len(), 1, "{warnings}");
+    assert!(warnings[0]
+        .as_str()
+        .unwrap()
+        .contains("Person.age (schema-defined integer)"));
     unsafe { kglite_session_free(session) };
 }
 

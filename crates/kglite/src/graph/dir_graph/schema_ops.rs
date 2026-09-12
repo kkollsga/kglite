@@ -75,6 +75,7 @@ impl DirGraph {
                 .unwrap_or_default()
                 .merged_with(schema),
         };
+        let property_shapes = Self::property_shapes_for(&schema)?;
         let previous_schema = self.schema_definition.take();
         let withdrawn = Self::declared_unique_tuples(previous_schema.as_ref());
         for (node_type, properties) in &withdrawn {
@@ -108,7 +109,8 @@ impl DirGraph {
                 return Err((*violation).into());
             }
         }
-        self.derive_property_shapes()?;
+        self.property_shapes = property_shapes;
+        self.bump_version();
         Ok(())
     }
 
@@ -121,19 +123,18 @@ impl DirGraph {
     /// place is never a harmless extra).
     // Boxed like every other KgError-returning path clippy flags.
     #[allow(clippy::result_large_err)] // matches set_schema's own Err size
-    fn derive_property_shapes(&mut self) -> Result<(), KgError> {
+    fn property_shapes_for(
+        schema: &SchemaDefinition,
+    ) -> Result<std::collections::BTreeMap<String, crate::graph::tables::PropertyShape>, KgError>
+    {
         use crate::graph::tables::{parse_property_shape, table_meta_key};
-        self.property_shapes.clear();
-        let Some(schema) = self.schema_definition.clone() else {
-            return Ok(());
-        };
+        let mut property_shapes = std::collections::BTreeMap::new();
         for (node_type, node) in &schema.node_schemas {
             for (property, type_text) in &node.field_types {
                 match parse_property_shape(type_text) {
                     None => {}
                     Some(Ok(shape)) => {
-                        self.property_shapes
-                            .insert(table_meta_key(node_type, property), shape);
+                        property_shapes.insert(table_meta_key(node_type, property), shape);
                     }
                     Some(Err(e)) => {
                         return Err(crate::error::KgError::Schema {
@@ -144,7 +145,7 @@ impl DirGraph {
                 }
             }
         }
-        Ok(())
+        Ok(property_shapes)
     }
 
     /// Every unique tuple a schema implies: each non-`id` primary key (a primary

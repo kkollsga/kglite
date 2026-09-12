@@ -14,6 +14,13 @@ before upgrading.
 - The CLI can emit bounded, canonical JSON agent responses for queries and
   writes, retain complete response envelopes for ten minutes, and expand them
   later by opaque handle without reopening or replaying the graph operation.
+
+### Fixed
+
+- Installing or clearing a declared schema now refreshes cached query
+  diagnostics, and changing the direct schema-lock flag cannot reuse an
+  unlocked plan. A rejected structured-shape schema leaves the prior schema
+  and its constraints unchanged.
   JSONL sessions offer the same behavior through explicit per-request agent
   format and `response_expand`; ordinary JSON, CSV, and session output remain
   complete. The new bounded-response guide documents targeted MCP and CLI

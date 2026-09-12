@@ -9,13 +9,16 @@
 //! entirely — the common pattern for a served, read-heavy graph (bolt/mcp)
 //! and for any hot read loop.
 //!
-//! ## Soundness — the key is `(graph_id, version, query)`
+//! ## Soundness — the key is `(graph_id, version, schema_locked, query)`
 //!
 //! - `version` changes on **every** mutation (see `DirGraph::bump_version`,
 //!   wired into `execute_mut`, the bulk-ingest fns, and `make_dir_graph_mut`),
 //!   so a cache hit means the graph is byte-for-byte the same state it was
 //!   when the plan was computed → the cached plan is *identical* to
 //!   re-optimizing. A mutation bumps `version` → the old key never hits again.
+//! - `schema_locked` changes the disposition of unknown node labels and strict
+//!   read findings, so unlocked and locked plans are distinct even when a core
+//!   caller toggles the public flag without changing `version`.
 //! - `graph_id` is process-unique and never reused, so two different graphs
 //!   that happen to share a `version` (e.g. both freshly loaded at version 0)
 //!   can never collide on each other's plans.
@@ -81,8 +84,9 @@ pub(crate) const CACHE_CAPACITY: usize = 512;
 /// the key because the cached plan is stored **post lazy-marking** (so a hit is
 /// a pure `Arc` clone with no per-call mutation); the wheel runs
 /// `lazy_eligible=true`, the bolt/mcp servers `false`, so each gets its own
-/// variant. See the module docs for `graph_id` / `version`.
-type PlanKey = (u64, u64, bool, u64);
+/// variant. `schema_locked` partitions the two validation dispositions. See the
+/// module docs for the complete key contract.
+type PlanKey = (u64, u64, bool, bool, u64);
 
 /// What a lookup hands back: the ready-to-execute plan plus the schema
 /// warnings computed for it (see the module docs). Both are behind `Arc`, so a
@@ -124,10 +128,17 @@ fn hash_query(query: &str) -> u64 {
 }
 
 /// Look up a cached, ready-to-execute plan for `query` against the graph
-/// identified by `(graph_id, version)` at the given `lazy_eligible` mode.
+/// identified by `(graph_id, version, schema_locked)` at the given
+/// `lazy_eligible` mode.
 /// Returns an `Arc` clone on hit (no AST copy), `None` on miss.
-pub fn get(graph_id: u64, version: u64, lazy: bool, query: &str) -> Option<CachedPlan> {
-    let key = (graph_id, version, lazy, hash_query(query));
+pub fn get(
+    graph_id: u64,
+    version: u64,
+    schema_locked: bool,
+    lazy: bool,
+    query: &str,
+) -> Option<CachedPlan> {
+    let key = (graph_id, version, schema_locked, lazy, hash_query(query));
     let guard = cache().read().expect("plan_cache RwLock poisoned");
     let hit = guard.map.get(&key).cloned();
     #[cfg(test)]
@@ -141,12 +152,13 @@ pub fn get(graph_id: u64, version: u64, lazy: bool, query: &str) -> Option<Cache
 pub fn insert(
     graph_id: u64,
     version: u64,
+    schema_locked: bool,
     lazy: bool,
     query: &str,
     plan: Arc<CypherQuery>,
     warnings: Arc<[String]>,
 ) {
-    let key = (graph_id, version, lazy, hash_query(query));
+    let key = (graph_id, version, schema_locked, lazy, hash_query(query));
     let mut guard = cache().write().expect("plan_cache RwLock poisoned");
     if guard.map.contains_key(&key) {
         return; // benign race: another thread inserted the same key.
@@ -348,16 +360,17 @@ mod tests {
         let _g = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         clear_for_tests();
         let q = "MATCH (n:T) RETURN n";
-        assert!(get(1, 0, false, q).is_none(), "cold miss");
+        assert!(get(1, 0, false, false, q).is_none(), "cold miss");
         insert(
             1,
             0,
+            false,
             false,
             q,
             plan(q),
             vec!["typo'd label".to_string()].into(),
         );
-        let hit = get(1, 0, false, q).expect("warm hit");
+        let hit = get(1, 0, false, false, q).expect("warm hit");
         assert_eq!(
             &*hit.warnings,
             ["typo'd label".to_string()],
@@ -366,19 +379,29 @@ mod tests {
     }
 
     #[test]
-    fn version_graph_id_and_lazy_partition_the_key() {
+    fn version_graph_id_lock_and_lazy_partition_the_key() {
         let _g = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         clear_for_tests();
         let q = "MATCH (n:T) RETURN n";
-        insert(7, 3, false, q, plan(q), no_warnings());
-        // Same query, different version / graph / lazy-mode → must miss.
-        assert!(get(7, 4, false, q).is_none(), "version change invalidates");
+        insert(7, 3, false, false, q, plan(q), no_warnings());
+        // Same query, different version / graph / lock / lazy-mode → must miss.
         assert!(
-            get(8, 3, false, q).is_none(),
+            get(7, 4, false, false, q).is_none(),
+            "version change invalidates"
+        );
+        assert!(
+            get(8, 3, false, false, q).is_none(),
             "different graph never collides"
         );
-        assert!(get(7, 3, true, q).is_none(), "lazy mode is part of the key");
-        assert!(get(7, 3, false, q).is_some(), "exact key hits");
+        assert!(
+            get(7, 3, true, false, q).is_none(),
+            "lock is part of the key"
+        );
+        assert!(
+            get(7, 3, false, true, q).is_none(),
+            "lazy mode is part of the key"
+        );
+        assert!(get(7, 3, false, false, q).is_some(), "exact key hits");
     }
 
     #[test]
@@ -389,6 +412,7 @@ mod tests {
             insert(
                 1,
                 i,
+                false,
                 false,
                 "MATCH (n:T) RETURN n",
                 plan("MATCH (n:T) RETURN n"),

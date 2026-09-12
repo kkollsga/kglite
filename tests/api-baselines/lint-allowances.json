@@ -293,7 +293,7 @@
       "classification": "test"
     },
     {
-      "identity": "crates/kglite/src/graph/dir_graph/schema_ops.rs::fn:derive_property_shapes:fn derive_property_shapes(&mut self) -> Result<(), KgError>::clippy::result_large_err",
+      "identity": "crates/kglite/src/graph/dir_graph/schema_ops.rs::fn:property_shapes_for:fn property_shapes_for( schema: &SchemaDefinition, ) -> Result<std::collections::BTreeMap<String, crate::graph::tables::PropertyShape>, KgError>::clippy::result_large_err",
       "classification": "api-shape"
     },
     {
