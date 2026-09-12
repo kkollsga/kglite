@@ -685,7 +685,15 @@ def test_session_help_op_lists_the_protocol(tmp_path):
     assert help_response["op"] == "help"
     assert help_response["id"] == "h1"
     listed = {entry["op"] for entry in help_response["ops"]}
-    assert listed == {"query", "write", "describe", "save", "help", "exit"}
+    assert listed == {
+        "query",
+        "write",
+        "response_expand",
+        "describe",
+        "save",
+        "help",
+        "exit",
+    }
     assert all(entry["description"] for entry in help_response["ops"])
     assert "id" in help_response["protocol"]
 
@@ -701,3 +709,205 @@ def test_session_unknown_op_names_the_valid_ops(tmp_path):
     assert error["id"] == "bad"
     for op in ("query", "write", "describe", "save", "help", "exit", "quit"):
         assert op in error["error"], error["error"]
+
+
+def test_session_agent_help_and_validation_precede_mutation(tmp_path, monkeypatch):
+    import kglite
+
+    cache = tmp_path / "cache"
+    monkeypatch.setenv("KGLITE_AGENT_CACHE_DIR", str(cache))
+    p = tmp_path / "session-agent-validation.kgl"
+    kglite.KnowledgeGraph().save(str(p))
+    responses = _session(
+        p,
+        {"id": "h", "op": "help"},
+        {
+            "id": "bad",
+            "op": "write",
+            "query": "CREATE (:Guard {id: 1})",
+            "format": "agent",
+            "response": {"max_bytes": 4095},
+        },
+        {"id": "count", "op": "query", "query": "MATCH (n:Guard) RETURN count(n) AS n"},
+        {"op": "exit"},
+    )
+    assert "response_expand" in {entry["op"] for entry in responses[0]["ops"]}
+    assert responses[1]["isError"] is True
+    assert "4096" in str(responses[1]["structuredContent"])
+    assert responses[2]["rows"] == [{"n": 0}]
+
+
+def test_session_agent_budget_counts_escaped_echo_id_and_reports_mandatory_overage(tmp_path, monkeypatch):
+    import json
+
+    import kglite
+
+    monkeypatch.setenv("KGLITE_AGENT_CACHE_DIR", str(tmp_path / "cache"))
+    p = tmp_path / "echo-budget.kgl"
+    kglite.KnowledgeGraph().save(str(p))
+    fitting_id = {"escaped": '\\"' * 100}
+    oversized_id = {"escaped": '\\"' * 5000}
+    responses = _session(
+        p,
+        {
+            "id": fitting_id,
+            "op": "query",
+            "query": f"UNWIND range(0,999) AS i RETURN i, '{'x' * 80}'",
+            "format": "agent",
+            "response": {"max_bytes": 4096},
+        },
+        {
+            "id": oversized_id,
+            "op": "query",
+            "query": "RETURN 1",
+            "format": "agent",
+            "response": {"max_bytes": 4096},
+        },
+        {"op": "exit"},
+    )
+    assert responses[0]["id"] == fitting_id
+    assert len(json.dumps(responses[0], separators=(",", ":")).encode()) <= 4096
+    assert responses[1]["id"] == oversized_id
+    assert responses[1]["retention"]["budget_exceeded"] is True
+    assert responses[1]["retention"]["max_bytes"] == 4096
+    final_size = len(json.dumps(responses[1], separators=(",", ":")).encode())
+    assert final_size > 4096
+    assert responses[1]["retention"]["actual_bytes"] == final_size
+
+
+def test_session_legacy_unknown_and_nonstring_formats_keep_default_fallback(tmp_path):
+    import kglite
+
+    p = tmp_path / "legacy-format.kgl"
+    kglite.KnowledgeGraph().save(str(p))
+    responses = _session(
+        p,
+        {"id": "unknown", "op": "query", "query": "RETURN 1 AS n", "format": "future"},
+        {"id": "object", "op": "query", "query": "RETURN 2 AS n", "format": {}},
+        {"op": "exit"},
+    )
+    assert responses[0]["rows"] == [{"n": 1}]
+    assert responses[1]["rows"] == [{"n": 2}]
+
+
+def test_session_agent_expands_retained_snapshot_without_replay(tmp_path, monkeypatch):
+    import json
+
+    import kglite
+
+    cache = tmp_path / "cache"
+    monkeypatch.setenv("KGLITE_AGENT_CACHE_DIR", str(cache))
+    p = tmp_path / "session-agent.kgl"
+    graph = kglite.KnowledgeGraph()
+    body = "x" * 80
+    graph.cypher(f"UNWIND range(0, 999) AS i CREATE (:Snapshot {{id:i, body:'{body}'}})")
+    graph.save(str(p))
+
+    first = _session(
+        p,
+        {
+            "id": "preview",
+            "op": "query",
+            "query": "MATCH (n:Snapshot) RETURN n.id, {nested:{body:n.body}} ORDER BY n.id",
+            "format": "agent",
+            "response": {"max_bytes": 4096},
+        },
+        {"op": "exit"},
+    )[0]
+    assert first["id"] == "preview"
+    assert first["op"] == "query"
+    assert first["isError"] is False
+    assert len(json.dumps(first, separators=(",", ":")).encode()) <= 4096
+    budget = json.loads(first["content"][0]["text"])["response_budget"]
+    handle = budget["result_id"]
+
+    changed = kglite.load(str(p))
+    changed.cypher("MATCH (n:Snapshot {id:999}) SET n.body = 'changed'")
+    changed.save(str(p))
+    second = _session(
+        p,
+        {
+            "id": "expand",
+            "op": "response_expand",
+            "handle": handle,
+            "path": "/rows/999/1/nested/body",
+            "response": {"mode": "full"},
+        },
+        {"op": "exit"},
+    )[0]
+    assert second["id"] == "expand"
+    assert second["op"] == "response_expand"
+    assert second["isError"] is False
+    assert json.loads(second["content"][0]["text"]) == body
+
+
+def test_session_agent_write_expands_once_only_result_after_live_state_changes(tmp_path, monkeypatch):
+    import json
+
+    import kglite
+
+    monkeypatch.setenv("KGLITE_AGENT_CACHE_DIR", str(tmp_path / "cache"))
+    p = tmp_path / "session-agent-write.kgl"
+    kglite.KnowledgeGraph().save(str(p))
+    body = "original-" + "x" * 80
+    first = _session(
+        p,
+        {
+            "id": "write",
+            "op": "write",
+            "query": (
+                f"UNWIND range(0,47) AS i CREATE (n:OnceOnly {{id:i, body:'{body}'}}) RETURN i, n.body ORDER BY i"
+            ),
+            "format": "agent",
+            "response": {"max_bytes": 4096},
+        },
+        {"op": "save"},
+        {"op": "exit"},
+    )[0]
+    assert first["isError"] is False
+    budget = json.loads(first["content"][0]["text"])["response_budget"]
+
+    second = _session(
+        p,
+        {
+            "op": "write",
+            "query": "MATCH (n:OnceOnly {id:47}) SET n.body = 'changed'",
+        },
+        {"op": "save"},
+        {
+            "id": "old",
+            "op": "response_expand",
+            "handle": budget["result_id"],
+            "path": "/rows/47/0",
+            "response": {"mode": "full"},
+        },
+        {
+            "id": "state",
+            "op": "query",
+            "query": (
+                "MATCH (n:OnceOnly) RETURN count(n) AS n, "
+                "sum(CASE WHEN n.body = 'changed' THEN 1 ELSE 0 END) AS changed"
+            ),
+        },
+        {"op": "exit"},
+    )
+    assert json.loads(second[2]["content"][0]["text"]) == 47
+    assert second[3]["rows"] == [{"n": 48, "changed": 1}]
+
+
+def test_session_agent_unknown_handle_is_structured_and_session_continues(tmp_path, monkeypatch):
+    import kglite
+
+    monkeypatch.setenv("KGLITE_AGENT_CACHE_DIR", str(tmp_path / "cache"))
+    p = tmp_path / "missing-handle.kgl"
+    kglite.KnowledgeGraph().save(str(p))
+    responses = _session(
+        p,
+        {"id": "x", "op": "response_expand", "handle": "does-not-exist"},
+        {"id": "q", "op": "query", "query": "RETURN 1 AS n"},
+        {"op": "exit"},
+    )
+    assert responses[0]["isError"] is True
+    assert responses[0]["op"] == "response_expand"
+    assert responses[0]["id"] == "x"
+    assert responses[1]["rows"] == [{"n": 1}]

@@ -147,6 +147,49 @@ pub(crate) fn purge(root: PathBuf) -> Result<()> {
     ResultCache::new(root).purge_all()
 }
 
+pub(crate) fn finalize_session(
+    mut value: Value,
+    op: &str,
+    request_id: Option<Value>,
+    options: AgentOptions,
+) -> Value {
+    value["op"] = json!(op);
+    if let Some(request_id) = request_id {
+        value["id"] = request_id;
+    }
+    if options.full {
+        return value;
+    }
+    let limit = options.limit();
+    shrink_to_limit_with_command_floor(&mut value, limit, 1);
+    let actual = serialized_size(&value);
+    if actual > limit {
+        value["retention"] = json!({
+            "complete": false,
+            "budget_exceeded": true,
+            "max_bytes": limit,
+            "actual_bytes": 0,
+            "warning": "Mandatory JSONL op/id fields and retrieval guidance cannot fit the requested budget; this response preserves them intact."
+        });
+        set_final_actual_bytes(&mut value);
+    }
+    value
+}
+
+fn set_final_actual_bytes(value: &mut Value) {
+    loop {
+        let actual = serialized_size(value);
+        if value
+            .pointer("/retention/actual_bytes")
+            .and_then(Value::as_u64)
+            == Some(actual as u64)
+        {
+            return;
+        }
+        value["retention"]["actual_bytes"] = json!(actual);
+    }
+}
+
 fn fit_translated_preview(
     original: Value,
     envelope: &Value,
@@ -268,6 +311,10 @@ fn command_from_parts(purpose: &str, pointer: &str, offset: u64, handle: &str) -
 }
 
 fn shrink_to_limit(value: &mut Value, limit: usize) {
+    shrink_to_limit_with_command_floor(value, limit, 7);
+}
+
+fn shrink_to_limit_with_command_floor(value: &mut Value, limit: usize, command_floor: usize) {
     let Some(text) = value.pointer("/content/0/text").and_then(Value::as_str) else {
         return;
     };
@@ -299,8 +346,7 @@ fn shrink_to_limit(value: &mut Value, limit: usize) {
         else {
             break;
         };
-        // Preserve four section targets, a late row, and two observed values.
-        if commands.len() <= 7 {
+        if commands.len() <= command_floor {
             break;
         }
         commands.pop();

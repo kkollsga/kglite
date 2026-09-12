@@ -14,6 +14,10 @@ before upgrading.
 - The CLI can emit bounded, canonical JSON agent responses for queries and
   writes, retain complete response envelopes for ten minutes, and expand them
   later by opaque handle without reopening or replaying the graph operation.
+  JSONL sessions offer the same behavior through explicit per-request agent
+  format and `response_expand`; ordinary JSON, CSV, and session output remain
+  complete. The new bounded-response guide documents targeted MCP and CLI
+  retrieval, cache lifecycles, and query-limit coverage.
 
 ## [0.17.3] - 2026-09-11
 

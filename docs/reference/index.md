@@ -15,6 +15,8 @@ workflows; these pages define callable/query syntax and supported contracts.
   for non-Rust bindings.
 - **[CLI](../operators/cli.md)** — commands, output formats, scoped writes, and
   interactive-shell behavior.
+- **[Bounded agent responses](../operators/agent-responses.md)** — MCP and CLI
+  byte budgets, retained evidence, targeted expansion, and lifecycle bounds.
 
 ```{toctree}
 :hidden:
@@ -25,4 +27,5 @@ fluent-api
 ../rust/api-reference
 ../rust/c-abi
 ../operators/cli
+../operators/agent-responses
 ```

@@ -78,6 +78,10 @@ kglite-mcp-server --graph my_graph.kgl
 runnable file? [`examples/csv_to_graph.py`](https://github.com/kkollsga/kglite/blob/main/examples/csv_to_graph.py)
 loads real CSVs end to end.
 
+Large agent results are bounded with targeted expansion. MCP offers session-local controls;
+CLI `--format agent` retrieves retained values later without rerunning the query.
+JSON and CSV remain complete. See [Bounded agent responses](https://kglite.readthedocs.io/en/latest/operators/agent-responses.html).
+
 Two guides cover most first sessions:
 
 - **[Getting Started](https://kglite.readthedocs.io/en/latest/python/getting-started.html)**: install, first graph, storage choices

@@ -4,6 +4,11 @@
 is available from `cargo install kglite-mcp-server` and inside the `kglite`
 Python wheel.
 
+Large tool results use discoverable byte budgets and retain complete structured
+evidence for targeted expansion. See [Bounded agent responses](agent-responses.md)
+for the response controls, collision-safe action composition, lifecycle, and
+the distinction between presentation truncation and query limits.
+
 ```bash
 kglite-mcp-server --graph /data/graph.kgl
 kglite-mcp-server --selftest --graph /data/graph.kgl

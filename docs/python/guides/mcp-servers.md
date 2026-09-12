@@ -41,6 +41,11 @@ cargo install kglite-mcp-server
 Either way the `kglite-mcp-server` command lands on PATH running the same
 Rust server. Run `kglite-mcp-server --help` to confirm.
 
+Response-control and expansion names are published by MCP discovery and can be
+renamed to avoid domain-tool collisions. Clients should copy the returned
+action rather than assume either name. See [Bounded agent responses](../../operators/agent-responses.md)
+for an executable compact-to-targeted-expansion workflow.
+
 For semantic search (`text_score()`) in the server, name an embedding engine in
 the manifest `extensions.embedder` block — you provide the `library` and the
 `model`, and install that library:

@@ -25,6 +25,11 @@ prompt = f"You have a knowledge graph:\n{xml}\nAnswer the user's question using 
 
 Expose the graph to any MCP-compatible agent (Claude, etc.) with a thin server. See the [MCP Servers guide](mcp-servers.md) for a complete walkthrough — server setup, tool patterns, FORMAT CSV export, security, and a copy-paste template.
 
+For large results, start with a bounded preview and retrieve the exact retained
+row or nested value the preview identifies. [Bounded agent responses](../../operators/agent-responses.md)
+documents the MCP action-composition flow and CLI follow-up commands. Expansion
+does not broaden a Cypher `LIMIT`; it only reads the completed retained result.
+
 ## Adding Semantic Search (5-Minute Setup)
 
 Semantic search lets agents find nodes by meaning, not just exact property matches:

@@ -517,7 +517,7 @@ where
     {
         run_session(
             graph,
-            (*format).into(),
+            *format,
             *save_on_exit,
             write_scope.as_deref(),
             git_sha.clone(),
@@ -871,7 +871,7 @@ fn describe_graph(graph: &Arc<DirGraph>, options: &DescribeOptions) -> Result<St
 
 fn run_session(
     path: &Path,
-    default_mode: Mode,
+    default_format: OutputFormat,
     save_on_exit: bool,
     write_scope: Option<&str>,
     git_sha: Option<String>,
@@ -906,8 +906,9 @@ fn run_session(
         }
         match handle_session_line(
             &mut graph,
+            path,
             line,
-            default_mode,
+            default_format,
             &base_options,
             &mut ownership,
         ) {
@@ -934,8 +935,9 @@ enum SessionAction {
 
 fn handle_session_line(
     graph: &mut Arc<DirGraph>,
+    graph_path: &Path,
     line: &str,
-    default_mode: Mode,
+    default_format: OutputFormat,
     base_options: &QueryOptions,
     ownership: &mut WriteOwnership,
 ) -> SessionAction {
@@ -950,14 +952,11 @@ fn handle_session_line(
         .and_then(|v| v.as_str())
         .unwrap_or("query");
     let request_id = request.get("id").cloned();
+    let agent_intent = session_agent_intent(op, &request, default_format);
     let result = match op {
-        "query" => session_query(graph, &request, mode_from_request(&request, default_mode)),
-        "write" => session_write(
-            graph,
-            &request,
-            mode_from_request(&request, default_mode),
-            base_options,
-        ),
+        "query" => session_query(graph, graph_path, &request, default_format),
+        "write" => session_write(graph, graph_path, &request, default_format, base_options),
+        "response_expand" => session_response_expand(&request),
         "describe" => session_describe(graph, &request),
         "save" => {
             session_save(graph, ownership).map(|()| serde_json::json!({"ok": true, "op": "save"}))
@@ -974,12 +973,45 @@ fn handle_session_line(
         )),
     };
     SessionAction::Continue(match result {
+        Ok(value) if agent_intent => agent_response::finalize_session(
+            value,
+            op,
+            request_id,
+            session_effective_agent_options(&request),
+        ),
         Ok(mut value) => {
             if let Some(obj) = value.as_object_mut() {
                 obj.entry("op").or_insert_with(|| serde_json::json!(op));
             }
             insert_request_id(&mut value, request_id);
             value
+        }
+        Err(e) if agent_intent => {
+            let query = request
+                .get("query")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let envelope = agent_response::error_envelope(&e, query, graph_path);
+            let options = session_effective_agent_options(&request);
+            let value = match agent_response::cache_root() {
+                Ok(root) => agent_response::present(
+                    root,
+                    &agent_response::namespace(graph_path),
+                    envelope,
+                    true,
+                    options,
+                ),
+                Err(cache_error) => serde_json::json!({
+                    "content":[{"type":"text","text":"Agent session operation failed"}],
+                    "structuredContent":agent_response::error_envelope(
+                        &cache_error,
+                        query,
+                        graph_path,
+                    ),
+                    "isError":true
+                }),
+            };
+            agent_response::finalize_session(value, op, request_id, options)
         }
         Err(e) => {
             let mut value = json_error(op, e.to_string());
@@ -996,12 +1028,18 @@ fn handle_session_line(
 const SESSION_OPS: &[(&str, &str)] = &[
     (
         "query",
-        "run a read-only Cypher query — {\"op\":\"query\",\"query\":\"MATCH …\",\"format\":\"json|table|csv\"}",
+        "run a read-only Cypher query — {\"op\":\"query\",\"query\":\"MATCH …\",\"format\":\"json|table|csv|agent\"} \
+         (agent optional: \"response\":{\"max_bytes\":4096}|{\"mode\":\"full\"})",
     ),
     (
         "write",
         "run a write Cypher statement — {\"op\":\"write\",\"query\":\"CREATE …\"} \
-         (optional: \"write_scope\":[\"Type\"], \"git_sha\", \"modified_by\")",
+         (optional: \"format\":\"agent\", \"response\", \"write_scope\":[\"Type\"], \"git_sha\", \"modified_by\")",
+    ),
+    (
+        "response_expand",
+        "expand retained agent evidence without rerunning — {\"op\":\"response_expand\",\"handle\":\"…\"} \
+         (optional: \"path\", \"offset\", \"response\":{\"max_bytes\":4096}|{\"mode\":\"full\"})",
     ),
     (
         "describe",
@@ -1044,10 +1082,27 @@ fn session_help() -> serde_json::Value {
 
 fn session_query(
     graph: &Arc<DirGraph>,
+    graph_path: &Path,
     request: &serde_json::Value,
-    mode: Mode,
+    default_format: OutputFormat,
 ) -> Result<serde_json::Value> {
     let query = request_string(request, "query")?;
+    let agent = session_agent_options(request, default_format)?;
+    if let Some(response) = agent {
+        let operation = kglite::api::cypher::with_query_warning_sink(
+            kglite::api::cypher::QueryWarningSink::Silent,
+            || {
+                let (_, is_mutation) = kglite::api::cypher::parse_with_mutation_check(&query)
+                    .map_err(|e| anyhow::anyhow!("Cypher parse error: {e}"))?;
+                if is_mutation {
+                    anyhow::bail!("query is read-only; use op=write for mutations");
+                }
+                exec::execute_readonly(graph, &query, &HashMap::new(), &QueryOptions::default())
+            },
+        );
+        return session_agent_operation(graph_path, &query, operation, response);
+    }
+    let mode = session_mode(request, default_format)?;
     let (_, is_mutation) = kglite::api::cypher::parse_with_mutation_check(&query)
         .map_err(|e| anyhow::anyhow!("Cypher parse error: {e}"))?;
     if is_mutation {
@@ -1060,11 +1115,13 @@ fn session_query(
 
 fn session_write(
     graph: &mut Arc<DirGraph>,
+    graph_path: &Path,
     request: &serde_json::Value,
-    mode: Mode,
+    default_format: OutputFormat,
     base_options: &QueryOptions,
 ) -> Result<serde_json::Value> {
     let query = request_string(request, "query")?;
+    let agent = session_agent_options(request, default_format)?;
     let params = HashMap::new();
     let options = QueryOptions {
         write_scope: request
@@ -1082,8 +1139,81 @@ fn session_write(
             .or_else(|| base_options.modified_by.clone()),
         ..QueryOptions::default()
     };
+    if let Some(response) = agent {
+        let operation = kglite::api::cypher::with_query_warning_sink(
+            kglite::api::cypher::QueryWarningSink::Silent,
+            || exec::execute(graph, &query, &params, &options),
+        );
+        return session_agent_operation(graph_path, &query, operation, response);
+    }
+    let mode = session_mode(request, default_format)?;
     let outcome = exec::execute(graph, &query, &params, &options)?;
     Ok(session_outcome_response(mode, &outcome))
+}
+
+fn session_agent_operation(
+    graph_path: &Path,
+    query: &str,
+    operation: Result<kglite::api::session::ExecuteOutcome>,
+    response: agent_response::AgentOptions,
+) -> Result<serde_json::Value> {
+    let (envelope, error) = match operation {
+        Ok(outcome) => (
+            agent_response::result_envelope(&outcome, query, graph_path),
+            false,
+        ),
+        Err(error) => (
+            agent_response::error_envelope(&error, query, graph_path),
+            true,
+        ),
+    };
+    Ok(agent_response::present(
+        agent_response::cache_root()?,
+        &agent_response::namespace(graph_path),
+        envelope,
+        error,
+        response,
+    ))
+}
+
+fn session_response_expand(request: &serde_json::Value) -> Result<serde_json::Value> {
+    let handle = request_string(request, "handle")?;
+    let path = request
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let offset = request
+        .get("offset")
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|number| usize::try_from(number).ok())
+                .ok_or_else(|| anyhow::anyhow!("offset must be a non-negative integer"))
+        })
+        .transpose()?
+        .unwrap_or(0);
+    let response = response_options_from_json(request.get("response"))?;
+    Ok(
+        match agent_response::expand(
+            agent_response::cache_root()?,
+            &handle,
+            path,
+            offset,
+            response,
+        ) {
+            Ok(value) => value,
+            Err(error) => serde_json::json!({
+                "content": [{"type":"text","text":"Retained response expansion failed"}],
+                "structuredContent": {
+                    "schema_version":1,
+                    "kind":"response_error",
+                    "diagnostics":{"errors":[{"message":format!("{error:#}")}]}
+                },
+                "isError": true
+            }),
+        },
+    )
 }
 
 fn session_describe(
@@ -1152,12 +1282,113 @@ fn request_string(request: &serde_json::Value, key: &str) -> Result<String> {
         .ok_or_else(|| anyhow::anyhow!("missing string field {key:?}"))
 }
 
-fn mode_from_request(request: &serde_json::Value, default_mode: Mode) -> Mode {
-    request
+fn session_agent_options(
+    request: &serde_json::Value,
+    default_format: OutputFormat,
+) -> Result<Option<agent_response::AgentOptions>> {
+    let response = request.get("response");
+    let explicit_format = request.get("format");
+    if response.is_none() {
+        if explicit_format.and_then(serde_json::Value::as_str) == Some("agent") {
+            return response_options_from_json(None).map(Some);
+        }
+        if explicit_format.is_some() || default_format != OutputFormat::Agent {
+            return Ok(None);
+        }
+        return response_options_from_json(None).map(Some);
+    }
+    let format = explicit_format
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("format must be a string"))
+        })
+        .transpose()?
+        .map(parse_session_format)
+        .transpose()?
+        .unwrap_or(default_format);
+    if format != OutputFormat::Agent {
+        if response.is_some() {
+            anyhow::bail!("response controls require format=agent");
+        }
+        return Ok(None);
+    }
+    response_options_from_json(response).map(Some)
+}
+
+fn session_agent_intent(
+    op: &str,
+    request: &serde_json::Value,
+    default_format: OutputFormat,
+) -> bool {
+    if op == "response_expand" {
+        return true;
+    }
+    matches!(op, "query" | "write")
+        && (default_format == OutputFormat::Agent
+            || request.get("response").is_some()
+            || request.get("format").and_then(serde_json::Value::as_str) == Some("agent"))
+}
+
+fn session_effective_agent_options(request: &serde_json::Value) -> agent_response::AgentOptions {
+    response_options_from_json(request.get("response")).unwrap_or_default()
+}
+
+fn response_options_from_json(
+    value: Option<&serde_json::Value>,
+) -> Result<agent_response::AgentOptions> {
+    let Some(value) = value else {
+        return Ok(agent_response::AgentOptions::default());
+    };
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("response must be an object"))?;
+    let mode = object
+        .get("mode")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("bounded");
+    let max_bytes = object
+        .get("max_bytes")
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|number| usize::try_from(number).ok())
+                .ok_or_else(|| anyhow::anyhow!("response.max_bytes must be a non-negative integer"))
+        })
+        .transpose()?;
+    let full = match mode {
+        "bounded" => false,
+        "full" => true,
+        other => anyhow::bail!("unknown response mode {other:?}; use bounded or full"),
+    };
+    if full && max_bytes.is_some() {
+        anyhow::bail!("response.max_bytes cannot be combined with response mode full");
+    }
+    let options = agent_response::AgentOptions { max_bytes, full };
+    options.validate()?;
+    Ok(options)
+}
+
+fn parse_session_format(value: &str) -> Result<OutputFormat> {
+    match value {
+        "table" => Ok(OutputFormat::Table),
+        "csv" => Ok(OutputFormat::Csv),
+        "json" => Ok(OutputFormat::Json),
+        "agent" => Ok(OutputFormat::Agent),
+        other => anyhow::bail!("unknown format {other:?}; use table, csv, json, or agent"),
+    }
+}
+
+fn session_mode(request: &serde_json::Value, default_format: OutputFormat) -> Result<Mode> {
+    let fallback = match default_format {
+        OutputFormat::Agent => Mode::Json,
+        other => other.into(),
+    };
+    Ok(request
         .get("format")
-        .and_then(|v| v.as_str())
+        .and_then(serde_json::Value::as_str)
         .and_then(Mode::parse)
-        .unwrap_or(default_mode)
+        .unwrap_or(fallback))
 }
 
 fn describe_options_from_json(request: &serde_json::Value) -> Result<DescribeOptions> {

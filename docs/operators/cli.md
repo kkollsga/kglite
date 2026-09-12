@@ -131,6 +131,13 @@ connection types.
 
 ## Agent Sessions
 
+For byte-bounded output with executable retrieval commands, use explicit
+`--format agent` on one-shot `query` or `write`. The default JSONL session
+contract remains complete; individual requests opt in with `"format":"agent"`
+and discover retained expansion through `{"op":"help"}`.
+See [Bounded agent responses](agent-responses.md) for controls, expansion, cache
+lifecycle, and the distinction between a response budget and Cypher `LIMIT`.
+
 Use `session` when an agent needs multiple operations against the same
 graph. The process keeps one graph loaded in memory and accepts JSONL
 requests on stdin:
