@@ -131,3 +131,26 @@ fn an_unparenthesised_predicate_is_a_value_everywhere() {
         assert_eq!(rows(&mut g, bare), expected, "{bare}");
     }
 }
+
+/// A pattern predicate closes at the `]` of the list holding it.
+#[test]
+fn a_pattern_predicate_ends_at_a_closing_bracket() {
+    let mut graph = graph();
+    execute_mut(
+        &mut graph,
+        "MATCH (n:N) CREATE (n)-[:R]->(:M {id: 2})",
+        &ExecuteOptions::eager(&HashMap::new()),
+    )
+    .unwrap();
+    for (query, expected) in [
+        ("MATCH (n:N) RETURN [(n)-->()] AS r", list(vec![b(true)])),
+        (
+            "MATCH (n:N) RETURN [1, (n)-[:R]->(:M)] AS r",
+            list(vec![Value::Int64(1), b(true)]),
+        ),
+        ("MATCH (n:N) RETURN [(n)<--()] AS r", list(vec![b(false)])),
+        ("MATCH (n:N) RETURN [(n:N)] AS r", list(vec![b(true)])),
+    ] {
+        assert_eq!(rows(&mut graph, query), vec![vec![expected]], "{query}");
+    }
+}

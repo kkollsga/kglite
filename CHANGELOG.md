@@ -27,6 +27,9 @@ before upgrading.
 
 ### Fixed
 
+- A pattern predicate as the last element of a list literal
+  (`RETURN [(n)-->()]`, `[1, (n)-[:R]->(:M)]`) was a syntax error; it now
+  closes at the list's `]`.
 - `IN`, a list subscript or slice, `head()` and `last()` over a value that is
   not a list (`'a' IN 'abc'`, `'abc'[0]`, `5[0..2]`, `head('abc')`) raise a
   type error instead of answering false, null or `[]`, and so do `size()` of a

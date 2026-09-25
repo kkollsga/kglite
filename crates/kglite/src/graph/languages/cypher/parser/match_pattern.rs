@@ -520,6 +520,12 @@ impl CypherParser {
                 break;
             }
 
+            // Likewise a top-level `]`: the close of a list holding a pattern
+            // predicate (`[(n)-->()]`).
+            if paren_depth == 0 && bracket_depth == 0 && self.check(&CypherToken::RBracket) {
+                break;
+            }
+
             // Stop at a top-level RBrace — it can only be the `}` closing a
             // `CALL { ... }` subquery body (property maps live inside `()` or
             // `[]`, so any `}` belonging to a map is at paren/bracket depth
