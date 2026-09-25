@@ -81,7 +81,9 @@ class TestPoint:
         assert len(rows) == 1
 
     def test_point_wrong_args(self, geo_graph):
-        with pytest.raises(kglite.KgError, match="point.*requires 2"):
+        with pytest.raises(kglite.KgError, match="point.*requires a map .* or 2 arguments"):
+            geo_graph.cypher("MATCH (n:City) RETURN point(1.0, 2.0, 3.0)")
+        with pytest.raises(kglite.KgError, match="point.*expects a map"):
             geo_graph.cypher("MATCH (n:City) RETURN point(1.0)")
 
     def test_point_non_numeric(self, geo_graph):

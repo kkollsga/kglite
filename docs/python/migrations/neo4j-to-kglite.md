@@ -395,7 +395,7 @@ Current notable function differences:
 | Neo4j | KGLite status | Note / workaround |
 |---|---|---|
 | `apoc.*` | Not supported, with exactly two exceptions | No APOC library. `apoc.meta.nodeTypeProperties()` / `apoc.meta.relTypeProperties()` are served as compatibility shims (schema clients read endpoint labels only from them); every other `apoc.*` name — including `apoc.meta.data()` — is rejected |
-| `point({latitude, longitude})` | Map form not supported | KGLite uses `point(lat, lon)` (**latitude-first**); WKT strings are longitude-first per OGC |
+| `point({x, y})` (Cartesian), 3D points | Not supported | Points are 2D WGS-84: `point({latitude, longitude})`, `point({x, y, crs: 'wgs-84'})` or `point(lat, lon)` (**latitude-first**); WKT strings are longitude-first per OGC |
 | `point.distance(a, b)` | Use top-level `distance(a, b)` | Geodesic (WGS84); also `contains`, `intersects`, `centroid`, `area`, `perimeter`, geometry primitives (`geom_*`) — all present |
 | `duration('P1Y2M')` (ISO-8601) | Map form only | `duration({years: 1, months: 2})`; `duration.between(d1, d2)` accepts dates or timestamps and returns a months/days/seconds duration |
 | `timestamp()` | Not supported | `datetime()` and `localdatetime()` return zoneless timestamp values; an offset-bearing `datetime(str)` is normalized to naive UTC, so zoned round-trip identity is not preserved. There is no epoch-millisecond alias |

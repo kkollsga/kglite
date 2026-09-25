@@ -195,6 +195,10 @@ mod iteration_type_tests;
 mod predicate_value_position_tests;
 
 #[cfg(test)]
+#[path = "point_map_tests.rs"]
+mod point_map_tests;
+
+#[cfg(test)]
 mod parameter_name_tests {
     use crate::api::cypher::parameter_names;
     use crate::error::{KgError, KgErrorCode};

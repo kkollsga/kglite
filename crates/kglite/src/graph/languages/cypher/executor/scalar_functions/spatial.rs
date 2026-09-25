@@ -16,8 +16,21 @@ impl<'a> CypherExecutor<'a> {
     ) -> Result<Option<Value>, String> {
         let result: Result<Value, String> = match name {
             "point" => {
+                if args.len() == 1 {
+                    return match self.evaluate_expression(&args[0], row)? {
+                        Value::Map(map) => point_from_map(&map).map(Some),
+                        Value::Null => Ok(Some(Value::Null)),
+                        other => Err(format!(
+                            "point() of one argument expects a map, got {}",
+                            other.type_name()
+                        )),
+                    };
+                }
                 if args.len() != 2 {
-                    return Err("point() requires 2 arguments: lat, lon".into());
+                    return Err(
+                        "point() requires a map ({latitude, longitude}) or 2 arguments: lat, lon"
+                            .into(),
+                    );
                 }
                 let lat = crate::graph::core::value_operations::value_to_f64(
                     &self.evaluate_expression(&args[0], row)?,
@@ -415,4 +428,104 @@ impl<'a> CypherExecutor<'a> {
         };
         result.map(Some)
     }
+}
+
+/// `point({…})`. KGLite points are 2D WGS-84, so the accepted maps are
+/// `{latitude, longitude}` and `{x, y}` with `crs: 'wgs-84'` or `srid: 4326`
+/// (x is the longitude). A Cartesian or 3D map is refused rather than read as
+/// a geographic point, since `distance()` would then measure the wrong space.
+/// A null coordinate gives a null point.
+fn point_from_map(map: &crate::datatypes::PropMap) -> Result<Value, String> {
+    const KEYS: &[&str] = &[
+        "latitude",
+        "longitude",
+        "x",
+        "y",
+        "crs",
+        "srid",
+        "height",
+        "z",
+    ];
+    if let Some((key, _)) = map.iter().find(|(key, _)| !KEYS.contains(key)) {
+        return Err(format!(
+            "point(): unknown key '{key}'; expected latitude/longitude or x/y, with an \
+             optional crs or srid"
+        ));
+    }
+    if map.get("height").is_some() || map.get("z").is_some() {
+        return Err("point(): 3D points are not supported".into());
+    }
+    let crs = match map.get("crs") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(name)) => Some(point_crs_srid(&name.to_ascii_lowercase())?),
+        Some(other) => {
+            return Err(format!(
+                "point(): crs must be a string, got {}",
+                other.type_name()
+            ))
+        }
+    };
+    let srid = match map.get("srid") {
+        None | Some(Value::Null) => None,
+        Some(Value::Int64(srid)) => Some(*srid),
+        Some(other) => {
+            return Err(format!(
+                "point(): srid must be an integer, got {}",
+                other.type_name()
+            ))
+        }
+    };
+    if let (Some(from_crs), Some(srid)) = (crs, srid) {
+        if from_crs != srid {
+            return Err(format!(
+                "point(): srid {srid} does not match the crs's srid {from_crs}"
+            ));
+        }
+    }
+    match srid.or(crs) {
+        None | Some(4326) => {}
+        Some(7203) => return Err(cartesian_point_error()),
+        Some(4979 | 9157) => return Err("point(): 3D points are not supported".into()),
+        Some(other) => return Err(format!("point(): unsupported srid {other}")),
+    }
+    let geographic = map.get("latitude").is_some() || map.get("longitude").is_some();
+    let cartesian_keys = map.get("x").is_some() || map.get("y").is_some();
+    let (lat_key, lon_key) = match (geographic, cartesian_keys) {
+        (true, true) => {
+            return Err("point(): give either latitude/longitude or x/y, not both".into())
+        }
+        (false, true) if srid.or(crs).is_none() => return Err(cartesian_point_error()),
+        (false, true) => ("y", "x"),
+        _ => ("latitude", "longitude"),
+    };
+    let coordinate = |key: &str| -> Result<Option<f64>, String> {
+        match map.get(key) {
+            None => Err(format!("point(): missing '{key}'")),
+            Some(Value::Null) => Ok(None),
+            Some(value) => crate::graph::core::value_operations::value_to_f64(value)
+                .map(Some)
+                .ok_or_else(|| format!("point(): {key} must be numeric")),
+        }
+    };
+    Ok(match (coordinate(lat_key)?, coordinate(lon_key)?) {
+        (Some(lat), Some(lon)) => Value::Point { lat, lon },
+        _ => Value::Null,
+    })
+}
+
+/// The srid a `crs` name denotes.
+fn point_crs_srid(name: &str) -> Result<i64, String> {
+    match name {
+        "wgs-84" => Ok(4326),
+        "wgs-84-3d" => Ok(4979),
+        "cartesian" => Ok(7203),
+        "cartesian-3d" => Ok(9157),
+        other => Err(format!("point(): unknown crs '{other}'")),
+    }
+}
+
+fn cartesian_point_error() -> String {
+    "point(): Cartesian points are not supported; KGLite points are WGS-84 \
+     (use latitude/longitude, or x/y with crs: 'wgs-84')"
+        .into()
 }

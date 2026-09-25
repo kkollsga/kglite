@@ -579,8 +579,8 @@ pub(crate) const FUNCTIONS: &[FunctionSpec] = &[
         name: "point",
         aliases: &[],
         category: "spatial",
-        description: "A geographic point from positional latitude and longitude",
-        signature: "point(latitude :: FLOAT, longitude :: FLOAT) :: POINT",
+        description: "A geographic point from latitude and longitude, positional or as a map",
+        signature: "point(input :: MAP | latitude :: FLOAT, longitude :: FLOAT) :: POINT",
     },
     FunctionSpec {
         name: "distance",

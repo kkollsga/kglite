@@ -540,7 +540,7 @@ graph.cypher("""
 | `trim(str)` | Remove leading/trailing whitespace |
 | `ltrim(str)` / `rtrim(str)` | Left/right trim |
 | `reverse(str)` | Reverse a string |
-| `point(lat, lon)` | Create a geographic point |
+| `point(lat, lon)` / `point({latitude, longitude})` | Create a geographic point |
 | `distance(a, b)` | Geodesic distance (m); geometry-aware |
 | `contains(a, b)` | Does a's geometry contain b? |
 | `intersects(a, b)` | Do geometries intersect? |
@@ -1212,6 +1212,7 @@ Built-in spatial functions for geographic queries. All node-aware functions auto
 | Function | Returns | Description |
 |----------|---------|-------------|
 | `point(lat, lon)` | Point | Create a geographic point |
+| `point({latitude, longitude})` | Point | The same point from a map; `{x, y, crs: 'wgs-84'}` (or `srid: 4326`) with `x` the longitude also works |
 | `distance(a, b)` | Float (m) | Geodesic distance (WGS84); geometry-aware (0 if inside/touching) |
 | `distance(lat1, lon1, lat2, lon2)` | Float (m) | Geodesic distance (4-arg shorthand) |
 | `contains(a, b)` | Boolean | Does a's geometry contain b? (point-in-polygon or geometry containment) |
@@ -1225,6 +1226,8 @@ Built-in spatial functions for geographic queries. All node-aware functions auto
 All functions accept both nodes (auto-resolved via spatial config) and raw values (WKT strings, Points).
 
 > **Coordinate order:** `point(lat, lon)` uses **latitude-first** (geographic convention). WKT strings use **longitude-first** per OGC standard: `POLYGON((lon lat, lon lat, ...))`. These conventions differ — be careful when mixing them.
+
+Points are 2D WGS-84. A map naming a Cartesian point (`point({x: 1, y: 2})`, `crs: 'cartesian'`, `srid: 7203`) or a 3D one (`height`, `z`, `wgs-84-3d`) is an error rather than a geographic point with the wrong distance semantics. A `null` map or a `null` coordinate gives `null`.
 
 ```python
 # Node-aware spatial — with spatial config declared via column_types
@@ -4205,7 +4208,7 @@ below; do not infer absence from this shorter list.
 | **Functions** | `toUpper`, `toLower`, `toString`, `toInteger`, `toFloat`, `size`, `length`, `type`, `id`, `labels`, `keys`, `coalesce`, `date`/`datetime`, `range`, `nodes(p)`, `relationships(p)`, `round` |
 | **String** | `split`, `replace`, `substring`, `left`, `right`, `trim`, `ltrim`, `rtrim`, `reverse` |
 | **Math** | `abs`, `ceil`/`ceiling`, `floor`, `round`, `sqrt`, `sign`, `log`/`ln`, `log10`, `exp`, `pow`, `pi`, `rand`, `randomUUID`, trig: `sin`/`cos`/`tan`/`asin`/`acos`/`atan`/`atan2`/`cot`/`haversin`/`degrees`/`radians` |
-| **Spatial** | `point(lat, lon)`, `distance(a, b)`, `contains(a, b)`, `intersects(a, b)`, `centroid(n)`, `area(n)`, `perimeter(n)`, `latitude(point)`, `longitude(point)` |
+| **Spatial** | `point(lat, lon)`, `point({latitude, longitude})`, `distance(a, b)`, `contains(a, b)`, `intersects(a, b)`, `centroid(n)`, `area(n)`, `perimeter(n)`, `latitude(point)`, `longitude(point)` |
 | **Temporal** | `date(str)`, `datetime(str)`, `localdatetime()` (timestamp values), `localtime()`/`time()` (ISO strings), `duration.between(d1, d2)`, `date_diff(d1, d2)`, `date ± N` (days), `date - date` → duration, `d.year`/`d.month`/`d.day`, `valid_at(...)`, `valid_during(...)` |
 | **Semantic** | `text_score(n, prop, query [, metric] [, options])` — scores a list `query` as a vector, embeds a string `query` via `set_embedder()`, cosine/dot_product/euclidean/poincare; `embedding_norm(n, prop)` — L2 norm (hierarchy depth) |
 | **Timeseries** | `ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_count`, `ts_at`, `ts_first`, `ts_last`, `ts_delta`, `ts_series` — date-string args with resolution validation |

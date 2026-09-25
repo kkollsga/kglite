@@ -18,6 +18,9 @@ before upgrading.
   and each batch statement's `diagnostics`) carries a `profile` array of
   `{"clause", "rows_in", "rows_out", "elapsed_us"}` objects. Java exposes it as
   `QueryResult.profile()`.
+- Cypher: `point()` takes a map — `point({latitude: 59.9, longitude: 10.75})`,
+  or `point({x: 10.75, y: 59.9, crs: 'wgs-84'})` (`srid: 4326` also works).
+  A Cartesian or 3D map is refused, since KGLite points are 2D WGS-84.
 
 ### Fixed
 
