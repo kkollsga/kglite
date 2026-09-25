@@ -127,3 +127,26 @@ fn malformed_tags_are_rejected_with_their_path() {
         assert_eq!(error.path(), path, "{source}");
     }
 }
+
+#[test]
+fn tolerant_converter_decodes_the_same_tags_as_the_query_path() {
+    let source = r#"{"d":{"$date":"2020-01-01"},"t":{"$datetime":"2020-01-01T10:00:00+02:00"},"s":[{"$duration":{"days":1}}]}"#;
+    let parsed: serde_json::Value = serde_json::from_str(source).unwrap();
+    let Value::Map(tolerant) = json_value_to_kglite_value(&parsed) else {
+        panic!("object must convert to a map");
+    };
+    let strict = params(source);
+    for key in ["d", "t", "s"] {
+        assert_eq!(tolerant.get(key), strict.get(key), "{key}");
+    }
+    assert!(matches!(strict["d"], Value::DateTime(_)));
+}
+
+#[test]
+fn tolerant_converter_keeps_an_invalid_tag_as_a_map() {
+    let parsed: serde_json::Value = serde_json::from_str(r#"{"$date":"2020-13-45"}"#).unwrap();
+    let Value::Map(map) = json_value_to_kglite_value(&parsed) else {
+        panic!("an invalid tagged payload must stay a map");
+    };
+    assert_eq!(map.get("$date"), Some(&Value::String("2020-13-45".into())));
+}

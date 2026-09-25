@@ -110,3 +110,17 @@ def test_parse_json_number_typing_at_the_f64_and_i64_edges() -> None:
     assert parsed["b"] == -1e308 and isinstance(parsed["b"], float)
     assert parsed["c"] == 9223372036854775807 and isinstance(parsed["c"], int)
     assert parsed["d"] == 9.223372036854776e18 and isinstance(parsed["d"], float)
+
+
+def test_parse_json_decodes_date_and_duration_tags() -> None:
+    g = kglite.KnowledgeGraph()
+    rows = g.cypher(
+        "WITH parse_json($text) AS o "
+        "RETURN o.d = date('2020-01-01') AS d, o.t = datetime('2020-01-01T08:00:00') AS t, "
+        "o.s = duration({days: 1}) AS s, o.other.`$date` AS kept",
+        params={
+            "text": '{"d": {"$date": "2020-01-01"}, "t": {"$datetime": "2020-01-01T10:00:00+02:00"},'
+            ' "s": {"$duration": {"days": 1}}, "other": {"$date": "not a date"}}'
+        },
+    ).to_list()
+    assert rows == [{"d": True, "t": True, "s": True, "kept": "not a date"}]

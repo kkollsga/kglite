@@ -9,6 +9,14 @@ before upgrading.
 
 ## [Unreleased]
 
+### Fixed
+
+- The `{"$date"}` / `{"$datetime"}` / `{"$duration"}` tags now decode on every
+  JSON input, not only on query parameters: `kglite_create_edges_batch` edge
+  properties and ids, `from_records` records, recipe record parameters and
+  Cypher `parse_json()`. They were stored as maps before. On these tolerant
+  paths a tag with a malformed payload stays an ordinary map.
+
 ## [0.18.1] - 2026-09-26
 
 ### Added

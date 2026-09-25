@@ -400,3 +400,36 @@ def test_neither_spelling_still_vivifies():
     del spec["on_missing_endpoint"]
     kg = kglite.from_records(spec)
     assert [r["i"] for r in kg.cypher("MATCH (n:Doc) RETURN n.id AS i ORDER BY i").to_list()] == [1, 2, 99]
+
+
+def test_date_tags_load_as_typed_values():
+    g = kglite.from_records(
+        {
+            "nodes": [
+                {
+                    "type": "Event",
+                    "id_field": "id",
+                    "records": [
+                        {"id": 1, "on": {"$date": "2020-01-01"}},
+                        {"id": 2, "on": {"$date": "2021-06-30"}},
+                    ],
+                }
+            ],
+            "connections": [
+                {
+                    "type": "NEXT",
+                    "source_type": "Event",
+                    "source_id_field": "a",
+                    "target_type": "Event",
+                    "target_id_field": "b",
+                    "records": [{"a": 1, "b": 2, "at": {"$datetime": "2020-01-01T10:00:00+02:00"}}],
+                }
+            ],
+        }
+    )
+    rows = g.cypher(
+        "MATCH (a:Event {id: 1})-[r:NEXT]->(b:Event) "
+        "RETURN a.on = date('2020-01-01') AS d, b.on > a.on AS ordered, "
+        "r.at = datetime('2020-01-01T08:00:00') AS t"
+    ).to_list()
+    assert rows == [{"d": True, "ordered": True, "t": True}]

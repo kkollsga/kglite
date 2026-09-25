@@ -69,45 +69,6 @@ Either pass column_types={'<col>': 'geometry'} (or 'location.lat'/'location.lon'
 add_nodes(), or store the data under a conventional property name (wkt_geometry, geometry, \
 geom, or wkt for WKT; latitude+longitude or lat+lon for points).";
 
-/// Recursively convert a parsed `serde_json::Value` into a kglite `Value`.
-/// Objects become `Value::Map`, arrays `Value::List`; integers that fit i64
-/// stay `Int64`, and every other number becomes `Float64` — including one
-/// past i64 (`9223372036854775808` folds to `9.223372036854776e18`). This is
-/// the tolerant policy; query parameters are the strict path.
-///
-/// **A number outside finite `f64` never reaches here under the shipped
-/// features.** Without `arbitrary_precision`, serde_json refuses `1e400` at
-/// parse time ("number out of range"), so `parse_json()` takes its
-/// invalid-JSON branch and yields `Null` for the *whole document*, not for
-/// the one field — pinned by `non_finite_number_token_fails_the_parse` below
-/// and by `tests/test_cypher_parse_json.py`. The `is_finite` filter guards
-/// the case where a downstream crate turns `arbitrary_precision` on through
-/// feature unification and such a token does get parsed.
-///
-/// Backs the `parse_json()` Cypher function.
-pub(super) fn json_to_value(j: &serde_json::Value) -> Value {
-    match j {
-        serde_json::Value::Null => Value::Null,
-        serde_json::Value::Bool(b) => Value::Boolean(*b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Value::Int64(i)
-            } else {
-                n.as_f64()
-                    .filter(|value| value.is_finite())
-                    .map_or(Value::Null, Value::Float64)
-            }
-        }
-        serde_json::Value::String(s) => Value::String(s.clone()),
-        serde_json::Value::Array(a) => Value::List(a.iter().map(json_to_value).collect()),
-        serde_json::Value::Object(o) => Value::Map(
-            o.iter()
-                .map(|(k, v)| (k.clone(), json_to_value(v)))
-                .collect(),
-        ),
-    }
-}
-
 /// One parsed ISO-8601 datetime: the wall-clock reading exactly as written,
 /// plus the UTC offset the string carried (`None` when it carried none).
 pub(super) struct ParsedIsoDateTime {
@@ -255,12 +216,12 @@ pub(super) fn coerce_naive_datetime(v: &Value) -> Option<chrono::NaiveDateTime> 
 
 #[cfg(test)]
 mod tests {
-    use super::json_to_value;
     use crate::datatypes::values::Value;
+    use crate::param::json_value_to_kglite_value as json_to_value;
 
-    /// The premise of `json_to_value`'s doc: a non-finite number token is
-    /// refused by the parser, so the `is_finite` filter is unreachable and
-    /// `parse_json()` nulls the whole document. A red here means
+    /// A non-finite number token is refused by the parser, so the tolerant
+    /// converter's `is_finite` filter is unreachable and `parse_json()` nulls
+    /// the whole document. A red here means
     /// `arbitrary_precision` got unified in and the filter is live again —
     /// the doc, not the filter, is what has to change.
     #[test]

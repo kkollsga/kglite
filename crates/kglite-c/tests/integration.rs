@@ -630,6 +630,46 @@ fn execute_mut_batch_is_atomic_on_failure() {
     unsafe { kglite_session_free(session) };
 }
 
+/// Edge properties in a bulk batch honour the same `$date` / `$datetime` /
+/// `$duration` tags as query parameters, so a stored bound compares equal to
+/// the matching typed literal.
+#[test]
+fn create_edges_batch_props_decode_date_and_duration_tags() {
+    let session = seed_notes("CREATE (:P {id: 1}), (:P {id: 2})");
+    let edges = CString::new(
+        r#"[{"src_id":1,"src_type":"P","dst_id":2,"dst_type":"P","type":"R",
+             "props":{"vf":{"$date":"2020-01-01"},
+                      "at":{"$datetime":"2020-01-01T10:00:00+02:00"},
+                      "span":{"$duration":{"days":3}},
+                      "bad":{"$date":"not a date"}}}]"#,
+    )
+    .unwrap();
+    let mut out: *const c_char = std::ptr::null();
+    let mut err: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_create_edges_batch(
+            session,
+            edges.as_ptr(),
+            &mut out as *mut _,
+            &mut err as *mut _,
+        )
+    };
+    assert_eq!(rc, KgliteStatusCode::Ok, "create_edges_batch failed");
+    unsafe { kglite_free_string(out) };
+    let rows = query_rows(
+        session,
+        "MATCH ()-[r:R]->() RETURN r.vf = date('2020-01-01') AS d, \
+         r.at = datetime('2020-01-01T08:00:00') AS t, \
+         r.span = duration({days: 3}) AS s, r.bad.`$date` AS bad",
+        "{}",
+    );
+    assert_eq!(
+        rows,
+        serde_json::json!([{ "d": true, "t": true, "s": true, "bad": "not a date" }])
+    );
+    unsafe { kglite_session_free(session) };
+}
+
 #[test]
 fn create_edges_batch_by_id() {
     let graph = kglite_graph_new();

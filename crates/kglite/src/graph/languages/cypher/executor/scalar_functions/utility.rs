@@ -110,7 +110,7 @@ impl<'a> CypherExecutor<'a> {
                 }
                 match self.evaluate_expression(&args[0], row)? {
                     Value::String(s) => Ok(serde_json::from_str::<serde_json::Value>(&s)
-                        .map(|j| json_to_value(&j))
+                        .map(|j| crate::param::json_value_to_kglite_value(&j))
                         .unwrap_or(Value::Null)),
                     Value::Null => Ok(Value::Null),
                     _ => Ok(Value::Null),

@@ -1606,9 +1606,10 @@ def from_records(
             carry, naming the value and its type. Python ``datetime`` / ``date``
             / ``time`` are in that set — JSON has no temporal type, and writing
             them as text would silently demote a temporal to a string property.
-            Pass an ISO-8601 string and convert with Cypher ``datetime()``, or
-            load the column through :meth:`KnowledgeGraph.add_nodes`, which
-            types it. ``pd.NaT`` carries no value to demote and becomes
+            Pass a tagged object — ``{"$date": "2020-01-01"}`` or
+            ``{"$datetime": "2020-01-01T10:00:00+02:00"}``, which load as a
+            date / datetime — or load the column through
+            :meth:`KnowledgeGraph.add_nodes`, which types it. ``pd.NaT`` carries no value to demote and becomes
             ``null``.
     """
     ...

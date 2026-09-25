@@ -357,7 +357,9 @@ fn group_records_by_target<'a>(
                     })?
             }
             None => {
-                let id = rec.get(target_id_field).map(json_to_value);
+                let id = rec
+                    .get(target_id_field)
+                    .map(crate::param::json_value_to_kglite_value);
                 id.as_ref()
                     .and_then(|v| {
                         target_types
@@ -623,33 +625,16 @@ fn records_to_columns_rows(
             let obj = rec.as_object().expect("validated above");
             columns
                 .iter()
-                .map(|col| obj.get(col).map(json_to_value).unwrap_or(Value::Null))
+                .map(|col| {
+                    obj.get(col)
+                        .map(crate::param::json_value_to_kglite_value)
+                        .unwrap_or(Value::Null)
+                })
                 .collect()
         })
         .collect();
 
     Ok((columns, rows))
-}
-
-/// Recursive JSON → [`Value`]. Arrays become native `Value::List`, objects
-/// become `Value::Map`; scalars map to their natural typed variant.
-fn json_to_value(j: &Json) -> Value {
-    match j {
-        Json::Null => Value::Null,
-        Json::Bool(b) => Value::Boolean(*b),
-        Json::Number(n) => n
-            .as_i64()
-            .map(Value::Int64)
-            .or_else(|| n.as_f64().map(Value::Float64))
-            .unwrap_or(Value::Null),
-        Json::String(s) => Value::String(s.clone()),
-        Json::Array(items) => Value::List(items.iter().map(json_to_value).collect()),
-        Json::Object(map) => Value::Map(
-            map.iter()
-                .map(|(k, v)| (k.clone(), json_to_value(v)))
-                .collect(),
-        ),
-    }
 }
 
 #[cfg(test)]

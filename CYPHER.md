@@ -1733,6 +1733,11 @@ int / float / bool / string. Invalid JSON or a non-string argument returns
 `null` (never an error). This lets you predicate over data that is *stored* as
 a JSON string rather than as graph structure.
 
+A one-key object `{"$date": "2020-01-01"}`, `{"$datetime": "2020-01-01T10:00:00+02:00"}`
+or `{"$duration": {"months": 0, "days": 1, "seconds": 0}}` parses to that
+date, datetime or duration, as query parameters do; with a malformed payload
+it stays a map.
+
 The code graph keeps `Function.parameters`, `Class.fields`, and
 `Function.signature` as JSON (property columns hold scalars only), so
 `parse_json` is how you query inside them:

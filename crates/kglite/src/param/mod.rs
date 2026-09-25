@@ -292,7 +292,10 @@ fn convert_query_map(
 /// - non-integer JSON number → `Value::Float64`
 /// - JSON string → `Value::String`
 /// - JSON array → `Value::List` (recursing element-wise)
-/// - JSON object → `Value::Map` (recursing value-wise)
+/// - `{"$date": …}`, `{"$datetime": …}`, `{"$duration": …}` → the typed value,
+///   decoded exactly as the checked query path decodes it; a tagged object
+///   whose payload is invalid stays an ordinary map
+/// - any other JSON object → `Value::Map` (recursing value-wise)
 ///
 /// This converter is intentionally tolerant for declared ingestion and
 /// non-query JSON parsing: an integer outside `i64` falls through to `f64`.
@@ -312,10 +315,12 @@ pub fn json_value_to_kglite_value(v: &serde_json::Value) -> Value {
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 Value::Int64(i)
-            } else if let Some(f) = n.as_f64() {
-                Value::Float64(f)
             } else {
-                Value::Null
+                // Non-finite only when a dependent enables serde_json's
+                // `arbitrary_precision`; the default parse rejects such tokens.
+                n.as_f64()
+                    .filter(|f| f.is_finite())
+                    .map_or(Value::Null, Value::Float64)
             }
         }
         serde_json::Value::String(s) => Value::String(s.clone()),
@@ -328,11 +333,13 @@ pub fn json_value_to_kglite_value(v: &serde_json::Value) -> Value {
         serde_json::Value::Array(items) => {
             Value::List(items.iter().map(json_value_to_kglite_value).collect())
         }
-        serde_json::Value::Object(map) => Value::Map(
-            map.iter()
-                .map(|(k, v)| (k.clone(), json_value_to_kglite_value(v)))
-                .collect(),
-        ),
+        serde_json::Value::Object(map) => tagged::decode(map).flatten().unwrap_or_else(|| {
+            Value::Map(
+                map.iter()
+                    .map(|(k, v)| (k.clone(), json_value_to_kglite_value(v)))
+                    .collect(),
+            )
+        }),
     }
 }
 

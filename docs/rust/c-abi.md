@@ -134,6 +134,11 @@ and wrapped in its tag matches the stored value; a bare string stays a string.
 An object with any other key, or with a tag key beside other keys, is an
 ordinary map. A malformed payload is refused like an unrepresentable number.
 
+Every JSON input decodes the same tags: `kglite_create_edges_batch` edge
+properties and endpoint ids, recipe record parameters, `from_records` records
+and Cypher `parse_json()`. Those tolerant paths keep a tagged object whose
+payload is malformed as an ordinary map instead of refusing it.
+
 ## Result access
 
 Results remain owned by `KgliteCypherResult` until
