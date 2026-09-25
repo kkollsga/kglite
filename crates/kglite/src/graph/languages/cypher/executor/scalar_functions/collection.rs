@@ -24,7 +24,8 @@ impl<'a> CypherExecutor<'a> {
                     Value::List(items) => Ok(Value::Int64(items.len() as i64)),
                     Value::Map(m) => Ok(Value::Int64(m.len() as i64)),
                     Value::String(s) => Ok(Value::Int64(string_scalar_length(s))),
-                    _ => Ok(Value::Null),
+                    Value::Null => Ok(Value::Null),
+                    other => Err(list_or_error("size()", " or a string", &other)),
                 }
             }
             "length" => {
@@ -41,7 +42,8 @@ impl<'a> CypherExecutor<'a> {
                     Value::Map(m) => Ok(Value::Int64(m.len() as i64)),
                     Value::Path(p) => Ok(Value::Int64(p.rels.len() as i64)),
                     Value::String(s) => Ok(Value::Int64(string_scalar_length(s))),
-                    _ => Ok(Value::Null),
+                    Value::Null => Ok(Value::Null),
+                    other => Err(list_or_error("length()", ", a string or a path", &other)),
                 }
             }
             "coalesce" => {
@@ -90,16 +92,18 @@ impl<'a> CypherExecutor<'a> {
                     return Err("head() requires 1 argument".into());
                 }
                 let val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
-                let items = parse_list_value(&val);
-                Ok(items.into_iter().next().unwrap_or(Value::Null))
+                Ok(list_operand(&val, "head()")?
+                    .and_then(|items| items.first().cloned())
+                    .unwrap_or(Value::Null))
             }
             "last" => {
                 if args.len() != 1 {
                     return Err("last() requires 1 argument".into());
                 }
                 let val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
-                let items = parse_list_value(&val);
-                Ok(items.into_iter().last().unwrap_or(Value::Null))
+                Ok(list_operand(&val, "last()")?
+                    .and_then(|items| items.last().cloned())
+                    .unwrap_or(Value::Null))
             }
             // ── Spatial functions ─────────────────────────────────
             "range" => {

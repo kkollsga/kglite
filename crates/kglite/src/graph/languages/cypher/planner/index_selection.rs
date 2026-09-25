@@ -663,20 +663,24 @@ fn extract_from_predicate(
 /// Resolve an `IN <rhs>` right-hand side to a concrete list of values at plan
 /// time: the RHS must be a `$param` or an inline literal whose value is a list,
 /// and anything not known at plan time (a correlated sub-expression) yields
-/// `None`. Reuses the executor's `parse_list_value`, which accepts both a
-/// native `Value::List` and the JSON-array `Value::String("[...]")` form the
-/// Python binding uses for list params — so the *same* element parsing drives
-/// the index pushdown here and the WHERE safety-net filter at run time. An
-/// empty list is returned as a known-empty candidate set. (A bracket list
-/// `IN [a, b]` parses to `Predicate::In`, not `InExpression`, and is handled
-/// separately.)
+/// `None`. Reuses the executor's `list_operand`, which accepts both a native
+/// `Value::List` and the JSON-array `Value::String("[...]")` form the Python
+/// binding uses for list params — so the *same* element parsing drives the
+/// index pushdown here and the WHERE safety-net filter at run time. An empty
+/// list is returned as a known-empty candidate set, and so is null: `x IN
+/// null` is UNKNOWN, which filters the row exactly as no match does. A value
+/// that is not a list yields `None`, leaving the predicate to the executor,
+/// which raises its type error. (A bracket list `IN [a, b]` parses to
+/// `Predicate::In`, not `InExpression`, and is handled separately.)
 fn resolve_value_list(expr: &Expression, params: &HashMap<String, Value>) -> Option<Vec<Value>> {
     let val = match expr {
         Expression::Parameter(name) => params.get(name.as_str())?,
         Expression::Literal(v) => v,
         _ => return None,
     };
-    Some(super::super::executor::helpers::parse_list_value(val))
+    super::super::executor::helpers::list_operand(val, "IN")
+        .ok()
+        .map(|items| items.map(std::borrow::Cow::into_owned).unwrap_or_default())
 }
 
 fn resolve_non_empty_string(expr: &Expression, params: &HashMap<String, Value>) -> Option<String> {

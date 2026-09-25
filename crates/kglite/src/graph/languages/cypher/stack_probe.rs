@@ -85,7 +85,9 @@ fn query(shape: &str, depth: usize) -> String {
         "and" => format!("RETURN {} AS x", vec!["true"; depth + 1].join(" AND ")),
         "add" => format!("RETURN {} AS x", vec!["1"; depth + 1].join(" + ")),
         "concat" => format!("RETURN {} AS x", vec!["'a'"; depth + 1].join(" || ")),
-        "subscript" => format!("RETURN [1]{} AS x", "[0]".repeat(depth)),
+        // `[null]`, not `[1]`: past the first subscript the container is null,
+        // which indexes to null, where an integer would be a type error.
+        "subscript" => format!("RETURN [null]{} AS x", "[0]".repeat(depth)),
         // Distinct values on purpose: identical disjuncts get collapsed, which
         // would hide the recursion this exists to measure. This is also the
         // literal shape a filter/facet builder emits for a multi-select — and

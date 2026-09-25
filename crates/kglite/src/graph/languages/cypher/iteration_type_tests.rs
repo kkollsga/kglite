@@ -81,3 +81,73 @@ fn lists_null_and_unwind_keep_their_meaning() {
         assert_eq!(run(&graph, query).unwrap(), vec![vec![expected]], "{query}");
     }
 }
+
+#[test]
+fn list_operators_over_a_non_list_are_a_type_error() {
+    let graph = graph();
+    for query in [
+        "RETURN 'a' IN 'abc' AS r",
+        "RETURN 1 IN 5 AS r",
+        "RETURN 1 IN {a: 1} AS r",
+        "RETURN 1 IN true AS r",
+        "RETURN null IN 'abc' AS r",
+        "RETURN 'a' IN $s AS r",
+        "MATCH (n:N) WHERE 'a' IN n.s RETURN n.id AS id",
+        "MATCH (n:N) WITH n WHERE 'a' IN n.s RETURN n.id AS id",
+        "MATCH (n:N) WHERE n.id IN $s RETURN n.id AS id",
+        "MATCH (n:N) WHERE n.id IN 5 RETURN n.id AS id",
+        "MATCH (n:N) WHERE 1 IN n.id RETURN count(n) AS c",
+        "RETURN head('abc') AS r",
+        "RETURN last(5) AS r",
+        "RETURN size(5) AS r",
+        "RETURN length(true) AS r",
+        "MATCH (n:N) RETURN size(n) AS r",
+        "RETURN 'abc'[0] AS r",
+        "RETURN 5[0] AS r",
+        "RETURN {a: 1}[0] AS r",
+        "MATCH (n:N) RETURN n.s[0] AS r",
+        "RETURN 'abc'[0..2] AS r",
+        "RETURN 5[..1] AS r",
+        "MATCH (n:N) RETURN count(n)[0] AS r",
+        "MATCH (n:N) RETURN count(n)[0..1] AS r",
+    ] {
+        let error = run(&graph, query).expect_err(query);
+        assert!(error.contains("expects a list"), "{query}: {error}");
+    }
+}
+
+#[test]
+fn list_operators_keep_their_meaning_over_lists_and_null() {
+    let graph = graph();
+    let ints = |items: &[i64]| Value::List(items.iter().copied().map(Value::Int64).collect());
+    for (query, expected) in [
+        ("RETURN 1 IN null AS r", Value::Null),
+        ("RETURN 2 IN [1, 2] AS r", Value::Boolean(true)),
+        ("RETURN 3 IN [1, null] AS r", Value::Null),
+        (
+            "MATCH (n:N) RETURN 2 IN n.legacy AS r",
+            Value::Boolean(true),
+        ),
+        ("RETURN head([1, 2]) AS r", Value::Int64(1)),
+        ("RETURN last([1, 2]) AS r", Value::Int64(2)),
+        ("RETURN head([]) AS r", Value::Null),
+        ("RETURN last(null) AS r", Value::Null),
+        ("MATCH (n:N) RETURN last(n.legacy) AS r", Value::Int64(2)),
+        ("RETURN size('abc') AS r", Value::Int64(3)),
+        ("RETURN size([1, 2]) AS r", Value::Int64(2)),
+        ("RETURN size(null) AS r", Value::Null),
+        ("RETURN length(null) AS r", Value::Null),
+        ("RETURN [1, 2][5] AS r", Value::Null),
+        ("RETURN [1, 2][-1] AS r", Value::Int64(2)),
+        ("RETURN null[0] AS r", Value::Null),
+        ("RETURN null[0..2] AS r", Value::Null),
+        ("RETURN [1, 2, 3][1..] AS r", ints(&[2, 3])),
+        ("MATCH (n:N) RETURN n.legacy[1] AS r", Value::Int64(2)),
+        ("MATCH (n:N) RETURN n.legacy[0..1] AS r", ints(&[1])),
+        ("RETURN {a: 1}['a'] AS r", Value::Int64(1)),
+        ("MATCH (n:N) RETURN collect(n.id)[0] AS r", Value::Int64(1)),
+        ("MATCH (n:N) RETURN collect(n.id)[0..1] AS r", ints(&[1])),
+    ] {
+        assert_eq!(run(&graph, query).unwrap(), vec![vec![expected]], "{query}");
+    }
+}

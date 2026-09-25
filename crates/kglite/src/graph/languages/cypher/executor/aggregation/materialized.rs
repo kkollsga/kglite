@@ -665,7 +665,9 @@ impl<'a> CypherExecutor<'a> {
                 end,
             } => {
                 let list_val = self.evaluate_aggregate_with_rows(inner, rows)?;
-                let items = parse_list_value(&list_val);
+                let Some(items) = list_operand(&list_val, "A list slice")? else {
+                    return Ok(Value::Null);
+                };
                 let len = items.len() as i64;
                 let dummy = ResultRow::new();
                 let row = rows.first().copied().unwrap_or(&dummy);
@@ -712,20 +714,19 @@ impl<'a> CypherExecutor<'a> {
                 let row = rows.first().copied().unwrap_or(&dummy);
                 let idx_val = self.evaluate_expression(index, row)?;
                 match idx_val {
-                    Value::Int64(idx) => {
-                        let items = parse_list_value(&container);
-                        let len = items.len() as i64;
-                        let actual = if idx < 0 { len + idx } else { idx };
-                        if actual >= 0 && (actual as usize) < items.len() {
-                            Ok(items[actual as usize].clone())
-                        } else {
-                            Ok(Value::Null)
+                    // The same rules as the scalar subscript.
+                    Value::Int64(idx) => index_into_value(&container, idx),
+                    Value::String(key) => match container {
+                        Value::Map(_) | Value::Node(_) | Value::Relationship(_) => {
+                            Ok(map_subscript(&container, &key))
                         }
-                    }
-                    // String key → map / node / relationship subscript;
-                    // missing key (or non-map container) is NULL.
-                    Value::String(key) => Ok(map_subscript(&container, &key)),
-                    _ => Ok(Value::Null),
+                        Value::Null => Ok(Value::Null),
+                        _ => Err(format!(
+                            "String index requires a map, node, or relationship; got {container:?}"
+                        )),
+                    },
+                    Value::Null => Ok(Value::Null),
+                    other => Err(format!("List index must be an integer, got {other:?}")),
                 }
             }
             Expression::Add(left, right) => {

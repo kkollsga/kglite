@@ -895,10 +895,11 @@ impl<'a> CypherExecutor<'a> {
     /// [`Self::evaluate_in_element_list`], but the LHS and the list are both
     /// arbitrary expressions, so NULL can come from either.
     ///
-    /// `parse_list_value(&Value::Null)` returns an empty vec, and an empty
-    /// list is *false* rather than unknown, so a NULL list has to be lifted
-    /// explicitly before the emptiness rule applies. The operand's own NULL is
-    /// left to `kleene_contains_linear`, which decides emptiness first.
+    /// A NULL list is UNKNOWN (an empty list would be *false*), and a value
+    /// that is not a list is a type error. The operand's own NULL is left to
+    /// `kleene_contains_linear`, which decides emptiness first. A
+    /// row-*independent* list never gets here — constant folding turns it
+    /// into `InLiteralSet`.
     fn evaluate_in_list_expression(
         &self,
         expr: &Expression,
@@ -907,23 +908,10 @@ impl<'a> CypherExecutor<'a> {
     ) -> Result<Option<bool>, String> {
         let val = self.evaluate_expression(expr, row)?;
         let list_val = self.evaluate_expression(list_expr, row)?;
-        if matches!(list_val, Value::Null) {
+        let Some(items) = list_operand(&list_val, "IN")? else {
             return Ok(None);
-        }
-        // Borrow the list where it already is a list. The previous
-        // `parse_list_value(&list_val)` cloned every element of the
-        // whole list for every row; only the string-encoded form
-        // needs parsing at all. A row-*independent* list never gets
-        // here — constant folding turns it into `InLiteralSet`.
-        let parsed;
-        let items: &[Value] = match &list_val {
-            Value::List(items) => items,
-            other => {
-                parsed = parse_list_value(other);
-                &parsed
-            }
         };
-        Ok(membership::kleene_contains_linear(&val, items))
+        Ok(membership::kleene_contains_linear(&val, &items))
     }
 
     fn execute_vector_score_filter(

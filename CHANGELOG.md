@@ -21,6 +21,13 @@ before upgrading.
 
 ### Fixed
 
+- `IN`, a list subscript or slice, `head()` and `last()` over a value that is
+  not a list (`'a' IN 'abc'`, `'abc'[0]`, `5[0..2]`, `head('abc')`) raise a
+  type error instead of answering false, null or `[]`, and so do `size()` of a
+  value that is neither a list nor a string and `length()` of one that is not
+  a list, string or path. The filter and `IN $param` index paths raise it
+  too. A list in its bracketed text form still counts as a list, and a null
+  slice (`null[0..2]`) is now null rather than `[]`.
 - The `{"$date"}` / `{"$datetime"}` / `{"$duration"}` tags now decode on every
   JSON input, not only on query parameters: `kglite_create_edges_batch` edge
   properties and ids, `from_records` records, recipe record parameters and

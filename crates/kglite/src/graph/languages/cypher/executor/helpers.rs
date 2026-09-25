@@ -24,11 +24,11 @@ pub use super::super::ast::is_aggregate_expression;
 /// does not match".
 ///
 /// Invalid regexes, missing parameters/retrieval sources, malformed vector
-/// arguments and iterating a non-list remain query errors. A fused filter must raise them just
-/// as scalar evaluation does; it must not report a silent empty result or zero
+/// arguments and a list operator over a non-list remain query errors. A fused
+/// filter must raise them just as scalar evaluation does; it must not report a silent empty result or zero
 /// count. Each recognizer lives beside the errors it classifies.
 pub(super) fn is_user_input_error(message: &str) -> bool {
-    is_iteration_type_error(message)
+    is_list_type_error(message)
         || super::regex_cache::is_compile_error(message)
         || super::expression::is_missing_parameter_error(message)
         || super::scalar_functions::utility::is_missing_retrieval_source_error(message)
@@ -1238,17 +1238,17 @@ pub(super) fn map_subscript(container: &Value, key: &str) -> Value {
 /// the selected element. A native `Value::List` is indexed by reference — the
 /// whole list is never cloned, which is what makes `list[i]` O(1) in list
 /// length on the hot vector-scoring path rather than O(len) per access. The
-/// legacy stringified-list form still parses first; anything else, and any
-/// out-of-range index, is `Value::Null` — matching `parse_list_value` + index.
+/// legacy stringified-list form still parses first. A null container or an
+/// out-of-range index is `Value::Null`; any other container is a
+/// [`list_operand`] type error.
 pub(in crate::graph::languages::cypher) fn index_into_value(
     container: &Value,
     integer_index: i64,
-) -> Value {
-    match container {
-        Value::List(items) => index_list_slice(items, integer_index),
-        Value::String(_) => index_list_slice(&parse_list_value(container), integer_index),
-        _ => Value::Null,
-    }
+) -> Result<Value, String> {
+    Ok(match list_operand(container, "A list index")? {
+        Some(items) => index_list_slice(&items, integer_index),
+        None => Value::Null,
+    })
 }
 
 /// Shared bounds/negative-index logic for `list[i]`. A negative index counts
@@ -1291,35 +1291,65 @@ pub(in crate::graph::languages::cypher) fn parse_list_value(val: &Value) -> Vec<
     }
 }
 
-/// Middle of the [`iteration_items`] type error, and what
-/// [`is_iteration_type_error`] recognises it by.
-const ITERATION_TYPE_ERROR: &str = " expects a list to iterate, got ";
+/// Stem of every list type error, and what [`is_list_type_error`] recognises
+/// it by.
+const LIST_TYPE_ERROR: &str = " expects a list";
 
-/// The items a list comprehension, list quantifier or `reduce` iterates.
-/// Callers answer null themselves. A list — or a list held in its bracketed
-/// text form, which [`parse_list_value`] reads — yields its items; any other
-/// value is a type error naming `construct`, not an empty iteration.
+/// The type error for `construct` applied to `value`, which is not a list.
+pub(in crate::graph::languages::cypher) fn list_type_error(
+    construct: &str,
+    value: &Value,
+) -> String {
+    list_or_error(construct, "", value)
+}
+
+/// As [`list_type_error`], for a construct that also accepts the types
+/// `alternatives` names (", a string or a path").
+pub(in crate::graph::languages::cypher) fn list_or_error(
+    construct: &str,
+    alternatives: &str,
+    value: &Value,
+) -> String {
+    format!(
+        "{construct}{LIST_TYPE_ERROR}{alternatives}, got {}",
+        value.type_name()
+    )
+}
+
+/// The items of an operand a list operator consumes (`IN`, a subscript or
+/// slice, `head`/`last`, iteration), borrowed when it is a native list.
+/// `None` for null, which each operator answers itself. A list held in its
+/// bracketed text form, which [`parse_list_value`] reads, counts as a list;
+/// any other value is a type error naming `construct`, never an empty list.
+pub(in crate::graph::languages::cypher) fn list_operand<'v>(
+    value: &'v Value,
+    construct: &str,
+) -> Result<Option<std::borrow::Cow<'v, [Value]>>, String> {
+    match value {
+        Value::Null => Ok(None),
+        Value::List(items) => Ok(Some(std::borrow::Cow::Borrowed(items))),
+        Value::String(text) if text.trim().starts_with('[') && text.trim().ends_with(']') => {
+            Ok(Some(std::borrow::Cow::Owned(parse_list_value(value))))
+        }
+        other => Err(list_type_error(construct, other)),
+    }
+}
+
+/// The items a list comprehension, list quantifier or `reduce` iterates —
+/// [`list_operand`] owned. Callers answer null themselves.
 pub(in crate::graph::languages::cypher) fn iteration_items(
     value: &Value,
     construct: &str,
 ) -> Result<Vec<Value>, String> {
-    match value {
-        Value::List(items) => Ok(items.clone()),
-        Value::String(text) if text.trim().starts_with('[') && text.trim().ends_with(']') => {
-            Ok(parse_list_value(value))
-        }
-        other => Err(format!(
-            "{construct}{ITERATION_TYPE_ERROR}{}",
-            other.type_name()
-        )),
-    }
+    Ok(list_operand(value, construct)?
+        .map(std::borrow::Cow::into_owned)
+        .unwrap_or_default())
 }
 
-/// Whether `message` is an [`iteration_items`] type error — wrong for the
-/// query, not for one row, so a fused filter must raise it rather than drop
-/// the row.
-fn is_iteration_type_error(message: &str) -> bool {
-    message.contains(ITERATION_TYPE_ERROR)
+/// Whether `message` is a list type error — wrong for the query, not for one
+/// row, so a fused filter must raise it rather than drop the row.
+fn is_list_type_error(message: &str) -> bool {
+    message.contains(LIST_TYPE_ERROR)
 }
 
 /// Parse a single value token (the same grammar as items inside a

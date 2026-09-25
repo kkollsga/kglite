@@ -1638,6 +1638,12 @@ graph.cypher("MATCH (n:Person) RETURN size(n.aliases) AS n_aliases")       # len
 `IN` over a list property is true *membership* — `'Bob' IN ['Bobby']` is
 false (no substring matching).
 
+The list operators take a list. `x IN null`, `null[0]`, `null[0..2]`,
+`head(null)` and `last(null)` are `null`; over any other value that is not a
+list — `'a' IN 'abc'`, `'abc'[0]`, `5[0..2]`, `head('abc')` — they are an
+error, as are `size()` of a value that is neither a list nor a string and
+`length()` of one that is not a list, string or path.
+
 ## List Comprehensions
 
 `[x IN list WHERE predicate | expression]` syntax:

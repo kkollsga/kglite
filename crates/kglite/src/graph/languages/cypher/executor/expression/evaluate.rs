@@ -524,10 +524,10 @@ impl<'a> CypherExecutor<'a> {
         // a parameter, or a property of an in-memory node binding); otherwise
         // fall back to an owned evaluation. Both routes then index identically.
         if let Some(container) = self.borrow_index_container(expression, row) {
-            return Ok(index_into_value(&container, integer_index));
+            return index_into_value(&container, integer_index);
         }
         let container = self.evaluate_expression(expression, row)?;
-        Ok(index_into_value(&container, integer_index))
+        index_into_value(&container, integer_index)
     }
 
     /// Borrow the container for an integer list-index access, avoiding a
@@ -673,7 +673,10 @@ impl<'a> CypherExecutor<'a> {
         end: Option<&Expression>,
         row: &ResultRow,
     ) -> Result<Value, String> {
-        let items = parse_list_value(&self.evaluate_expression(expression, row)?);
+        let value = self.evaluate_expression(expression, row)?;
+        let Some(items) = list_operand(&value, "A list slice")? else {
+            return Ok(Value::Null);
+        };
         let len = items.len() as i64;
         let start = self.evaluate_slice_bound(start, row, len, 0, "start")?;
         let end = self.evaluate_slice_bound(end, row, len, len as usize, "end")?;
