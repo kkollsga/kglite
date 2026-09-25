@@ -6,9 +6,10 @@ import java.util.Map;
 /**
  * The rows of one statement together with the engine's diagnostics for it.
  *
- * <p>Returned by {@link KnowledgeGraph#queryResult(String, Map)} and
- * {@link KnowledgeGraph#cypherResult(String, Map)}; the plain
- * {@code query}/{@code cypher} methods return the same rows without it.
+ * <p>Returned by {@link KnowledgeGraph#queryResult(String, Map)},
+ * {@link KnowledgeGraph#cypherResult(String, Map)} and, one per statement, by
+ * {@link Transaction#commitResults()}; the plain {@code query}/{@code cypher}
+ * methods and {@link Transaction#commit()} return the same rows without it.
  *
  * <p>{@link #warnings()} carries the engine's non-fatal advisories — a
  * {@code MATCH} naming a label or relationship type the graph does not have

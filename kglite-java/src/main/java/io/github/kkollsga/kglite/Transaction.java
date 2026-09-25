@@ -117,7 +117,7 @@ public final class Transaction implements AutoCloseable {
          * @param queriesJson the request text
          * @return one result per statement, in order
          */
-        List<List<Map<String, Object>>> submit(MemorySegment session, String queriesJson);
+        List<QueryResult> submit(MemorySegment session, String queriesJson);
     }
 
     private final NativeHandle session;
@@ -211,6 +211,22 @@ public final class Transaction implements AutoCloseable {
      *     created it
      */
     public List<List<Map<String, Object>>> commit() {
+        return commitResults().stream().map(QueryResult::rows).toList();
+    }
+
+    /**
+     * As {@link #commit()}, returning each statement's rows together with the
+     * engine's warnings and diagnostics for it — the per-statement counterpart
+     * of {@link KnowledgeGraph#cypherResult(String, Map)}.
+     *
+     * @return one result per staged statement, in staging order
+     * @throws KgliteException if any statement failed, carrying that statement's
+     *     engine status and message; nothing was applied
+     * @throws IllegalStateException if this transaction is already finished, the
+     *     graph has been closed, or the calling thread is not the one that
+     *     created it
+     */
+    public List<QueryResult> commitResults() {
         checkOwner("commit");
         checkOpen("commit");
         if (queries.isEmpty()) {

@@ -415,9 +415,10 @@ final class Abi {
      *
      * @param session     the session handle
      * @param queriesJson the request array, {@code [{"query":…,"params":{…}}]}
-     * @return one result per input statement, in input order
+     * @return one result per input statement, in input order, each with its
+     *     rows, warnings and diagnostics
      */
-    static java.util.List<java.util.List<Map<String, Object>>> executeMutBatch(
+    static java.util.List<QueryResult> executeMutBatch(
             MemorySegment session, String queriesJson) {
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment outResults = arena.allocate(PTR);
@@ -432,7 +433,7 @@ final class Abi {
                 throw new KgliteException(
                         "the engine reported a successful transaction but produced no results");
             }
-            return Json.toBatchRows(resultsJson);
+            return Json.toBatchResults(resultsJson);
         } catch (Throwable t) {
             throw rethrow(t);
         }

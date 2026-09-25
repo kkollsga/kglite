@@ -248,27 +248,30 @@ final class Json {
     }
 
     /**
-     * Decode a batch result: the array of {@code {"columns": […], "rows": […]}}
-     * objects {@code kglite_session_execute_mut_batch} returns, one per input
-     * statement and in input order.
+     * Decode a batch result: the array of
+     * {@code {"columns": […], "rows": […], "diagnostics": {…}}} objects
+     * {@code kglite_session_execute_mut_batch} returns, one per input statement
+     * and in input order.
      *
      * <p>The per-statement cell mapping is {@link #toRows(Object, Object)}'s,
-     * the same one the single-statement path uses, so a transaction's rows and
-     * a {@code cypher()} call's rows cannot decode differently.
+     * and the diagnostics decoding {@link #toQueryResult(List, Object)}'s — the
+     * ones the single-statement path uses, so a transaction's results and a
+     * {@code cypherResult()} call's cannot decode differently.
      *
      * @param resultsJson the {@code out_results_json} text
-     * @return one row list per statement, in statement order
+     * @return one result per statement, in statement order
      * @throws KgliteException if the blob is malformed
      */
-    static List<List<Map<String, Object>>> toBatchRows(String resultsJson) {
+    static List<QueryResult> toBatchResults(String resultsJson) {
         List<Object> raw = asList(parse(resultsJson), "batch results");
-        List<List<Map<String, Object>>> results = new ArrayList<>(raw.size());
+        List<QueryResult> results = new ArrayList<>(raw.size());
         for (Object entry : raw) {
             if (!(entry instanceof Map<?, ?> result)) {
                 throw new KgliteException(
                         "expected a JSON object per batch statement, got " + entry);
             }
-            results.add(toRows(result.get("columns"), result.get("rows")));
+            results.add(toQueryResult(
+                    toRows(result.get("columns"), result.get("rows")), result.get("diagnostics")));
         }
         return Collections.unmodifiableList(results);
     }
@@ -329,7 +332,19 @@ final class Json {
      * @throws KgliteException if the diagnostics are not a JSON object or null
      */
     static QueryResult toQueryResult(List<Map<String, Object>> rows, String diagnosticsJson) {
-        Object parsed = diagnosticsJson == null ? null : parse(diagnosticsJson);
+        return toQueryResult(rows, diagnosticsJson == null ? null : parse(diagnosticsJson));
+    }
+
+    /**
+     * As {@link #toQueryResult(List, String)}, over an already-parsed
+     * diagnostics value.
+     *
+     * @param rows   the decoded rows
+     * @param parsed the parsed diagnostics object, or {@code null} for none
+     * @return the rows with their warnings and diagnostics
+     * @throws KgliteException if {@code parsed} is not a JSON object
+     */
+    static QueryResult toQueryResult(List<Map<String, Object>> rows, Object parsed) {
         if (parsed == null) {
             return new QueryResult(rows, List.of(), Map.of());
         }

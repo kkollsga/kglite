@@ -131,7 +131,8 @@ advisories, such as a `MATCH` on a label the graph does not have (*"Did you
 mean 'City'?"*) or a result cut by a row cap — and `diagnostics()`, the
 engine's whole diagnostics object (`elapsed_ms`, `timeout_ms`, `row_limit`,
 `total_rows`, `retrieval`). The native library never prints a warning to the
-process's stderr, so these methods are the only place warnings appear.
+process's stderr, so these methods, and a transaction's `commitResults()`,
+are the only places warnings appear.
 
 ```java
 QueryResult result = graph.queryResult("MATCH (c:Cty) RETURN c.id AS id", Map.of());
@@ -287,6 +288,9 @@ If any statement fails, **none** of the batch reaches the graph, and `commit()`
 throws `KgliteException` with that statement's engine status and message. Which
 statement failed is not reported — the ABI's batch call carries a status and a
 message and no index — so the engine message is the whole diagnosis today.
+
+`commitResults()` commits the same way and returns one `QueryResult` per
+statement, carrying its warnings and diagnostics alongside its rows.
 
 A transaction is confined to the thread that began it (any other thread gets
 `IllegalStateException`); the `KnowledgeGraph` itself stays shareable. An empty

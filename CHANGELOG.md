@@ -9,6 +9,12 @@ before upgrading.
 
 ## [Unreleased]
 
+### Added
+
+- Java: `Transaction.commitResults()` commits like `commit()` and returns one
+  `QueryResult` per statement, so a transaction's statements expose their
+  `warnings()` and `diagnostics()` as `queryResult`/`cypherResult` do.
+
 ### Fixed
 
 - The `{"$date"}` / `{"$datetime"}` / `{"$duration"}` tags now decode on every

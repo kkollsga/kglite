@@ -141,6 +141,30 @@ class TransactionTest {
     }
 
     @Test
+    @DisplayName("commitResults() carries each statement's rows, warnings and diagnostics")
+    void commitResultsCarryWarningsAndDiagnostics() {
+        try (KnowledgeGraph graph = people()) {
+            Transaction tx = graph.beginTransaction();
+            tx.add("CREATE (:Person {id: 42, title: 'Zed'})");
+            tx.add("MATCH (p:Persn) RETURN p.title AS title");
+            tx.add("MATCH (p:Person {id: $id}) RETURN p.title AS title", Map.of("id", 42));
+
+            List<QueryResult> results = tx.commitResults();
+
+            assertEquals(3, results.size(), "one result per staged statement");
+            assertEquals(List.of(), results.get(0).warnings(), "a clean statement warns about nothing");
+            assertTrue(results.get(0).diagnostics().containsKey("elapsed_ms"),
+                    results.get(0).diagnostics().toString());
+            assertEquals(1, results.get(1).warnings().size(), results.get(1).warnings().toString());
+            assertTrue(results.get(1).warnings().get(0).contains("'Person'"),
+                    results.get(1).warnings().get(0));
+            assertEquals(results.get(1).warnings(), results.get(1).diagnostics().get("warnings"));
+            assertEquals(List.of(Map.of("title", "Zed")), results.get(2).rows());
+            assertThrows(IllegalStateException.class, tx::commit, "commitResults() finished it");
+        }
+    }
+
+    @Test
     @DisplayName("commit() publishes into the session, not to disk")
     void commitIsNotDurability(@org.junit.jupiter.api.io.TempDir java.nio.file.Path directory) {
         java.nio.file.Path path = directory.resolve("people.kgl");
@@ -168,7 +192,7 @@ class TransactionTest {
         NativeHandle handle = liveHandle(pointer -> {});
         Transaction.Batch counting = (pointer, request) -> {
             calls.incrementAndGet();
-            return List.of(List.of());
+            return List.of(new QueryResult(List.of(), List.of(), Map.of()));
         };
 
         assertEquals(List.of(), new Transaction(handle, counting).commit());
@@ -234,7 +258,7 @@ class TransactionTest {
                 Transaction tx = new Transaction(handle, (pointer, request) -> {
                     inside.countDown();
                     await(release);
-                    return List.of(List.of());
+                    return List.of(new QueryResult(List.of(), List.of(), Map.of()));
                 });
                 tx.add("CREATE (:Person {id: 1})");
                 tx.commit();
