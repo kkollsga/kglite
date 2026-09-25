@@ -68,8 +68,36 @@ pub(crate) fn result_to_json_object(result: &CypherResult) -> serde_json::Value 
     serde_json::json!({
         "columns": result.columns,
         "rows": rows_to_json_array(result),
-        "diagnostics": result.diagnostics,
+        "diagnostics": diagnostics_to_json(result).unwrap_or(serde_json::Value::Null),
     })
+}
+
+/// The diagnostics object, plus a `profile` array of
+/// `{"clause", "rows_in", "rows_out", "elapsed_us"}` for a `PROFILE` query —
+/// the keys the Python binding's `result.profile` uses. `None` only on a
+/// serialization failure.
+fn diagnostics_to_json(result: &CypherResult) -> Option<serde_json::Value> {
+    let mut diagnostics = serde_json::to_value(&result.diagnostics).ok()?;
+    if let Some(profile) = &result.profile {
+        let clauses: Vec<serde_json::Value> = profile
+            .iter()
+            .map(|clause| {
+                serde_json::json!({
+                    "clause": clause.clause_name,
+                    "rows_in": clause.rows_in,
+                    "rows_out": clause.rows_out,
+                    "elapsed_us": clause.elapsed_us,
+                })
+            })
+            .collect();
+        match &mut diagnostics {
+            serde_json::Value::Object(map) => {
+                map.insert("profile".to_string(), clauses.into());
+            }
+            _ => diagnostics = serde_json::json!({ "profile": clauses }),
+        }
+    }
+    Some(diagnostics)
 }
 
 /// Return the column names as a JSON array string:
@@ -138,6 +166,9 @@ pub unsafe extern "C" fn kglite_cypher_result_rows_json(
 }
 
 /// Return execution diagnostics as owned JSON, including actual retrieval routes.
+/// A `PROFILE` query's diagnostics also carry a `profile` array, one
+/// `{"clause", "rows_in", "rows_out", "elapsed_us"}` object per executed clause;
+/// the key is absent otherwise.
 /// A live result with no diagnostics returns the JSON string `null`. A null
 /// handle or serialization failure returns a null pointer. Free the returned
 /// string with [`kglite_free_string`](crate::kglite_free_string); its lifetime
@@ -154,9 +185,9 @@ pub unsafe extern "C" fn kglite_cypher_result_diagnostics_json(
             return std::ptr::null();
         }
         let state = unsafe { ResultState::from_handle(result) };
-        match serde_json::to_string(&state.inner.diagnostics) {
-            Ok(json) => alloc_c_string(&json),
-            Err(_) => std::ptr::null(),
+        match diagnostics_to_json(&state.inner).map(|json| json.to_string()) {
+            Some(json) => alloc_c_string(&json),
+            None => std::ptr::null(),
         }
     })
 }
@@ -262,6 +293,23 @@ mod tests {
         unsafe {
             crate::kglite_free_string(json);
         }
+    }
+
+    #[test]
+    fn profile_without_diagnostics_is_a_profile_only_object() {
+        let mut r = CypherResult::empty();
+        r.profile = Some(vec![kglite::api::cypher::ClauseStats {
+            clause_name: "Return".into(),
+            rows_in: 1,
+            rows_out: 1,
+            elapsed_us: 7,
+        }]);
+        assert_eq!(
+            diagnostics_to_json(&r),
+            Some(serde_json::json!({"profile": [
+                {"clause": "Return", "rows_in": 1, "rows_out": 1, "elapsed_us": 7}
+            ]}))
+        );
     }
 
     #[test]

@@ -1165,6 +1165,9 @@ KgliteStatusCode kglite_open_or_create_graph_in_mode(const char *path,
 
 /**
  * Return execution diagnostics as owned JSON, including actual retrieval routes.
+ * A `PROFILE` query's diagnostics also carry a `profile` array, one
+ * `{"clause", "rows_in", "rows_out", "elapsed_us"}` object per executed clause;
+ * the key is absent otherwise.
  * A live result with no diagnostics returns the JSON string `null`. A null
  * handle or serialization failure returns a null pointer. Free the returned
  * string with [`kglite_free_string`](crate::kglite_free_string); its lifetime

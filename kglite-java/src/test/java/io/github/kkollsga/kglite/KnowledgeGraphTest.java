@@ -279,6 +279,33 @@ class KnowledgeGraphTest {
         }
     }
 
+    @Test
+    @DisplayName("a PROFILE statement's clause statistics arrive through QueryResult.profile()")
+    void profileStatisticsArriveInTheResult() {
+        try (KnowledgeGraph graph = KnowledgeGraph.createInMemory()) {
+            graph.cypher("CREATE (:City {id: 1}), (:City {id: 2})");
+            QueryResult profiled = graph.queryResult("PROFILE MATCH (c:City) RETURN c.id AS id", Map.of());
+            assertEquals(2, profiled.rows().size());
+            List<Map<String, Object>> clauses = profiled.profile();
+            assertEquals(List.of("Match :City", "Return"),
+                    clauses.stream().map(c -> c.get("clause")).toList(), clauses.toString());
+            assertEquals(2L, clauses.get(0).get("rows_out"));
+            assertEquals(2L, clauses.get(1).get("rows_in"));
+            assertTrue(clauses.get(0).get("elapsed_us") instanceof Long, clauses.toString());
+            assertEquals(clauses, profiled.diagnostics().get("profile"));
+
+            assertEquals(List.of(), graph.queryResult("MATCH (c:City) RETURN c.id", Map.of()).profile(),
+                    "an unprofiled statement has no clause statistics");
+
+            try (Transaction tx = graph.beginTransaction()) {
+                tx.add("PROFILE CREATE (:City {id: 3})");
+                List<QueryResult> results = tx.commitResults();
+                assertEquals(List.of("Create"),
+                        results.get(0).profile().stream().map(c -> c.get("clause")).toList());
+            }
+        }
+    }
+
     /** {@code Map.of} rejects a null value; the null cell case needs one. */
     private static Map<String, Object> mapOfNullable(Object... pairs) {
         Map<String, Object> map = new java.util.LinkedHashMap<>();

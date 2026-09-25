@@ -1,5 +1,6 @@
 package io.github.kkollsga.kglite;
 
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -23,9 +24,26 @@ import java.util.Map;
  *                    them; empty for a clean statement
  * @param diagnostics the engine's full diagnostics object — {@code warnings},
  *                    {@code elapsed_ms}, {@code timeout_ms},
- *                    {@code row_limit}, {@code total_rows} and
- *                    {@code retrieval} — or an empty map when the engine
+ *                    {@code row_limit}, {@code total_rows},
+ *                    {@code retrieval} and, for a {@code PROFILE} statement,
+ *                    {@code profile} — or an empty map when the engine
  *                    reported none
  */
 public record QueryResult(
-        List<Map<String, Object>> rows, List<String> warnings, Map<String, Object> diagnostics) {}
+        List<Map<String, Object>> rows, List<String> warnings, Map<String, Object> diagnostics) {
+
+    /**
+     * The per-clause statistics of a {@code PROFILE} statement: one map per
+     * executed clause, in execution order, with {@code clause} (its name),
+     * {@code rows_in}, {@code rows_out} and {@code elapsed_us}.
+     *
+     * @return the clause statistics; empty when the statement was not profiled
+     */
+    @SuppressWarnings("unchecked")
+    public List<Map<String, Object>> profile() {
+        if (diagnostics.get("profile") instanceof List<?> clauses) {
+            return Collections.unmodifiableList((List<Map<String, Object>>) clauses);
+        }
+        return List.of();
+    }
+}

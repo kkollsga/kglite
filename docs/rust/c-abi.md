@@ -151,6 +151,11 @@ Query warnings (an unknown label or relationship type, a row-cap truncation)
 arrive only in `kglite_cypher_result_diagnostics_json`'s `warnings` array. The
 library does not print them to the host process's stderr.
 
+A `PROFILE` query's diagnostics also carry a `profile` array: one
+`{"clause", "rows_in", "rows_out", "elapsed_us"}` object per executed clause,
+in execution order. The key is absent for an unprofiled query. Batch results
+carry the same object under each statement's `diagnostics`.
+
 ## Binding checklist
 
 1. Validate UTF-8 and nullability before calls.

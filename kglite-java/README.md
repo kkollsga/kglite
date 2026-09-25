@@ -140,6 +140,10 @@ result.rows();      // []
 result.warnings();  // ["MATCH references unknown node label 'Cty' … Did you mean 'City'?"]
 ```
 
+A `PROFILE` statement's per-clause statistics arrive through `profile()`: one
+map per executed clause with `clause`, `rows_in`, `rows_out` and `elapsed_us`
+(empty for an unprofiled statement).
+
 ## Values
 
 Rows are `List<Map<String, Object>>`: one `Map` per row, keyed by column name

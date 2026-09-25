@@ -1582,6 +1582,10 @@ fn query_rows(session: *mut KgliteSession, query: &str, params: &str) -> serde_j
 }
 
 fn query_warning_json(session: *mut KgliteSession, query: &str) -> serde_json::Value {
+    query_diagnostics_json(session, query)["warnings"].clone()
+}
+
+fn query_diagnostics_json(session: *mut KgliteSession, query: &str) -> serde_json::Value {
     let query = CString::new(query).unwrap();
     let mut result: *mut KgliteCypherResult = std::ptr::null_mut();
     let mut error: *const c_char = std::ptr::null();
@@ -1604,7 +1608,66 @@ fn query_warning_json(session: *mut KgliteSession, query: &str) -> serde_json::V
         kglite_free_string(diagnostics_json);
         kglite_cypher_result_free(result);
     }
-    diagnostics["warnings"].clone()
+    diagnostics
+}
+
+/// Clause names and row counts of a diagnostics `profile` array; timings vary.
+fn profile_shape(diagnostics: &serde_json::Value) -> Vec<(String, u64, u64)> {
+    diagnostics["profile"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no profile array in {diagnostics}"))
+        .iter()
+        .map(|clause| {
+            assert!(clause["elapsed_us"].is_u64(), "{clause}");
+            (
+                clause["clause"].as_str().unwrap().to_string(),
+                clause["rows_in"].as_u64().unwrap(),
+                clause["rows_out"].as_u64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// PROFILE's per-clause statistics reach C callers in the diagnostics JSON,
+/// on the single-statement and batch paths; an unprofiled query has none.
+#[test]
+fn profile_statistics_are_part_of_the_diagnostics_json() {
+    let session = seed_notes("CREATE (:A {x: 1}), (:A {x: 2})");
+    let profiled = query_diagnostics_json(session, "PROFILE MATCH (a:A) RETURN a.x AS x");
+    assert_eq!(
+        profile_shape(&profiled),
+        vec![("Match :A".to_string(), 0, 2), ("Return".to_string(), 2, 2)]
+    );
+    assert!(profiled["warnings"].is_array(), "{profiled}");
+    let plain = query_diagnostics_json(session, "MATCH (a:A) RETURN a.x AS x");
+    assert!(plain.get("profile").is_none(), "{plain}");
+
+    let batch =
+        CString::new(r#"[{"query":"PROFILE CREATE (:A {x: 3})"},{"query":"CREATE (:A {x: 4})"}]"#)
+            .unwrap();
+    let mut out: *const c_char = std::ptr::null();
+    let mut err: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_session_execute_mut_batch(
+            session,
+            batch.as_ptr(),
+            &mut out as *mut _,
+            &mut err as *mut _,
+        )
+    };
+    assert_eq!(rc, KgliteStatusCode::Ok);
+    let parsed: serde_json::Value =
+        serde_json::from_str(unsafe { CStr::from_ptr(out).to_str().unwrap() }).unwrap();
+    unsafe { kglite_free_string(out) };
+    assert_eq!(
+        profile_shape(&parsed[0]["diagnostics"]),
+        vec![("Create".to_string(), 1, 1)]
+    );
+    assert!(
+        parsed[1]["diagnostics"].get("profile").is_none(),
+        "{parsed}"
+    );
+    unsafe { kglite_session_free(session) };
 }
 
 /// End-to-end: packed-float ingest → build index → query with a raw query

@@ -14,6 +14,10 @@ before upgrading.
 - Java: `Transaction.commitResults()` commits like `commit()` and returns one
   `QueryResult` per statement, so a transaction's statements expose their
   `warnings()` and `diagnostics()` as `queryResult`/`cypherResult` do.
+- C ABI: a `PROFILE` query's diagnostics JSON (`kglite_cypher_result_diagnostics_json`
+  and each batch statement's `diagnostics`) carries a `profile` array of
+  `{"clause", "rows_in", "rows_out", "elapsed_us"}` objects. Java exposes it as
+  `QueryResult.profile()`.
 
 ### Fixed
 
