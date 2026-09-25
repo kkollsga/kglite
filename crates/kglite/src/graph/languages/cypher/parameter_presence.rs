@@ -461,6 +461,17 @@ fn visit_expression(expression: &Expression, names: &mut BTreeSet<String>) {
                 visit_predicate(predicate, names);
             }
         }
+        Expression::PatternComprehension {
+            pattern,
+            where_clause,
+            map_expr,
+        } => {
+            visit_pattern(pattern, names);
+            if let Some(predicate) = where_clause {
+                visit_predicate(predicate, names);
+            }
+            visit_expression(map_expr, names);
+        }
         Expression::PropertyAccess { .. }
         | Expression::Variable(_)
         | Expression::Literal(_)

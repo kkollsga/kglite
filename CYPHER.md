@@ -1674,6 +1674,33 @@ graph.cypher("""
 
 Over `null` a comprehension is `null`. Over any other value that is not a list (`[x IN 'abc' | x]`, `[x IN 5 | x]`) it is an error, not an empty list; the same holds for the quantifiers and `reduce` below. (`UNWIND` of a non-list value is that one value as one row.)
 
+## Pattern Comprehensions
+
+`[pattern WHERE predicate | expression]` — one element per match of a
+relationship pattern, evaluated for the current row:
+
+```python
+# The names of each person's friends
+graph.cypher("MATCH (p:Person) RETURN p.name, [(p)-[:KNOWS]->(f) | f.name] AS friends")
+
+# Filter the matches, read relationship properties
+graph.cypher("""
+    MATCH (p:Person)
+    RETURN p.name, [(p)-[k:KNOWS]->(f) WHERE k.since < 2020 | f.name + ' ' + k.since] AS old
+""")
+
+# Degree, usable in WHERE / WITH / ORDER BY like any expression
+graph.cypher("MATCH (p:Person) WHERE size([(p)--() | 1]) > 3 RETURN p.name")
+```
+
+Variables the row already binds (`p` above) are the row's values; the ones the
+pattern introduces (`f`, `k`) are visible only inside the brackets. The pattern
+needs at least one relationship, and the `| expression` projection is required.
+A person with no match gets `[]`, as does a row whose correlated variable is
+`null`. The order of the elements is the match order, which is not specified.
+A named path (`[p = (a)-->(b) | p]`) is not supported; project the parts
+(`[(a)-[r]->(b) | [a, r, b]]`) instead.
+
 ## List Quantifier Predicates
 
 `any(x IN list WHERE pred)`, `all(...)`, `none(...)`, `single(...)` — test list elements against a predicate:

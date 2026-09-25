@@ -608,6 +608,16 @@ pub enum Expression {
         pattern_groups: Vec<usize>,
         where_clause: Option<Box<Predicate>>,
     },
+    /// Pattern comprehension: `[(a)-[:R]->(b) WHERE <pred> | <expr>]`. The list
+    /// of `map_expr` over every match of `pattern`, correlated with the current
+    /// row's bindings (variables it shares with the row are the row's values);
+    /// the variables it introduces are visible only to `where_clause` and
+    /// `map_expr`.
+    PatternComprehension {
+        pattern: Box<crate::graph::core::pattern_matching::Pattern>,
+        where_clause: Option<Box<Predicate>>,
+        map_expr: Box<Expression>,
+    },
 }
 
 #[derive(Debug, Clone)]

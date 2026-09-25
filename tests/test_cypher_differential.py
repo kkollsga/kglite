@@ -1135,6 +1135,38 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         {"k": 5},
     ),
     (
+        "pattern_comprehension_projection",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.person_id AS id, [(p)-[:KNOWS]->(f) | f.person_id] AS friends ORDER BY id",
+        None,
+    ),
+    (
+        "pattern_comprehension_with_rename",
+        "social_graph",
+        "MATCH (p:Person) WITH p AS x RETURN x.person_id AS id, "
+        "[(x)-[:KNOWS]->(f) WHERE f.age > 30 | f.person_id] AS fs ORDER BY id",
+        None,
+    ),
+    (
+        "pattern_comprehension_topk",
+        "social_graph",
+        "MATCH (p:Person) WITH p, size([(p)-[:KNOWS]-() | 1]) AS degree "
+        "RETURN p.person_id AS id, degree ORDER BY degree DESC, id LIMIT $k",
+        {"k": 5},
+    ),
+    (
+        "pattern_comprehension_in_where",
+        "social_graph",
+        "MATCH (p:Person) WHERE size([(p)-[:KNOWS]->(f) WHERE f.age > 30 | f]) > 0 RETURN count(p) AS n",
+        None,
+    ),
+    (
+        "pattern_comprehension_grouped",
+        "social_graph",
+        "MATCH (p:Person) RETURN size([(p)-[:KNOWS]->() | 1]) AS out_degree, count(*) AS n ORDER BY out_degree",
+        None,
+    ),
+    (
         "trigger_count_short_circuit_typed_hop",
         "social_graph",
         "MATCH (a:Person)-[:KNOWS]->(b) RETURN count(*) AS n",

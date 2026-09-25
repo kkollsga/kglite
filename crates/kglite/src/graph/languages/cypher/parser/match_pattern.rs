@@ -362,6 +362,12 @@ impl CypherParser {
                 break;
             }
 
+            // Stop at a top-level `|`: a pattern comprehension's projection.
+            // Label and type alternations sit inside parentheses or brackets.
+            if paren_depth == 0 && bracket_depth == 0 && self.check(&CypherToken::Pipe) {
+                break;
+            }
+
             // Stop at MATCH keyword at top level — multi-MATCH subquery
             // form (`EXISTS { MATCH ... MATCH ... }`). The outer
             // parse_exists_patterns loop continues on this case.

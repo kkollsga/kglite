@@ -1133,6 +1133,16 @@ impl TextScoreCollector {
                 }
                 Ok(())
             }
+            Expression::PatternComprehension {
+                where_clause,
+                map_expr,
+                ..
+            } => {
+                if let Some(pred) = where_clause.as_deref_mut() {
+                    self.rewrite_pred(pred, params)?;
+                }
+                self.rewrite_expr(map_expr, params)
+            }
             Expression::Reduce {
                 init,
                 list_expr,
@@ -1956,6 +1966,17 @@ pub(crate) fn collect_expression_refs(expr: &Expression, out: &mut HashSet<Strin
             if let Some(p) = where_clause {
                 collect_predicate_refs(p, out);
             }
+        }
+        Expression::PatternComprehension {
+            pattern,
+            where_clause,
+            map_expr,
+        } => {
+            collect_pattern_refs(std::slice::from_ref(pattern), out);
+            if let Some(p) = where_clause {
+                collect_predicate_refs(p, out);
+            }
+            collect_expression_refs(map_expr, out);
         }
     }
 }

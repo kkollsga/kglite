@@ -199,6 +199,10 @@ mod predicate_value_position_tests;
 mod point_map_tests;
 
 #[cfg(test)]
+#[path = "pattern_comprehension_tests.rs"]
+mod pattern_comprehension_tests;
+
+#[cfg(test)]
 mod parameter_name_tests {
     use crate::api::cypher::parameter_names;
     use crate::error::{KgError, KgErrorCode};

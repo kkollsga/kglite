@@ -21,6 +21,9 @@ before upgrading.
 - Cypher: `point()` takes a map — `point({latitude: 59.9, longitude: 10.75})`,
   or `point({x: 10.75, y: 59.9, crs: 'wgs-84'})` (`srid: 4326` also works).
   A Cartesian or 3D map is refused, since KGLite points are 2D WGS-84.
+- Cypher: pattern comprehensions — `[(p)-[:KNOWS]->(f) WHERE f.age > 30 | f.name]`
+  gives one element per match of the pattern, correlated with the current
+  row. A named path inside one is not supported.
 
 ### Fixed
 

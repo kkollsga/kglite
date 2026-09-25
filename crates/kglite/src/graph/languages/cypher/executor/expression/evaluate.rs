@@ -163,7 +163,43 @@ impl<'a> CypherExecutor<'a> {
             } => {
                 self.evaluate_count_subquery(patterns, pattern_groups, where_clause.as_deref(), row)
             }
+            Expression::PatternComprehension {
+                pattern,
+                where_clause,
+                map_expr,
+            } => self.evaluate_pattern_comprehension(
+                pattern,
+                where_clause.as_deref(),
+                map_expr,
+                row,
+            ),
         }
+    }
+
+    /// `[pattern WHERE pred | expr]`: `expr` for each match of `pattern` joined
+    /// with `row` (as a `COUNT { }` subquery joins it), keeping the matches
+    /// `pred` holds for.
+    fn evaluate_pattern_comprehension(
+        &self,
+        pattern: &crate::graph::core::pattern_matching::Pattern,
+        where_clause: Option<&Predicate>,
+        map_expr: &Expression,
+        row: &ResultRow,
+    ) -> Result<Value, String> {
+        let rows = self.evaluate_count_join_rows(std::slice::from_ref(pattern), &[0], row)?;
+        let mut items = Vec::new();
+        for (index, joined) in rows.iter().enumerate() {
+            self.check_interrupt_periodic(index)?;
+            if let Some(predicate) = where_clause {
+                if self.evaluate_predicate_tristate(predicate, joined)? != Some(true) {
+                    continue;
+                }
+            }
+            self.budget
+                .consume_collection(1, "pattern comprehension")?;
+            items.push(self.evaluate_expression(map_expr, joined)?);
+        }
+        Ok(Value::List(items))
     }
 
     fn evaluate_count_subquery(

@@ -935,6 +935,18 @@ fn validate_expression_scope(
             }
             Ok(())
         }
+        Expression::PatternComprehension {
+            pattern,
+            where_clause,
+            map_expr,
+        } => {
+            let mut inner = scope.clone();
+            bind_pattern(pattern, &mut inner);
+            if let Some(where_clause) = where_clause {
+                validate_predicate_scope(where_clause, &inner)?;
+            }
+            validate_expression_scope(map_expr, &inner)
+        }
         Expression::Literal(_) | Expression::Parameter(_) | Expression::Star => Ok(()),
     }
 }

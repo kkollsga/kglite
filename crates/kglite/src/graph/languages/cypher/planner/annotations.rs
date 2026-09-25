@@ -398,6 +398,17 @@ fn walk_expression(expr: &mut Expression, visit: &mut impl FnMut(&mut [Pattern])
                 walk_predicate(inner, visit);
             }
         }
+        // One element per match, so the same holds for a pattern comprehension.
+        Expression::PatternComprehension {
+            where_clause,
+            map_expr,
+            ..
+        } => {
+            if let Some(inner) = where_clause {
+                walk_predicate(inner, visit);
+            }
+            walk_expression(map_expr, visit);
+        }
         Expression::PropertyAccess { .. }
         | Expression::Variable(_)
         | Expression::Literal(_)

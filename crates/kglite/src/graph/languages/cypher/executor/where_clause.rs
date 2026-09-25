@@ -1441,6 +1441,7 @@ impl<'a> CypherExecutor<'a> {
             | Expression::PredicateExpr(_)
             | Expression::ExprPropertyAccess { .. }
             | Expression::CountSubquery { .. }
+            | Expression::PatternComprehension { .. }
             | Expression::Reduce { .. } => false,
         }
     }

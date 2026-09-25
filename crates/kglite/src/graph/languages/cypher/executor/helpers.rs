@@ -279,6 +279,9 @@ pub(crate) fn expression_to_string(expr: &Expression) -> String {
             // Patterns don't render usefully here, so emit the subquery marker.
             "count{...}".to_string()
         }
+        Expression::PatternComprehension { map_expr, .. } => {
+            format!("[(...) | {}]", expression_to_string(map_expr))
+        }
         Expression::Reduce {
             accumulator,
             variable,

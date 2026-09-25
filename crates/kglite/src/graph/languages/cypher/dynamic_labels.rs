@@ -446,6 +446,17 @@ fn resolve_expression(
                 resolve_predicate(inner, params)?;
             }
         }
+        Expression::PatternComprehension {
+            pattern,
+            where_clause,
+            map_expr,
+        } => {
+            resolve_pattern(pattern, params)?;
+            if let Some(inner) = where_clause {
+                resolve_predicate(inner, params)?;
+            }
+            resolve_expression(map_expr, params)?;
+        }
         Expression::Case {
             operand,
             when_clauses,

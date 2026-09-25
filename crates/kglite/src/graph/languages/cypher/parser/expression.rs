@@ -497,6 +497,22 @@ impl CypherParser {
                     return self.parse_list_comprehension();
                 }
 
+                if matches!(self.peek(), Some(CypherToken::Identifier(_)))
+                    && self.peek_at(1) == Some(&CypherToken::Equals)
+                    && self.peek_at(2) == Some(&CypherToken::LParen)
+                {
+                    return Err(
+                        "A named path in a pattern comprehension is not supported; project \
+                         the nodes and relationships instead, e.g. [(a)-[r]->(b) | [a, r, b]]"
+                            .to_string(),
+                    );
+                }
+                if self.check(&CypherToken::LParen) && self.looks_like_pattern_start() {
+                    if let Some(comprehension) = self.try_parse_pattern_comprehension()? {
+                        return Ok(comprehension);
+                    }
+                }
+
                 // Otherwise: list literal [expr, expr, ...]
                 let mut items = Vec::new();
                 if !self.check(&CypherToken::RBracket) {
@@ -1029,6 +1045,49 @@ impl CypherParser {
             filter,
             map_expr,
         })
+    }
+
+    /// Parse `pattern [WHERE pred] | expr ]` after the opening `[`, when the
+    /// brackets hold a pattern comprehension: a pattern with at least one
+    /// relationship, followed by `WHERE` or `|`. Anything else — `[(n:A)]`,
+    /// `[(a)-->(b)]` (a list holding a pattern predicate) — rewinds and
+    /// answers `None`, leaving the list-literal parse to read it.
+    fn try_parse_pattern_comprehension(&mut self) -> Result<Option<Expression>, String> {
+        let (start, depth, parked) = (self.pos, self.depth, self.inline_map_exprs.len());
+        let pattern = self
+            .extract_pattern_subquery_string(&CypherToken::RBracket)
+            .and_then(|text| self.parse_extracted_pattern(&text));
+        let is_comprehension = matches!(&pattern, Ok(pattern) if pattern
+            .elements
+            .iter()
+            .any(|element| matches!(element, crate::graph::core::pattern_matching::PatternElement::Edge(_))))
+            && (self.check(&CypherToken::Where) || self.check(&CypherToken::Pipe));
+        let (true, Ok(pattern)) = (is_comprehension, pattern) else {
+            self.pos = start;
+            self.depth = depth;
+            self.inline_map_exprs.truncate(parked);
+            return Ok(None);
+        };
+        let where_clause = if self.check(&CypherToken::Where) {
+            self.advance();
+            Some(Box::new(self.parse_predicate()?))
+        } else {
+            None
+        };
+        if !self.check(&CypherToken::Pipe) {
+            return Err(
+                "A pattern comprehension needs a projection: [pattern WHERE ... | expression]"
+                    .to_string(),
+            );
+        }
+        self.advance();
+        let map_expr = Box::new(self.parse_expression_with_predicates()?);
+        self.expect(&CypherToken::RBracket)?;
+        Ok(Some(Expression::PatternComprehension {
+            pattern: Box::new(pattern),
+            where_clause,
+            map_expr,
+        }))
     }
 
     /// Parse list quantifier expression: (variable IN list_expr WHERE predicate)
