@@ -3443,7 +3443,7 @@ class TestJunctionDedupeRegime:
         """Person loads LINK twice: an FK edge first (one edge per person),
         then the junction, whose rows all start from a Person too."""
         bp_path = self._bp(tmp_path)
-        bp = json.loads(bp_path.read_text())
+        bp = json.loads(bp_path.read_text(encoding="utf-8"))
         _write_csv(
             tmp_path / "persons.csv",
             pd.DataFrame({"person_id": [1, 2, 3], "name": ["A", "B", "C"], "buddy": [2, 3, 1]}),
