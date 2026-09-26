@@ -2599,6 +2599,11 @@ class KnowledgeGraph:
 
         Returns:
             A new KnowledgeGraph with the filtered selection.
+
+        Raises:
+            ValueError: If ``temporal=True`` and *node_type* has no temporal
+                configuration, or a node's validity bound is not a date, a
+                datetime or an ISO date string.
         """
         ...
 
@@ -2779,6 +2784,10 @@ class KnowledgeGraph:
 
         Returns:
             A new KnowledgeGraph with the filtered selection.
+
+        Raises:
+            ValueError: If a node's validity bound is not a date, a datetime
+                or an ISO date string.
         """
         ...
 
@@ -2801,6 +2810,10 @@ class KnowledgeGraph:
 
         Returns:
             A new KnowledgeGraph with the filtered selection.
+
+        Raises:
+            ValueError: If a node's validity bound is not a date, a datetime
+                or an ISO date string.
         """
         ...
 
@@ -7401,7 +7414,8 @@ class KnowledgeGraph:
         Args:
             type_name: Node type (e.g. ``'FieldStatus'``) or connection type
                 (e.g. ``'HAS_LICENSEE'``).
-            valid_from: Property name holding the start date.
+            valid_from: Property name holding the start date. Bounds may be
+                stored as dates, datetimes or ISO date strings; NULL is open.
             valid_to: Property name holding the end date.
 
         Raises:

@@ -85,13 +85,6 @@
       "nesting": 6
     },
     {
-      "path": "crates/kglite/src/graph/core/traversal.rs",
-      "qualified_name": "crate::make_traversal_full",
-      "lines": 218,
-      "branches": 40,
-      "nesting": 7
-    },
-    {
       "path": "crates/kglite/src/graph/features/equations.rs",
       "qualified_name": "crate::Evaluator::evaluate_single",
       "lines": 83,

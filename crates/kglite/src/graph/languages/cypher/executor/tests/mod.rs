@@ -81,9 +81,9 @@ mod vector_score;
 mod vectors;
 mod with_scope;
 
-/// Test helper: unwraps evaluate_comparison Result for use in assert!()
+/// Test helper: whether a comparison is true, with NULL counting as false.
 pub(super) fn cmp(left: &Value, op: &ComparisonOp, right: &Value) -> bool {
-    evaluate_comparison(left, op, right).unwrap()
+    evaluate_comparison_tristate(left, op, right).unwrap() == Some(true)
 }
 
 pub(super) fn projected_rows(name: &str, count: usize) -> Vec<ResultRow> {

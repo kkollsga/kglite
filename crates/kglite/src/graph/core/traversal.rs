@@ -1,6 +1,7 @@
 // src/graph/traversal.rs
 use crate::datatypes::values::FilterCondition;
 use crate::datatypes::values::Value;
+use crate::graph::core::iterators::GraphEdgeRef;
 use crate::graph::schema::{
     CurrentSelection, DirGraph, InternedKey, SelectionOperation, SpatialConfig, TemporalConfig,
 };
@@ -146,17 +147,44 @@ fn edge_matches_conditions(
     })
 }
 
-/// Check if edge properties pass a temporal filter.
-/// Tries multiple configs to find one matching the edge's field names.
-fn edge_passes_temporal(properties: &[(InternedKey, Value)], filter: &TemporalEdgeFilter) -> bool {
-    match filter {
-        TemporalEdgeFilter::At(configs, date) => {
-            crate::graph::features::temporal::is_temporally_valid_multi(properties, configs, date)
-        }
-        TemporalEdgeFilter::During(configs, start, end) => {
-            crate::graph::features::temporal::overlaps_range_multi(properties, configs, start, end)
+/// Whether a traversed edge passes the connection-property filter and the
+/// temporal filter. An unreadable temporal bound is an error naming the
+/// relationship's endpoints.
+fn edge_passes_filters(
+    graph: &DirGraph,
+    edge: &GraphEdgeRef<'_>,
+    connection_type: &str,
+    filter_connection: Option<&HashMap<String, FilterCondition>>,
+    temporal_filter: Option<&TemporalEdgeFilter>,
+) -> Result<bool, String> {
+    let properties = &edge.weight().properties;
+    if let Some(conn_filter) = filter_connection {
+        if !edge_matches_conditions(properties, conn_filter) {
+            return Ok(false);
         }
     }
+    let passes = match temporal_filter {
+        None => return Ok(true),
+        Some(TemporalEdgeFilter::At(configs, date)) => {
+            crate::graph::features::temporal::is_temporally_valid_multi(properties, configs, date)
+        }
+        Some(TemporalEdgeFilter::During(configs, start, end)) => {
+            crate::graph::features::temporal::overlaps_range_multi(properties, configs, start, end)
+        }
+    };
+    passes.map_err(|reason| {
+        let id = |idx| {
+            graph.graph.get_node_id(idx).map_or_else(
+                || "?".to_string(),
+                |v| crate::graph::core::value_operations::format_value_compact(&v),
+            )
+        };
+        format!(
+            "{connection_type} relationship from node '{}' to node '{}', {reason}",
+            id(edge.source()),
+            id(edge.target())
+        )
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -486,6 +514,15 @@ fn make_traversal_full(
                 }
             }
         };
+        let edge_passes = |edge: &GraphEdgeRef<'_>| {
+            edge_passes_filters(
+                graph,
+                edge,
+                &connection_type,
+                filter_connection,
+                temporal_filter,
+            )
+        };
 
         // Process edges based on direction. See make_traversal_fast for the
         // rationale behind edges_directed_filtered.
@@ -496,16 +533,8 @@ fn make_traversal_full(
                         g.edges_directed_filtered(source_node, Direction::Outgoing, Some(conn_key))
                     {
                         if edge.weight().connection_type == conn_key {
-                            if let Some(conn_filter) = filter_connection {
-                                if !edge_matches_conditions(&edge.weight().properties, conn_filter)
-                                {
-                                    continue;
-                                }
-                            }
-                            if let Some(tf) = &temporal_filter {
-                                if !edge_passes_temporal(&edge.weight().properties, tf) {
-                                    continue;
-                                }
+                            if !edge_passes(&edge)? {
+                                continue;
                             }
                             let t = edge.target();
                             if type_ok(t) {
@@ -519,16 +548,8 @@ fn make_traversal_full(
                         g.edges_directed_filtered(source_node, Direction::Incoming, Some(conn_key))
                     {
                         if edge.weight().connection_type == conn_key {
-                            if let Some(conn_filter) = filter_connection {
-                                if !edge_matches_conditions(&edge.weight().properties, conn_filter)
-                                {
-                                    continue;
-                                }
-                            }
-                            if let Some(tf) = &temporal_filter {
-                                if !edge_passes_temporal(&edge.weight().properties, tf) {
-                                    continue;
-                                }
+                            if !edge_passes(&edge)? {
+                                continue;
                             }
                             let t = edge.source();
                             if type_ok(t) {
@@ -543,16 +564,8 @@ fn make_traversal_full(
                         g.edges_directed_filtered(source_node, Direction::Outgoing, Some(conn_key))
                     {
                         if edge.weight().connection_type == conn_key {
-                            if let Some(conn_filter) = filter_connection {
-                                if !edge_matches_conditions(&edge.weight().properties, conn_filter)
-                                {
-                                    continue;
-                                }
-                            }
-                            if let Some(tf) = &temporal_filter {
-                                if !edge_passes_temporal(&edge.weight().properties, tf) {
-                                    continue;
-                                }
+                            if !edge_passes(&edge)? {
+                                continue;
                             }
                             let t = edge.target();
                             if type_ok(t) {
@@ -564,16 +577,8 @@ fn make_traversal_full(
                         g.edges_directed_filtered(source_node, Direction::Incoming, Some(conn_key))
                     {
                         if edge.weight().connection_type == conn_key {
-                            if let Some(conn_filter) = filter_connection {
-                                if !edge_matches_conditions(&edge.weight().properties, conn_filter)
-                                {
-                                    continue;
-                                }
-                            }
-                            if let Some(tf) = &temporal_filter {
-                                if !edge_passes_temporal(&edge.weight().properties, tf) {
-                                    continue;
-                                }
+                            if !edge_passes(&edge)? {
+                                continue;
                             }
                             let t = edge.source();
                             if type_ok(t) {

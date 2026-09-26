@@ -7,7 +7,11 @@ use super::super::*;
 use super::shared::*;
 use crate::datatypes::values::Value;
 use crate::graph::algorithms::vector as vs;
+use crate::graph::features::temporal::eval::{
+    self as temporal_eval, BoundSide, Instant, IntervalConvention, TemporalError,
+};
 use crate::graph::languages::cypher::planner::simplification::TEXT_SCORE_STORES_PARAM;
+use crate::graph::property_types::value_type_name;
 use crate::graph::storage::GraphRead;
 use crate::graph::text_indexes;
 
@@ -125,7 +129,8 @@ impl<'a> CypherExecutor<'a> {
 impl CypherExecutor<'_> {
     /// `valid_at(entity, date, 'from_field', 'to_field')` → Boolean.
     /// True when `from_field <= date <= to_field`; a null field is an
-    /// open-ended boundary and always passes.
+    /// open-ended boundary and always passes. An instant or bound that is
+    /// not a date is an error, never a silent false.
     fn eval_valid_at(&self, args: &[Expression], row: &ResultRow) -> Result<Value, String> {
         if args.len() != 4 {
             return Err(
@@ -149,22 +154,29 @@ impl CypherExecutor<'_> {
             Value::String(s) => s,
             _ => return Err("valid_at(): to_field (4th arg) must be a string".into()),
         };
-        let from_val = self.resolve_property(var_name, &from_field, row)?;
-        let to_val = self.resolve_property(var_name, &to_field, row)?;
-        let from_ok = match &from_val {
-            Value::Null => true,
-            _ => evaluate_comparison(&from_val, &ComparisonOp::LessThanEq, &date_val)?,
+        let bounds = ValidityBounds {
+            function: "valid_at",
+            var_name,
+            from_field: &from_field,
+            from_val: self.resolve_property(var_name, &from_field, row)?,
+            to_field: &to_field,
+            to_val: self.resolve_property(var_name, &to_field, row)?,
         };
-        let to_ok = match &to_val {
-            Value::Null => true,
-            _ => evaluate_comparison(&to_val, &ComparisonOp::GreaterThanEq, &date_val)?,
-        };
-        Ok(Value::Boolean(from_ok && to_ok))
+        let instant = bounds.instant(&date_val, "date")?;
+        temporal_eval::interval_contains(
+            &bounds.from_val,
+            &bounds.to_val,
+            instant,
+            IntervalConvention::Closed,
+        )
+        .map(Value::Boolean)
+        .map_err(|e| self.validity_bound_error(&bounds, e, row))
     }
 
     /// `valid_during(entity, start, end, 'from_field', 'to_field')` → Boolean.
     /// True when the entity's interval overlaps `[start, end]`; a null field is
-    /// an open-ended boundary and always passes.
+    /// an open-ended boundary and always passes. Instants and bounds are read
+    /// as in `valid_at`.
     fn eval_valid_during(&self, args: &[Expression], row: &ResultRow) -> Result<Value, String> {
         if args.len() != 5 {
             return Err(
@@ -190,17 +202,64 @@ impl CypherExecutor<'_> {
             Value::String(s) => s,
             _ => return Err("valid_during(): to_field (5th arg) must be a string".into()),
         };
-        let from_val = self.resolve_property(var_name, &from_field, row)?;
-        let to_val = self.resolve_property(var_name, &to_field, row)?;
-        let from_ok = match &from_val {
-            Value::Null => true,
-            _ => evaluate_comparison(&from_val, &ComparisonOp::LessThanEq, &end_val)?,
+        let bounds = ValidityBounds {
+            function: "valid_during",
+            var_name,
+            from_field: &from_field,
+            from_val: self.resolve_property(var_name, &from_field, row)?,
+            to_field: &to_field,
+            to_val: self.resolve_property(var_name, &to_field, row)?,
         };
-        let to_ok = match &to_val {
-            Value::Null => true,
-            _ => evaluate_comparison(&to_val, &ComparisonOp::GreaterThanEq, &start_val)?,
+        let start = bounds.instant(&start_val, "start")?;
+        let end = bounds.instant(&end_val, "end")?;
+        temporal_eval::interval_overlaps(
+            &bounds.from_val,
+            &bounds.to_val,
+            start,
+            end,
+            IntervalConvention::Closed,
+        )
+        .map(Value::Boolean)
+        .map_err(|e| self.validity_bound_error(&bounds, e, row))
+    }
+
+    /// The error for a stored bound the evaluator cannot read, naming the
+    /// element by its user id (a node's `id`, a relationship's endpoints).
+    fn validity_bound_error(
+        &self,
+        bounds: &ValidityBounds<'_>,
+        err: TemporalError,
+        row: &ResultRow,
+    ) -> String {
+        let field = match &err {
+            TemporalError::Bound {
+                side: BoundSide::To,
+                ..
+            } => bounds.to_field,
+            _ => bounds.from_field,
         };
-        Ok(Value::Boolean(from_ok && to_ok))
+        let id = |idx| {
+            self.graph
+                .graph
+                .get_node_id(idx)
+                .map_or_else(|| "?".to_string(), |v| format_value_compact(&v))
+        };
+        let element = if let Some(&idx) = row.node_bindings.get(bounds.var_name) {
+            format!("node '{}'", id(idx))
+        } else if let Some(edge) = row.edge_bindings.get(bounds.var_name) {
+            format!(
+                "relationship from '{}' to '{}'",
+                id(edge.source),
+                id(edge.target)
+            )
+        } else {
+            format!("'{}'", bounds.var_name)
+        };
+        format!(
+            "{}(): {}.{field} on {element}: {err}. Store bounds as date() or datetime() values, \
+             or as ISO strings such as '2009-06-30'",
+            bounds.function, bounds.var_name
+        )
     }
 
     /// `text_bm25(node, 'property', 'query text')` → BM25 relevance of that one
@@ -1045,5 +1104,36 @@ fn norm_of(embedding: Option<&[f32]>) -> Value {
     match embedding {
         Some(vector) => Value::Float64(vector.iter().map(|x| x * x).sum::<f32>().sqrt() as f64),
         None => Value::Null,
+    }
+}
+
+/// One `valid_at` / `valid_during` call's element bounds, for its errors.
+struct ValidityBounds<'a> {
+    function: &'static str,
+    var_name: &'a str,
+    from_field: &'a str,
+    from_val: Value,
+    to_field: &'a str,
+    to_val: Value,
+}
+
+impl ValidityBounds<'_> {
+    /// Read a query instant, or explain which argument could not be compared
+    /// with which bound — both type names — and how to write it instead.
+    fn instant(&self, value: &Value, argument: &str) -> Result<Instant, String> {
+        temporal_eval::parse_instant(value).map_err(|err| {
+            let (field, bound) = if matches!(self.from_val, Value::Null) && !matches!(self.to_val, Value::Null) {
+                (self.to_field, &self.to_val)
+            } else {
+                (self.from_field, &self.from_val)
+            };
+            format!(
+                "{}(): the {argument} argument {err}, so it cannot be compared with {}.{field} ({}). \
+                 Pass a date such as date('2009'), a datetime, or an ISO string such as '2009-06-30'",
+                self.function,
+                self.var_name,
+                value_type_name(bound)
+            )
+        })
     }
 }

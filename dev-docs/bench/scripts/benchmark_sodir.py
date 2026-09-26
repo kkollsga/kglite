@@ -277,13 +277,16 @@ CYPHER_QUERIES: list[tuple[str, str | None]] = [
     ),
     ("cypher_date_accessors", "WITH date('2020-06-15') AS d RETURN d.year AS y, d.month AS m, d.day AS dy"),
     # ── Temporal Functions (valid_at / valid_during) ───────────────
+    # These cells once passed the year strings '2010' and '2000', which
+    # compared false against DATE bounds, so captures taken before the
+    # date() form measured empty results.
     (
         "cypher_valid_at",
-        "MATCH (f:Field)-[r:HAS_LICENSEE]->(c:Company) WHERE valid_at(r, '2010', 'fldLicenseeFrom', 'fldLicenseeTo') RETURN f.title, c.title LIMIT 20",
+        "MATCH (f:Field)-[r:HAS_LICENSEE]->(c:Company) WHERE valid_at(r, date('2010'), 'fldLicenseeFrom', 'fldLicenseeTo') RETURN f.title, c.title LIMIT 20",
     ),
     (
         "cypher_valid_during",
-        "MATCH (f:Field)-[r:HAS_LICENSEE]->(c:Company) WHERE valid_during(r, '2000', '2010', 'fldLicenseeFrom', 'fldLicenseeTo') RETURN f.title, count(c) AS licensees ORDER BY licensees DESC LIMIT 10",
+        "MATCH (f:Field)-[r:HAS_LICENSEE]->(c:Company) WHERE valid_during(r, date('2000'), date('2010'), 'fldLicenseeFrom', 'fldLicenseeTo') RETURN f.title, count(c) AS licensees ORDER BY licensees DESC LIMIT 10",
     ),
     # ── Window Functions ───────────────────────────────────────────
     (

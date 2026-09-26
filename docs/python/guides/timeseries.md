@@ -183,8 +183,14 @@ graph.cypher("""
 """)
 ```
 
-Both accept a date string or a `date(...)` value for the query date, and
-treat an open/sentinel upper bound (e.g. `'9999-12-31'`) as "still valid". Pair
+Both accept a `date(...)` or `datetime(...)` value for the query date, or a
+string read the way those functions read it: `'2009'` is 2009-01-01, `'2009-06'`
+is 2009-06-01, and a string with a time part keeps its time, an offset applied
+and normalised to UTC. A value that is not a date — `'garbage'`, `2009` as an
+integer, `null` — raises `CypherExecutionError` rather than matching nothing.
+The stored bounds may be dates, datetimes or ISO strings; a datetime bound is
+compared at date grain against a date. Both functions treat the interval as
+closed, and an open/sentinel upper bound (e.g. `'9999-12-31'`) as "still valid". Pair
 them with [date functions](../../reference/cypher-reference.md) — `date()`,
 `add_days(date(), 30)` — to express relative windows like "active in the next
 30 days".

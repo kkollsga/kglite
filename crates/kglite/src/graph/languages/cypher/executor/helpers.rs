@@ -347,14 +347,6 @@ pub(super) fn predicate_to_string(pred: &Predicate) -> String {
     }
 }
 
-pub(super) fn evaluate_comparison(
-    left: &Value,
-    op: &ComparisonOp,
-    right: &Value,
-) -> Result<bool, String> {
-    Ok(evaluate_comparison_tristate(left, op, right)? == Some(true))
-}
-
 pub(super) fn evaluate_comparison_tristate(
     left: &Value,
     op: &ComparisonOp,

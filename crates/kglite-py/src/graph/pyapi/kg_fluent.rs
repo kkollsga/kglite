@@ -181,24 +181,19 @@ impl KnowledgeGraph {
             .map_err(to_pyerr)?;
         }
 
+        let temporal_config = self.inner.temporal_node_configs.get(&node_type);
+        if temporal == Some(true) && temporal_config.is_none() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "select('{node_type}', temporal=True): '{node_type}' has no temporal \
+                 configuration; call set_temporal('{node_type}', valid_from, valid_to) first"
+            )));
+        }
         if temporal != Some(false) && !self.cursor.temporal_context.is_all() {
-            if let Some(config) = self.inner.temporal_node_configs.get(&node_type) {
-                let level_idx = new_kg.cursor.selection.get_level_count().saturating_sub(1);
-                if let Some(level) = new_kg.cursor.selection.get_level_mut(level_idx) {
-                    for nodes in level.selections.values_mut() {
-                        nodes.retain(|&idx| {
-                            if let Some(node) = self.inner.graph.node_view(idx) {
-                                kglite_core::api::fluent::node_passes_context(
-                                    node,
-                                    config,
-                                    &self.cursor.temporal_context,
-                                )
-                            } else {
-                                false
-                            }
-                        });
-                    }
-                }
+            if let Some(config) = temporal_config {
+                let context = &self.cursor.temporal_context;
+                new_kg.retain_current_level(|node| {
+                    kglite_core::api::fluent::node_passes_context(node, config, context)
+                })?;
             }
         }
 
@@ -449,18 +444,9 @@ impl KnowledgeGraph {
             .map(|l| l.node_count())
             .unwrap_or(0);
 
-        let current_level = new_kg.cursor.selection.get_level_count().saturating_sub(1);
-        if let Some(level) = new_kg.cursor.selection.get_level_mut(current_level) {
-            for children in level.selections.values_mut() {
-                children.retain(|&idx| {
-                    if let Some(node) = self.inner.graph.node_view(idx) {
-                        kglite_core::api::fluent::node_is_temporally_valid(node, &config, &ref_date)
-                    } else {
-                        false
-                    }
-                });
-            }
-        }
+        new_kg.retain_current_level(|node| {
+            kglite_core::api::fluent::node_is_temporally_valid(node, &config, &ref_date)
+        })?;
 
         let actual = new_kg
             .cursor
@@ -531,23 +517,9 @@ impl KnowledgeGraph {
             .map(|l| l.node_count())
             .unwrap_or(0);
 
-        let current_level = new_kg.cursor.selection.get_level_count().saturating_sub(1);
-        if let Some(level) = new_kg.cursor.selection.get_level_mut(current_level) {
-            for children in level.selections.values_mut() {
-                children.retain(|&idx| {
-                    if let Some(node) = self.inner.graph.node_view(idx) {
-                        kglite_core::api::fluent::node_overlaps_range(
-                            node,
-                            &config,
-                            &start_parsed,
-                            &end_parsed,
-                        )
-                    } else {
-                        false
-                    }
-                });
-            }
-        }
+        new_kg.retain_current_level(|node| {
+            kglite_core::api::fluent::node_overlaps_range(node, &config, &start_parsed, &end_parsed)
+        })?;
 
         let actual = new_kg
             .cursor

@@ -3,6 +3,7 @@
 import pandas as pd
 import pytest
 
+import kglite
 from kglite import KnowledgeGraph
 
 
@@ -435,3 +436,151 @@ def test_order_by_min_max_and_distinct_are_unchanged(disable_optimizer):
     ).to_list()
     assert len(ordered) == 3
     assert str(ordered[-1]["v"]).startswith("2024-03-15 12:00")
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# One instant rule for valid_at / valid_during.
+#
+# The query instant is read the way `date()` / `datetime()` read it: a
+# date-only string through the `date()` parser (so '2009' is 2009-01-01), a
+# string with a time part through the `datetime()` parser (an offset applied,
+# normalised to UTC). Anything else is an error, never a silent false. Stored
+# bounds may be dates, datetimes or ISO strings and answer alike.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def bound_types_graph():
+    """`a`, `s`, `t`: [2005-01-01, 2012-12-31] stored as date, string and
+    datetime; `b`: [2009-01-01, open); `c`: [2010-01-01, open)."""
+    graph = KnowledgeGraph()
+    graph.cypher(
+        """
+        CREATE (:V {id: 'a', vf: date('2005-01-01'), vt: date('2012-12-31')}),
+               (:V {id: 'b', vf: date('2009-01-01')}),
+               (:V {id: 's', vf: '2005-01-01', vt: '2012-12-31'}),
+               (:V {id: 't', vf: datetime('2005-01-01T00:00:00'), vt: datetime('2012-12-31T12:00:00')}),
+               (:V {id: 'c', vf: date('2010-01-01')})
+        """
+    )
+    return graph
+
+
+def _valid_ids(graph, instant, disable_optimizer=False):
+    rows = graph.cypher(
+        f"MATCH (n:V) WHERE valid_at(n, {instant}, 'vf', 'vt') RETURN n.id AS id ORDER BY id",
+        disable_optimizer=disable_optimizer,
+    ).to_list()
+    return [r["id"] for r in rows]
+
+
+@pytest.mark.parametrize("disable_optimizer", [False, True])
+@pytest.mark.parametrize(
+    "instant",
+    [
+        "'2009'",
+        "'2009-06'",
+        "'2009-06-30'",
+        "date('2009')",
+        "date('2009-06-30')",
+        "datetime('2009-06-30T12:00:00')",
+        "'2009-06-30T12:00:00'",
+    ],
+)
+def test_valid_at_reads_every_instant_form_the_same_way(bound_types_graph, instant, disable_optimizer):
+    assert _valid_ids(bound_types_graph, instant, disable_optimizer) == ["a", "b", "s", "t"]
+
+
+def test_valid_at_year_string_is_the_first_day_of_the_year(bound_types_graph):
+    """'2010' is 2010-01-01: `c` starts that day, and the closed bound keeps it."""
+    assert _valid_ids(bound_types_graph, "'2010'") == ["a", "b", "c", "s", "t"]
+    assert _valid_ids(bound_types_graph, "'2004'") == []
+
+
+@pytest.mark.parametrize("instant", ["'garbage'", "2009", "null", "datetime('garbage')", "[2009]"])
+def test_valid_at_rejects_an_instant_it_cannot_read(bound_types_graph, instant):
+    with pytest.raises(kglite.CypherExecutionError) as info:
+        _valid_ids(bound_types_graph, instant)
+    message = str(info.value)
+    assert "n.vf" in message
+    assert "date('2009')" in message
+
+
+def test_valid_at_instant_error_names_both_types(bound_types_graph):
+    with pytest.raises(kglite.CypherExecutionError) as info:
+        _valid_ids(bound_types_graph, "2009")
+    message = str(info.value)
+    assert "INTEGER" in message
+    assert "DATE" in message
+
+
+@pytest.mark.parametrize("instant", ["'garbage'", "2009", "null"])
+def test_valid_during_rejects_an_instant_it_cannot_read(bound_types_graph, instant):
+    with pytest.raises(kglite.CypherExecutionError, match=r"date\('2009'\)"):
+        bound_types_graph.cypher(f"MATCH (n:V) WHERE valid_during(n, {instant}, '2010', 'vf', 'vt') RETURN n.id")
+
+
+def test_valid_during_reads_year_strings(bound_types_graph):
+    rows = bound_types_graph.cypher(
+        "MATCH (n:V) WHERE valid_during(n, '2000', '2009', 'vf', 'vt') RETURN n.id AS id ORDER BY id"
+    ).to_list()
+    assert [r["id"] for r in rows] == ["a", "b", "s", "t"]
+
+
+def test_valid_at_rejects_an_unreadable_stored_bound():
+    graph = KnowledgeGraph()
+    graph.cypher("CREATE (:V {id: 'bad', vf: 'sometime', vt: date('2012-12-31')})")
+    with pytest.raises(kglite.CypherExecutionError) as info:
+        graph.cypher("MATCH (n:V) WHERE valid_at(n, date('2009'), 'vf', 'vt') RETURN n.id")
+    message = str(info.value)
+    assert "'bad'" in message
+    assert "vf" in message
+    assert "STRING" in message
+
+
+def test_valid_at_rejects_an_unreadable_bound_on_a_relationship():
+    graph = KnowledgeGraph()
+    graph.cypher("CREATE (:P {id: 'p1'})-[:R {vf: 2005, vt: date('2012-12-31')}]->(:P {id: 'p2'})")
+    with pytest.raises(kglite.CypherExecutionError) as info:
+        graph.cypher("MATCH ()-[r:R]->() WHERE valid_at(r, date('2009'), 'vf', 'vt') RETURN 1")
+    message = str(info.value)
+    assert "r.vf" in message
+    assert "INTEGER" in message
+    assert "p1" in message
+
+
+@pytest.fixture
+def zoned_bounds_graph():
+    graph = KnowledgeGraph()
+    graph.cypher(
+        """
+        CREATE (:Z {id: 'ts_after', vf: date('2000-01-01'), vt: datetime('2009-06-29T23:30')}),
+               (:Z {id: 'ts_before', vf: date('2000-01-01'), vt: datetime('2009-06-29T22:30')}),
+               (:Z {id: 'day', vf: date('2000-01-01'), vt: date('2009-06-29')})
+        """
+    )
+    return graph
+
+
+@pytest.mark.parametrize("disable_optimizer", [False, True])
+@pytest.mark.parametrize(
+    "instant",
+    ["datetime('2009-06-30T01:00+02:00')", "datetime('2009-06-30T01:00:00+02:00')", "'2009-06-30T01:00:00+02:00'"],
+)
+def test_valid_at_applies_the_instant_offset(zoned_bounds_graph, instant, disable_optimizer):
+    """01:00+02:00 on the 30th is 23:00 UTC on the 29th: inside a 23:30 bound,
+    outside a 22:30 bound, and inside a closed bound on its UTC date."""
+    rows = zoned_bounds_graph.cypher(
+        f"MATCH (n:Z) WHERE valid_at(n, {instant}, 'vf', 'vt') RETURN n.id AS id ORDER BY id",
+        disable_optimizer=disable_optimizer,
+    ).to_list()
+    assert [r["id"] for r in rows] == ["day", "ts_after"]
+
+
+def test_datetime_accepts_an_offset_without_seconds():
+    graph = KnowledgeGraph()
+    rows = graph.cypher(
+        "RETURN datetime('2009-06-30T01:00+02:00') = datetime('2009-06-29T23:00:00') AS same, "
+        "datetime('2009-06-30T01:00Z') = datetime('2009-06-30T01:00:00') AS utc"
+    ).to_list()
+    assert rows == [{"same": True, "utc": True}]

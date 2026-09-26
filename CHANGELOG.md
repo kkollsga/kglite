@@ -27,7 +27,33 @@ before upgrading.
   `kglite::api::cypher::Expression` gains a `PatternComprehension` variant, so
   an exhaustive match over it needs a new arm.
 
+### Changed
+
+- Cypher `valid_at` / `valid_during` read the query date the way `date()` and
+  `datetime()` do: `'2009'` is 2009-01-01 and `'2009-06'` is 2009-06-01, and a
+  string with a time part keeps its time, its offset applied and normalised to
+  UTC. Year and month strings used to match nothing against date bounds, so
+  such queries now return the rows they always should have. A query date that
+  is not a date (`'garbage'`, the integer `2009`, `null`) and a stored bound
+  that is not a date, a datetime or an ISO string now raise
+  `CypherExecutionError`, naming the variable, the property and both types,
+  instead of silently answering false. A datetime bound compares at date grain
+  against a date. The closed-interval semantics are otherwise unchanged.
+- Rust API: `kglite::api::fluent::node_is_temporally_valid`,
+  `node_overlaps_range` and `node_passes_context` return
+  `Result<bool, String>`; the error names the node and the unreadable bound.
+
 ### Fixed
+
+- Fluent temporal filtering (`select()` under a `date()` context,
+  `valid_at()`, `valid_during()` and `traverse()` over temporal relationships)
+  treated bounds stored as datetimes or ISO strings as unbounded, so elements
+  outside the requested date passed. Every bound kind is now compared, and an
+  unreadable bound raises (`ValueError` from the node filters).
+- `select(node_type, temporal=True)` on a type with no temporal configuration
+  raises `ValueError`, as documented, instead of selecting every node.
+- `datetime('2009-06-30T01:00+02:00')` — an offset-bearing stamp written to the
+  minute — returned null; it now parses, with the offset applied.
 
 - A pattern predicate as the last element of a list literal
   (`RETURN [(n)-->()]`, `[1, (n)-[:R]->(:M)]`) was a syntax error; it now

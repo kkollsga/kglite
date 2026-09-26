@@ -1347,6 +1347,12 @@ Date-range filtering on nodes and relationships with explicit field names.
 
 **NULL semantics:** NULL `from` = valid since beginning. NULL `to` = still valid. Both NULL = always valid.
 
+**Query dates:** `valid_at` / `valid_during` take a `date()` or `datetime()` value, or a string read as
+those functions read it (`'2009'` = `date('2009')` = 2009-01-01; an offset in a datetime string is applied
+and normalised to UTC). Any other value — an unparsable string, an integer, `null` — raises
+`CypherExecutionError`, as does a stored bound that is not a date, a datetime or an ISO string. A datetime
+bound compares exactly against a datetime and at date grain against a date.
+
 **Magnitude/error policy:** a well-typed date/calendar shift that lands outside
 the representable chrono range returns NULL. Invalid types, a zero range step,
 range allocation/budget overflow, and Duration construction or arithmetic that

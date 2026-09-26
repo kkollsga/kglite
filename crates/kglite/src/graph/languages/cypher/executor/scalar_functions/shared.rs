@@ -90,8 +90,9 @@ impl ParsedIsoDateTime {
 /// Parse an ISO-8601 datetime string, retaining fractional seconds.
 ///
 /// Accepts, in order: an offset-bearing RFC 3339 stamp (`…Z`, `…+02:00`),
-/// a zone-less `YYYY-MM-DDTHH:MM:SS` with optional fractional seconds, a
-/// zone-less `YYYY-MM-DDTHH:MM`, and finally a bare date (midnight).
+/// the same written to the minute (`…T01:00+02:00`), a zone-less
+/// `YYYY-MM-DDTHH:MM:SS` with optional fractional seconds, a zone-less
+/// `YYYY-MM-DDTHH:MM`, and finally a bare date (midnight).
 /// The returned Timestamp retains the precision represented by Chrono.
 ///
 /// **The bare-date fallback only fires for a string with no time part.** It
@@ -106,6 +107,21 @@ pub(super) fn parse_iso_datetime(s: &str) -> Option<ParsedIsoDateTime> {
     let trimmed = s.trim();
 
     if let Ok(zoned) = chrono::DateTime::parse_from_rfc3339(trimmed) {
+        return Some(ParsedIsoDateTime {
+            local: zoned.naive_local(),
+            offset: Some(*zoned.offset()),
+        });
+    }
+    // RFC 3339 requires seconds; ISO 8601 does not.
+    let zulu;
+    let offset_form = match trimmed.strip_suffix(['Z', 'z']) {
+        Some(rest) => {
+            zulu = format!("{rest}+00:00");
+            zulu.as_str()
+        }
+        None => trimmed,
+    };
+    if let Ok(zoned) = chrono::DateTime::parse_from_str(offset_form, "%Y-%m-%dT%H:%M%:z") {
         return Some(ParsedIsoDateTime {
             local: zoned.naive_local(),
             offset: Some(*zoned.offset()),
@@ -245,5 +261,23 @@ mod tests {
         assert_eq!(map.get("c"), Some(&Value::Int64(i64::MAX)));
         // Past i64 the tolerant converter folds to f64 rather than nulling.
         assert_eq!(map.get("d"), Some(&Value::Float64(9.223372036854776e18)));
+    }
+
+    #[test]
+    fn an_offset_written_to_the_minute_is_applied() {
+        let utc = |s: &str| super::parse_iso_datetime(s).map(|p| p.utc().to_string());
+        assert_eq!(
+            utc("2009-06-30T01:00+02:00").as_deref(),
+            Some("2009-06-29 23:00:00")
+        );
+        assert_eq!(
+            utc("2009-06-30T01:00Z").as_deref(),
+            Some("2009-06-30 01:00:00")
+        );
+        assert_eq!(
+            utc("2009-06-30T01:00").as_deref(),
+            Some("2009-06-30 01:00:00")
+        );
+        assert_eq!(utc("2009-06-30T01+02:00"), None);
     }
 }

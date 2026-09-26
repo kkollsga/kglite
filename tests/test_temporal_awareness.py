@@ -362,3 +362,89 @@ class TestDescribeTemporal:
         xml = temporal_graph.describe()
         assert 'temporal_from="fldLicenseeFrom"' in xml
         assert 'temporal_to="fldLicenseeTo"' in xml
+
+
+@pytest.fixture
+def bound_kinds_graph():
+    """Three `:T` nodes valid 2015-01-01..2016-12-31, their bounds stored as
+    a date, a datetime and an ISO string, configured with set_temporal."""
+    g = kglite.KnowledgeGraph()
+    g.cypher(
+        """
+        CREATE (:T {id: 'date_bounded', title: 'date_bounded', vf: date('2015-01-01'), vt: date('2016-12-31')}),
+               (:T {id: 'ts_bounded', title: 'ts_bounded',
+                    vf: datetime('2015-01-01T00:00:00'), vt: datetime('2016-12-31T00:00:00')}),
+               (:T {id: 'str_bounded', title: 'str_bounded', vf: '2015-01-01', vt: '2016-12-31'})
+        """
+    )
+    g.set_temporal("T", "vf", "vt")
+    return g
+
+
+def _titles(result):
+    return sorted(row["title"] for row in result.collect())
+
+
+class TestFluentBoundKinds:
+    """Fluent filters honour date, datetime and ISO-string bounds alike."""
+
+    def test_date_context_before_the_interval(self, bound_kinds_graph):
+        assert _titles(bound_kinds_graph.date("2009").select("T")) == []
+
+    def test_default_context_after_the_interval(self, bound_kinds_graph):
+        assert _titles(bound_kinds_graph.select("T")) == []
+
+    def test_date_context_inside_the_interval(self, bound_kinds_graph):
+        assert _titles(bound_kinds_graph.date("2016").select("T")) == ["date_bounded", "str_bounded", "ts_bounded"]
+
+    def test_valid_at_before_the_interval(self, bound_kinds_graph):
+        assert _titles(bound_kinds_graph.select("T", temporal=False).valid_at("2009-06-30")) == []
+
+    def test_valid_at_inside_the_interval(self, bound_kinds_graph):
+        got = _titles(bound_kinds_graph.select("T", temporal=False).valid_at("2015-06-30"))
+        assert got == ["date_bounded", "str_bounded", "ts_bounded"]
+
+    def test_valid_during_outside_and_inside(self, bound_kinds_graph):
+        base = bound_kinds_graph.select("T", temporal=False)
+        assert _titles(base.valid_during("2009-01-01", "2010-12-31")) == []
+        assert _titles(base.valid_during("2016-06-01", "2020-01-01")) == ["date_bounded", "str_bounded", "ts_bounded"]
+
+    def test_range_context_outside(self, bound_kinds_graph):
+        assert _titles(bound_kinds_graph.date("2009", "2010").select("T")) == []
+
+    def test_cypher_agrees(self, bound_kinds_graph):
+        rows = bound_kinds_graph.cypher("MATCH (n:T) WHERE valid_at(n, date('2009'), 'vf', 'vt') RETURN n.id").to_list()
+        assert rows == []
+
+    def test_unreadable_bound_raises(self):
+        g = kglite.KnowledgeGraph()
+        g.cypher("CREATE (:T {id: 'bad', title: 'bad', vf: 'someday', vt: date('2016-12-31')})")
+        g.set_temporal("T", "vf", "vt")
+        with pytest.raises(ValueError, match="someday"):
+            g.date("2015").select("T")
+        with pytest.raises(ValueError, match="bad"):
+            g.select("T", temporal=False).valid_at("2015-06-30")
+
+    def test_traverse_edge_bounds_of_every_kind(self):
+        g = kglite.KnowledgeGraph()
+        g.cypher(
+            """
+            CREATE (f:F {id: 1, title: 'f'}),
+                   (f)-[:L {vf: datetime('2015-01-01T00:00:00'), vt: datetime('2016-12-31T00:00:00')}]->
+                       (:C {id: 10, title: 'ts'}),
+                   (f)-[:L {vf: '2015-01-01', vt: '2016-12-31'}]->(:C {id: 20, title: 'str'})
+            """
+        )
+        g.set_temporal("L", "vf", "vt")
+        assert _titles(g.select("F").traverse("L", at="2009-06-30")) == []
+        assert _titles(g.select("F").traverse("L", at="2015-06-30")) == ["str", "ts"]
+
+
+class TestSelectTemporalRequired:
+    def test_temporal_true_on_unconfigured_type_raises(self, temporal_graph):
+        with pytest.raises(ValueError, match="Company"):
+            temporal_graph.select("Company", temporal=True)
+
+    def test_temporal_true_on_configured_type_filters(self, temporal_node_graph):
+        result = temporal_node_graph.select("FieldStatus", temporal=True).collect()
+        assert [r["title"] for r in result] == ["Producing again"]

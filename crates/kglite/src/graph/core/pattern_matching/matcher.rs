@@ -280,7 +280,7 @@ pub(super) fn value_matches(
     matcher: &PropertyMatcher,
 ) -> bool {
     // Cypher three-valued logic, as `WHERE` applies it in
-    // `executor::helpers::evaluate_comparison`: a comparison with a NULL
+    // `executor::helpers::evaluate_comparison_tristate`: a comparison with a NULL
     // operand is NULL, and a NULL row is filtered out. `values_equal` already
     // encodes that for equality, but the ordering matchers reach
     // `compare_values`, which sorts NULL *below* every value (its ORDER BY

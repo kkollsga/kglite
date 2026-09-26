@@ -812,6 +812,38 @@ impl KnowledgeGraph {
         kglite_core::api::infer_selection_node_type(&self.cursor.selection, &self.inner)
     }
 
+    /// Keep the nodes of the current selection level that `keep` accepts. A
+    /// `keep` error (an unreadable temporal bound) raises `ValueError`.
+    pub(crate) fn retain_current_level(
+        &mut self,
+        keep: impl Fn(kglite_core::api::NodeView<'_>) -> Result<bool, String>,
+    ) -> PyResult<()> {
+        let graph = Arc::clone(&self.inner);
+        let level_idx = self.cursor.selection.get_level_count().saturating_sub(1);
+        let mut failure = None;
+        if let Some(level) = self.cursor.selection.get_level_mut(level_idx) {
+            for nodes in level.selections.values_mut() {
+                nodes.retain(|&idx| {
+                    if failure.is_some() {
+                        return false;
+                    }
+                    let Some(node) = kglite_core::api::GraphRead::node_view(&graph.graph, idx)
+                    else {
+                        return false;
+                    };
+                    keep(node).unwrap_or_else(|e| {
+                        failure = Some(e);
+                        false
+                    })
+                });
+            }
+        }
+        match failure {
+            Some(e) => Err(pyo3::exceptions::PyValueError::new_err(e)),
+            None => Ok(()),
+        }
+    }
+
     /// The registered embedder, or an error carrying the implement-this
     /// skeleton.
     pub(crate) fn get_embedder_or_error(&self) -> PyResult<Arc<dyn embedder::Embedder>> {
