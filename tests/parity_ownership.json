@@ -360,6 +360,21 @@
   "tests/test_storage_parity.py::test_soft_alias_index_parity": {
     "owner": "storage-parity"
   },
+  "tests/test_storage_parity.py::test_relationship_conflict_merge_parity": {
+    "owner": "storage-parity"
+  },
+  "tests/test_storage_parity.py::test_relationship_merge_folds_within_one_call_parity": {
+    "owner": "storage-parity"
+  },
+  "tests/test_storage_parity.py::test_replace_relationships_parity": {
+    "owner": "storage-parity"
+  },
+  "tests/test_storage_parity.py::test_declared_temporal_relationship_merge_parity": {
+    "owner": "storage-parity"
+  },
+  "tests/test_storage_parity.py::test_add_properties_parity": {
+    "owner": "storage-parity"
+  },
   "tests/test_temporal_persistence.py::test_temporal_declarations_round_trip[memory]": {
     "owner": "storage-parity"
   },

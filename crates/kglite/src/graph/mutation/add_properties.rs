@@ -256,6 +256,9 @@ where
         properties_set += count;
         touched_types.insert(type_name);
     }
+    // Disk stages `set_node_property` in `node_mut_cache`; drain it before the
+    // index refresh below reads the new values, and so every later read does.
+    GraphWrite::flush_pending_writes(&mut graph.graph);
 
     for node_type in &touched_types {
         graph.refresh_indexes_for_type(node_type);

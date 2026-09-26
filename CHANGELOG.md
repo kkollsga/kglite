@@ -133,6 +133,15 @@ before upgrading.
 
 ### Fixed
 
+- On a disk graph, merging into an existing relationship left its stored
+  properties unchanged when read afterwards: `add_relationships` with
+  `conflict_handling='update'`, `'sum'` or `'preserve'`, rows folding into one
+  relationship within a single `add_relationships`, `replace_relationships` or
+  `create_relationships` call, and a repeated `from` start on a relationship
+  type with a declared validity interval. The merged values reached reads only
+  after certain later writes or a save; reads now return them straight after
+  the call. `add_properties` on a disk graph had the same fault for the node
+  properties it wrote.
 - Relationship `IS NOT NULL` and `IS :: <type>` constraints were not checked
   by the C ABI's `kglite_create_edges_batch` (and so the Java binding), by
   `create_relationships()`, or by the Rust `kglite::api::blueprint::from_records`

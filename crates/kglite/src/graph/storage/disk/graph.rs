@@ -120,7 +120,8 @@ pub struct DiskGraph {
     pub(super) edge_properties: EdgePropertyStore,
 
     /// Cache for edge_weight_mut: stores materialized EdgeData that may be modified.
-    /// Flushed to edge_properties on next clear_arenas call.
+    /// Flushed to edge_properties on next clear_arenas call; until then every
+    /// edge-property read consults it first (`staged_edge`).
     pub(super) edge_mut_cache: HashMap<u32, EdgeData>,
     /// Cache for `node_weight_mut`: stages Cypher-SET-style exact-row writes
     /// as `PropertyStorage::Map` until `clear_arenas` drains it — see
@@ -745,7 +746,9 @@ impl DiskGraph {
     pub(crate) fn materialize_edge(&self, edge_idx: u32) -> &EdgeData {
         let ep = self.edge_endpoint(edge_idx as usize);
         let ct = InternedKey::from_u64(ep.connection_type);
-        let props = if self.edge_properties.is_empty() {
+        let props = if let Some(staged) = self.staged_edge(edge_idx) {
+            staged.properties.clone()
+        } else if self.edge_properties.is_empty() {
             Vec::new()
         } else {
             self.edge_properties
@@ -1276,7 +1279,22 @@ impl DiskGraph {
     /// that need `&[(InternedKey, Value)]` can use `.as_deref()`.
     #[inline]
     pub fn edge_properties_at(&self, edge_idx: u32) -> Option<Cow<'_, [(InternedKey, Value)]>> {
+        if let Some(staged) = self.staged_edge(edge_idx) {
+            return (!staged.properties.is_empty()).then(|| Cow::Borrowed(&staged.properties[..]));
+        }
         self.edge_properties.get(edge_idx)
+    }
+
+    /// A write `edge_weight_mut` staged and no flush has drained yet. Every
+    /// property read consults it first, so a staged write is never shadowed
+    /// by the store it has not reached; the emptiness test keeps the common
+    /// no-pending-write read at one branch.
+    #[inline]
+    fn staged_edge(&self, edge_idx: u32) -> Option<&EdgeData> {
+        if self.edge_mut_cache.is_empty() {
+            return None;
+        }
+        self.edge_mut_cache.get(&edge_idx)
     }
 
     /// Load-admission lookup that surfaces malformed persisted properties.
@@ -1574,7 +1592,7 @@ impl DiskGraph {
                 .find(|(k, v)| *k == key && !matches!(v, Value::Null))
                 .map(|(_, v)| v.clone())
         };
-        if let Some(staged) = self.edge_mut_cache.get(&(ei as u32)) {
+        if let Some(staged) = self.staged_edge(ei as u32) {
             return found(&staged.properties);
         }
         found(&self.edge_properties.get(ei as u32)?)
@@ -2110,8 +2128,10 @@ impl Clone for DiskGraph {
             edge_count: self.edge_count,
             next_edge_idx: self.next_edge_idx,
             edge_properties: self.edge_properties.fork_overlay(),
-            edge_mut_cache: HashMap::new(),
-            node_mut_cache: HashMap::new(),
+            // Staged writes are part of the graph's state until a flush drains
+            // them; a clone that dropped them would lose those writes.
+            edge_mut_cache: self.edge_mut_cache.clone(),
+            node_mut_cache: self.node_mut_cache.clone(),
             // SAFETY: cloning takes `&self`; every mutation of pending_edges is
             // gated by `&mut self`, so no writer can overlap this read.
             pending_edges: UnsafeCell::new(unsafe { &*self.pending_edges.get() }.clone()),

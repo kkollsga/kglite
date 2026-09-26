@@ -976,3 +976,195 @@ def test_relationship_embedding_parity(tmp_path):
         )
         info = kg.embedding_info("RELATED", "text", entity="relationship")
         assert (info["model"], info["hashed"]) == ("parity/stub", expected_count), mode
+
+
+# ─── Relationship conflict merges ───────────────────────────────────────────
+#
+# A merge onto an existing relationship stages its write on disk; these pin
+# that every read after the load — in the same session and after a save and
+# reopen — sees the merged value, with absolute expected values rather than
+# memory-as-oracle, since a merge bug shared by every mode is still a bug.
+
+
+def _new_graph(mode: str, tmp_path, name: str) -> KnowledgeGraph:
+    path = str(tmp_path / f"{name}_{mode}") if mode == "disk" else None
+    return _build_graph_empty(mode, path)
+
+
+def _build_graph_empty(mode: str, path: str | None) -> KnowledgeGraph:
+    if mode == "memory":
+        return KnowledgeGraph()
+    if mode == "mapped":
+        return KnowledgeGraph(storage="mapped")
+    return KnowledgeGraph(storage="disk", path=path)
+
+
+def _reopen(kg: KnowledgeGraph, mode: str, tmp_path, name: str) -> KnowledgeGraph:
+    import kglite
+
+    target = str(tmp_path / f"{name}_{mode}_saved" if mode == "disk" else tmp_path / f"{name}_{mode}.kgl")
+    kg.save(target)
+    return kglite.load(target)
+
+
+def _merge_endpoints(kg: KnowledgeGraph) -> None:
+    kg.add_nodes(pd.DataFrame({"aid": [1], "title": ["A1"]}), "A", "aid", "title")
+    kg.add_nodes(pd.DataFrame({"cid": [100], "title": ["C100"]}), "C", "cid", "title")
+
+
+def _edge_state(kg: KnowledgeGraph, rel: str) -> list[dict]:
+    return _rows(kg.cypher(f"MATCH (:A)-[r:{rel}]->(:C) RETURN r.score AS score, properties(r) AS props"))
+
+
+MERGE_EXPECTED = {
+    "update": {"score": 7, "props": {"score": 7, "tag": "a", "x": 3, "type": "U"}},
+    "sum": {"score": 12, "props": {"score": 12, "tag": "a", "x": 3, "type": "U"}},
+    "replace": {"score": 7, "props": {"score": 7, "x": 3, "type": "U"}},
+    "preserve": {"score": 5, "props": {"score": 5, "tag": "a", "x": 3, "type": "U"}},
+    "skip": {"score": 5, "props": {"score": 5, "tag": "a", "type": "U"}},
+}
+
+
+def test_relationship_conflict_merge_parity(tmp_path):
+    """`add_relationships` onto an existing relationship applies its conflict
+    mode in every storage mode, visibly in-session and after save + reopen."""
+    for conflict, expected in MERGE_EXPECTED.items():
+        for mode in STORAGE_MODES:
+            name = f"merge_{conflict}"
+            kg = _new_graph(mode, tmp_path, name)
+            _merge_endpoints(kg)
+            kg.add_relationships(
+                pd.DataFrame({"s": [1], "t": [100], "score": [5], "tag": ["a"]}), "U", "A", "s", "C", "t"
+            )
+            kg.add_relationships(
+                pd.DataFrame({"s": [1], "t": [100], "score": [7], "x": [3]}),
+                "U",
+                "A",
+                "s",
+                "C",
+                "t",
+                conflict_handling=conflict,
+            )
+            assert _edge_state(kg, "U") == [expected], f"{conflict}/{mode} in-session"
+            # A second read route: the property filter, not the projection.
+            hits = kg.cypher(f"MATCH (:A)-[r:U]->(:C) WHERE r.score = {expected['score']} RETURN count(r) AS c")
+            assert _rows(hits) == [{"c": 1}], f"{conflict}/{mode} filter"
+            reopened = _reopen(kg, mode, tmp_path, name)
+            assert _edge_state(reopened, "U") == [expected], f"{conflict}/{mode} after reopen"
+
+
+@pytest.mark.filterwarnings("ignore:create_relationships")
+def test_relationship_merge_folds_within_one_call_parity(tmp_path):
+    """Rows that fold onto one relationship inside a single call — a loader
+    frame repeating a pair, and `create_relationships` paths joining the same
+    endpoints — fold identically in every mode."""
+    for mode in STORAGE_MODES:
+        kg = _new_graph(mode, tmp_path, "fold_loader")
+        _merge_endpoints(kg)
+        # The type must already exist: a type's first load owns every edge and
+        # keeps repeated pairs as parallel relationships.
+        kg.add_relationships(pd.DataFrame({"s": [1], "t": [100], "score": [0]}), "U", "A", "s", "C", "t")
+        kg.add_relationships(
+            pd.DataFrame({"s": [1, 1, 1], "t": [100, 100, 100], "score": [1, 2, 4]}),
+            "U",
+            "A",
+            "s",
+            "C",
+            "t",
+            conflict_handling="sum",
+        )
+        assert _rows(kg.cypher("MATCH (:A)-[r:U]->(:C) RETURN r.score AS s")) == [{"s": 7}], mode
+
+    folds = {"update": 2, "sum": 3, "skip": 1, "preserve": 1, "replace": 2}
+    for conflict, expected in folds.items():
+        for mode in STORAGE_MODES:
+            name = f"fold_{conflict}"
+            kg = _new_graph(mode, tmp_path, name)
+            kg.cypher(
+                "CREATE (a:A {aid: 1, title: 'A1'}), (b1:B {bid: 10, title: 'B10', score: 1}), "
+                "(b2:B {bid: 11, title: 'B11', score: 2}), (c:C {cid: 100, title: 'C100'}), "
+                "(a)-[:AB]->(b1), (a)-[:AB]->(b2), (b1)-[:BC]->(c), (b2)-[:BC]->(c)"
+            )
+            folded = (
+                kg.select("A")
+                .traverse("AB")
+                .traverse("BC")
+                .create_relationships("T", conflict_handling=conflict, properties={"B": ["score"]})
+            )
+            got = _rows(folded.cypher("MATCH (:A)-[r:T]->(:C) RETURN r.score AS s"))
+            assert got == [{"s": expected}], f"{conflict}/{mode}: {got}"
+            reopened = _reopen(folded, mode, tmp_path, name)
+            got = _rows(reopened.cypher("MATCH (:A)-[r:T]->(:C) RETURN r.score AS s"))
+            assert got == [{"s": expected}], f"{conflict}/{mode} after reopen: {got}"
+
+
+def test_replace_relationships_parity(tmp_path):
+    """`replace_relationships` prunes then rewrites the source's edges of the
+    type, identically in every mode, including a repeated pair in the frame."""
+    for mode in STORAGE_MODES:
+        kg = _new_graph(mode, tmp_path, "replace_rel")
+        _merge_endpoints(kg)
+        kg.add_relationships(pd.DataFrame({"s": [1], "t": [100], "score": [5]}), "U", "A", "s", "C", "t")
+        kg.replace_relationships(
+            pd.DataFrame({"s": [1, 1], "t": [100, 100], "score": [7, 9]}),
+            "U",
+            "A",
+            "s",
+            "C",
+            "t",
+            conflict_handling="sum",
+        )
+        assert _rows(kg.cypher("MATCH (:A)-[r:U]->(:C) RETURN r.score AS s")) == [{"s": 16}], mode
+        reopened = _reopen(kg, mode, tmp_path, "replace_rel")
+        assert _rows(reopened.cypher("MATCH (:A)-[r:U]->(:C) RETURN r.score AS s")) == [{"s": 16}], mode
+
+
+def test_declared_temporal_relationship_merge_parity(tmp_path):
+    """On a declared interval type the merge key is the endpoints plus the
+    start: a repeated start merges into the stored relationship (closing its
+    open period), a new start is a parallel relationship — in every mode."""
+    periods = {"vf": "validFrom", "vt": "validTo"}
+    for mode in STORAGE_MODES:
+        kg = _new_graph(mode, tmp_path, "temporal_merge")
+        _merge_endpoints(kg)
+
+        def link(rows, conflict=None):
+            frame = pd.DataFrame(rows, columns=["s", "t", "vf", "vt", "w"])
+            return kg.add_relationships(
+                frame, "IN", "A", "s", "C", "t", conflict_handling=conflict, column_types=periods
+            )
+
+        link([(1, 100, "2000-01-01", None, 1)])
+        report = link([(1, 100, "2000-01-01", "2005-01-01", 2), (1, 100, "2010-01-01", None, 3)], "update")
+        assert (report["connections_created"], report["connections_updated"]) == (1, 1), mode
+        query = "MATCH (:A)-[r:IN]->(:C) RETURN toString(r.vf) AS vf, toString(r.vt) AS vt, r.w AS w ORDER BY vf"
+        expected = [
+            {"vf": "2000-01-01", "vt": "2005-01-01", "w": 2},
+            {"vf": "2010-01-01", "vt": None, "w": 3},
+        ]
+        assert kg.cypher(query).to_list() == expected, mode
+        # A merge-only call: no new relationship in the batch to flush it.
+        report = link([(1, 100, "2010-01-01", "2012-01-01", 4)], "update")
+        assert (report["connections_created"], report["connections_updated"]) == (0, 1), mode
+        expected[1] = {"vf": "2010-01-01", "vt": "2012-01-01", "w": 4}
+        assert kg.cypher(query).to_list() == expected, mode
+        reopened = _reopen(kg, mode, tmp_path, "temporal_merge")
+        assert reopened.cypher(query).to_list() == expected, mode
+
+
+def test_add_properties_parity(tmp_path):
+    """`add_properties` writes are visible to the next read in every mode —
+    disk stages them, so the call itself must drain the stage."""
+    for mode in STORAGE_MODES:
+        kg = _new_graph(mode, tmp_path, "add_props")
+        kg.cypher(
+            "CREATE (a:A {aid: 1, title: 'A1', region: 'north'}), "
+            "(b:B {bid: 10, title: 'B10', score: 4}), (a)-[:AB]->(b)"
+        )
+        enriched = kg.select("A").traverse("AB").add_properties({"A": ["region"]})
+        query = "MATCH (b:B) RETURN b.region AS region, b.score AS score"
+        expected = [{"region": "north", "score": 4}]
+        assert _rows(enriched.cypher(query)) == expected, mode
+        filtered = enriched.cypher("MATCH (b:B) WHERE b.region = 'north' RETURN count(b) AS c")
+        assert _rows(filtered) == [{"c": 1}], mode
+        assert _rows(_reopen(enriched, mode, tmp_path, "add_props").cypher(query)) == expected, mode

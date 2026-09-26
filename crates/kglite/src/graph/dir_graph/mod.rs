@@ -1609,6 +1609,11 @@ impl DirGraph {
     /// reads back in-session but resolves to nothing in enumerations,
     /// panics `StringInterner::resolve`, and is dropped by `save_graph` —
     /// silent data loss. Returns `false` when no node exists at `index`.
+    ///
+    /// On a disk graph the write is staged, as `GraphWrite::node_weight_mut`
+    /// documents: call `graph.graph.flush_pending_writes()` after a run of
+    /// writes and before reading them back. Flushing per call would copy the
+    /// written column each time.
     pub fn set_node_property(&mut self, index: NodeIndex, key: &str, mut value: Value) -> bool {
         use crate::graph::storage::{GraphRead, GraphWrite};
         if self.graph.node_weight(index).is_none() {
@@ -1624,7 +1629,8 @@ impl DirGraph {
     /// embedder route replacing the removed `NodeData::remove_property`.
     /// Routes by storage variant; returns the removed value, or `None` if
     /// the node or the property was absent. Lookup uses the pure key hash,
-    /// so a never-registered key simply returns `None`.
+    /// so a never-registered key simply returns `None`. Staged on a disk
+    /// graph like [`Self::set_node_property`].
     pub fn remove_node_property(&mut self, index: NodeIndex, key: &str) -> Option<Value> {
         use crate::graph::storage::interner::InternedKey;
         use crate::graph::storage::GraphWrite;

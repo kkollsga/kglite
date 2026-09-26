@@ -966,6 +966,10 @@ impl ConnectionBatchProcessor {
                 }
             }
         }
+        // A merge writes through `edge_weight_mut`, which disk stages in
+        // `edge_mut_cache`; drain it so the batch's merges reach the store
+        // every later read, clone and save sees. No-op on memory/mapped.
+        GraphWrite::flush_pending_writes(&mut graph.graph);
 
         Ok((total_stats, self.metrics))
     }
