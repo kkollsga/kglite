@@ -230,8 +230,8 @@ fn tagged_date_and_datetime_params_match_stored_values() {
     );
     assert_eq!(
         rows,
-        serde_json::json!([{ "c": 0 }]),
-        "a bare string stays a string"
+        serde_json::json!([{ "c": 1 }]),
+        "a bare ISO string compares with a stored date, as `<` / `>` always did"
     );
 
     let tagged = serde_json::json!({ "v": { "$date": vf }, "t": { "$datetime": at } }).to_string();
