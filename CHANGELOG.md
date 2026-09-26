@@ -97,6 +97,16 @@ before upgrading.
 
 ### Changed
 
+- **Breaking (Python):** a date value comes back as a `datetime.date`, and a
+  date column in `to_df()` is `datetime64[ns]`, on every read route —
+  `cypher()` / `to_list()`, rows, fluent `collect()` and `to_df()`, `Session`,
+  `Transaction` and `FrozenGraph`, and nested in lists and maps. It came back
+  as its ISO string (`'2010-01-02'`, a string column in `to_df()`), unlike a
+  datetime, which already came back as `datetime.datetime`. To keep the old
+  shape, format the value: `d.isoformat()` or `str(d)`, and
+  `df[col].dt.strftime('%Y-%m-%d')` for a frame column. A returned date passed
+  back as a query parameter matches as before. The Bolt server, the MCP server
+  and JSON output are unchanged; timeseries keys stay ISO strings.
 - **Behaviour change on declared types:** Cypher `valid_at(entity, date,
   'from', 'to')` and `valid_during(entity, start, end, 'from', 'to')` now follow
   the convention of a declaration that names the same two properties. On a

@@ -22,9 +22,9 @@ def graph() -> kglite.KnowledgeGraph:
 @pytest.mark.parametrize(
     ("expression", "expected"),
     [
-        ("date({year: 2010, month: 6, day: 30})", "2010-06-30"),
-        ("date({year: 2010})", "2010-01-01"),
-        ("date({year: 2010, month: 2})", "2010-02-01"),
+        ("date({year: 2010, month: 6, day: 30})", dt.date(2010, 6, 30)),
+        ("date({year: 2010})", dt.date(2010, 1, 1)),
+        ("date({year: 2010, month: 2})", dt.date(2010, 2, 1)),
         ("date({year: null, month: 1})", None),
         ("date({year: 2010, month: 6, day: 30}) = date('2010-06-30')", True),
         (
@@ -40,7 +40,7 @@ def test_map_form_builds_the_value(graph, expression, expected) -> None:
 
 def test_map_form_takes_row_values(graph) -> None:
     rows = graph.cypher("UNWIND [1990, 2000] AS y RETURN date({year: y, month: 1, day: 1}) AS d").to_list()
-    assert rows == [{"d": "1990-01-01"}, {"d": "2000-01-01"}]
+    assert rows == [{"d": dt.date(1990, 1, 1)}, {"d": dt.date(2000, 1, 1)}]
 
 
 @pytest.mark.parametrize(

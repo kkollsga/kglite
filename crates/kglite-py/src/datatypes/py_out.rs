@@ -47,8 +47,9 @@ pub fn value_to_py(py: Python, value: &Value) -> PyResult<Py<PyAny>> {
         Value::Int64(i) => i.into_py_any(py),
         Value::Boolean(b) => b.into_py_any(py),
         Value::UniqueId(u) => u.into_py_any(py),
-        Value::DateTime(d) => d.format("%Y-%m-%d").to_string().into_py_any(py),
-        // Timestamp → native Python datetime.datetime (pyo3 chrono bridge).
+        // Date → datetime.date, Timestamp → naive datetime.datetime (pyo3's
+        // chrono bridge). Dates used to be ISO strings.
+        Value::DateTime(d) => d.into_py_any(py),
         Value::Timestamp(dt) => dt.into_py_any(py),
         Value::Point { lat, lon } => {
             let dict = PyDict::new(py);

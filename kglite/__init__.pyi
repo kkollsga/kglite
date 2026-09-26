@@ -587,12 +587,13 @@ class ResultView:
     def to_list(self) -> list[dict[str, Any]]:
         """Convert all rows to a Python list of dicts (full materialization).
 
-        Temporal values come back in two shapes. A **date** is an ISO string,
-        ``'2010-01-02'`` — not a ``datetime.date``. A **datetime** is a naive
-        ``datetime.datetime``. A date string can be passed straight back into
-        a query: ``WHERE n.d = $d`` compares a stored date with the text it
-        parses to, as ``<`` and ``>`` do. Wrap it in ``date($d)`` where a
-        function needs a date value.
+        Temporal values come back as Python temporal values: a **date** is a
+        ``datetime.date`` and a **datetime** a naive ``datetime.datetime`` —
+        top-level, in lists and maps, and on every read route. (Earlier
+        releases returned a date as its ISO string; ``d.isoformat()`` gives
+        that text.)
+        A returned date can be passed straight back into a query as a
+        parameter; ``WHERE n.d = $d`` also accepts the ISO text.
         """
         ...
 
@@ -649,9 +650,10 @@ class ResultView:
         Integer columns containing NULL use pandas nullable ``Int64``. Mixed
         columns containing integers use ``object`` to preserve values and types.
         Other columns follow pandas inference; float NULLs can become NaN.
-        Column order and nested values are preserved. A date column holds ISO
-        strings (a string column, not ``datetime64``) — convert it with
-        ``pd.to_datetime(df[col])``; a datetime column is ``datetime64``.
+        Column order and nested values are preserved. A date column — alone or
+        mixed with datetimes and NULLs — is ``datetime64[ns]`` (each date at
+        midnight), as a datetime column is ``datetime64``; a date column mixed
+        with text or numbers stays ``object`` and keeps each value.
 
         Example::
 
@@ -7415,7 +7417,8 @@ class KnowledgeGraph:
             or CSV string when the query ends with ``FORMAT CSV``. Only the
             ResultView carries ``diagnostics`` / ``warnings``. Python result
             values follow :class:`ResultView`'s endpoint-reference and timestamp
-            conversion contract; format-specific details are in
+            conversion contract — a date is a ``datetime.date``, a datetime a
+            ``datetime.datetime``; format-specific details are in
             :doc:`Value projection </python/value-projection>`.
 
         Raises:

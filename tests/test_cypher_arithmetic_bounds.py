@@ -1,5 +1,6 @@
 """Regression tests for checked range and temporal arithmetic."""
 
+import datetime as dt
 import math
 
 import pytest
@@ -131,8 +132,8 @@ def test_calendar_shift_unsupported_magnitudes_return_null(graph: kglite.Knowled
 
 
 def test_add_years_preserves_leap_day_policy(graph: kglite.KnowledgeGraph) -> None:
-    assert graph.cypher("RETURN add_years(date('2024-02-29'), 1) AS d").to_list() == [{"d": "2025-02-28"}]
-    assert graph.cypher("RETURN add_years(date('2024-02-29'), -1) AS d").to_list() == [{"d": "2023-02-28"}]
+    assert graph.cypher("RETURN add_years(date('2024-02-29'), 1) AS d").to_list() == [{"d": dt.date(2025, 2, 28)}]
+    assert graph.cypher("RETURN add_years(date('2024-02-29'), -1) AS d").to_list() == [{"d": dt.date(2023, 2, 28)}]
 
 
 @pytest.mark.parametrize(

@@ -33,9 +33,6 @@ def test_identity_values_survive_save_reload_and_streaming_subset(tmp_path, stor
     expected = [{"id": value, "title": f"row-{i}", "rank": i} for i, value in enumerate(values)]
     for row in expected:
         graph.cypher("CREATE (:Item {id:$id,title:$title,rank:$rank})", params=row)
-    expected = [
-        {**row, "id": row["id"].isoformat() if isinstance(row["id"], datetime.date) else row["id"]} for row in expected
-    ]
     assert identity_rows(graph) == expected
     graph.save(path)
     loaded = kglite.load(path)

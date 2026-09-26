@@ -158,7 +158,7 @@ class TestDatetimeAlias:
         import datetime
 
         rows = graph.cypher("RETURN date('2020-01-15') AS d1, datetime('2020-01-15') AS d2")
-        assert rows[0]["d1"] == "2020-01-15"
+        assert rows[0]["d1"] == datetime.date(2020, 1, 15)
         assert rows[0]["d2"] == datetime.datetime(2020, 1, 15, 0, 0, 0)
 
 

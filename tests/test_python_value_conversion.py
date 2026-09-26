@@ -115,7 +115,9 @@ def test_timezone_without_an_offset_remains_naive(reader):
 
 
 def test_pure_date_remains_date_only(reader):
-    assert _roundtrip(reader, dt.date(2025, 1, 2)) == "2025-01-02"
+    got = _roundtrip(reader, dt.date(2025, 1, 2))
+    # A date comes back as a date — not a datetime, and not text.
+    assert got == dt.date(2025, 1, 2) and type(got) is dt.date
 
 
 def test_aware_timestamp_persists_as_utc(tmp_path):

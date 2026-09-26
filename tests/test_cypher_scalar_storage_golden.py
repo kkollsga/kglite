@@ -1,5 +1,7 @@
 """Cross-storage golden semantics for shared scalar execution paths."""
 
+import datetime as dt
+
 import pytest
 
 import kglite
@@ -28,7 +30,7 @@ def test_range_temporal_duration_and_regex_golden(scalar_graph):
     )
     expected = {
         "r": [-2, -1, 0, 1, 2],
-        "shifted": "2025-02-28",
+        "shifted": dt.date(2025, 2, 28),
         "months": 4,
         "days": 6,
         "regex_op": True,

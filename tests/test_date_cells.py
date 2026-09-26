@@ -10,6 +10,7 @@ date. An empty cell is a missing value and is not reported.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import warnings
 
@@ -32,9 +33,9 @@ FRAME = pd.DataFrame(
 )
 
 EXPECTED = [
-    {"id": "a", "vf": "1965-07-01", "vt": "1991-02-01"},
+    {"id": "a", "vf": dt.date(1965, 7, 1), "vt": dt.date(1991, 2, 1)},
     {"id": "b", "vf": None, "vt": None},
-    {"id": "c", "vf": None, "vt": "2010-01-01"},
+    {"id": "c", "vf": None, "vt": dt.date(2010, 1, 1)},
     {"id": "d", "vf": None, "vt": None},
 ]
 
@@ -64,7 +65,7 @@ def test_add_nodes_reads_an_integer_column_of_basic_dates() -> None:
     graph = kglite.KnowledgeGraph()
     frame = pd.DataFrame({"id": ["a"], "vf": np.array([19650701], dtype="int64")})
     graph.add_nodes(frame, "M", "id", column_types={"vf": "date"})
-    assert graph.cypher("MATCH (m:M) RETURN m.vf AS vf").to_list() == [{"vf": "1965-07-01"}]
+    assert graph.cypher("MATCH (m:M) RETURN m.vf AS vf").to_list() == [{"vf": dt.date(1965, 7, 1)}]
 
 
 def test_blueprint_reads_basic_dates_like_add_nodes(tmp_path) -> None:
@@ -93,13 +94,13 @@ def test_blueprint_keeps_epoch_milliseconds(tmp_path) -> None:
     }
     (tmp_path / "bp.json").write_text(json.dumps(blueprint), encoding="utf-8")
     graph = kglite.from_blueprint(str(tmp_path / "bp.json"))
-    assert graph.cypher("MATCH (m:M) RETURN m.d AS d").to_list() == [{"d": "2021-01-01"}]
+    assert graph.cypher("MATCH (m:M) RETURN m.d AS d").to_list() == [{"d": dt.date(2021, 1, 1)}]
 
 
 @pytest.mark.parametrize(
     ("text", "expected"),
-    [("19650701", "1965-07-01"), ("1965-07-01", "1965-07-01"), ("19651301", None)],
+    [("19650701", dt.date(1965, 7, 1)), ("1965-07-01", dt.date(1965, 7, 1)), ("19651301", None)],
 )
-def test_cypher_date_reads_the_basic_format(text: str, expected: str | None) -> None:
+def test_cypher_date_reads_the_basic_format(text: str, expected: dt.date | None) -> None:
     graph = kglite.KnowledgeGraph()
     assert graph.cypher("RETURN date($t) AS d", params={"t": text}).to_list() == [{"d": expected}]

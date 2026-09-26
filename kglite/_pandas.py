@@ -71,10 +71,29 @@ def _integer_dtype(values):
 
     # Native homogeneous numbers need no per-cell Python policy scan. Missing
     # and mixed labels retain the exact Python-type checks below.
-    if infer_dtype(values, skipna=False) in {"integer", "floating"}:
+    inferred = infer_dtype(values, skipna=False)
+    if inferred in {"integer", "floating"}:
         return None
+    # A column of dates (with datetimes or missing cells) is datetime64, as a
+    # datetime column already is; pandas alone keeps `datetime.date` as object.
+    if inferred in {"date", "mixed"} and _is_date_column(values):
+        return "datetime64[ns]"
     if not any(type(value) is int for value in values):
         return None
     if all(value is None or type(value) is int for value in values):
         return "Int64" if any(value is None for value in values) else None
     return object
+
+
+def _is_date_column(values):
+    import datetime
+
+    seen_date = False
+    for value in values:
+        if value is None:
+            continue
+        if type(value) is datetime.date:
+            seen_date = True
+        elif type(value) is not datetime.datetime:
+            return False
+    return seen_date

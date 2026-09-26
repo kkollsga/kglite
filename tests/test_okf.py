@@ -13,7 +13,7 @@ loose/obsidian wikilink dialect, and reserved-file handling.
 from __future__ import annotations
 
 from collections import Counter
-from datetime import datetime
+from datetime import date, datetime
 import json
 from pathlib import Path
 import shutil
@@ -369,10 +369,10 @@ class TestVaultGoldenBundle:
             "RETURN n.updated AS u, n.reviewed AS r, "
             "n.updated + duration({days: 1}) AS plus, n.updated < date('2026-02-01') AS lt"
         ).to_list()
-        # A date renders as its ISO string, but it is a date: arithmetic and
-        # ordering against date() both work, which a string could not do.
-        assert rows[0]["u"] == "2026-01-15"
-        assert rows[0]["plus"] == "2026-01-16"
+        # A date comes back as a `datetime.date`: arithmetic and ordering
+        # against date() both work, which a string could not do.
+        assert rows[0]["u"] == date(2026, 1, 15)
+        assert rows[0]["plus"] == date(2026, 1, 16)
         assert rows[0]["lt"] is True
         assert rows[0]["r"] == datetime(2026, 1, 15, 9, 30)
 

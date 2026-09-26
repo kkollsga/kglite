@@ -31,7 +31,7 @@ SCALARS = [
     (
         "date",
         [" 2025-01-02 ", "2025-01-02T03:04:05", "1609459200000", "2025/01/02", "bad", ""],
-        ["2025-01-02", "2025-01-02", "2021-01-01", None, None, None],
+        [dt.date(2025, 1, 2), dt.date(2025, 1, 2), dt.date(2021, 1, 1), None, None, None],
     ),
 ]
 
@@ -85,7 +85,7 @@ def test_direct_date_aliases_remain_separate_from_blueprint_grammar():
     graph = kglite.KnowledgeGraph()
     values = ["2025/01/02", "02-01-2025", "01/02/2025"]
     graph.add_nodes(pd.DataFrame({"id": range(3), "v": values}), "N", "id", column_types={"v": "date"})
-    assert graph.cypher("MATCH(n:N) RETURN n.v AS v").column("v") == ["2025-01-02"] * 3
+    assert graph.cypher("MATCH(n:N) RETURN n.v AS v").column("v") == [dt.date(2025, 1, 2)] * 3
 
 
 @pytest.mark.parametrize("downcast", [False, True])
@@ -145,7 +145,7 @@ def test_scalar_nested_timestamp_same_utc_instant(value, expected, route):
         query = "MATCH()-[n:R]->() RETURN n.v AS v,n.m.v AS m,n.l[0] AS l,n.day AS day"
     assert_rows_equal(
         graph.cypher(query).to_list(),
-        [{"v": expected, "m": expected, "l": expected, "day": value.date().isoformat()}],
+        [{"v": expected, "m": expected, "l": expected, "day": value.date()}],
         order="ordered",
     )
 

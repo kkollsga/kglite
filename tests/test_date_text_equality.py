@@ -12,6 +12,8 @@ family, so `=` is false and `<>` true (openCypher), as `<` is null.
 
 from __future__ import annotations
 
+import datetime as dt
+
 import pandas as pd
 import pytest
 
@@ -78,8 +80,10 @@ def test_fluent_where_and_a_round_tripped_value(storage, tmp_path) -> None:
     graph = _graph(storage, False, tmp_path)
     assert graph.select("M").where({"vt": "1990-01-01"}).len() == 1
     assert graph.select("M").where({"vt": {"in": ["1990-01-01"]}}).len() == 1
-    # A date read back as text finds its row again.
+    # A date read back — as a `datetime.date`, or as its ISO text — finds its
+    # row again.
     returned = graph.cypher("MATCH (m:M {id: 'a'}) RETURN m.vt AS vt").to_list()[0]["vt"]
-    assert isinstance(returned, str)
-    again = graph.cypher("MATCH (m:M) WHERE m.vt = $v RETURN m.id AS id", params={"v": returned}).to_list()
-    assert again == [{"id": "a"}]
+    assert returned == dt.date(1990, 1, 1)
+    for value in (returned, returned.isoformat()):
+        again = graph.cypher("MATCH (m:M) WHERE m.vt = $v RETURN m.id AS id", params={"v": value}).to_list()
+        assert again == [{"id": "a"}]

@@ -33,7 +33,7 @@ def test_a_date_load_after_a_string_set_reports_a_written_mismatch() -> None:
     (message,) = report["errors"]
     assert "Type mismatch for property 'vt'" in message
     assert "The values were written" in message and "now 'DateTime'" in message
-    assert graph.cypher("MATCH (m:M {code: 'z'}) RETURN m.vt AS vt").to_list() == [{"vt": "2021-01-01"}]
+    assert graph.cypher("MATCH (m:M {code: 'z'}) RETURN m.vt AS vt").to_list() == [{"vt": dt.date(2021, 1, 1)}]
 
 
 def test_a_matching_follow_up_load_reports_nothing() -> None:

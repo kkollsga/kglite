@@ -94,7 +94,7 @@ pub fn rows_to_dataframe(
                 col_list.append(py.None())?;
             }
         }
-        native_dtypes.set_item(key, dataframe_integer_dtype(kinds))?;
+        native_dtypes.set_item(key, dataframe_column_dtype(kinds))?;
         dict.set_item(key, col_list)?;
         col_order.append(key)?;
     }
@@ -108,21 +108,42 @@ pub fn rows_to_dataframe(
     )
 }
 
-fn dataframe_integer_dtype(kinds: u8) -> Option<&'static str> {
-    match kinds {
-        3 => Some("Int64"),
-        5 | 7 => Some("object"),
-        _ => None,
+const KIND_INT: u8 = 1;
+const KIND_NULL: u8 = 2;
+const KIND_OTHER: u8 = 4;
+const KIND_DATE: u8 = 8;
+const KIND_DATETIME: u8 = 16;
+
+/// The dtype a boxed column is built at, from the kinds of value it holds;
+/// `None` leaves it to pandas' inference.
+///
+/// - integers with nulls → nullable `Int64`;
+/// - integers mixed with anything else → `object`, keeping each value's type;
+/// - dates, alone or with datetimes and nulls → `datetime64[ns]`. pandas
+///   infers `object` for `datetime.date` cells, and a date is midnight on that
+///   date alongside a datetime, as it is in a comparison.
+fn dataframe_column_dtype(kinds: u8) -> Option<&'static str> {
+    if kinds == KIND_INT | KIND_NULL {
+        return Some("Int64");
     }
+    if kinds & KIND_INT != 0 && kinds & !(KIND_INT | KIND_NULL) != 0 {
+        return Some("object");
+    }
+    if kinds & KIND_DATE != 0 && kinds & !(KIND_DATE | KIND_DATETIME | KIND_NULL) == 0 {
+        return Some("datetime64[ns]");
+    }
+    None
 }
 
 // Match emitted Python scalar types, not core predicate equality. UniqueId and
 // the unresolved NodeRef fallback emit integers; absent cells emit None.
 fn dataframe_value_kind(value: Option<&Value>) -> u8 {
     match value {
-        Some(Value::Int64(_) | Value::UniqueId(_) | Value::NodeRef(_)) => 1,
-        Some(Value::Null) | None => 2,
-        _ => 4,
+        Some(Value::Int64(_) | Value::UniqueId(_) | Value::NodeRef(_)) => KIND_INT,
+        Some(Value::Null) | None => KIND_NULL,
+        Some(Value::DateTime(_)) => KIND_DATE,
+        Some(Value::Timestamp(_)) => KIND_DATETIME,
+        _ => KIND_OTHER,
     }
 }
 
@@ -131,8 +152,8 @@ fn dataframe_value_kind(value: Option<&Value>) -> u8 {
 /// Only the three kinds whose boxed-list form pandas infers to exactly this
 /// dtype qualify, and only when **every** cell is that kind: one NULL, one
 /// short row, or one cell of another type and the column stays on the boxed
-/// path, where `dataframe_integer_dtype` decides between `Int64`, `object` and
-/// pandas' own inference. So the frame is value- and dtype-identical either
+/// path, where `dataframe_column_dtype` decides between `Int64`, `object`,
+/// `datetime64[ns]` and pandas' own inference. So the frame is value- and dtype-identical either
 /// way — this is a transport change, not a policy one.
 #[derive(Clone, Copy)]
 enum ColumnBuffer {
@@ -219,13 +240,13 @@ mod dataframe_dtype_tests {
         ] {
             let integer = dataframe_value_kind(Some(&value));
             assert_eq!(integer, 1);
-            assert_eq!(dataframe_integer_dtype(integer), None);
+            assert_eq!(dataframe_column_dtype(integer), None);
             assert_eq!(
-                dataframe_integer_dtype(integer | dataframe_value_kind(None)),
+                dataframe_column_dtype(integer | dataframe_value_kind(None)),
                 Some("Int64")
             );
             assert_eq!(
-                dataframe_integer_dtype(integer | dataframe_value_kind(Some(&Value::Null))),
+                dataframe_column_dtype(integer | dataframe_value_kind(Some(&Value::Null))),
                 Some("Int64")
             );
             for other in [
@@ -234,12 +255,38 @@ mod dataframe_dtype_tests {
                 Value::String("x".into()),
             ] {
                 let mixed = integer | dataframe_value_kind(Some(&other));
-                assert_eq!(dataframe_integer_dtype(mixed), Some("object"));
-                assert_eq!(dataframe_integer_dtype(mixed | 2), Some("object"));
+                assert_eq!(dataframe_column_dtype(mixed), Some("object"));
+                assert_eq!(dataframe_column_dtype(mixed | 2), Some("object"));
             }
         }
         for kind in [0, 2, 4, 6] {
-            assert_eq!(dataframe_integer_dtype(kind), None);
+            assert_eq!(dataframe_column_dtype(kind), None);
         }
+    }
+
+    #[test]
+    fn date_columns_are_datetime64_and_date_mixed_with_text_is_left_alone() {
+        let date = dataframe_value_kind(Some(&Value::DateTime(
+            chrono::NaiveDate::from_ymd_opt(2010, 1, 1).unwrap(),
+        )));
+        let datetime = dataframe_value_kind(Some(&Value::Timestamp(
+            chrono::NaiveDate::from_ymd_opt(2010, 1, 1)
+                .unwrap()
+                .and_hms_opt(1, 2, 3)
+                .unwrap(),
+        )));
+        for kinds in [
+            date,
+            date | KIND_NULL,
+            date | datetime,
+            date | datetime | KIND_NULL,
+        ] {
+            assert_eq!(dataframe_column_dtype(kinds), Some("datetime64[ns]"));
+        }
+        // A datetime column keeps pandas' own inference, as before.
+        assert_eq!(dataframe_column_dtype(datetime | KIND_NULL), None);
+        let text = dataframe_value_kind(Some(&Value::String("x".into())));
+        assert_eq!(dataframe_column_dtype(date | text), None);
+        assert_eq!(dataframe_column_dtype(date | KIND_INT), Some("object"));
     }
 }

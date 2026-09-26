@@ -1,5 +1,6 @@
 """Tests for temporal queries: datetime columns, valid_at, valid_during."""
 
+from datetime import date as D
 import warnings
 
 import pandas as pd
@@ -99,7 +100,7 @@ class TestDeclaredTemporalTextColumns:
     )
     def test_datetime_takes_the_date_part_of_text_carrying_a_time(self, values):
         _, stored = self._load(values, "datetime")
-        assert stored == ["2024-03-15", "2024-07-01"]
+        assert stored == [D(2024, 3, 15), D(2024, 7, 1)]
 
     @pytest.mark.parametrize(
         "values",
@@ -115,14 +116,14 @@ class TestDeclaredTemporalTextColumns:
 
     def test_date_only_text_still_loads_under_both_declarations(self):
         _, as_date = self._load(["2024-03-15"], "datetime")
-        assert as_date == ["2024-03-15"]
+        assert as_date == [D(2024, 3, 15)]
         _, as_timestamp = self._load(["2024-03-15"], "timestamp")
         assert as_timestamp[0].isoformat() == "2024-03-15T00:00:00"
 
     def test_datetime64_column_still_forces_date_only(self):
         """The declared meaning is unchanged: `'datetime'` drops time-of-day."""
         _, stored = self._load(pd.to_datetime(["2024-03-15 08:30:00", "2024-07-01 23:59:59"]), "datetime")
-        assert stored == ["2024-03-15", "2024-07-01"]
+        assert stored == [D(2024, 3, 15), D(2024, 7, 1)]
 
     @pytest.mark.parametrize("declared", ["datetime", "timestamp"])
     def test_an_unparseable_cell_warns_and_names_itself(self, declared):
@@ -142,10 +143,10 @@ class TestDeclaredTemporalTextColumns:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             _, stored = self._load(["2024-03-15", "nonsense"], "datetime", on_invalid="skip")
-        assert stored == ["2024-03-15", None]
+        assert stored == [D(2024, 3, 15), None]
 
     def test_a_fully_parseable_column_says_nothing(self):
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             _, stored = self._load(["2024-03-15 08:30:00"], "datetime")
-        assert stored == ["2024-03-15"]
+        assert stored == [D(2024, 3, 15)]

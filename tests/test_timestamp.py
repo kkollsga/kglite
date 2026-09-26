@@ -24,7 +24,7 @@ def test_date_property_stays_date_only():
     g = kglite.KnowledgeGraph()
     g.cypher("CREATE (:Event {id: 1, d: $d})", params={"d": datetime.date(2024, 3, 15)})
     got = g.cypher("MATCH (e:Event) RETURN e.d AS d")[0]["d"]
-    assert got == "2024-03-15"  # DateTime renders as an ISO date string
+    assert got == datetime.date(2024, 3, 15) and type(got) is datetime.date
 
 
 def test_datetime_constructor_returns_timestamp():
