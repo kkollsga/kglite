@@ -11,6 +11,12 @@ before upgrading.
 
 ### Added
 
+- Cypher: `valid_at(entity, date)` and `valid_during(entity, start, end)` read
+  the bounds and convention from the entity type's declared validity interval
+  (`db.temporal.declare`, a loader's `validFrom`/`validTo`, `set_temporal`), as
+  the fluent filters do. A relationship takes its source type's keyed
+  declaration first. On a type with no declaration they raise, naming
+  `db.temporal.declare` and the four-argument form.
 - Cypher: `date({year, month, day})` and `datetime({year, month, day, hour,
   minute, second, millisecond, microsecond, nanosecond})`, openCypher's map
   form, build a date or datetime from integers — `date({year: y, month: 1,
@@ -91,6 +97,14 @@ before upgrading.
 
 ### Changed
 
+- **Behaviour change on declared types:** Cypher `valid_at(entity, date,
+  'from', 'to')` and `valid_during(entity, start, end, 'from', 'to')` now follow
+  the convention of a declaration that names the same two properties. On a
+  `half_open` declaration the `to` day is no longer valid, so a query on the
+  day one period ends and the next begins counts only the new one — where it
+  used to count both, and disagreed with the fluent `select()`/`traverse()`
+  filters on the same graph. A property pair no declaration names still reads
+  closed, and a `closed` declaration answers as before.
 - Cypher: `=`, `<>` and `IN` compare a date or datetime with a string by
   parsing the string, as `<` and `>` already did. `n.valid_to = '1990-01-01'`
   matched nothing — as a literal, a parameter, an inline map `{valid_to: …}` or

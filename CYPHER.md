@@ -557,8 +557,8 @@ graph.cypher("""
 | `perimeter(n)` | Geodesic perimeter/length (m) |
 | `latitude(point)` | Extract latitude from point |
 | `longitude(point)` | Extract longitude from point |
-| `valid_at(e, date, 'from', 'to')` | Temporal point-in-time filter (nodes or edges) |
-| `valid_during(e, start, end, 'from', 'to')` | Temporal range overlap filter |
+| `valid_at(e, date)` / `valid_at(e, date, 'from', 'to')` | Temporal point-in-time filter (nodes or edges); the short form reads the type's declared interval |
+| `valid_during(e, start, end)` / `valid_during(e, start, end, 'from', 'to')` | Temporal range overlap filter |
 | `text_bm25(n, prop, query)` | Lexical (BM25) relevance of the node's — or relationship's — indexed text against a query string. Needs `build_text_index(node_type, property)` for a node, `CALL db.relationship_text_index.build({type, text_column})` for a relationship; `0.0` when the document shares no word with the query, `null` when the index has no document for that row |
 | `text_score(n, prop, query)` | Semantic similarity. A **list** `query` is scored directly as your query vector; a **string** `query` is embedded first (requires `set_embedder()`) |
 | `text_score(n, prop, query, metric)` | With explicit metric (`'cosine'`, `'dot_product'`, `'euclidean'`, `'poincare'`) |
@@ -1352,8 +1352,10 @@ Date-range filtering on nodes and relationships with explicit field names.
 | `date_diff(d1, d2)` | Days between two dates (legacy; same as `d2 - d1` returning Int64 directly) |
 | `date + N` / `date - N` | Add/subtract N days (Int64 form, kept for backward compat) |
 | `date - date` | Returns a Duration (was Int64 days pre-0.9.0) |
-| `valid_at(entity, date, 'from_field', 'to_field')` | True if entity is active at a point in time |
-| `valid_during(entity, start, end, 'from_field', 'to_field')` | True if entity's range overlaps the given interval |
+| `valid_at(entity, date)` | True if entity is valid at a point in time under its type's declared bounds and convention (see [Validity-interval declarations](#validity-interval-declarations)); raises on a type with no declaration |
+| `valid_during(entity, start, end)` | True if entity's declared interval overlaps `[start, end]` |
+| `valid_at(entity, date, 'from_field', 'to_field')` | True if entity is active at a point in time — closed, unless the type's declaration names the same two properties, whose convention then applies |
+| `valid_during(entity, start, end, 'from_field', 'to_field')` | True if entity's range overlaps the given interval, under the same rule |
 
 **NULL semantics:** NULL `from` = valid since beginning. NULL `to` = still valid. Both NULL = always valid.
 A property name that no element of the type has at all — a misspelling such as `'validfrom'` — raises
@@ -1428,8 +1430,12 @@ relationship type's validity interval, and whether the `to` day is still valid
 (`convention: 'closed'`) or is the first day no longer valid (`'half_open'`).
 A datetime `to` under `half_open` excludes only from its own time, so a `to`
 after midnight leaves its day valid. The convention is required. The fluent `select()`, `valid_at()`,
-`valid_during()` and `traverse()` filters read a declaration; `valid_at` and
-`valid_during` in Cypher take the property names explicitly and are closed.
+`valid_during()` and `traverse()` filters read a declaration, and so does Cypher:
+`valid_at(m, date('2010-01-01'))` and `valid_during(m, start, end)` read the declared
+bounds and follow the declared convention, and the four- and five-argument forms follow
+it too when the declaration names the same two properties. Only a property pair no
+declaration names is read closed. A relationship takes its source type's keyed
+declaration first, as the fluent filters do.
 
 ```cypher
 CALL db.temporal.declare({node: 'FieldStatus', from: 'date_from', to: 'date_to', convention: 'closed'})

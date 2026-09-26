@@ -826,10 +826,12 @@ pub(super) fn write_topic_temporal(xml: &mut String) {
         "      <fn name=\"date - date\">Difference between two dates (returns Duration).</fn>\n",
     );
     xml.push_str("      <fn name=\"d.year / d.month / d.day\">Extract year, month, or day from a DateTime value.</fn>\n");
-    xml.push_str("      <fn name=\"valid_at(entity, date, 'from_field', 'to_field')\">True if entity.from_field &lt;= date &lt;= entity.to_field. NULL from_field = valid since beginning. NULL to_field = still valid.</fn>\n");
-    xml.push_str("      <fn name=\"valid_during(entity, start, end, 'from_field', 'to_field')\">True if entity's validity period overlaps [start, end]. Overlap: entity.from_field &lt;= end AND entity.to_field &gt;= start. NULL = open-ended.</fn>\n");
+    xml.push_str("      <fn name=\"valid_at(entity, date)\">On a declared type (db.temporal.declare, a loader's validFrom/validTo): true if the entity is valid at date under the declared bounds and convention — half_open treats the to day as no longer valid. Raises on an undeclared type.</fn>\n");
+    xml.push_str("      <fn name=\"valid_at(entity, date, 'from_field', 'to_field')\">True if entity.from_field &lt;= date &lt;= entity.to_field (closed); when the type's declaration names the same two properties, its convention applies instead. NULL from_field = valid since beginning. NULL to_field = still valid.</fn>\n");
+    xml.push_str("      <fn name=\"valid_during(entity, start, end[, 'from_field', 'to_field'])\">True if entity's validity period overlaps [start, end], under the same bounds and convention rule as valid_at. NULL = open-ended.</fn>\n");
     xml.push_str("    </functions>\n");
     xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"declared type\">MATCH (m:Municipality) WHERE valid_at(m, date('2010-01-01')) RETURN count(*)</ex>\n");
     xml.push_str("      <ex desc=\"node valid at date\">MATCH (e:Estimate) WHERE valid_at(e, '2020-06-15', 'date_from', 'date_to') RETURN e.title, e.value</ex>\n");
     xml.push_str("      <ex desc=\"edge valid at date\">MATCH (a)-[r:EMPLOYED_AT]->(b) WHERE valid_at(r, '2023-01-01', 'start_date', 'end_date') RETURN a.name, b.name</ex>\n");
     xml.push_str("      <ex desc=\"range overlap\">MATCH (p:Prospect) WHERE valid_during(p, '2021-01-01', '2022-12-31', 'date_from', 'date_to') RETURN p.title</ex>\n");
@@ -841,7 +843,7 @@ pub(super) fn write_topic_temporal(xml: &mut String) {
     xml.push_str("      <rule>NULL to_field = still valid / open-ended (always passes the to check)</rule>\n");
     xml.push_str("      <rule>Both NULL = always valid (returns true)</rule>\n");
     xml.push_str("    </null_semantics>\n");
-    xml.push_str("    <declarations>CALL db.temporal.declare({node: 'Label' | relationship: 'TYPE'[, source_type: 'Label'], from: 'prop', to: 'prop', convention: 'closed' | 'half_open'}) records which properties bound a type's validity interval and whether the to day is still valid (closed) or the first day no longer valid (half_open). Every stored bound is validated first; rows whose to equals another row's from (same label, or same source node) are counted, with a warning under closed. db.temporal.undeclare({...}) removes one; db.temporal.declarations() lists them. Declarations drive the fluent select()/traverse() filters; valid_at/valid_during take the property names explicitly.</declarations>\n");
+    xml.push_str("    <declarations>CALL db.temporal.declare({node: 'Label' | relationship: 'TYPE'[, source_type: 'Label'], from: 'prop', to: 'prop', convention: 'closed' | 'half_open'}) records which properties bound a type's validity interval and whether the to day is still valid (closed) or the first day no longer valid (half_open). Every stored bound is validated first; rows whose to equals another row's from (same label, or same source node) are counted, with a warning under closed. db.temporal.undeclare({...}) removes one; db.temporal.declarations() lists them. Declarations drive the fluent select()/traverse() filters and Cypher valid_at(entity, date)/valid_during(entity, start, end); the four-argument forms follow a declaration that names the same two properties.</declarations>\n");
     xml.push_str("  </temporal>\n");
 }
 

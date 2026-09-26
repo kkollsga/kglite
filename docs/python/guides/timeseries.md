@@ -147,8 +147,14 @@ you can ask "what did the graph look like on this date?" without versioning
 the whole store. Almost nothing in the embedded-graph space has this built into
 the query language.
 
-You don't configure anything — you just name the two date properties holding
-the interval bounds (any ISO date/datetime strings, or `date()` values).
+Name the two date properties holding the interval bounds (any ISO
+date/datetime strings, or `date()` values) — or declare them once, with
+`CALL db.temporal.declare({node: 'Role', from: 'start_date', to: 'end_date',
+convention: 'half_open'})` or a loader's `validFrom`/`validTo` column types,
+and write `valid_at(r, '2020-06-15')`. A declared type's convention applies to
+both forms: under `half_open` the `to` day is the first day no longer valid,
+which is what a registry whose periods end on their successor's start day
+means.
 
 ### Point-in-time: `valid_at(entity, date, 'from_field', 'to_field')`
 
@@ -189,8 +195,8 @@ is 2009-06-01, and a string with a time part keeps its time, an offset applied
 and normalised to UTC. A value that is not a date — `'garbage'`, `2009` as an
 integer, `null` — raises `CypherExecutionError` rather than matching nothing.
 The stored bounds may be dates, datetimes or ISO strings; a datetime bound is
-compared at date grain against a date. Both functions treat the interval as
-closed, and an open/sentinel upper bound (e.g. `'9999-12-31'`) as "still valid". Pair
+compared at date grain against a date. Without a declaration naming the two
+properties, both functions treat the interval as closed, and an open/sentinel upper bound (e.g. `'9999-12-31'`) as "still valid". Pair
 them with [date functions](../../reference/cypher-reference.md) — `date()`,
 `add_days(date(), 30)` — to express relative windows like "active in the next
 30 days".

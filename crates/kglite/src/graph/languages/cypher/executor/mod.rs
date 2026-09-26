@@ -148,6 +148,10 @@ pub struct CypherExecutor<'a> {
     /// See [`TextBm25Cache`] for why one slot is enough and what a second call
     /// site pays.
     tb_cache: OnceLock<TextBm25Cache>,
+    /// The first `valid_at()` / `valid_during()` call site's declaration
+    /// lookup, keyed by element type and bound names (see
+    /// [`scalar_functions::validity::ValidityCache`]).
+    validity_cache: OnceLock<scalar_functions::validity::ValidityCache>,
     pub(super) deadline: Option<Instant>,
     /// Optional cooperative-cancellation flag, polled alongside
     /// `deadline` (and propagated to the pattern matcher). Set by a
@@ -250,6 +254,7 @@ impl<'a> CypherExecutor<'a> {
             params,
             vs_cache: VectorScoreCaches::default(),
             tb_cache: OnceLock::new(),
+            validity_cache: OnceLock::new(),
             deadline,
             cancel: None,
             budget: ExecutionBudget::default(),

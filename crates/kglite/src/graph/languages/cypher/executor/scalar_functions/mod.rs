@@ -20,6 +20,7 @@ mod string;
 mod temporal;
 mod timeseries;
 mod utility;
+pub(super) mod validity;
 mod vector;
 
 pub(super) use function_registry::{FunctionSpec, FUNCTIONS};

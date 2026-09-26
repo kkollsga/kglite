@@ -242,11 +242,12 @@ class TestValidAtWithDatetime:
 
 class TestTemporalErrors:
     def test_wrong_arg_count_valid_at(self, temporal_graph):
-        with pytest.raises(Exception, match="4 arguments"):
+        # Two forms: the declared (entity, date) and the named four-argument one.
+        with pytest.raises(Exception, match=r"valid_at\(\) takes \(entity, date\).*from_field, to_field"):
             temporal_graph.cypher("MATCH (e:Employee) WHERE valid_at(e, '2020-01-01', 'hire_date') RETURN e")
 
     def test_wrong_arg_count_valid_during(self, temporal_graph):
-        with pytest.raises(Exception, match="5 arguments"):
+        with pytest.raises(Exception, match=r"valid_during\(\) takes \(entity, start, end\).*from_field, to_field"):
             temporal_graph.cypher(
                 "MATCH (e:Employee) WHERE valid_during(e, '2020-01-01', '2020-12-31', 'hire_date') RETURN e"
             )

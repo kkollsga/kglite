@@ -280,7 +280,49 @@ def date_text_graph():
     return graph
 
 
+@pytest.fixture
+def declared_interval_graph():
+    """A half-open declared node type whose periods abut, for the declared
+    `valid_at` / `valid_during` forms under the fused scans."""
+    graph = kglite.KnowledgeGraph()
+    graph.cypher(
+        "CREATE (:M {code: '0039', kind: 'a', vf: date('1900-01-01'), vt: date('2010-01-01')}),"
+        " (:M {code: '1895', kind: 'a', vf: date('2010-01-01')}),"
+        " (:M {code: '0001', kind: 'b', vf: date('1900-01-01'), vt: date('1990-01-01')})"
+    ).to_list()
+    graph.cypher("CALL db.temporal.declare({node: 'M', from: 'vf', to: 'vt', convention: 'half_open'})").to_list()
+    return graph
+
+
 DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
+    # `valid_at` / `valid_during` follow the declared (half-open) convention,
+    # in the two-argument form and in the named form on the declared pair,
+    # through the fused count, grouped aggregate and top-K scans.
+    (
+        "valid_at_declared_count",
+        "declared_interval_graph",
+        "MATCH (m:M) WHERE valid_at(m, date('2010-01-01')) RETURN count(*) AS c",
+        None,
+    ),
+    (
+        "valid_at_named_declared_count",
+        "declared_interval_graph",
+        "MATCH (m:M) WHERE valid_at(m, date('2010-01-01'), 'vf', 'vt') RETURN count(*) AS c",
+        None,
+    ),
+    (
+        "valid_at_declared_grouped",
+        "declared_interval_graph",
+        "MATCH (m:M) WHERE valid_at(m, $d) RETURN m.kind AS k, count(*) AS c",
+        {"d": "1985-06-01"},
+    ),
+    (
+        "valid_during_declared_top_k",
+        "declared_interval_graph",
+        "MATCH (m:M) WHERE valid_during(m, date('2010-01-01'), date('2011-01-01')) "
+        "RETURN m.code AS code ORDER BY m.code LIMIT 5",
+        None,
+    ),
     # An unaliased `count(*)` is `count(*)` on every plan, and a zero-row
     # `RETURN *` names the variables it stands for, not `*`.
     ("count_star_column_all_nodes", "social_graph", "MATCH (n) RETURN count(*)", None),
