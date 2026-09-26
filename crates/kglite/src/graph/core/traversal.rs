@@ -163,13 +163,15 @@ fn edge_passes_filters(
             return Ok(false);
         }
     }
+    use crate::graph::features::temporal::{is_temporally_valid_multi, overlaps_range_multi};
+    let source = || graph.graph.node_type_of(edge.source());
     let passes = match temporal_filter {
         None => return Ok(true),
         Some(TemporalEdgeFilter::At(configs, date)) => {
-            crate::graph::features::temporal::is_temporally_valid_multi(properties, configs, date)
+            is_temporally_valid_multi(properties, configs, source(), date)
         }
         Some(TemporalEdgeFilter::During(configs, start, end)) => {
-            crate::graph::features::temporal::overlaps_range_multi(properties, configs, start, end)
+            overlaps_range_multi(properties, configs, source(), start, end)
         }
     };
     passes.map_err(|reason| {

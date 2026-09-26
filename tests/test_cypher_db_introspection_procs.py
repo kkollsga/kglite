@@ -257,15 +257,17 @@ def test_show_procedures_default_columns(small_graph):
     assert {"pagerank", "db.labels", "list_procedures"} <= names
 
     # `mode` is READ for everything that only reads, and Neo4j's "SCHEMA" for
-    # the procedures that change capture configuration or build/drop an index
-    # rather than change data. The set is pinned both ways: a procedure that
-    # starts mutating without saying so, and a read procedure mislabelled as
-    # schema-changing, both fail here.
+    # the procedures that change capture configuration, build/drop an index or
+    # declare a validity interval rather than change data. The set is pinned
+    # both ways: a procedure that starts mutating without saying so, and a read
+    # procedure mislabelled as schema-changing, both fail here.
     modes = dict(zip(df["name"], df["mode"]))
     schema_changing = {name for name, mode in modes.items() if mode == "SCHEMA"}
     assert schema_changing == {
         "db.cdc.enable",
         "db.cdc.disable",
+        "db.temporal.declare",
+        "db.temporal.undeclare",
         *(
             f"db.{namespace}.{op}"
             for namespace in ("node_text_index", "relationship_text_index", "text_index")

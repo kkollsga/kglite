@@ -101,11 +101,7 @@ impl CypherExecutor<'_> {
             .runtime_warnings
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if warnings.contains(&message) {
-            return;
-        }
-        super::super::emit_query_warnings(std::slice::from_ref(&message));
-        warnings.push(message);
+        record_warning(&mut warnings, message);
     }
 
     /// Move a nested executor's warnings onto this one. A `CALL {}` body runs
@@ -153,4 +149,14 @@ impl CypherExecutor<'_> {
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
         )
     }
+}
+
+/// Echo `message` and add it to `warnings`, unless it is already there — the
+/// one rule for every sink an execution-time warning lands in.
+pub(super) fn record_warning(warnings: &mut Vec<String>, message: String) {
+    if warnings.contains(&message) {
+        return;
+    }
+    super::super::emit_query_warnings(std::slice::from_ref(&message));
+    warnings.push(message);
 }

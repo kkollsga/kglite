@@ -841,6 +841,7 @@ pub(super) fn write_topic_temporal(xml: &mut String) {
     xml.push_str("      <rule>NULL to_field = still valid / open-ended (always passes the to check)</rule>\n");
     xml.push_str("      <rule>Both NULL = always valid (returns true)</rule>\n");
     xml.push_str("    </null_semantics>\n");
+    xml.push_str("    <declarations>CALL db.temporal.declare({node: 'Label' | relationship: 'TYPE'[, source_type: 'Label'], from: 'prop', to: 'prop', convention: 'closed' | 'half_open'}) records which properties bound a type's validity interval and whether the to day is still valid (closed) or the first day no longer valid (half_open). Every stored bound is validated first; rows whose to equals another row's from (same label, or same source node) are counted, with a warning under closed. db.temporal.undeclare({...}) removes one; db.temporal.declarations() lists them. Declarations drive the fluent select()/traverse() filters; valid_at/valid_during take the property names explicitly.</declarations>\n");
     xml.push_str("  </temporal>\n");
 }
 

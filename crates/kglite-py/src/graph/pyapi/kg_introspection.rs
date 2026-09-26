@@ -872,6 +872,10 @@ impl KnowledgeGraph {
         };
 
         // Priority: temporal=False > at > during > config+temporal_context
+        let edge_configs = || {
+            let configs = kglite_core::api::temporal::edge_configs(&self.inner, &connection_type);
+            (!configs.is_empty()).then(|| configs.to_vec())
+        };
         let temporal_filter = if temporal == Some(false) {
             None
         } else if let Some(at_str) = at {
@@ -880,12 +884,8 @@ impl KnowledgeGraph {
                     crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
                 },
             )?;
-            self.inner
-                .temporal_edge_configs
-                .get(&connection_type)
-                .map(|configs| {
-                    kglite_core::api::fluent::TemporalEdgeFilter::At(configs.clone(), date)
-                })
+            edge_configs()
+                .map(|configs| kglite_core::api::fluent::TemporalEdgeFilter::At(configs, date))
         } else if let Some((start_str, end_str)) = &during {
             let (start, _) = kglite_core::api::timeseries::parse_date_query(start_str).map_err(
                 |e: String| -> PyErr {
@@ -897,45 +897,21 @@ impl KnowledgeGraph {
                     crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
                 },
             )?;
-            self.inner
-                .temporal_edge_configs
-                .get(&connection_type)
-                .map(|configs| {
-                    kglite_core::api::fluent::TemporalEdgeFilter::During(
-                        configs.clone(),
-                        start,
-                        end,
-                    )
-                })
+            edge_configs().map(|configs| {
+                kglite_core::api::fluent::TemporalEdgeFilter::During(configs, start, end)
+            })
         } else {
             match &self.cursor.temporal_context {
                 TemporalContext::All => None,
-                TemporalContext::Today => self
-                    .inner
-                    .temporal_edge_configs
-                    .get(&connection_type)
-                    .map(|configs| {
-                        let today = chrono::Local::now().date_naive();
-                        kglite_core::api::fluent::TemporalEdgeFilter::At(configs.clone(), today)
-                    }),
-                TemporalContext::At(d) => self
-                    .inner
-                    .temporal_edge_configs
-                    .get(&connection_type)
-                    .map(|configs| {
-                        kglite_core::api::fluent::TemporalEdgeFilter::At(configs.clone(), *d)
-                    }),
-                TemporalContext::During(start, end) => self
-                    .inner
-                    .temporal_edge_configs
-                    .get(&connection_type)
-                    .map(|configs| {
-                        kglite_core::api::fluent::TemporalEdgeFilter::During(
-                            configs.clone(),
-                            *start,
-                            *end,
-                        )
-                    }),
+                TemporalContext::Today => edge_configs().map(|configs| {
+                    let today = chrono::Local::now().date_naive();
+                    kglite_core::api::fluent::TemporalEdgeFilter::At(configs, today)
+                }),
+                TemporalContext::At(d) => edge_configs()
+                    .map(|configs| kglite_core::api::fluent::TemporalEdgeFilter::At(configs, *d)),
+                TemporalContext::During(start, end) => edge_configs().map(|configs| {
+                    kglite_core::api::fluent::TemporalEdgeFilter::During(configs, *start, *end)
+                }),
             }
         };
 

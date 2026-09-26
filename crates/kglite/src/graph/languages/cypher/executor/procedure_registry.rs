@@ -301,6 +301,32 @@ pub(super) const PROCEDURES: &[ProcedureSpec] = &[
         columns: &["node", "score", "search_method", "type"],
     },
     ProcedureSpec {
+        name: "db.temporal.declare",
+        aliases: &[],
+        description: "Declare which two properties (from, to) bound a node label's or relationship type's validity interval, and whether the to day belongs to it (convention 'closed') or ends it ('half_open'); validates every stored bound and counts rows whose end meets another row's start. A relationship uses its source's source_type declaration first, the unkeyed one otherwise",
+        columns: &["declared", "rows", "abutting_rows"],
+    },
+    ProcedureSpec {
+        name: "db.temporal.undeclare",
+        aliases: &[],
+        description: "Remove one validity-interval declaration (node, or relationship with optional source_type)",
+        columns: &["undeclared"],
+    },
+    ProcedureSpec {
+        name: "db.temporal.declarations",
+        aliases: &[],
+        description: "List validity-interval declarations: kind, name, source type, bound properties, convention, and abutting rows counted at declare time",
+        columns: &[
+            "kind",
+            "name",
+            "source_type",
+            "from",
+            "to",
+            "convention",
+            "abutting_rows",
+        ],
+    },
+    ProcedureSpec {
         name: "db.node_text_index.build",
         aliases: &[],
         description: "Build (or rebuild) a BM25 text index over one node type's string property (text_column), for text_bm25(n, text_column, query)",
@@ -825,6 +851,8 @@ pub(super) const MUTATING_PROCEDURES: &[&str] = &[
     "db.relationship_text_index.build",
     "db.relationship_text_index.refresh",
     "db.relationship_text_index.drop",
+    "db.temporal.declare",
+    "db.temporal.undeclare",
 ];
 
 /// Whether `name` (canonical spelling or alias, any case) is a mutating
@@ -853,8 +881,8 @@ fn in_embedding_namespace(name: &str) -> bool {
 
 /// Neo4j procedure mode for `SHOW PROCEDURES`. The table and embedding-store
 /// procedures change data (Neo4j's "WRITE"); every other mutating procedure
-/// changes capture configuration or builds/drops a text index, which is
-/// Neo4j's "SCHEMA".
+/// changes capture configuration, builds/drops a text index or declares a
+/// validity interval, which is Neo4j's "SCHEMA".
 pub(super) fn procedure_mode(name: &str) -> &'static str {
     if name.starts_with("table.") || (in_embedding_namespace(name) && is_mutating_procedure(name)) {
         // The table procedures mutate DATA (rows of a property), not
@@ -964,6 +992,7 @@ mod tests {
             "db.embeddings.query",
             "db.node_text_index.list",
             "db.text_index.list",
+            "db.temporal.declarations",
         ] {
             assert!(!is_mutating_procedure(name));
             assert_eq!(procedure_mode(name), "READ");

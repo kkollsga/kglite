@@ -1561,6 +1561,25 @@ impl DiskGraph {
         Some(self.materialize_edge(ei as u32))
     }
 
+    /// One edge property, read from the edge-property store without going
+    /// through the query arena; a write staged in `edge_mut_cache` wins.
+    pub fn get_edge_property(&self, idx: EdgeIndex, key: InternedKey) -> Option<Value> {
+        let ei = idx.index();
+        if ei >= self.next_edge_idx as usize || self.edge_endpoint(ei).source == TOMBSTONE_EDGE {
+            return None;
+        }
+        let found = |props: &[(InternedKey, Value)]| {
+            props
+                .iter()
+                .find(|(k, v)| *k == key && !matches!(v, Value::Null))
+                .map(|(_, v)| v.clone())
+        };
+        if let Some(staged) = self.edge_mut_cache.get(&(ei as u32)) {
+            return found(&staged.properties);
+        }
+        found(&self.edge_properties.get(ei as u32)?)
+    }
+
     pub fn edge_weight_mut(&mut self, idx: EdgeIndex) -> Option<&mut EdgeData> {
         let ei = idx.index();
         if ei >= self.next_edge_idx as usize {

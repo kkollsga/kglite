@@ -13,7 +13,7 @@ use crate::graph::property_types::DeclaredType;
 use crate::graph::schema::{
     CompositeIndexKey, CompositeValue, ConnectionTypeInfo, ConnectivityTriple, EdgeData,
     EmbeddingStore, GraphBackend, IndexKey, InternedKey, NodeData, PropertyStorage, SaveMetadata,
-    SchemaDefinition, SpatialConfig, StringInterner, TemporalConfig, TypeIdIndex, TypeSchema,
+    SchemaDefinition, SpatialConfig, StringInterner, TypeIdIndex, TypeSchema,
 };
 use crate::graph::storage::column_store::ColumnStore;
 use crate::graph::storage::disk::id_index::IdIndexStore;
@@ -566,16 +566,10 @@ pub struct DirGraph {
     /// Persisted as a separate section in v2 .kgl files.
     #[serde(skip)]
     pub timeseries_store: HashMap<usize, crate::graph::features::timeseries::NodeTimeseries>,
-    /// Temporal configuration per node type: type_name → TemporalConfig.
-    /// Nodes of this type are auto-filtered by validity period in select().
+    /// Validity-interval declarations per node label and relationship type,
+    /// read and written through `kglite::api::temporal`.
     #[serde(default)]
-    pub temporal_node_configs: HashMap<String, TemporalConfig>,
-    /// Temporal configurations per connection type: connection_type → Vec<TemporalConfig>.
-    /// Multiple configs per type support shared connection type names across source types
-    /// (e.g., HAS_LICENSEE used by Field, Licence, BusinessArrangement with different field names).
-    /// Edges of this type are auto-filtered by validity period in traverse().
-    #[serde(default)]
-    pub temporal_edge_configs: HashMap<String, Vec<TemporalConfig>>,
+    pub(crate) temporal: crate::graph::features::temporal::declarations::TemporalDeclarations,
     /// Memory limit for columnar heap storage. If Some(n), `enable_columnar()`
     /// will spill columns to temp files when total heap_bytes exceeds n.
     #[serde(skip)]
@@ -981,8 +975,7 @@ impl DirGraph {
             edge_text_indexes: HashMap::new(),
             timeseries_configs: HashMap::new(),
             timeseries_store: HashMap::new(),
-            temporal_node_configs: HashMap::new(),
-            temporal_edge_configs: HashMap::new(),
+            temporal: Default::default(),
             memory_limit: None,
             spill_dir: None,
             temp_dirs: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -1062,8 +1055,7 @@ impl DirGraph {
             edge_text_indexes: HashMap::new(),
             timeseries_configs: HashMap::new(),
             timeseries_store: HashMap::new(),
-            temporal_node_configs: HashMap::new(),
-            temporal_edge_configs: HashMap::new(),
+            temporal: Default::default(),
             memory_limit: None,
             spill_dir: None,
             temp_dirs: Arc::new(std::sync::Mutex::new(Vec::new())),

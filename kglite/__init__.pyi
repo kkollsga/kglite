@@ -2580,9 +2580,11 @@ class KnowledgeGraph:
     ) -> KnowledgeGraph:
         """Select all nodes of a given type.
 
-        When a temporal config exists for this node type (via ``set_temporal()``),
-        nodes are auto-filtered to those valid at the reference date (today or
-        ``date()`` context). Pass ``temporal=False`` to include all nodes.
+        When a temporal config exists for this node type (via ``set_temporal()``
+        or ``CALL db.temporal.declare``), nodes are auto-filtered to those valid
+        at the reference date (today or ``date()`` context), under the
+        declaration's convention: ``'half_open'`` excludes the ``to`` day.
+        Pass ``temporal=False`` to include all nodes.
 
         Args:
             node_type: The node type to select (e.g. ``'Person'``).
@@ -2774,7 +2776,9 @@ class KnowledgeGraph:
 
         Keeps nodes where ``date_from <= date <= date_to``.
 
-        If field names are not specified, auto-detects from ``set_temporal()`` config.
+        If field names are not specified, auto-detects from the type's temporal
+        config (``set_temporal()`` or ``CALL db.temporal.declare``), and then
+        follows its convention: under ``'half_open'`` the ``to`` day is excluded.
         If *date* is not specified, uses the ``date()`` context or today.
 
         Args:
@@ -2800,7 +2804,9 @@ class KnowledgeGraph:
     ) -> KnowledgeGraph:
         """Filter nodes whose validity period overlaps a date range.
 
-        If field names are not specified, auto-detects from ``set_temporal()`` config.
+        If field names are not specified, auto-detects from the type's temporal
+        config (``set_temporal()`` or ``CALL db.temporal.declare``), and then
+        follows its convention.
 
         Args:
             start_date: Start of the query range.
@@ -7407,7 +7413,9 @@ class KnowledgeGraph:
 
         After configuration, ``select()`` auto-filters temporal nodes and
         ``traverse()`` auto-filters temporal connections to "current" (today
-        or the ``date()`` context).
+        or the ``date()`` context). The interval is closed and the column is
+        not validated; ``CALL db.temporal.declare`` validates every stored
+        bound and also takes a half-open convention and a source type.
 
         Auto-detects whether *type_name* is a node type or connection type.
 

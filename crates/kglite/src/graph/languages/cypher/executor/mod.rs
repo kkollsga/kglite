@@ -984,6 +984,7 @@ mod show_ontology;
 pub mod spatial_join;
 pub mod stream;
 mod table_procedures;
+mod temporal_procedures;
 #[cfg(test)]
 pub mod tests;
 pub mod transient_index;

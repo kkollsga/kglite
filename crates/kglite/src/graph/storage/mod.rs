@@ -326,6 +326,19 @@ pub trait GraphRead {
 
     fn edge_weight(&self, idx: EdgeIndex) -> Option<&EdgeData>;
 
+    /// Read one edge property without materialising the edge: the edge
+    /// counterpart of [`GraphRead::get_node_property`], for passes that visit
+    /// every edge of a type. `None` if the edge is gone, or the property is
+    /// missing or NULL. The disk backend overrides it so the read does not
+    /// grow the query arena.
+    fn get_edge_property(&self, idx: EdgeIndex, key: InternedKey) -> Option<Value> {
+        self.edge_weight(idx)?
+            .properties
+            .iter()
+            .find(|(k, v)| *k == key && !matches!(v, Value::Null))
+            .map(|(_, v)| v.clone())
+    }
+
     /// First edge index from `a` to `b`, if one exists.
     fn find_edge(&self, a: NodeIndex, b: NodeIndex) -> Option<EdgeIndex>;
 

@@ -500,6 +500,7 @@ fn run_clause_pipeline(
                         budget,
                         identities: ctx.relationship_identities,
                         service: ctx.embedding_service,
+                        diagnostics: ctx.diagnostics,
                     },
                 )?;
             }

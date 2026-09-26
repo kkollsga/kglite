@@ -1407,6 +1407,42 @@ graph.cypher("""
 graph.cypher("MATCH (e:Estimate) WHERE valid_at(e, date('2020-06-15'), 'date_from', 'date_to') RETURN count(*)")
 ```
 
+### Validity-interval declarations
+
+`db.temporal.declare` records which two properties bound a node label's or a
+relationship type's validity interval, and whether the `to` day is still valid
+(`convention: 'closed'`) or is the first day no longer valid (`'half_open'`).
+The convention is required. The fluent `select()`, `valid_at()`,
+`valid_during()` and `traverse()` filters read a declaration; `valid_at` and
+`valid_during` in Cypher take the property names explicitly and are closed.
+
+```cypher
+CALL db.temporal.declare({node: 'FieldStatus', from: 'date_from', to: 'date_to', convention: 'closed'})
+CALL db.temporal.declare({relationship: 'HAS_LICENSEE', source_type: 'Field',
+                          from: 'licensee_from', to: 'licensee_to', convention: 'half_open'})
+  YIELD declared, rows, abutting_rows
+CALL db.temporal.undeclare({relationship: 'HAS_LICENSEE', source_type: 'Field'}) YIELD undeclared
+CALL db.temporal.declarations()
+  YIELD kind, name, source_type, from, to, convention, abutting_rows
+```
+
+- **Target.** Exactly one of `node` (a primary type or a secondary label) or
+  `relationship`. `source_type` narrows a relationship declaration to the
+  relationships leaving nodes of that type; a relationship uses its source's
+  declaration first and the unkeyed one otherwise.
+- **Validation.** Both properties must exist on the target, and every stored
+  bound must be NULL, a date, a datetime or an ISO string, with `from` before
+  `to` (strictly before under `half_open`). The first row that fails is
+  refused, naming the node's id or the relationship's endpoints.
+- **Re-declaring** the same target with the same properties and convention is
+  a no-op (`declared: false`); different ones are refused until the target is
+  undeclared.
+- **`abutting_rows`** counts rows whose `to` equals another row's `from` in
+  the same label, or among the relationships of one source node, at declare
+  time. Under `closed` both such rows are valid on that day, so a non-zero
+  count adds a query warning suggesting `half_open`. On a disk-mode graph the
+  count is skipped (NULL) for a node label above 250,000 rows.
+
 ### Duration semantics
 
 A `Duration` value carries three independent components:

@@ -6,7 +6,7 @@ use crate::datatypes::values::Value;
 use crate::graph::algorithms::Interrupt;
 use crate::graph::edge_embedding_generation::EmbeddingExecutionService;
 use crate::graph::languages::cypher::ast::CallClause;
-use crate::graph::languages::cypher::result::{ResultRow, ResultSet};
+use crate::graph::languages::cypher::result::{QueryDiagnostics, ResultRow, ResultSet};
 use crate::graph::schema::DirGraph;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -17,6 +17,8 @@ pub(super) struct MutatingCallCtx<'a, 'service> {
     pub(super) budget: &'a super::budget::ExecutionBudget,
     pub(super) identities: &'a Arc<Mutex<StatementRelationshipIdentities>>,
     pub(super) service: Option<&'service EmbeddingExecutionService<'service>>,
+    /// The statement's warning sink, for advisories a procedure raises.
+    pub(super) diagnostics: &'a Mutex<QueryDiagnostics>,
 }
 
 pub(super) fn execute(
@@ -50,7 +52,7 @@ pub(super) fn execute(
             .with_budget(ctx.budget.clone())
             .with_relationship_identities(Some(ctx.identities.clone()))
             .extract_call_params(&resolved.parameters, &outer)?;
-        let rows = dispatch(graph, &name, &args, &resolved, ctx.identities, ctx.service)?;
+        let rows = dispatch(graph, &name, &args, &resolved, &ctx)?;
         ctx.budget.check_work(rows.len(), &format!("CALL {name}"))?;
         ctx.budget
             .reserve_rows(joined.len(), rows.len(), &format!("CALL {name} row join"))?;
@@ -71,9 +73,9 @@ fn dispatch(
     name: &str,
     params: &HashMap<String, Value>,
     call: &CallClause,
-    identities: &Arc<Mutex<StatementRelationshipIdentities>>,
-    service: Option<&EmbeddingExecutionService<'_>>,
+    ctx: &MutatingCallCtx<'_, '_>,
 ) -> Result<Vec<ResultRow>, String> {
+    let (identities, service) = (ctx.identities, ctx.service);
     if name.starts_with("table.") {
         super::table_procedures::execute_table_procedure(graph, name, params, &call.yield_items)
     } else if name.starts_with("db.relationship_text_index.") {
@@ -91,6 +93,9 @@ fn dispatch(
             identities,
             service,
         )
+    } else if name.starts_with("db.temporal.") {
+        let yields = &call.yield_items;
+        super::temporal_procedures::execute(graph, name, params, yields, ctx.diagnostics)
     } else {
         super::cdc_procedures::execute_mutating_procedure(graph, name, params, &call.yield_items)
     }

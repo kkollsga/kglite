@@ -1210,6 +1210,7 @@ pub fn kglite::api::durable::RecordingGraph<G>::edges_connecting(&self, a: petgr
 pub fn kglite::api::durable::RecordingGraph<G>::edges_directed(&self, idx: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction) -> Self::EdgesIter
 pub fn kglite::api::durable::RecordingGraph<G>::edges_directed_filtered(&self, idx: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction, conn_type_filter: core::option::Option<kglite::api::InternedKey>) -> Self::EdgesIter
 pub fn kglite::api::durable::RecordingGraph<G>::find_edge(&self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex) -> core::option::Option<petgraph::graph_impl::EdgeIndex>
+pub fn kglite::api::durable::RecordingGraph<G>::get_edge_property(&self, idx: petgraph::graph_impl::EdgeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::api::durable::RecordingGraph<G>::get_node_id(&self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::api::durable::RecordingGraph<G>::get_node_property(&self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::api::durable::RecordingGraph<G>::get_node_title(&self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::datatypes::values::Value>
@@ -2867,6 +2868,7 @@ pub fn kglite::api::storage::GraphBackend::edges_connecting(&self, a: petgraph::
 pub fn kglite::api::storage::GraphBackend::edges_directed(&self, idx: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction) -> kglite::graph::core::iterators::GraphEdges<'_>
 pub fn kglite::api::storage::GraphBackend::edges_directed_filtered(&self, idx: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction, conn_type_filter: core::option::Option<kglite::api::InternedKey>) -> kglite::graph::core::iterators::GraphEdges<'_>
 pub fn kglite::api::storage::GraphBackend::find_edge(&self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex) -> core::option::Option<petgraph::graph_impl::EdgeIndex>
+pub fn kglite::api::storage::GraphBackend::get_edge_property(&self, idx: petgraph::graph_impl::EdgeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::api::storage::GraphBackend::get_node_id(&self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::api::storage::GraphBackend::get_node_property(&self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::api::storage::GraphBackend::get_node_title(&self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::datatypes::values::Value>
@@ -2955,6 +2957,7 @@ pub fn kglite::api::storage::DiskGraph::edges_directed_filtered_iter(&self, a: p
 pub fn kglite::api::storage::DiskGraph::edges_directed_iter(&self, a: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction) -> kglite::graph::core::iterators::DiskEdges<'_>
 pub fn kglite::api::storage::DiskGraph::find_edge(&self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex) -> core::option::Option<petgraph::graph_impl::EdgeIndex>
 pub fn kglite::api::storage::DiskGraph::for_each_edge_of_conn_type<F>(&self, conn_type: u64, f: F) where F: core::ops::function::FnMut(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex, u32) -> bool
+pub fn kglite::api::storage::DiskGraph::get_edge_property(&self, idx: petgraph::graph_impl::EdgeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::api::storage::DiskGraph::get_node_id(&self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::api::storage::DiskGraph::get_node_property(&self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::api::storage::DiskGraph::get_node_title(&self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::datatypes::values::Value>
@@ -3032,6 +3035,7 @@ pub fn kglite::api::storage::DiskGraph::edges_connecting(&self, a: petgraph::gra
 pub fn kglite::api::storage::DiskGraph::edges_directed(&self, idx: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction) -> kglite::graph::core::iterators::GraphEdges<'_>
 pub fn kglite::api::storage::DiskGraph::edges_directed_filtered(&self, idx: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction, conn_type_filter: core::option::Option<kglite::api::InternedKey>) -> kglite::graph::core::iterators::GraphEdges<'_>
 pub fn kglite::api::storage::DiskGraph::find_edge(&self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex) -> core::option::Option<petgraph::graph_impl::EdgeIndex>
+pub fn kglite::api::storage::DiskGraph::get_edge_property(&self, idx: petgraph::graph_impl::EdgeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::api::storage::DiskGraph::get_node_id(&self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::api::storage::DiskGraph::get_node_property(&self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::api::storage::DiskGraph::get_node_title(&self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::datatypes::values::Value>
@@ -3209,6 +3213,76 @@ pub fn kglite::api::storage::TypeLookup::deserialize<__D>(__deserializer: __D) -
 pub fn kglite::api::storage::convert_dir_graph_to_mode(graph: &mut kglite::api::DirGraph, requested: kglite::api::storage::StorageMode) -> core::result::Result<(), alloc::string::String>
 pub fn kglite::api::storage::live_storage_mode(graph: &kglite::api::DirGraph) -> kglite::api::storage::StorageMode
 pub fn kglite::api::storage::new_dir_graph_in_mode(mode: kglite::api::storage::StorageMode, path: core::option::Option<&std::path::Path>) -> core::result::Result<kglite::api::DirGraph, alloc::string::String>
+pub mod kglite::api::temporal
+pub enum kglite::api::temporal::IntervalConvention
+pub kglite::api::temporal::IntervalConvention::Closed
+pub kglite::api::temporal::IntervalConvention::HalfOpen
+impl kglite::api::temporal::IntervalConvention
+pub fn kglite::api::temporal::IntervalConvention::as_str(self) -> &'static str
+pub fn kglite::api::temporal::IntervalConvention::parse(text: &str) -> core::option::Option<Self>
+impl core::clone::Clone for kglite::api::temporal::IntervalConvention
+pub fn kglite::api::temporal::IntervalConvention::clone(&self) -> kglite::api::temporal::IntervalConvention
+impl core::cmp::Eq for kglite::api::temporal::IntervalConvention
+impl core::cmp::PartialEq for kglite::api::temporal::IntervalConvention
+pub fn kglite::api::temporal::IntervalConvention::eq(&self, other: &kglite::api::temporal::IntervalConvention) -> bool
+impl core::default::Default for kglite::api::temporal::IntervalConvention
+pub fn kglite::api::temporal::IntervalConvention::default() -> kglite::api::temporal::IntervalConvention
+impl core::fmt::Debug for kglite::api::temporal::IntervalConvention
+pub fn kglite::api::temporal::IntervalConvention::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for kglite::api::temporal::IntervalConvention
+pub fn kglite::api::temporal::IntervalConvention::hash<__H: core::hash::Hasher>(&self, state: &mut __H)
+impl core::marker::Copy for kglite::api::temporal::IntervalConvention
+impl core::marker::StructuralPartialEq for kglite::api::temporal::IntervalConvention
+impl serde_core::ser::Serialize for kglite::api::temporal::IntervalConvention
+pub fn kglite::api::temporal::IntervalConvention::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for kglite::api::temporal::IntervalConvention
+pub fn kglite::api::temporal::IntervalConvention::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+pub enum kglite::api::temporal::TemporalTarget
+pub kglite::api::temporal::TemporalTarget::Node(alloc::string::String)
+pub kglite::api::temporal::TemporalTarget::Relationship
+pub kglite::api::temporal::TemporalTarget::Relationship::rel_type: alloc::string::String
+pub kglite::api::temporal::TemporalTarget::Relationship::source_type: core::option::Option<alloc::string::String>
+impl core::clone::Clone for kglite::api::temporal::TemporalTarget
+pub fn kglite::api::temporal::TemporalTarget::clone(&self) -> kglite::api::temporal::TemporalTarget
+impl core::cmp::Eq for kglite::api::temporal::TemporalTarget
+impl core::cmp::PartialEq for kglite::api::temporal::TemporalTarget
+pub fn kglite::api::temporal::TemporalTarget::eq(&self, other: &kglite::api::temporal::TemporalTarget) -> bool
+impl core::fmt::Debug for kglite::api::temporal::TemporalTarget
+pub fn kglite::api::temporal::TemporalTarget::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for kglite::api::temporal::TemporalTarget
+pub fn kglite::api::temporal::TemporalTarget::hash<__H: core::hash::Hasher>(&self, state: &mut __H)
+impl core::marker::StructuralPartialEq for kglite::api::temporal::TemporalTarget
+pub struct kglite::api::temporal::DeclarationInfo
+pub kglite::api::temporal::DeclarationInfo::abutting_rows: core::option::Option<usize>
+pub kglite::api::temporal::DeclarationInfo::config: kglite::api::TemporalConfig
+pub kglite::api::temporal::DeclarationInfo::target: kglite::api::temporal::TemporalTarget
+impl core::clone::Clone for kglite::api::temporal::DeclarationInfo
+pub fn kglite::api::temporal::DeclarationInfo::clone(&self) -> kglite::api::temporal::DeclarationInfo
+impl core::cmp::PartialEq for kglite::api::temporal::DeclarationInfo
+pub fn kglite::api::temporal::DeclarationInfo::eq(&self, other: &kglite::api::temporal::DeclarationInfo) -> bool
+impl core::fmt::Debug for kglite::api::temporal::DeclarationInfo
+pub fn kglite::api::temporal::DeclarationInfo::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for kglite::api::temporal::DeclarationInfo
+pub struct kglite::api::temporal::DeclareReport
+pub kglite::api::temporal::DeclareReport::abutting_rows: core::option::Option<usize>
+pub kglite::api::temporal::DeclareReport::changed: bool
+pub kglite::api::temporal::DeclareReport::rows: usize
+pub kglite::api::temporal::DeclareReport::warning: core::option::Option<alloc::string::String>
+impl core::clone::Clone for kglite::api::temporal::DeclareReport
+pub fn kglite::api::temporal::DeclareReport::clone(&self) -> kglite::api::temporal::DeclareReport
+impl core::cmp::Eq for kglite::api::temporal::DeclareReport
+impl core::cmp::PartialEq for kglite::api::temporal::DeclareReport
+pub fn kglite::api::temporal::DeclareReport::eq(&self, other: &kglite::api::temporal::DeclareReport) -> bool
+impl core::fmt::Debug for kglite::api::temporal::DeclareReport
+pub fn kglite::api::temporal::DeclareReport::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for kglite::api::temporal::DeclareReport
+pub const kglite::api::temporal::DISK_NODE_ABUTMENT_CAP: usize
+pub fn kglite::api::temporal::declare(graph: &mut kglite::api::DirGraph, target: &kglite::api::temporal::TemporalTarget, valid_from: &str, valid_to: &str, convention: kglite::api::temporal::IntervalConvention) -> core::result::Result<kglite::api::temporal::DeclareReport, alloc::string::String>
+pub fn kglite::api::temporal::declare_loaded(graph: &mut kglite::api::DirGraph, target: &kglite::api::temporal::TemporalTarget, valid_from: &str, valid_to: &str, convention: kglite::api::temporal::IntervalConvention, written: &[&str]) -> core::result::Result<kglite::api::temporal::DeclareReport, alloc::string::String>
+pub fn kglite::api::temporal::edge_configs<'g>(graph: &'g kglite::api::DirGraph, rel_type: &str) -> &'g [kglite::api::TemporalConfig]
+pub fn kglite::api::temporal::list(graph: &kglite::api::DirGraph) -> alloc::vec::Vec<kglite::api::temporal::DeclarationInfo>
+pub fn kglite::api::temporal::node_config<'g>(graph: &'g kglite::api::DirGraph, label: &str) -> core::option::Option<&'g kglite::api::TemporalConfig>
+pub fn kglite::api::temporal::undeclare(graph: &mut kglite::api::DirGraph, target: &kglite::api::temporal::TemporalTarget) -> bool
 pub mod kglite::api::text_indexes
 pub struct kglite::api::text_indexes::PreparedQuery
 impl kglite::api::text_indexes::PreparedQuery
@@ -3819,8 +3893,6 @@ pub kglite::api::DirGraph::source_root: core::option::Option<alloc::string::Stri
 pub kglite::api::DirGraph::spatial_configs: std::collections::hash::map::HashMap<alloc::string::String, kglite::api::SpatialConfig>
 pub kglite::api::DirGraph::spill_dir: core::option::Option<std::path::PathBuf>
 pub kglite::api::DirGraph::table_property_meta: alloc::collections::btree::map::BTreeMap<alloc::string::String, kglite::api::TablePropertyMeta>
-pub kglite::api::DirGraph::temporal_edge_configs: std::collections::hash::map::HashMap<alloc::string::String, alloc::vec::Vec<kglite::api::TemporalConfig>>
-pub kglite::api::DirGraph::temporal_node_configs: std::collections::hash::map::HashMap<alloc::string::String, kglite::api::TemporalConfig>
 pub kglite::api::DirGraph::text_indexes: std::collections::hash::map::HashMap<(alloc::string::String, alloc::string::String), kglite::api::text_indexes::TextIndexStore>
 pub kglite::api::DirGraph::timeseries_configs: std::collections::hash::map::HashMap<alloc::string::String, kglite::api::timeseries::TimeseriesConfig>
 pub kglite::api::DirGraph::timeseries_store: std::collections::hash::map::HashMap<usize, kglite::api::timeseries::NodeTimeseries>
@@ -4559,6 +4631,8 @@ pub fn kglite::api::TablePropertyMeta::serialize<__S>(&self, __serializer: __S) 
 impl<'de> serde_core::de::Deserialize<'de> for kglite::api::TablePropertyMeta
 pub fn kglite::api::TablePropertyMeta::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 pub struct kglite::api::TemporalConfig
+pub kglite::api::TemporalConfig::convention: kglite::api::temporal::IntervalConvention
+pub kglite::api::TemporalConfig::source_type: core::option::Option<alloc::string::String>
 pub kglite::api::TemporalConfig::valid_from: alloc::string::String
 pub kglite::api::TemporalConfig::valid_to: alloc::string::String
 impl core::clone::Clone for kglite::api::TemporalConfig
@@ -4613,6 +4687,7 @@ pub fn kglite::api::GraphRead::edges_connecting(&self, a: petgraph::graph_impl::
 pub fn kglite::api::GraphRead::edges_directed(&self, idx: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction) -> Self::EdgesIter
 pub fn kglite::api::GraphRead::edges_directed_filtered(&self, idx: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction, conn_type_filter: core::option::Option<kglite::api::InternedKey>) -> Self::EdgesIter
 pub fn kglite::api::GraphRead::find_edge(&self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex) -> core::option::Option<petgraph::graph_impl::EdgeIndex>
+pub fn kglite::api::GraphRead::get_edge_property(&self, idx: petgraph::graph_impl::EdgeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::api::GraphRead::get_node_id(&self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::api::GraphRead::get_node_property(&self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::api::GraphRead::get_node_title(&self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::datatypes::values::Value>
@@ -4666,6 +4741,7 @@ pub fn kglite::api::storage::DiskGraph::edges_connecting(&self, a: petgraph::gra
 pub fn kglite::api::storage::DiskGraph::edges_directed(&self, idx: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction) -> kglite::graph::core::iterators::GraphEdges<'_>
 pub fn kglite::api::storage::DiskGraph::edges_directed_filtered(&self, idx: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction, conn_type_filter: core::option::Option<kglite::api::InternedKey>) -> kglite::graph::core::iterators::GraphEdges<'_>
 pub fn kglite::api::storage::DiskGraph::find_edge(&self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex) -> core::option::Option<petgraph::graph_impl::EdgeIndex>
+pub fn kglite::api::storage::DiskGraph::get_edge_property(&self, idx: petgraph::graph_impl::EdgeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::api::storage::DiskGraph::get_node_id(&self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::api::storage::DiskGraph::get_node_property(&self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::api::storage::DiskGraph::get_node_title(&self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::datatypes::values::Value>
@@ -4712,6 +4788,7 @@ pub fn kglite::api::storage::GraphBackend::edges_connecting(&self, a: petgraph::
 pub fn kglite::api::storage::GraphBackend::edges_directed(&self, idx: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction) -> kglite::graph::core::iterators::GraphEdges<'_>
 pub fn kglite::api::storage::GraphBackend::edges_directed_filtered(&self, idx: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction, conn_type_filter: core::option::Option<kglite::api::InternedKey>) -> kglite::graph::core::iterators::GraphEdges<'_>
 pub fn kglite::api::storage::GraphBackend::find_edge(&self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex) -> core::option::Option<petgraph::graph_impl::EdgeIndex>
+pub fn kglite::api::storage::GraphBackend::get_edge_property(&self, idx: petgraph::graph_impl::EdgeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::api::storage::GraphBackend::get_node_id(&self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::api::storage::GraphBackend::get_node_property(&self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::api::storage::GraphBackend::get_node_title(&self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::datatypes::values::Value>
@@ -4804,6 +4881,7 @@ pub fn kglite::api::durable::RecordingGraph<G>::edges_connecting(&self, a: petgr
 pub fn kglite::api::durable::RecordingGraph<G>::edges_directed(&self, idx: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction) -> Self::EdgesIter
 pub fn kglite::api::durable::RecordingGraph<G>::edges_directed_filtered(&self, idx: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction, conn_type_filter: core::option::Option<kglite::api::InternedKey>) -> Self::EdgesIter
 pub fn kglite::api::durable::RecordingGraph<G>::find_edge(&self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex) -> core::option::Option<petgraph::graph_impl::EdgeIndex>
+pub fn kglite::api::durable::RecordingGraph<G>::get_edge_property(&self, idx: petgraph::graph_impl::EdgeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::api::durable::RecordingGraph<G>::get_node_id(&self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::api::durable::RecordingGraph<G>::get_node_property(&self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::api::durable::RecordingGraph<G>::get_node_title(&self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::datatypes::values::Value>

@@ -30,6 +30,8 @@
 //! - [`star_projection`] — `*` written beside other projection items:
 //!   which names it stands for, and which explicit item wins a collision
 //! - [`strings`] — string functions and procedure list arguments
+//! - [`temporal_procedures`] — `db.temporal.*` declarations: arguments,
+//!   yielded rows, the abutment advisory, rollback
 //! - [`text_bm25`] — the BM25 scalar's null/zero split, freshness policy, cache
 //! - [`vector_score`] — the embedding-store scalar's per-query argument cache
 //! - [`vectors`] — `dot` / `cosine` / `norm` over list-valued data
@@ -76,6 +78,7 @@ mod semantics;
 mod shortest_path;
 mod star_projection;
 mod strings;
+mod temporal_procedures;
 mod text_bm25;
 mod vector_score;
 mod vectors;

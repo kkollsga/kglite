@@ -600,6 +600,11 @@ impl<'a> CypherExecutor<'a> {
                     &params,
                     &clause.yield_items,
                 )?,
+                "db.temporal.declarations" => super::temporal_procedures::declarations(
+                    self.graph,
+                    &params,
+                    &clause.yield_items,
+                )?,
                 _ => self.execute_resolved_call_once(proc_name.as_str(), clause, params)?,
             };
             self.budget.reserve_rows(

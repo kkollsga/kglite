@@ -315,6 +315,18 @@ pub struct TemporalConfig {
     pub valid_from: String,
     /// Property name holding the end date, e.g. "fldLicenseeTo" or "date_to"
     pub valid_to: String,
+    /// Whether the `valid_to` day belongs to the interval. Omitted from the
+    /// serialized form when closed, so a closed config writes the bytes a
+    /// config without the field always wrote.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::graph::features::temporal::IntervalConvention::is_closed"
+    )]
+    pub convention: crate::graph::features::temporal::IntervalConvention,
+    /// The source node type a relationship config applies to; `None` covers
+    /// every source. Always `None` for a node config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_type: Option<String>,
 }
 
 /// Result of temporal column-type parsing: optional config + cleaned pairs.
@@ -355,6 +367,7 @@ pub fn parse_temporal_column_types_from_pairs(
             Some(TemporalConfig {
                 valid_from: from,
                 valid_to: to,
+                ..Default::default()
             }),
             cleaned,
         )),

@@ -160,6 +160,50 @@ fn a_mutation_between_two_reads_invalidates_the_read_plan() {
     assert_eq!(events(stats.mutation), (0, 0, 0));
 }
 
+/// A validity-interval declaration changes what a later plan may assume, so
+/// it must move the key like a data write does — on both routes an embedder
+/// can take: the Cypher procedure and the direct `api::temporal` call.
+#[test]
+fn a_declaration_between_two_reads_invalidates_the_read_plan() {
+    use crate::graph::features::temporal::{declare, IntervalConvention, TemporalTarget};
+    let _guard = plan_cache::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let params = empty_params();
+    let opts = ExecuteOptions::eager(&params);
+    let declare_cypher = |graph: &mut DirGraph| {
+        execute_mut(
+            graph,
+            "CALL db.temporal.declare({node: 'Item', from: 'vf', to: 'vf', convention: 'closed'})",
+            &opts,
+        )
+        .map(|_| ())
+        .expect("procedure declaration");
+    };
+    let declare_direct = |graph: &mut DirGraph| {
+        let target = TemporalTarget::Node("Item".into());
+        declare(graph, &target, "vf", "vf", IntervalConvention::Closed)
+            .expect("direct declaration");
+    };
+    for declare_route in [&declare_cypher as &dyn Fn(&mut DirGraph), &declare_direct] {
+        let mut graph = seeded();
+        execute_mut(&mut graph, "MATCH (n:Item) SET n.vf = '2000'", &opts).expect("bound");
+        execute_read(&graph, READ, &opts).expect("populate the read plan");
+        instrumentation::reset();
+        execute_read(&graph, READ, &opts).expect("warm read");
+        assert_eq!(events(instrumentation::totals().read), (1, 1, 0), "control");
+
+        declare_route(&mut graph);
+        instrumentation::reset();
+        execute_read(&graph, READ, &opts).expect("post-declaration read");
+        assert_eq!(
+            events(instrumentation::totals().read),
+            (1, 0, 1),
+            "a plan cached before a declaration must not be served after it"
+        );
+    }
+}
+
 #[test]
 fn transactions_forked_from_one_base_version_no_longer_reuse_a_mutation_plan() {
     let _guard = plan_cache::TEST_LOCK

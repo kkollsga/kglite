@@ -44,20 +44,17 @@ impl KnowledgeGraph {
         valid_from: String,
         valid_to: String,
     ) -> PyResult<()> {
-        use kglite_core::api::TemporalConfig;
+        use kglite_core::api::{temporal, TemporalConfig};
         let config = TemporalConfig {
             valid_from,
             valid_to,
+            ..Default::default()
         };
         let graph = get_graph_mut(&mut self.inner);
         if graph.type_indices.contains_key(&type_name) {
-            graph.temporal_node_configs.insert(type_name, config);
+            temporal::legacy_set_node(graph, type_name, config);
         } else if graph.connection_type_metadata.contains_key(&type_name) {
-            graph
-                .temporal_edge_configs
-                .entry(type_name)
-                .or_default()
-                .push(config);
+            temporal::legacy_push_edge(graph, type_name, config);
         } else {
             return Err(crate::error_py::kg_to_pyerr(
                 crate::error::KgError::Argument(format!(
@@ -181,7 +178,7 @@ impl KnowledgeGraph {
             .map_err(to_pyerr)?;
         }
 
-        let temporal_config = self.inner.temporal_node_configs.get(&node_type);
+        let temporal_config = kglite_core::api::temporal::node_config(&self.inner, &node_type);
         if temporal == Some(true) && temporal_config.is_none() {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "select('{node_type}', temporal=True): '{node_type}' has no temporal \
@@ -402,7 +399,7 @@ impl KnowledgeGraph {
         let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         let temporal_config = if date_from_field.is_none() || date_to_field.is_none() {
             self.infer_selection_node_type()
-                .and_then(|nt| self.inner.temporal_node_configs.get(&nt).cloned())
+                .and_then(|nt| kglite_core::api::temporal::node_config(&self.inner, &nt).cloned())
         } else {
             None
         };
@@ -433,6 +430,8 @@ impl KnowledgeGraph {
         let config = kglite_core::api::TemporalConfig {
             valid_from: from_field,
             valid_to: to_field,
+            convention: temporal_config.map(|c| c.convention).unwrap_or_default(),
+            source_type: None,
         };
 
         let mut new_kg = self.clone();
@@ -479,7 +478,7 @@ impl KnowledgeGraph {
         let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         let temporal_config = if date_from_field.is_none() || date_to_field.is_none() {
             self.infer_selection_node_type()
-                .and_then(|nt| self.inner.temporal_node_configs.get(&nt).cloned())
+                .and_then(|nt| kglite_core::api::temporal::node_config(&self.inner, &nt).cloned())
         } else {
             None
         };
@@ -506,6 +505,8 @@ impl KnowledgeGraph {
         let config = kglite_core::api::TemporalConfig {
             valid_from: from_field,
             valid_to: to_field,
+            convention: temporal_config.map(|c| c.convention).unwrap_or_default(),
+            source_type: None,
         };
 
         let mut new_kg = self.clone();

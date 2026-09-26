@@ -1495,6 +1495,11 @@ impl GraphRead for DiskGraph {
     }
 
     #[inline]
+    fn get_edge_property(&self, idx: EdgeIndex, key: InternedKey) -> Option<Value> {
+        DiskGraph::get_edge_property(self, idx, key)
+    }
+
+    #[inline]
     fn find_edge(&self, a: NodeIndex, b: NodeIndex) -> Option<EdgeIndex> {
         DiskGraph::find_edge(self, a, b)
     }

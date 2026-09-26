@@ -7,6 +7,7 @@
 use crate::datatypes::values::Value;
 use crate::graph::property_types::value_type_name;
 use chrono::{NaiveDate, NaiveDateTime};
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt;
 
@@ -19,7 +20,7 @@ pub(crate) enum Instant {
 }
 
 impl Instant {
-    fn date(self) -> NaiveDate {
+    pub(crate) fn date(self) -> NaiveDate {
         match self {
             Instant::Date(d) => d,
             Instant::Timestamp(ts) => ts.date(),
@@ -29,7 +30,7 @@ impl Instant {
     /// Chronological order. Two timestamps compare exactly; when either side
     /// is a date the comparison is at date grain, so a date bound covers its
     /// whole day.
-    fn chrono_cmp(self, other: Instant) -> Ordering {
+    pub(crate) fn chrono_cmp(self, other: Instant) -> Ordering {
         match (self, other) {
             (Instant::Timestamp(a), Instant::Timestamp(b)) => a.cmp(&b),
             (a, b) => a.date().cmp(&b.date()),
@@ -38,17 +39,37 @@ impl Instant {
 }
 
 /// Whether the `to` bound belongs to the interval.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum IntervalConvention {
-    /// `[from, to]`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntervalConvention {
+    /// `[from, to]`: the `to` day is the last valid day.
     #[default]
     Closed,
-    /// `[from, to)`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "no production caller selects half-open intervals")
-    )]
+    /// `[from, to)`: the `to` day is the first day no longer valid.
     HalfOpen,
+}
+
+impl IntervalConvention {
+    /// The spelling a declaration takes and reports: `closed` / `half_open`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IntervalConvention::Closed => "closed",
+            IntervalConvention::HalfOpen => "half_open",
+        }
+    }
+
+    /// Read [`Self::as_str`]'s spelling back; `None` for anything else.
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "closed" => Some(IntervalConvention::Closed),
+            "half_open" => Some(IntervalConvention::HalfOpen),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        *self == IntervalConvention::Closed
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,7 +112,7 @@ impl fmt::Display for TemporalError {
     }
 }
 
-fn shown(value: &Value) -> String {
+pub(crate) fn shown(value: &Value) -> String {
     match value {
         Value::String(s) => format!("'{s}'"),
         other => crate::graph::core::value_operations::format_value_compact(other),
@@ -144,7 +165,8 @@ fn parse_bound(value: &Value, side: BoundSide) -> Result<Option<Instant>, Tempor
     }
 }
 
-fn parse_bounds(
+/// Both stored bounds, `from` first; the first unreadable one is the error.
+pub(crate) fn parse_bounds(
     from: &Value,
     to: &Value,
 ) -> Result<(Option<Instant>, Option<Instant>), TemporalError> {

@@ -452,6 +452,19 @@ pub mod api {
         };
     }
 
+    /// Validity-interval declarations: which two properties bound a node
+    /// label's or relationship type's validity interval, and whether the end
+    /// day belongs to it (`closed`) or ends it (`half_open`). `declare`
+    /// validates every stored bound first. Cypher reaches the same functions
+    /// through `db.temporal.declare` / `undeclare` / `declarations`.
+    pub mod temporal {
+        pub use crate::graph::features::temporal::{
+            declare, declare_loaded, edge_configs, legacy_push_edge, legacy_set_node, list,
+            node_config, undeclare, DeclarationInfo, DeclareReport, IntervalConvention,
+            TemporalTarget, DISK_NODE_ABUTMENT_CAP,
+        };
+    }
+
     /// Graph-carried skills — the markdown methodology a graph carries about
     /// how to be used, stored as nodes of the `KgliteSkill` system label.
     ///

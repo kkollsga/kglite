@@ -22,6 +22,7 @@ pub(crate) mod embeddings_view;
 pub mod reporting;
 pub mod schema_overview;
 pub(crate) mod skills_section;
+mod temporal_view;
 pub mod topics;
 
 use crate::datatypes::values::Value;

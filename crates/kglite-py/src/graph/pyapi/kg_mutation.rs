@@ -120,7 +120,7 @@ fn collect_bulk_connection_names(
 /// frame (the `data` mode shared by `add_relationships` and
 /// `replace_relationships`). Returns the columnar DataFrame plus any
 /// temporal-edge config auto-detected from `validFrom`/`validTo` column
-/// types — the caller merges that into `graph.temporal_edge_configs`.
+/// types — the caller records that as the type's temporal config.
 // Mirrors add_relationships' keyword surface one-to-one; a params struct would
 // just re-spell the pyo3 signature.
 #[allow(clippy::too_many_arguments)]
@@ -487,11 +487,7 @@ fn write_connections(
 
     // Merge temporal config into graph (auto-detected from validFrom/validTo column types)
     if let Some(cfg) = temporal_cfg {
-        graph
-            .temporal_edge_configs
-            .entry(connection_type.clone())
-            .or_default()
-            .push(cfg);
+        kglite_core::api::temporal::legacy_push_edge(graph, connection_type.clone(), cfg);
     }
 
     kg.cursor.selection.clear();
@@ -746,9 +742,7 @@ fn register_feature_configs(
         graph.set_spatial_config(node_type, cfg);
     }
     if let Some(cfg) = temporal_cfg {
-        graph
-            .temporal_node_configs
-            .insert(node_type.to_string(), cfg);
+        kglite_core::api::temporal::legacy_set_node(graph, node_type.to_string(), cfg);
     }
 }
 

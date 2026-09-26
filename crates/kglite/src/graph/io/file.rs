@@ -499,8 +499,8 @@ impl FileMetadata {
                 .or(graph.cdc_handoff),
             spatial_configs: graph.spatial_configs.clone(),
             timeseries_configs: graph.timeseries_configs.clone(),
-            temporal_node_configs: graph.temporal_node_configs.clone(),
-            temporal_edge_configs: graph.temporal_edge_configs.clone(),
+            temporal_node_configs: graph.temporal.node_map().clone(),
+            temporal_edge_configs: graph.temporal.edge_map().clone(),
             timeseries_data_version: 2,
             topology_compressed_size: 0,
             column_sections: Vec::new(),
@@ -578,8 +578,7 @@ impl FileMetadata {
         graph.cdc_handoff = self.cdc_handoff;
         graph.spatial_configs = self.spatial_configs;
         graph.timeseries_configs = self.timeseries_configs;
-        graph.temporal_node_configs = self.temporal_node_configs;
-        graph.temporal_edge_configs = self.temporal_edge_configs;
+        graph.temporal = (self.temporal_node_configs, self.temporal_edge_configs).into();
         // `format_version` is not persisted, so the load side has to re-derive
         // it: the constant this build writes, not a literal pinned to whatever
         // container was current when this line was written.

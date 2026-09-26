@@ -26,9 +26,32 @@ before upgrading.
   row; `[p = (a)-->(b) | length(p)]` binds each match's path. In the Rust API,
   `kglite::api::cypher::Expression` gains a `PatternComprehension` variant, so
   an exhaustive match over it needs a new arm.
+- Cypher: `CALL db.temporal.declare({node: 'Label' | relationship: 'TYPE',
+  source_type?: 'Label', from: 'vf', to: 'vt', convention: 'closed' |
+  'half_open'})` declares which two properties bound an element's validity
+  interval, with a closed end (the `to` day is still valid) or a half-open
+  one (the `to` day is the first day no longer valid). The declaration reads
+  every stored bound first and refuses a missing property, an unreadable
+  bound or an inverted interval, naming the node or the relationship's
+  endpoints. It yields `declared`, `rows` and `abutting_rows`: the rows whose
+  `to` equals another row's `from` in the same label or from the same source
+  node, which under `closed` also earns a query warning. A relationship uses
+  its source's `source_type` declaration first and the unkeyed one otherwise.
+  `CALL db.temporal.undeclare({...})` removes one, and
+  `CALL db.temporal.declarations()` lists them. The fluent `select()`,
+  `valid_at()`, `valid_during()` and `traverse()` filters follow a
+  declaration's convention, and `describe()` shows it.
+- Rust API: `kglite::api::temporal` (`declare`, `declare_loaded`,
+  `undeclare`, `list`, `node_config`, `edge_configs`, `TemporalTarget`,
+  `IntervalConvention`), `TemporalConfig::convention` / `source_type`, and
+  `GraphRead::get_edge_property`, which reads one relationship property
+  without materialising the relationship.
 
 ### Changed
 
+- Rust API: `DirGraph::temporal_node_configs` and `temporal_edge_configs` are
+  no longer public fields; read declarations through
+  `kglite::api::temporal::{node_config, edge_configs, list}`.
 - Cypher `valid_at` / `valid_during` read the query date the way `date()` and
   `datetime()` do: `'2009'` is 2009-01-01 and `'2009-06'` is 2009-06-01, and a
   string with a time part keeps its time, its offset applied and normalised to
@@ -51,6 +74,10 @@ before upgrading.
 
 ### Fixed
 
+- `describe()` repeated `temporal_from` / `temporal_to` on one `<conn>`
+  element when a relationship type had several temporal configurations,
+  which is malformed XML. It now prints them once each in one
+  `temporal="Source: from..to; …"` attribute.
 - Fluent temporal filtering (`select()` under a `date()` context,
   `valid_at()`, `valid_during()` and `traverse()` over temporal relationships)
   treated bounds stored as datetimes or ISO strings as unbounded, so elements

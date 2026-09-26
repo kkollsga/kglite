@@ -338,22 +338,7 @@ fn write_connection_map(
             if sources.is_empty() || targets.is_empty() {
                 continue;
             }
-            let temporal_attr =
-                if let Some(configs) = graph.temporal_edge_configs.get(&ct.connection_type) {
-                    configs
-                        .iter()
-                        .map(|tc| {
-                            format!(
-                                " temporal_from=\"{}\" temporal_to=\"{}\"",
-                                xml_escape(&tc.valid_from),
-                                xml_escape(&tc.valid_to)
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("")
-                } else {
-                    String::new()
-                };
+            let temporal_attr = super::temporal_view::conn_attrs(graph, &ct.connection_type);
             let props_attr = connection_props_attr(graph, ct);
             let from_str = if sources.len() > 10 {
                 format!("{},... ({} total)", sources[..10].join(","), sources.len())
@@ -856,7 +841,7 @@ fn write_extensions(xml: &mut String, graph: &DirGraph, surface: DescribeSurface
             surface.call("connections=['TYPE']", "--connection-types TYPE"),
         ));
     }
-    xml.push_str("    <temporal hint=\"valid_at(entity, date, 'from', 'to'), valid_during(entity, start, end, 'from', 'to') — temporal filtering on nodes/edges. NULL = open-ended.\"/>\n");
+    xml.push_str("    <temporal hint=\"valid_at(entity, date, 'from', 'to'), valid_during(entity, start, end, 'from', 'to') — temporal filtering on nodes/edges. NULL = open-ended. CALL db.temporal.declare/declarations() record and list a type's bounds.\"/>\n");
     xml.push_str("    <bug_report hint=\"bug_report(query, result, expected, description) — file a Cypher bug report to reported_bugs.md.\"/>\n");
     xml.push_str(INDEXING_HINT);
     xml.push_str("  </extensions>\n");
@@ -1162,13 +1147,7 @@ fn write_type_detail(
     if let Some(title_alias) = graph.title_field_aliases.get(node_type) {
         alias_attrs.push_str(&format!(" title_alias=\"{}\"", xml_escape(title_alias)));
     }
-    if let Some(tc) = graph.temporal_node_configs.get(node_type) {
-        alias_attrs.push_str(&format!(
-            " temporal_from=\"{}\" temporal_to=\"{}\"",
-            xml_escape(&tc.valid_from),
-            xml_escape(&tc.valid_to)
-        ));
-    }
+    alias_attrs.push_str(&super::temporal_view::node_attrs(graph, node_type));
 
     xml.push_str(&format!(
         "{}<type name=\"{}\" count=\"{}\"{}>\n",
