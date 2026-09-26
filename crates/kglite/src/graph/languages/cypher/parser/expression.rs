@@ -485,46 +485,8 @@ impl CypherParser {
                 Ok(expr)
             }
 
-            // List literal [...] or list comprehension [x IN list WHERE ... | expr]
-            Some(CypherToken::LBracket) => {
-                self.advance(); // consume [
-
-                // Check for list comprehension: [x IN list ...]
-                // Look for: Identifier IN
-                if matches!(self.peek(), Some(CypherToken::Identifier(_)))
-                    && self.peek_at(1) == Some(&CypherToken::In)
-                {
-                    return self.parse_list_comprehension();
-                }
-
-                if matches!(self.peek(), Some(CypherToken::Identifier(_)))
-                    && self.peek_at(1) == Some(&CypherToken::Equals)
-                    && self.peek_at(2) == Some(&CypherToken::LParen)
-                {
-                    return Err(
-                        "A named path in a pattern comprehension is not supported; project \
-                         the nodes and relationships instead, e.g. [(a)-[r]->(b) | [a, r, b]]"
-                            .to_string(),
-                    );
-                }
-                if self.check(&CypherToken::LParen) && self.looks_like_pattern_start() {
-                    if let Some(comprehension) = self.try_parse_pattern_comprehension()? {
-                        return Ok(comprehension);
-                    }
-                }
-
-                // Otherwise: list literal [expr, expr, ...]
-                let mut items = Vec::new();
-                if !self.check(&CypherToken::RBracket) {
-                    items.push(self.parse_expression_with_predicates()?);
-                    while self.check(&CypherToken::Comma) {
-                        self.advance();
-                        items.push(self.parse_expression_with_predicates()?);
-                    }
-                }
-                self.expect(&CypherToken::RBracket)?;
-                Ok(Expression::ListLiteral(items))
-            }
+            // A list literal, or a list or pattern comprehension.
+            Some(CypherToken::LBracket) => self.parse_bracketed_expression(),
 
             // CASE expression
             Some(CypherToken::Case) => {
@@ -1045,6 +1007,48 @@ impl CypherParser {
             filter,
             map_expr,
         })
+    }
+
+    /// At `[`: a list comprehension `[x IN list WHERE … | expr]`, a
+    /// pattern comprehension `[(a)-->(b) WHERE … | expr]`, or a list literal.
+    fn parse_bracketed_expression(&mut self) -> Result<Expression, String> {
+        self.advance(); // consume [
+
+        // Check for list comprehension: [x IN list ...]
+        // Look for: Identifier IN
+        if matches!(self.peek(), Some(CypherToken::Identifier(_)))
+            && self.peek_at(1) == Some(&CypherToken::In)
+        {
+            return self.parse_list_comprehension();
+        }
+
+        if matches!(self.peek(), Some(CypherToken::Identifier(_)))
+            && self.peek_at(1) == Some(&CypherToken::Equals)
+            && self.peek_at(2) == Some(&CypherToken::LParen)
+        {
+            return Err(
+                "A named path in a pattern comprehension is not supported; project \
+                 the nodes and relationships instead, e.g. [(a)-[r]->(b) | [a, r, b]]"
+                    .to_string(),
+            );
+        }
+        if self.check(&CypherToken::LParen) && self.looks_like_pattern_start() {
+            if let Some(comprehension) = self.try_parse_pattern_comprehension()? {
+                return Ok(comprehension);
+            }
+        }
+
+        // Otherwise: list literal [expr, expr, ...]
+        let mut items = Vec::new();
+        if !self.check(&CypherToken::RBracket) {
+            items.push(self.parse_expression_with_predicates()?);
+            while self.check(&CypherToken::Comma) {
+                self.advance();
+                items.push(self.parse_expression_with_predicates()?);
+            }
+        }
+        self.expect(&CypherToken::RBracket)?;
+        Ok(Expression::ListLiteral(items))
     }
 
     /// Parse `pattern [WHERE pred] | expr ]` after the opening `[`, when the

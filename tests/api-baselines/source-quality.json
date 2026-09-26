@@ -136,8 +136,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/aggregation/materialized.rs",
       "qualified_name": "crate::CypherExecutor<'a>::evaluate_aggregate_with_rows",
-      "lines": 298,
-      "branches": 95,
+      "lines": 284,
+      "branches": 91,
       "nesting": 5
     },
     {
@@ -178,8 +178,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/scalar_functions/collection.rs",
       "qualified_name": "crate::CypherExecutor<'a>::eval_collection_fn",
-      "lines": 169,
-      "branches": 64,
+      "lines": 161,
+      "branches": 59,
       "nesting": 4
     },
     {
@@ -199,8 +199,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/scalar_functions/spatial.rs",
       "qualified_name": "crate::CypherExecutor<'a>::eval_spatial_fn",
-      "lines": 407,
-      "branches": 145,
+      "lines": 394,
+      "branches": 140,
       "nesting": 8
     },
     {
@@ -227,8 +227,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/parser/expression.rs",
       "qualified_name": "crate::CypherParser::parse_primary_expression_inner",
-      "lines": 226,
-      "branches": 50,
+      "lines": 204,
+      "branches": 44,
       "nesting": 4
     },
     {
@@ -255,8 +255,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/planner/schema_check/mod.rs",
       "qualified_name": "crate::validate_expression_scope",
-      "lines": 155,
-      "branches": 54,
+      "lines": 144,
+      "branches": 51,
       "nesting": 4
     },
     {
@@ -269,8 +269,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/planner/simplification.rs",
       "qualified_name": "crate::TextScoreCollector::rewrite_expr",
-      "lines": 147,
-      "branches": 63,
+      "lines": 141,
+      "branches": 61,
       "nesting": 4
     },
     {

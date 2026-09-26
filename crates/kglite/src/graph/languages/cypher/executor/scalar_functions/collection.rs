@@ -19,14 +19,8 @@ impl<'a> CypherExecutor<'a> {
                 // Native Value::List fast path; a string is a string and
                 // counts characters, brackets included — see
                 // `string_scalar_length`.
-                let val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
-                match val {
-                    Value::List(items) => Ok(Value::Int64(items.len() as i64)),
-                    Value::Map(m) => Ok(Value::Int64(m.len() as i64)),
-                    Value::String(s) => Ok(Value::Int64(string_scalar_length(s))),
-                    Value::Null => Ok(Value::Null),
-                    other => Err(list_or_error("size()", " or a string", &other)),
-                }
+                let value = self.evaluate_expression(super::first_arg(name, args)?, row)?;
+                element_count(value, "size()", " or a string")
             }
             "length" => {
                 // length(p) for paths, length(s) for strings, length(list) for lists
@@ -35,15 +29,9 @@ impl<'a> CypherExecutor<'a> {
                         return Ok(Some(Value::Int64(path.hops as i64)));
                     }
                 }
-                let val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
-                match val {
-                    // Native Value::List/Path/Map paths.
-                    Value::List(items) => Ok(Value::Int64(items.len() as i64)),
-                    Value::Map(m) => Ok(Value::Int64(m.len() as i64)),
+                match self.evaluate_expression(super::first_arg(name, args)?, row)? {
                     Value::Path(p) => Ok(Value::Int64(p.rels.len() as i64)),
-                    Value::String(s) => Ok(Value::Int64(string_scalar_length(s))),
-                    Value::Null => Ok(Value::Null),
-                    other => Err(list_or_error("length()", ", a string or a path", &other)),
+                    other => element_count(other, "length()", ", a string or a path"),
                 }
             }
             "coalesce" => {
@@ -180,5 +168,18 @@ impl<'a> CypherExecutor<'a> {
             _ => return Ok(None),
         };
         result.map(Some)
+    }
+}
+
+/// The length `size()` / `length()` share: a list's or map's entries, a
+/// string's characters, null for null; any other value is a type error naming
+/// `construct` and the other types it `accepts`.
+fn element_count(value: Value, construct: &str, accepts: &str) -> Result<Value, String> {
+    match value {
+        Value::List(items) => Ok(Value::Int64(items.len() as i64)),
+        Value::Map(m) => Ok(Value::Int64(m.len() as i64)),
+        Value::String(s) => Ok(Value::Int64(string_scalar_length(s))),
+        Value::Null => Ok(Value::Null),
+        other => Err(list_or_error(construct, accepts, &other)),
     }
 }

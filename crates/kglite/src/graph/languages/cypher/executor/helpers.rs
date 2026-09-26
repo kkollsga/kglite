@@ -1254,6 +1254,26 @@ pub(in crate::graph::languages::cypher) fn index_into_value(
     })
 }
 
+/// `container[index]`: an integer indexes a list ([`index_into_value`]), a
+/// string keys a map, node or relationship ([`map_subscript`]); a null
+/// container or index is null, and any other pairing is an error.
+pub(in crate::graph::languages::cypher) fn subscript_value(
+    container: &Value,
+    index: &Value,
+) -> Result<Value, String> {
+    match (index, container) {
+        (Value::Int64(index), _) => index_into_value(container, *index),
+        (Value::Null, _) | (Value::String(_), Value::Null) => Ok(Value::Null),
+        (Value::String(key), Value::Map(_) | Value::Node(_) | Value::Relationship(_)) => {
+            Ok(map_subscript(container, key))
+        }
+        (Value::String(_), _) => Err(format!(
+            "String index requires a map, node, or relationship; got {container:?}"
+        )),
+        (other, _) => Err(format!("List index must be an integer, got {other:?}")),
+    }
+}
+
 /// Shared bounds/negative-index logic for `list[i]`. A negative index counts
 /// from the end; anything still out of range yields `Value::Null`.
 #[inline]

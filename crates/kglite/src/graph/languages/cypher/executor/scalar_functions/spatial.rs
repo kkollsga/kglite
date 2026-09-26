@@ -15,33 +15,7 @@ impl<'a> CypherExecutor<'a> {
         row: &ResultRow,
     ) -> Result<Option<Value>, String> {
         let result: Result<Value, String> = match name {
-            "point" => {
-                if args.len() == 1 {
-                    return match self.evaluate_expression(&args[0], row)? {
-                        Value::Map(map) => point_from_map(&map).map(Some),
-                        Value::Null => Ok(Some(Value::Null)),
-                        other => Err(format!(
-                            "point() of one argument expects a map, got {}",
-                            other.type_name()
-                        )),
-                    };
-                }
-                if args.len() != 2 {
-                    return Err(
-                        "point() requires a map ({latitude, longitude}) or 2 arguments: lat, lon"
-                            .into(),
-                    );
-                }
-                let lat = crate::graph::core::value_operations::value_to_f64(
-                    &self.evaluate_expression(&args[0], row)?,
-                )
-                .ok_or("point(): lat must be numeric")?;
-                let lon = crate::graph::core::value_operations::value_to_f64(
-                    &self.evaluate_expression(&args[1], row)?,
-                )
-                .ok_or("point(): lon must be numeric")?;
-                Ok(Value::Point { lat, lon })
-            }
+            "point" => self.eval_point(args, row),
             "distance" => match args.len() {
                 2 => {
                     // Resolve via spatial config — prefer_geometry=false so bare
@@ -427,6 +401,33 @@ impl<'a> CypherExecutor<'a> {
             _ => return Ok(None),
         };
         result.map(Some)
+    }
+    /// `point(lat, lon)` or `point({…})`.
+    fn eval_point(&self, args: &[Expression], row: &ResultRow) -> Result<Value, String> {
+        if args.len() == 1 {
+            return match self.evaluate_expression(&args[0], row)? {
+                Value::Map(map) => point_from_map(&map),
+                Value::Null => Ok(Value::Null),
+                other => Err(format!(
+                    "point() of one argument expects a map, got {}",
+                    other.type_name()
+                )),
+            };
+        }
+        if args.len() != 2 {
+            return Err(
+                "point() requires a map ({latitude, longitude}) or 2 arguments: lat, lon".into(),
+            );
+        }
+        let lat = crate::graph::core::value_operations::value_to_f64(
+            &self.evaluate_expression(&args[0], row)?,
+        )
+        .ok_or("point(): lat must be numeric")?;
+        let lon = crate::graph::core::value_operations::value_to_f64(
+            &self.evaluate_expression(&args[1], row)?,
+        )
+        .ok_or("point(): lon must be numeric")?;
+        Ok(Value::Point { lat, lon })
     }
 }
 

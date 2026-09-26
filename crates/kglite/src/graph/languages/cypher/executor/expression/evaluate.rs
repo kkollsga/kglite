@@ -156,6 +156,21 @@ impl<'a> CypherExecutor<'a> {
             Expression::ExprPropertyAccess { expr, property } => {
                 self.evaluate_expression_property(expr, property, row)
             }
+            subquery @ (Expression::CountSubquery { .. }
+            | Expression::PatternComprehension { .. }) => {
+                self.evaluate_subquery_expression(subquery, row)
+            }
+        }
+    }
+
+    /// A `COUNT { }` subquery or a pattern comprehension: the expressions that
+    /// match a pattern against the current row.
+    fn evaluate_subquery_expression(
+        &self,
+        expression: &Expression,
+        row: &ResultRow,
+    ) -> Result<Value, String> {
+        match expression {
             Expression::CountSubquery {
                 patterns,
                 pattern_groups,
@@ -173,6 +188,7 @@ impl<'a> CypherExecutor<'a> {
                 map_expr,
                 row,
             ),
+            other => Err(format!("not a subquery expression: {other:?}")),
         }
     }
 
@@ -538,22 +554,8 @@ impl<'a> CypherExecutor<'a> {
         // the whole list per access. Evaluating the index first keeps this
         // decision cheap (the index is usually a variable/literal integer).
         let index = self.evaluate_expression(index, row)?;
-        let integer_index = match &index {
-            Value::Int64(index) => *index,
-            Value::String(key) => {
-                let container = self.evaluate_expression(expression, row)?;
-                return match container {
-                    Value::Map(_) | Value::Node(_) | Value::Relationship(_) => {
-                        Ok(map_subscript(&container, key))
-                    }
-                    Value::Null => Ok(Value::Null),
-                    _ => Err(format!(
-                        "String index requires a map, node, or relationship; got {container:?}"
-                    )),
-                };
-            }
-            Value::Null => return Ok(Value::Null),
-            _ => return Err(format!("List index must be an integer, got {index:?}")),
+        let Value::Int64(integer_index) = index else {
+            return subscript_value(&self.evaluate_expression(expression, row)?, &index);
         };
 
         // Borrow the container when its shape allows it (a projected variable,

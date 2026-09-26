@@ -921,34 +921,46 @@ fn validate_expression_scope(
             }
             Ok(())
         }
+        subquery @ (Expression::CountSubquery { .. } | Expression::PatternComprehension { .. }) => {
+            validate_pattern_subquery_scope(subquery, scope)
+        }
+        Expression::Literal(_) | Expression::Parameter(_) | Expression::Star => Ok(()),
+    }
+}
+
+/// A `COUNT { }` subquery or pattern comprehension: its pattern binds new
+/// variables for its own `WHERE` and projection only.
+fn validate_pattern_subquery_scope(
+    subquery: &Expression,
+    scope: &HashSet<String>,
+) -> Result<(), SchemaError> {
+    let (patterns, where_clause, projection) = match subquery {
         Expression::CountSubquery {
             patterns,
             where_clause,
             ..
-        } => {
-            let mut inner = scope.clone();
-            for pattern in patterns {
-                bind_pattern(pattern, &mut inner);
-            }
-            if let Some(where_clause) = where_clause {
-                validate_predicate_scope(where_clause, &inner)?;
-            }
-            Ok(())
-        }
+        } => (patterns.as_slice(), where_clause.as_deref(), None),
         Expression::PatternComprehension {
             pattern,
             where_clause,
             map_expr,
-        } => {
-            let mut inner = scope.clone();
-            bind_pattern(pattern, &mut inner);
-            if let Some(where_clause) = where_clause {
-                validate_predicate_scope(where_clause, &inner)?;
-            }
-            validate_expression_scope(map_expr, &inner)
-        }
-        Expression::Literal(_) | Expression::Parameter(_) | Expression::Star => Ok(()),
+        } => (
+            std::slice::from_ref(pattern.as_ref()),
+            where_clause.as_deref(),
+            Some(map_expr.as_ref()),
+        ),
+        _ => return Ok(()),
+    };
+    let mut inner = scope.clone();
+    for pattern in patterns {
+        bind_pattern(pattern, &mut inner);
     }
+    if let Some(where_clause) = where_clause {
+        validate_predicate_scope(where_clause, &inner)?;
+    }
+    projection.map_or(Ok(()), |projection| {
+        validate_expression_scope(projection, &inner)
+    })
 }
 
 fn validate_query(query: &CypherQuery, graph: &DirGraph) -> Result<(), SchemaError> {

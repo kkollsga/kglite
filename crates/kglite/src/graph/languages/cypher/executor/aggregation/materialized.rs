@@ -712,22 +712,7 @@ impl<'a> CypherExecutor<'a> {
                 let container = self.evaluate_aggregate_with_rows(inner, rows)?;
                 let dummy = ResultRow::new();
                 let row = rows.first().copied().unwrap_or(&dummy);
-                let idx_val = self.evaluate_expression(index, row)?;
-                match idx_val {
-                    // The same rules as the scalar subscript.
-                    Value::Int64(idx) => index_into_value(&container, idx),
-                    Value::String(key) => match container {
-                        Value::Map(_) | Value::Node(_) | Value::Relationship(_) => {
-                            Ok(map_subscript(&container, &key))
-                        }
-                        Value::Null => Ok(Value::Null),
-                        _ => Err(format!(
-                            "String index requires a map, node, or relationship; got {container:?}"
-                        )),
-                    },
-                    Value::Null => Ok(Value::Null),
-                    other => Err(format!("List index must be an integer, got {other:?}")),
-                }
+                subscript_value(&container, &self.evaluate_expression(index, row)?)
             }
             Expression::Add(left, right) => {
                 let l = self.evaluate_aggregate_with_rows(left, rows)?;

@@ -999,6 +999,28 @@ impl TextScoreCollector {
         pname
     }
 
+    /// A `COUNT { }` subquery's WHERE, or a pattern comprehension's WHERE and
+    /// projection. Patterns don't carry text_score() calls.
+    fn rewrite_subquery(
+        &mut self,
+        subquery: &mut Expression,
+        params: &HashMap<String, Value>,
+    ) -> Result<(), String> {
+        let (where_clause, projection) = match subquery {
+            Expression::CountSubquery { where_clause, .. } => (where_clause, None),
+            Expression::PatternComprehension {
+                where_clause,
+                map_expr,
+                ..
+            } => (where_clause, Some(map_expr.as_mut())),
+            _ => return Ok(()),
+        };
+        if let Some(pred) = where_clause.as_deref_mut() {
+            self.rewrite_pred(pred, params)?;
+        }
+        projection.map_or(Ok(()), |expr| self.rewrite_expr(expr, params))
+    }
+
     fn rewrite_expr(
         &mut self,
         expr: &mut Expression,
@@ -1125,24 +1147,8 @@ impl TextScoreCollector {
             }
             Expression::PredicateExpr(pred) => self.rewrite_pred(pred, params),
             Expression::ExprPropertyAccess { expr, .. } => self.rewrite_expr(expr, params),
-            Expression::CountSubquery { where_clause, .. } => {
-                // Patterns don't carry text_score() calls; only the
-                // optional WHERE predicate might. Rewrite it if present.
-                if let Some(pred) = where_clause.as_deref_mut() {
-                    self.rewrite_pred(pred, params)?;
-                }
-                Ok(())
-            }
-            Expression::PatternComprehension {
-                where_clause,
-                map_expr,
-                ..
-            } => {
-                if let Some(pred) = where_clause.as_deref_mut() {
-                    self.rewrite_pred(pred, params)?;
-                }
-                self.rewrite_expr(map_expr, params)
-            }
+            subquery @ (Expression::CountSubquery { .. }
+            | Expression::PatternComprehension { .. }) => self.rewrite_subquery(subquery, params),
             Expression::Reduce {
                 init,
                 list_expr,
