@@ -2246,6 +2246,7 @@ pub mod kglite::api::mutation
 pub enum kglite::api::mutation::ColumnData
 pub kglite::api::mutation::ColumnData::Boolean(alloc::vec::Vec<core::option::Option<bool>>)
 pub kglite::api::mutation::ColumnData::DateTime(alloc::vec::Vec<core::option::Option<chrono::naive::date::NaiveDate>>)
+pub kglite::api::mutation::ColumnData::Duration(alloc::vec::Vec<core::option::Option<(i32, i32, i64)>>)
 pub kglite::api::mutation::ColumnData::Float64(alloc::vec::Vec<core::option::Option<f64>>)
 pub kglite::api::mutation::ColumnData::Int64(alloc::vec::Vec<core::option::Option<i64>>)
 pub kglite::api::mutation::ColumnData::List(alloc::vec::Vec<core::option::Option<alloc::vec::Vec<kglite::datatypes::values::Value>>>)
@@ -2258,6 +2259,7 @@ pub fn kglite::datatypes::values::ColumnData::fmt(&self, f: &mut core::fmt::Form
 pub enum kglite::api::mutation::ColumnType
 pub kglite::api::mutation::ColumnType::Boolean
 pub kglite::api::mutation::ColumnType::DateTime
+pub kglite::api::mutation::ColumnType::Duration
 pub kglite::api::mutation::ColumnType::Float64
 pub kglite::api::mutation::ColumnType::Int64
 pub kglite::api::mutation::ColumnType::List
@@ -4984,6 +4986,7 @@ impl<'a> core::marker::Copy for kglite::datatypes::values::BorrowedValue<'a>
 pub enum kglite::datatypes::values::ColumnData
 pub kglite::datatypes::values::ColumnData::Boolean(alloc::vec::Vec<core::option::Option<bool>>)
 pub kglite::datatypes::values::ColumnData::DateTime(alloc::vec::Vec<core::option::Option<chrono::naive::date::NaiveDate>>)
+pub kglite::datatypes::values::ColumnData::Duration(alloc::vec::Vec<core::option::Option<(i32, i32, i64)>>)
 pub kglite::datatypes::values::ColumnData::Float64(alloc::vec::Vec<core::option::Option<f64>>)
 pub kglite::datatypes::values::ColumnData::Int64(alloc::vec::Vec<core::option::Option<i64>>)
 pub kglite::datatypes::values::ColumnData::List(alloc::vec::Vec<core::option::Option<alloc::vec::Vec<kglite::datatypes::values::Value>>>)
@@ -4996,6 +4999,7 @@ pub fn kglite::datatypes::values::ColumnData::fmt(&self, f: &mut core::fmt::Form
 pub enum kglite::datatypes::values::ColumnType
 pub kglite::datatypes::values::ColumnType::Boolean
 pub kglite::datatypes::values::ColumnType::DateTime
+pub kglite::datatypes::values::ColumnType::Duration
 pub kglite::datatypes::values::ColumnType::Float64
 pub kglite::datatypes::values::ColumnType::Int64
 pub kglite::datatypes::values::ColumnType::List

@@ -38,7 +38,7 @@ pub(super) fn decode(map: &serde_json::Map<String, serde_json::Value>) -> Option
     })
 }
 
-fn decode_duration(payload: &serde_json::Value) -> Option<Value> {
+pub(super) fn decode_duration(payload: &serde_json::Value) -> Option<Value> {
     let fields = payload.as_object()?;
     let (mut months, mut days, mut seconds) = (0i32, 0i32, 0i64);
     for (name, value) in fields {

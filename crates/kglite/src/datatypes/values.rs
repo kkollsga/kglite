@@ -672,6 +672,9 @@ pub enum ColumnType {
     /// object-dtype column of dicts (or a JSON-records object field) reach the
     /// graph as a native `Value::Map` instead of a stringified/None value.
     Map,
+    /// A duration column — each cell is a `Value::Duration`. Lets a pandas
+    /// `timedelta64` column reach the graph as durations rather than text.
+    Duration,
 }
 
 impl fmt::Display for ColumnType {
@@ -686,6 +689,7 @@ impl fmt::Display for ColumnType {
             ColumnType::Timestamp => "Timestamp",
             ColumnType::List => "List",
             ColumnType::Map => "Map",
+            ColumnType::Duration => "Duration",
         };
         write!(f, "{}", type_str)
     }
@@ -714,6 +718,9 @@ pub enum ColumnData {
     List(Vec<Option<Vec<Value>>>),
     /// One `Value::Map` payload per cell (None = null / non-map cell).
     Map(Vec<Option<PropMap>>),
+    /// One `(months, days, seconds)` per cell (None = null), materialised as
+    /// `Value::Duration`.
+    Duration(Vec<Option<(i32, i32, i64)>>),
 }
 
 #[derive(Debug)]
@@ -734,6 +741,14 @@ impl Column {
             ColumnData::Timestamp(vec) => vec.get(row_idx)?.map(Value::Timestamp),
             ColumnData::List(vec) => vec.get(row_idx)?.as_ref().map(|v| Value::List(v.clone())),
             ColumnData::Map(vec) => vec.get(row_idx)?.as_ref().map(|m| Value::Map(m.clone())),
+            ColumnData::Duration(vec) => {
+                vec.get(row_idx)?
+                    .map(|(months, days, seconds)| Value::Duration {
+                        months,
+                        days,
+                        seconds,
+                    })
+            }
         }
     }
 
@@ -754,6 +769,7 @@ impl ColumnData {
             ColumnData::Timestamp(vec) => vec.len(),
             ColumnData::List(vec) => vec.len(),
             ColumnData::Map(vec) => vec.len(),
+            ColumnData::Duration(vec) => vec.len(),
         }
     }
 }
@@ -775,6 +791,7 @@ impl DataFrame {
                     ColumnType::Timestamp => ColumnData::Timestamp(Vec::new()),
                     ColumnType::List => ColumnData::List(Vec::new()),
                     ColumnType::Map => ColumnData::Map(Vec::new()),
+                    ColumnType::Duration => ColumnData::Duration(Vec::new()),
                 };
                 column_indices.insert(name.clone(), idx);
                 Column {
@@ -904,7 +921,8 @@ impl DataFrame {
             | (ColumnType::DateTime, ColumnData::DateTime(_))
             | (ColumnType::Timestamp, ColumnData::Timestamp(_))
             | (ColumnType::List, ColumnData::List(_))
-            | (ColumnType::Map, ColumnData::Map(_)) => (),
+            | (ColumnType::Map, ColumnData::Map(_))
+            | (ColumnType::Duration, ColumnData::Duration(_)) => (),
             _ => return Err(format!("Data type mismatch for column {}", name)),
         }
 
@@ -990,6 +1008,7 @@ impl DataFrame {
                 ColumnType::Timestamp => ColumnData::Timestamp(Vec::with_capacity(num_rows)),
                 ColumnType::List => ColumnData::List(Vec::with_capacity(num_rows)),
                 ColumnType::Map => ColumnData::Map(Vec::with_capacity(num_rows)),
+                ColumnType::Duration => ColumnData::Duration(Vec::with_capacity(num_rows)),
             })
             .collect();
 
@@ -1047,6 +1066,16 @@ impl DataFrame {
                         Value::Map(m) => vec.push(Some(m)),
                         // Promotion routes map/non-map mixes to String, so
                         // only Null/NodeRef reach here.
+                        _ => vec.push(None),
+                    },
+                    ColumnData::Duration(vec) => match val {
+                        Value::Duration {
+                            months,
+                            days,
+                            seconds,
+                        } => vec.push(Some((months, days, seconds))),
+                        // Durations mix with nothing but nulls (anything else
+                        // promotes to String), so only Null/NodeRef reach here.
                         _ => vec.push(None),
                     },
                 }
@@ -1160,6 +1189,7 @@ mod kind {
     pub const LIST: u16 = 1 << 7;
     pub const MAP: u16 = 1 << 8;
     pub const TEXTUAL: u16 = 1 << 9;
+    pub const DURATION: u16 = 1 << 10;
 }
 
 /// Kind bit contributed by one value. `Null` and the internal `NodeRef`
@@ -1177,11 +1207,10 @@ fn value_kind_bit(val: &Value) -> u16 {
         // structurally (UNWIND/IN, `m['k']`/`m.k`), not as stringified JSON.
         Value::List(_) => kind::LIST,
         Value::Map(_) => kind::MAP,
-        Value::Point { .. }
-        | Value::Duration { .. }
-        | Value::Node(_)
-        | Value::Relationship(_)
-        | Value::Path(_) => kind::TEXTUAL,
+        Value::Duration { .. } => kind::DURATION,
+        Value::Point { .. } | Value::Node(_) | Value::Relationship(_) | Value::Path(_) => {
+            kind::TEXTUAL
+        }
         Value::Null | Value::NodeRef(_) => 0,
     }
 }
@@ -1195,6 +1224,7 @@ fn value_kind_bit(val: &Value) -> u16 {
 /// - {UniqueId, Int64} + Float64 → Float64
 /// - DateTime + Timestamp → Timestamp (dates embed as midnight)
 /// - any mix containing a List → List (non-list cells wrap as 1-element lists)
+/// - only durations → Duration
 /// - anything else → String, each value in its natural text form
 fn resolve_column_type(kinds: u16, ints_fit_u32: bool) -> ColumnType {
     const NUMERIC: u16 = kind::UNIQUE_ID | kind::INT64 | kind::FLOAT64;
@@ -1216,6 +1246,7 @@ fn resolve_column_type(kinds: u16, ints_fit_u32: bool) -> ColumnType {
         k if k & !(kind::DATE | kind::TIMESTAMP) == 0 => ColumnType::Timestamp,
         k if k & kind::LIST != 0 => ColumnType::List,
         k if k == kind::MAP => ColumnType::Map,
+        k if k == kind::DURATION => ColumnType::Duration,
         _ => ColumnType::String,
     }
 }
@@ -1235,7 +1266,7 @@ pub(crate) enum ValueSetType {
     /// `Float64` makes a `Float64` column).
     Uniform(ColumnType),
     /// Every value is one of the variants no column shape names (`Point`,
-    /// `Duration`, the query-time graph entities), which a frame renders as
+    /// the query-time graph entities), which a frame renders as
     /// text. Kept apart from `Mixed` because the values do agree — there is
     /// simply no column type for them.
     Shapeless,
@@ -1476,6 +1507,7 @@ fn format_col_type(col_type: &ColumnType) -> String {
         ColumnType::Timestamp => "timestamp",
         ColumnType::List => "list",
         ColumnType::Map => "map",
+        ColumnType::Duration => "duration",
     }
     .to_string()
 }

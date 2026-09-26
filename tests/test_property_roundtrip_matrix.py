@@ -33,6 +33,12 @@ Fixed (the cells below now round-trip and pass — kept as passing rows):
   **truncated to date-only**. Fixed: a ``datetime64`` column with any nonzero
   time-of-day is typed ``Timestamp`` (full precision); a pure-midnight column
   stays date-only ``DateTime``. (`datatypes/py_in.rs`.)
+* **Python ``timedelta``** — was an unsupported ``timedelta64`` column in
+  ``add_nodes`` / ``add_connections``, text in an object column, a refused
+  query parameter and a refused ``from_records`` value. Fixed: all of them
+  load as a ``Duration``.
+* **Python ``date`` / ``datetime`` via `from_records`** — were refused (JSON
+  has no date type). Fixed: the records shim sends them as tagged objects.
 
 * **Chained-dot into a map — ``n.m.k``** — was returning ``None`` while bracket
   subscript ``n.m['k']`` worked (node and edge). Fixed: ``ExprPropertyAccess``
@@ -86,6 +92,11 @@ KINDS: dict[str, tuple[object, str, object]] = {
     "none": (None, "null", None),
     "date": (_DATE, "date('2020-01-02')", _DATE),
     "datetime": (_DT, "datetime('2020-01-02T03:04:05')", _DT),
+    "duration": (
+        datetime.timedelta(days=1, hours=2),
+        "duration({days: 1, hours: 2})",
+        {"months": 0, "days": 1, "seconds": 7200},
+    ),
     "point": (None, "point(1.0,2.0)", _POINT_READBACK),
     "list_str": (["a", "b", "c"], "['a','b','c']", ["a", "b", "c"]),
     "list_int": ([1, 2, 3], "[1,2,3]", [1, 2, 3]),
@@ -97,8 +108,9 @@ KINDS: dict[str, tuple[object, str, object]] = {
 
 # Kinds with no Python value literal: only reachable through Cypher point().
 _CYPHER_ONLY = {"point"}
-# Kinds that from_records cannot carry as a Python object (JSON has no date).
-_JSON_UNSERIALISABLE = {"date", "datetime"}
+# Kinds that from_records cannot carry as a Python object. Dates, datetimes
+# and durations travel as `{"$date"}` / `{"$datetime"}` / `{"$duration"}` tags.
+_JSON_UNSERIALISABLE: set[str] = set()
 # Collection kinds need an object-dtype pandas column with per-cell assignment;
 # scalars use their natural inferred dtype (an object column of scalars is a
 # pandas footgun that stringifies ints/floats/datetimes — not a value-kind bug).
@@ -479,12 +491,16 @@ def test_bracket_subscript_into_map_works():
     assert got == "v"
 
 
-# ── from_records loud-error contract for Python temporals ───────────────────
-@pytest.mark.parametrize("val", [_DATE, _DT], ids=["date", "datetime"])
-def test_from_records_rejects_python_temporal_loudly(val):
-    """A Python date/datetime in a from_records spec fails loudly (JSON has no
-    date type). This is the *acceptable* half of the contract — a loud error at
-    write time, not a silent degradation."""
+# ── from_records loud-error contract for Python values with no graph type ───
+@pytest.mark.parametrize(
+    "val",
+    [datetime.time(3, 4, 5), datetime.timedelta(seconds=1.5)],
+    ids=["time", "sub_second_timedelta"],
+)
+def test_from_records_rejects_untyped_python_values_loudly(val):
+    """A time of day, or a timedelta with a sub-second part, has no graph
+    value: from_records fails loudly rather than storing text or truncating.
+    Dates, datetimes and whole-second timedeltas load typed (the matrix)."""
     spec = {"nodes": [{"type": "N", "id_field": "id", "records": [{"id": 1, "p": val}]}]}
     with pytest.raises(TypeError):
         kglite.from_records(spec)

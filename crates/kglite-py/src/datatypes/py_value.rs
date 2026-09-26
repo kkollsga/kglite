@@ -6,7 +6,8 @@ use super::values::Value;
 use pyo3::exceptions::{PyOverflowError, PyRecursionError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{
-    PyBytes, PyDate, PyDateTime, PyDict, PyFloat, PyInt, PyList, PyTuple, PyTzInfo, PyTzInfoAccess,
+    PyBytes, PyDate, PyDateTime, PyDelta, PyDict, PyFloat, PyInt, PyList, PyTuple, PyTzInfo,
+    PyTzInfoAccess,
 };
 
 const MAX_CONTAINER_DEPTH: usize = 64;
@@ -452,6 +453,10 @@ fn convert_query_value(
     if let Ok(string) = value.extract::<String>() {
         return Ok(Value::String(string));
     }
+    if let Ok(delta) = value.cast::<PyDelta>() {
+        return delta_to_duration(delta)
+            .map_err(|message| QueryConversionError::Python(PyValueError::new_err(message)));
+    }
     if let Ok(datetime) = value.cast::<PyDateTime>() {
         // `pd.NaT` is a `datetime` subclass, so it arrives here and would fail
         // inside the conversion. It is pandas' missing value: bind it as NULL,
@@ -591,6 +596,9 @@ fn convert_value(value: &Bound<'_, PyAny>, state: &mut ConversionState) -> PyRes
     if let Ok(u) = value.extract::<u32>() {
         return Ok(Value::UniqueId(u));
     }
+    if let Ok(delta) = value.cast::<PyDelta>() {
+        return delta_to_duration(delta).map_err(PyValueError::new_err);
+    }
     // datetime is a date subclass: failure must not degrade to a date-only value.
     if let Ok(dt) = value.cast::<PyDateTime>() {
         return datetime_to_utc_naive(dt).map(Value::Timestamp);
@@ -661,6 +669,36 @@ pub(super) fn datetime_to_utc_naive(
     normalized
         .call_method("replace", (), Some(&kwargs))?
         .extract::<chrono::NaiveDateTime>()
+}
+
+/// A `datetime.timedelta` (or `pd.Timedelta`) as a `Value::Duration`. Its
+/// whole seconds split into days and seconds that keep the delta's sign, the
+/// components `duration({days, seconds})` builds, so `timedelta(hours=-1)`
+/// equals `duration({hours: -1})`. A duration holds whole seconds; a delta
+/// with a sub-second part is refused rather than truncated.
+pub(crate) fn delta_to_duration(delta: &Bound<'_, PyDelta>) -> Result<Value, String> {
+    // The limited API has no timedelta accessors; the attributes are public.
+    let field = |name: &str| -> i64 {
+        delta
+            .getattr(name)
+            .and_then(|value| value.extract())
+            .unwrap_or(0)
+    };
+    if field("microseconds") != 0 || field("nanoseconds") != 0 {
+        return Err(format!(
+            "{} has a sub-second part; a duration holds whole seconds",
+            delta
+                .repr()
+                .map_or_else(|_| "timedelta".to_string(), |r| r.to_string())
+        ));
+    }
+    let total = field("days") * 86_400 + field("seconds");
+    let days = i32::try_from(total / 86_400).map_err(|_| "timedelta days exceed the i32 range")?;
+    Ok(Value::Duration {
+        months: 0,
+        days,
+        seconds: total % 86_400,
+    })
 }
 
 #[cfg(test)]

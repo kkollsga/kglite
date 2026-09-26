@@ -5,7 +5,7 @@ pub use super::py_value::{py_query_parameter_to_value, py_value_to_value, F32Row
 use super::type_conversions::{to_bool, to_datetime, to_f64, to_i64, to_timestamp, to_u32};
 use super::values::{ColumnData, ColumnType, DataFrame, FilterCondition, Value};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyTuple};
+use pyo3::types::{PyDelta, PyDict, PyList, PyTuple};
 use pyo3::Bound;
 use std::collections::HashMap;
 
@@ -257,6 +257,74 @@ fn parse_temporal_cells<T>(
     Ok(vec)
 }
 
+/// An object column's cells through `convert`; a null cell stays null.
+fn object_cells<T>(
+    py_list: &Bound<'_, PyList>,
+    null_mask: &[bool],
+    convert: impl Fn(&Bound<'_, PyAny>) -> PyResult<Option<T>>,
+) -> PyResult<Vec<Option<T>>> {
+    let mut cells = Vec::with_capacity(null_mask.len());
+    for (i, &is_null) in null_mask.iter().enumerate() {
+        cells.push(if is_null {
+            None
+        } else {
+            convert(&py_list.get_item(i)?)?
+        });
+    }
+    Ok(cells)
+}
+
+/// A duration column's cells: each `timedelta` (or `pd.Timedelta`) as
+/// `(months, days, seconds)`. A cell with a sub-second part, or one that is not
+/// a timedelta, is stored as null and reported under `on_invalid` — a duration
+/// holds whole seconds, and truncating would change the value unannounced.
+fn duration_cells(
+    py_list: &Bound<'_, PyList>,
+    null_mask: &[bool],
+    col_name: &str,
+    on_invalid: OnInvalid,
+) -> PyResult<Vec<Option<(i32, i32, i64)>>> {
+    let mut cells = Vec::with_capacity(null_mask.len());
+    let (mut rejected, mut first) = (0usize, None);
+    for (row, &is_null) in null_mask.iter().enumerate() {
+        if is_null {
+            cells.push(None);
+            continue;
+        }
+        let item = py_list.get_item(row)?;
+        let converted = item
+            .cast::<PyDelta>()
+            .map_err(|_| "not a timedelta".to_string())
+            .and_then(|delta| super::py_value::delta_to_duration(delta));
+        match converted {
+            Ok(Value::Duration {
+                months,
+                days,
+                seconds,
+            }) => cells.push(Some((months, days, seconds))),
+            Ok(_) | Err(_) => {
+                rejected += 1;
+                first.get_or_insert_with(|| {
+                    (row, item.repr().map(|r| r.to_string()).unwrap_or_default())
+                });
+                cells.push(None);
+            }
+        }
+    }
+    if let Some((row, shown)) = first {
+        on_invalid::report(
+            py_list.py(),
+            on_invalid,
+            format!(
+                "Column '{col_name}': {rejected} value(s) could not be stored as a duration of \
+                 whole seconds (row {row} holds {shown}) and are stored as NULL. Round the \
+                 column to whole seconds (e.g. .dt.round('s')) to keep them."
+            ),
+        )?;
+    }
+    Ok(cells)
+}
+
 fn convert_pandas_series(
     series: &Bound<'_, PyAny>,
     col_type: ColumnType,
@@ -412,42 +480,34 @@ fn convert_pandas_series(
                 to_timestamp,
             )?))
         }
-        ColumnType::List => {
-            // Object column of Python lists/tuples → native List property.
-            let py_list = py_list.cast::<PyList>()?;
-            let mut vec: Vec<Option<Vec<Value>>> = Vec::with_capacity(length);
-            for (i, &is_null) in null_mask.iter().enumerate() {
-                if is_null {
-                    vec.push(None);
-                } else {
-                    let item = py_list.get_item(i)?;
-                    vec.push(Some(py_cell_to_value_list(&item)?));
-                }
-            }
-            Ok(ColumnData::List(vec))
-        }
-        ColumnType::Map => {
-            // Object column of Python dicts → native Map property. Reuses the
-            // recursive `py_value_to_value` (the params path), so nested lists /
-            // dicts inside the map keep their structure instead of stringifying.
-            let py_list = py_list.cast::<PyList>()?;
-            let mut vec: Vec<Option<kglite_core::datatypes::PropMap>> = Vec::with_capacity(length);
-            for (i, &is_null) in null_mask.iter().enumerate() {
-                if is_null {
-                    vec.push(None);
-                } else {
-                    let item = py_list.get_item(i)?;
-                    match py_value_to_value(&item)? {
-                        Value::Map(m) => vec.push(Some(m)),
-                        // A non-dict cell in a dict-first object column: no
-                        // faithful map form (a pandas mixed-type footgun).
-                        // Null rather than a stringified surprise.
-                        _ => vec.push(None),
-                    }
-                }
-            }
-            Ok(ColumnData::Map(vec))
-        }
+        // Object column of Python lists/tuples → native List property.
+        ColumnType::List => Ok(ColumnData::List(object_cells(
+            py_list.cast::<PyList>()?,
+            &null_mask,
+            |item| py_cell_to_value_list(item).map(Some),
+        )?)),
+        // Object column of Python dicts → native Map property. Reuses the
+        // recursive `py_value_to_value` (the params path), so nested lists /
+        // dicts inside the map keep their structure instead of stringifying.
+        // A non-dict cell in a dict-first object column has no faithful map
+        // form (a pandas mixed-type footgun): null rather than a stringified
+        // surprise.
+        ColumnType::Map => Ok(ColumnData::Map(object_cells(
+            py_list.cast::<PyList>()?,
+            &null_mask,
+            |item| {
+                Ok(match py_value_to_value(item)? {
+                    Value::Map(m) => Some(m),
+                    _ => None,
+                })
+            },
+        )?)),
+        ColumnType::Duration => Ok(ColumnData::Duration(duration_cells(
+            py_list.cast::<PyList>()?,
+            &null_mask,
+            col_name,
+            on_invalid,
+        )?)),
     }
 }
 
@@ -590,6 +650,7 @@ fn pandas_to_dataframe_with_text_policy(
                         "timestamp" => ColumnType::Timestamp,
                         "list" | "array" => ColumnType::List,
                         "map" | "dict" => ColumnType::Map,
+                        "duration" | "timedelta" => ColumnType::Duration,
                         _ => {
                             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                                 "Unsupported column type '{}' specified for column '{}'",
@@ -798,6 +859,10 @@ fn determine_column_type(
         "float64" | "float32" | "Float64" | "Float32" => Ok(ColumnType::Float64),
         "bool" | "boolean" => Ok(ColumnType::Boolean),
         s if s.starts_with("datetime64") => datetime64_column_type(series),
+        // numpy `timedelta64[..]`, and pandas' pyarrow-backed `duration[..][pyarrow]`.
+        s if s.starts_with("timedelta64") || s.starts_with("duration[") => {
+            Ok(ColumnType::Duration)
+        }
         "object" => {
             // A column of Python lists/tuples → native List; a column of dicts
             // → native Map (so collections round-trip structurally instead of
@@ -849,6 +914,9 @@ fn first_non_null_collection_type(series: &Bound<'_, PyAny>) -> PyResult<Option<
     }
     if first.cast::<PyDict>().is_ok() {
         return Ok(Some(ColumnType::Map));
+    }
+    if first.cast::<PyDelta>().is_ok() {
+        return Ok(Some(ColumnType::Duration));
     }
     Ok(None)
 }

@@ -124,28 +124,32 @@ def from_blueprint(
 
 
 def _json_scalar(value: Any) -> Any:
-    """Refuse a record value JSON cannot carry, by name.
+    """Encode a record value plain JSON cannot carry, or refuse it by name.
 
-    ``json.dumps`` raised ``TypeError: Object of type datetime is not JSON
-    serializable`` — true, but it named neither the value nor the field, and it
-    read as a wrapper bug rather than a spec one. The refusal itself is the
-    contract (``tests/test_property_roundtrip_matrix.py``): a records spec is
-    JSON, JSON has no temporal type, and silently writing ``datetime`` as
-    ISO-8601 text would demote a temporal to a string property — a silent
-    degradation, which is the one outcome that matrix exists to keep out. Load
-    temporals through ``add_nodes``/``add_relationships``, which type them, or
-    pass the ISO-8601 string yourself and convert with Cypher ``datetime()``.
-
-    Missing values are the exception: ``pd.NaT`` carries no temporal value to
-    degrade, so it becomes ``null`` like any other absent field.
+    ``date``, ``datetime`` and ``timedelta`` become the one-key tagged objects
+    the records loader decodes — ``{"$date": …}``, ``{"$datetime": …}`` (an
+    offset is applied, normalising to UTC) and ``{"$duration": …}`` — so they
+    load typed rather than as text. A ``time`` has no graph type and is
+    refused, as is a ``timedelta`` with a sub-second part: a duration holds
+    whole seconds. ``pd.NaT`` carries no value and becomes ``null``.
     """
-    if isinstance(value, (_datetime.datetime, _datetime.date, _datetime.time)):
-        if value.isoformat() == "NaT":  # pandas' missing timestamp
+    if isinstance(value, (_datetime.datetime, _datetime.date, _datetime.timedelta)):
+        if str(value) == "NaT":  # pandas' missing timestamp / timedelta
             return None
+    if isinstance(value, _datetime.datetime):
+        return {"$datetime": value.isoformat()}
+    if isinstance(value, _datetime.date):
+        return {"$date": value.isoformat()}
+    if isinstance(value, _datetime.timedelta):
+        if value.microseconds or getattr(value, "nanoseconds", 0):
+            raise TypeError(f"from_records: {value!r} has a sub-second part; a duration holds whole seconds")
+        total = value.days * 86_400 + value.seconds
+        days = abs(total) // 86_400 * (1 if total >= 0 else -1)
+        return {"$duration": {"days": days, "seconds": total - days * 86_400}}
+    if isinstance(value, _datetime.time):
         raise TypeError(
-            f"from_records: a {type(value).__name__} value ({value!r}) cannot be carried in a "
-            "JSON records spec — JSON has no temporal type. Pass an ISO-8601 string and convert "
-            "with Cypher datetime()/date(), or load the column through add_nodes()."
+            f"from_records: a time value ({value!r}) cannot be carried in a JSON records spec — "
+            "the graph has no time-of-day type. Pass it as a string."
         )
     raise TypeError(
         f"from_records: a record value of type {type(value).__name__!r} ({value!r}) cannot be "

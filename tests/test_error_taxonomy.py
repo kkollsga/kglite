@@ -464,11 +464,10 @@ def test_a_negative_positional_sample_count_is_an_argument_error(people):
 
 
 def test_from_records_names_the_value_it_cannot_carry():
-    """The refusal is the contract (a JSON spec has no temporal type, and
-    writing one as text would demote it to a string property — see
-    `test_property_roundtrip_matrix.py`). What was broken is the *message*:
-    `json.dumps` answered "Object of type datetime is not JSON serializable",
-    naming neither the value, the field, nor a way forward."""
+    """A value with no graph type (a time of day) is refused, and the message
+    names the field's value and a way forward — `json.dumps` alone answered
+    "Object of type time is not JSON serializable". Dates, datetimes and
+    durations load typed (see `test_property_roundtrip_matrix.py`)."""
     import datetime
 
     spec = {
@@ -476,7 +475,7 @@ def test_from_records_names_the_value_it_cannot_carry():
             {
                 "type": "Event",
                 "id_field": "id",
-                "records": [{"id": 1, "at": datetime.datetime(2024, 3, 9, 14, 30, 5)}],
+                "records": [{"id": 1, "at": datetime.time(14, 30, 5)}],
             }
         ]
     }
@@ -484,9 +483,9 @@ def test_from_records_names_the_value_it_cannot_carry():
         kglite.from_records(spec)
     message = str(excinfo.value)
     assert "from_records" in message
-    assert "datetime" in message
-    assert "2024" in message, "the refusal must name the offending value"
-    assert "ISO-8601" in message and "add_nodes" in message, "and a way forward"
+    assert "time" in message
+    assert "14" in message and "30" in message, "the refusal must name the offending value"
+    assert "string" in message, "and a way forward"
 
 
 def test_from_records_treats_a_missing_timestamp_as_null():

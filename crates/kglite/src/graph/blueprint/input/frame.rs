@@ -23,6 +23,7 @@
 //! | `Timestamp` | ISO-8601 date+time, `2024-03-01T09:30:00` |
 //! | `List` | compact JSON, nested values included — `["a",1]` |
 //! | `Map` | compact JSON object — `{"a":1}` |
+//! | `Duration` | compact JSON object — `{"days":1,"months":0,"seconds":7200}` |
 //! | `String` | the string as-is |
 //!
 //! Two rules carry a consequence worth stating plainly:
@@ -157,6 +158,7 @@ fn vocabulary_type(ct: &ColumnType) -> Option<ColumnType> {
         ColumnType::String => Some(ColumnType::String),
         ColumnType::DateTime => Some(ColumnType::DateTime),
         ColumnType::List => Some(ColumnType::List),
+        ColumnType::Duration => Some(ColumnType::Duration),
         ColumnType::Timestamp | ColumnType::Map => None,
     }
 }
@@ -174,6 +176,7 @@ fn type_label(ct: &ColumnType) -> &'static str {
         ColumnType::List => "list",
         ColumnType::Timestamp => "timestamp",
         ColumnType::Map => "map",
+        ColumnType::Duration => "duration",
     }
 }
 

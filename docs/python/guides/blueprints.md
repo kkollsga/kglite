@@ -79,6 +79,7 @@ Available types:
 | `"bool"` / `"boolean"` | boolean | Accepts true/false and common 1/0/yes/no forms |
 | `"date"` / `"datetime"` | date | Accepts `YYYY-MM-DD`, timestamp text, or epoch milliseconds; stores the date |
 | `"list"` / `"array"` | list | Cell is a JSON array, e.g. `["a","b"]` — see below |
+| `"duration"` | duration | Cell is a `{"months", "days", "seconds"}` object (each field optional), e.g. `{"days": 1, "seconds": 7200}`; anything else is null |
 | `"validFrom"` / `"validTo"` | date | Date column plus temporal-role metadata |
 | `"geometry"` | WKT string | Uses existing WKT or converts `_geometry` GeoJSON in Rust |
 | `"location.lat"` / `"location.lon"` | float | Coordinates; may receive GeoJSON centroids |

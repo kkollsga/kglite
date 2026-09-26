@@ -85,6 +85,7 @@ pub fn map_blueprint_type(ty: &str) -> Option<ColumnType> {
         "bool" | "boolean" => Some(ColumnType::Boolean),
         "date" | "datetime" | "validFrom" | "validTo" => Some(ColumnType::DateTime),
         "list" | "array" => Some(ColumnType::List),
+        "duration" => Some(ColumnType::Duration),
         _ => None,
     }
 }
@@ -104,6 +105,7 @@ pub fn blueprint_type_keyword(ct: &ColumnType) -> Option<&'static str> {
         ColumnType::Boolean => Some("bool"),
         ColumnType::DateTime => Some("date"),
         ColumnType::List => Some("list"),
+        ColumnType::Duration => Some("duration"),
         ColumnType::UniqueId | ColumnType::Timestamp | ColumnType::Map => None,
     }
 }
@@ -389,6 +391,29 @@ fn build_column_data(
         // the right shape to keep the match exhaustive without a panic.
         ColumnType::Timestamp => Ok(ColumnData::Timestamp(vec![None; n])),
         ColumnType::Map => Ok(ColumnData::Map(vec![None; n])),
+        ColumnType::Duration => Ok(ColumnData::Duration(
+            (0..n)
+                .map(|r| parse_duration_cell(&raw.rows[r][src_idx], raw.nulls[r][src_idx]))
+                .collect(),
+        )),
+    }
+}
+
+/// A cell declared `duration`: the `{"months", "days", "seconds"}` object a
+/// duration renders as (each field optional). Anything else is null, as an
+/// unparseable int cell is.
+fn parse_duration_cell(text: &str, is_null: bool) -> Option<(i32, i32, i64)> {
+    if is_null {
+        return None;
+    }
+    let payload = serde_json::from_str::<serde_json::Value>(text).ok()?;
+    match crate::param::duration_from_json(&payload)? {
+        Value::Duration {
+            months,
+            days,
+            seconds,
+        } => Some((months, days, seconds)),
+        _ => None,
     }
 }
 

@@ -43,9 +43,20 @@ before upgrading.
   JSON input, not only on query parameters: `kglite_create_edges_batch` edge
   properties and ids, `from_records` records, recipe record parameters and
   Cypher `parse_json()`. They were stored as maps before. On these tolerant
-  paths a tag with a malformed payload stays an ordinary map. A
-  `from_records` column of durations is stored as their text, as any
-  loaded frame column of durations is.
+  paths a tag with a malformed payload stays an ordinary map.
+- Durations load as durations from every tabular input: a pandas
+  `timedelta64` column (numpy or pyarrow-backed) or a column of
+  `datetime.timedelta` in `add_nodes` / `add_connections` (which raised
+  "Unsupported column type" or stored text), `from_records` records and
+  `{"$duration"}` tags (stored as text), and blueprint frames, including
+  polars and pyarrow tables. A `datetime.timedelta` query parameter binds a
+  duration (it was refused). A duration holds whole seconds: a cell with a
+  sub-second part is stored as NULL and reported through `on_invalid`, and
+  such a parameter is refused. Blueprints gain a `"duration"` property type,
+  whose cells are `{"months", "days", "seconds"}` objects. In the Rust API,
+  `ColumnType` and `ColumnData` gain a `Duration` variant.
+- `from_records` loads a Python `date`, `datetime` or `timedelta` typed; it
+  refused them before. A `time` is still refused.
 
 ## [0.18.1] - 2026-09-26
 

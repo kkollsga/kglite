@@ -1603,14 +1603,13 @@ def from_records(
         ValueError: If the spec JSON is malformed, a required field is missing,
             or any key is not one this loader reads.
         TypeError: If a record value is of a type a JSON records spec cannot
-            carry, naming the value and its type. Python ``datetime`` / ``date``
-            / ``time`` are in that set — JSON has no temporal type, and writing
-            them as text would silently demote a temporal to a string property.
-            Pass a tagged object — ``{"$date": "2020-01-01"}`` or
-            ``{"$datetime": "2020-01-01T10:00:00+02:00"}``, which load as a
-            date / datetime — or load the column through
-            :meth:`KnowledgeGraph.add_nodes`, which types it. ``pd.NaT`` carries no value to demote and becomes
-            ``null``.
+            carry, naming the value and its type: a ``time`` (the graph has no
+            time-of-day type), or a ``timedelta`` with a sub-second part (a
+            duration holds whole seconds). A ``date``, ``datetime`` or
+            ``timedelta`` loads typed — it is sent as the tagged object
+            ``{"$date": …}`` / ``{"$datetime": …}`` / ``{"$duration": …}``,
+            which a spec given as JSON text can use directly. ``pd.NaT``
+            becomes ``null``.
     """
     ...
 
@@ -2073,7 +2072,13 @@ class KnowledgeGraph:
             column_types: Override column dtypes, e.g. ``{'col': 'string'}``.
                 Supported: ``'string'``, ``'integer'``, ``'float'``,
                 ``'datetime'``, ``'timestamp'``, ``'uniqueid'``, ``'list'``,
-                ``'map'``.
+                ``'map'``, ``'duration'``.
+                A ``timedelta64`` column (numpy or pyarrow-backed) or a column
+                of ``datetime.timedelta`` loads as ``'duration'`` values —
+                equal to ``duration({...})``, and read back as
+                ``{'months', 'days', 'seconds'}``. A duration holds whole
+                seconds: a cell with a sub-second part is stored as NULL and
+                reported through ``on_invalid``.
                 A column of Python lists/tuples is auto-detected as a native
                 ``'list'`` property (stored structurally, not stringified), so
                 ``'y' IN n.aliases`` tests membership and ``UNWIND n.aliases``

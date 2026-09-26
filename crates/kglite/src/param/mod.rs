@@ -22,6 +22,13 @@ pub use raw_json::validate_json_query_numbers_at;
 use crate::datatypes::values::Value;
 use std::collections::HashMap;
 
+/// A `{"months", "days", "seconds"}` object — the shape results render a
+/// duration as, and a `{"$duration": …}` tag's payload — as a
+/// `Value::Duration`; `None` for any other value.
+pub(crate) fn duration_from_json(payload: &serde_json::Value) -> Option<Value> {
+    tagged::decode_duration(payload)
+}
+
 /// Convert a JSON object into a `HashMap<String, Value>` (each value via
 /// [`json_value_to_kglite_value`]). The canonical builder for a Cypher
 /// **parameter map** from a JSON object — bindings parsing a params /
