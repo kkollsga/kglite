@@ -292,18 +292,18 @@ fn emit_groups(
     edge_defaults: &BTreeMap<String, Vec<(String, Value)>>,
     report: &mut BuildReport,
 ) -> Result<(), String> {
-    // The initial-load regime belongs to the connection *type*, decided once
-    // before the first group of it is emitted. Letting each call re-detect it
-    // made the first group of a type keep its parallel edges while every later
-    // group folded duplicate endpoint pairs onto one — so two body links that
-    // differ only in `section` became two edges or one depending on hash
-    // order, and the same vault built two different graphs.
-    let fresh: BTreeSet<&str> = groups
+    // The initial-load regime belongs to the (connection type, source label)
+    // pair (`maintain::source_owns_its_edges`), decided once before the first
+    // group of it is emitted. Letting each call re-detect it made the first
+    // group keep its parallel edges while every later group folded duplicate
+    // endpoint pairs onto one — so two body links that differ only in
+    // `section` became two edges or one depending on hash order, and the same
+    // vault built two different graphs.
+    let fresh: BTreeSet<(String, String)> = groups
         .keys()
-        .map(|(conn, _, _)| conn.as_str())
-        .filter(|conn| !graph.connection_type_metadata.contains_key(*conn))
+        .filter(|(conn, src_label, _)| maintain::source_owns_its_edges(graph, conn, src_label))
+        .map(|(conn, src_label, _)| (conn.clone(), src_label.clone()))
         .collect();
-    let fresh: BTreeSet<String> = fresh.into_iter().map(str::to_string).collect();
     let present: BTreeSet<String> = groups.keys().map(|(conn, _, _)| conn.clone()).collect();
     // A declaration the vault has no edges of (VAULT.md §7.2, §9): a typo in
     // an edge type is otherwise silent — the property simply never appears.
@@ -358,7 +358,8 @@ fn emit_groups(
         let mut columns = vec!["source_id".to_string(), "target_id".to_string()];
         columns.extend(prop_keys);
         let df = DataFrame::from_cypher_rows(columns, rows)?;
-        let initial = maintain::InitialLoad::Preset(fresh.contains(&conn));
+        let initial =
+            maintain::InitialLoad::Preset(fresh.contains(&(conn.clone(), src_label.clone())));
         maintain::add_connections_with_initial_load(
             graph,
             df,

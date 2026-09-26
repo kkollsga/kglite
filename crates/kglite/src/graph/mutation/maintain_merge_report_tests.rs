@@ -102,3 +102,28 @@ fn skip_neither_creates_nor_updates() {
         vec![vec![Value::Int64(10), Value::Int64(20)]]
     );
 }
+
+/// A relationship type registered without source types (an N-Triples load
+/// records names only, and so did files older than the field) says nothing
+/// about which source type wrote its edges, so a load still merges into them
+/// rather than duplicating every pair.
+#[test]
+fn a_type_with_no_recorded_source_types_still_merges() {
+    let mut graph = DirGraph::new();
+    docs(&mut graph);
+    connect(&mut graph, Value::Int64(1), Value::Int64(1), None);
+    graph
+        .connection_type_metadata_mut()
+        .get_mut("LINKS")
+        .unwrap()
+        .source_types
+        .clear();
+    assert!(!source_owns_its_edges(&graph, "LINKS", "Doc"));
+
+    let report = connect(&mut graph, Value::Int64(2), Value::Int64(2), None);
+    assert_eq!(
+        (report.connections_created, report.connections_updated),
+        (0, 1)
+    );
+    assert_eq!(graph.graph.edge_count(), 1);
+}

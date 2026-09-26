@@ -4,7 +4,9 @@
 use crate::datatypes::Value;
 use crate::graph::features::temporal::{merge_start_key, StartKey};
 use crate::graph::mutation::batch::{ConflictHandling, ConnectionBatchProcessor};
-use crate::graph::mutation::maintain::{preflight_interner_names, update_schema_node};
+use crate::graph::mutation::maintain::{
+    preflight_interner_names, source_owns_its_edges, update_schema_node,
+};
 use crate::graph::mutation::rel_constraint_gate::{gate_property_rows, RowFolding};
 use crate::graph::schema::{DirGraph, InternedKey, RESERVED_PROVENANCE_KEYS};
 use crate::graph::storage::lookups::CombinedTypeLookup;
@@ -139,11 +141,15 @@ pub fn add_edges_from_specs(
                 _ => report.skipped_missing_endpoint += 1,
             }
         }
-        // Same initial-load fast path and merge key as `add_connections`. The
-        // first group of an edge type registers it, so a later group of the
-        // same type merges — decided here, before anything is written.
-        let is_initial_load = !graph.connection_type_metadata.contains_key(&edge_type)
-            && !prepared.iter().any(|group| group.edge_type == edge_type);
+        // Same initial-load fast path and merge key as `add_connections`,
+        // under the same ownership rule (`maintain::source_owns_its_edges`).
+        // The first group of an (edge type, source type) registers that
+        // source, so a later group of the pair merges — decided here, before
+        // anything is written.
+        let is_initial_load = source_owns_its_edges(graph, &edge_type, &source_type)
+            && !prepared
+                .iter()
+                .any(|group| group.edge_type == edge_type && group.source_type == source_type);
         let start_key = merge_start_key(graph, &edge_type, Some(&source_type));
         prepared.push(PreparedSpecGroup {
             source_type,

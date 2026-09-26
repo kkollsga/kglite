@@ -103,8 +103,11 @@ fn load_one_junction_edge(
     // this input bounds peak RAM, so it must not decide which of its rows become
     // parallel edges. Per-type splitting rides on the same decision — every
     // group of every chunk gets this one value. See `maintain::InitialLoad`.
-    let initial_load =
-        maintain::InitialLoad::Preset(!graph.connection_type_metadata.contains_key(edge_type));
+    let initial_load = maintain::InitialLoad::Preset(maintain::source_owns_its_edges(
+        graph,
+        edge_type,
+        &spec.node_type,
+    ));
 
     // `validate_inputs` refuses a junction declaring neither `csv` nor
     // `file`, so this is the shape of that rule at the read site, not a

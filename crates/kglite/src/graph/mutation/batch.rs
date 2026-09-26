@@ -751,10 +751,11 @@ impl ConnectionBatchProcessor {
     /// Set how rows fold into relationships.
     ///
     /// `skip_existence_check` makes every row its own edge, parallel ones
-    /// included. It is set for a load's first touch of a connection type, and
-    /// held across every chunk of a chunked load (`maintain::InitialLoad`) — so
-    /// "on" does not imply the type has no stored edges, only that this load
-    /// owns all of them. Otherwise a row merges per `mode` into the stored or
+    /// included. It is set for a connection type's first load from a source
+    /// type (`maintain::source_owns_its_edges`), and held across every chunk
+    /// of a chunked load (`maintain::InitialLoad`) — so "on" does not imply
+    /// the type has no stored edges, only that this load owns every one that
+    /// leaves its source type. Otherwise a row merges per `mode` into the stored or
     /// earlier-queued edge with the same key: the endpoint pair, plus — when
     /// `start_key` names a declared temporal relationship type's `from`
     /// properties (`features::temporal::merge_start_key`) — the first of them
@@ -879,7 +880,7 @@ impl ConnectionBatchProcessor {
         //
         // `skip_existence_check` (initial-load fast path) skips both the build
         // and the per-edge lookup — the caller has declared this load owns
-        // every edge of the type, so nothing may fold, and within-chunk
+        // every edge of the type leaving its source type, so nothing may fold, and within-chunk
         // consolidation is the caller's job in that mode.
         let mut existing_lookup: HashMap<K::Key, EdgeIndex> = HashMap::new();
         if !skip_existence_check {

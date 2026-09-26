@@ -41,10 +41,13 @@
 //!   `conflict_handling`. This is the defensible choice over petgraph's
 //!   raw parallel-edge capability — a merge that silently doubled every
 //!   shared edge would be surprising. Parallel edges the *source* itself
-//!   carries between one pair follow `add_connections`' initial-load rule:
-//!   for a connection type the target does not hold yet, every one is
-//!   copied; for a type it holds, they fold onto one edge per key, as a
-//!   re-load would.
+//!   carries between one pair follow `add_connections`' ownership rule
+//!   (`maintain::source_owns_its_edges`): for a connection type the target
+//!   holds no edge of from that source node type, every one is copied; for
+//!   one it does, they fold onto one edge per key, as a re-load would.
+//! - **Constraints**: every edge group is judged against the target's
+//!   relationship constraints before the first node or edge is written, so a
+//!   refusal leaves the target as it was.
 //! - **Property schemas** merge through the same `upsert_node_type_metadata`
 //!   / `type_schemas` extension path `add_nodes` uses.
 //! - **Declarations**: the source's temporal declarations and spatial
@@ -64,11 +67,18 @@
 
 use crate::datatypes::{DataFrame, Value};
 use crate::graph::features::temporal;
+use crate::graph::features::temporal::merge_start_key;
 use crate::graph::introspection::reporting::{ConnectionOperationReport, NodeOperationReport};
-use crate::graph::mutation::maintain::{add_connections_with_initial_load, add_nodes, InitialLoad};
+use crate::graph::mutation::batch::ConflictHandling;
+use crate::graph::mutation::edge_props::resolve_edge_property_columns;
+use crate::graph::mutation::maintain::{
+    add_connections_with_initial_load, add_nodes, gate_node_rows, parse_conflict_mode,
+    source_owns_its_edges, InitialLoad,
+};
+use crate::graph::mutation::rel_constraint_gate::{ConnectionBatchGate, RowFolding};
 use crate::graph::schema::DirGraph;
 use crate::graph::storage::GraphRead;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Combined report for an `extend` merge.
 #[derive(Debug, Clone)]
@@ -169,9 +179,10 @@ fn snapshot_edge_properties(
 /// Merge `source` into `target` in place. See module docs for full
 /// semantics. `source` is read-only.
 ///
-/// Errors when either graph is not the in-memory `Default` backend, or
-/// when a routed `add_nodes` / `add_connections` call fails (the error
-/// string is propagated unchanged).
+/// Errors when either graph is not the in-memory `Default` backend, when a
+/// relationship constraint on the target refuses an edge group (before
+/// anything is written), or when a routed `add_nodes` / `add_connections`
+/// call fails (the error string is propagated unchanged).
 pub fn extend_graph(
     target: &mut DirGraph,
     source: &DirGraph,
@@ -191,7 +202,7 @@ pub fn extend_graph(
     //
     // We also remember, per source NodeIndex, its (node_type, id) so the
     // label-union pass can resolve the *target* node after merge.
-    let mut node_groups: HashMap<String, NodeGroup> = HashMap::new();
+    let mut node_groups: BTreeMap<String, NodeGroup> = BTreeMap::new();
     // (node_type, id, secondary_label_names) for the label-union pass.
     let mut label_carriers: Vec<(String, Value, Vec<String>)> = Vec::new();
 
@@ -262,7 +273,7 @@ pub fn extend_graph(
         .validate_names(incoming_names.iter().map(String::as_str))
         .map_err(|err| err.to_string())?;
 
-    // ---- Pass 2: route each node group through add_nodes ----
+    let edge_groups = collect_edge_groups(source);
     let mut report = ExtendReport {
         nodes_created: 0,
         nodes_updated: 0,
@@ -271,12 +282,186 @@ pub fn extend_graph(
         edges_updated: 0,
         edges_skipped: 0,
         node_types_merged: node_groups.len(),
-        connection_types_merged: 0,
+        connection_types_merged: edge_groups
+            .keys()
+            .map(|(conn_type, _, _)| conn_type)
+            .collect::<HashSet<_>>()
+            .len(),
         labels_unioned: 0,
         processing_time_ms: 0.0,
         errors: Vec::new(),
     };
 
+    // The temporal declarations go in before any row, so the edge merge — and
+    // the gate below, which must model it — key declared relationship types on
+    // their `from` bound. They are validated once the edges have landed, or
+    // withdrawn when the merge fails before then.
+    let adopted = temporal::adopt_declarations(target, temporal::list(source), &mut report.errors);
+    let merged = merge_rows(
+        target,
+        source,
+        node_groups,
+        label_carriers,
+        edge_groups,
+        &conflict_handling,
+        &mut report,
+    );
+    if let Err(e) = merged {
+        temporal::withdraw_adopted(target, adopted);
+        return Err(e);
+    }
+    temporal::settle_adopted(target, adopted, &mut report.errors);
+
+    report.processing_time_ms = start.elapsed().as_secs_f64() * 1000.0;
+    Ok(report)
+}
+
+/// `(connection_type, source node type, target node type)` — one
+/// `add_connections` call each.
+type EdgeGroupKey = (String, String, String);
+
+/// Collect the source's edges grouped by [`EdgeGroupKey`], in key order so a
+/// refusal names the same group on every run. The endpoint *node types* are
+/// resolved in the source graph so `add_connections` can id-index-match them
+/// in the target.
+fn collect_edge_groups(source: &DirGraph) -> BTreeMap<EdgeGroupKey, EdgeGroup> {
+    let mut edge_groups: BTreeMap<EdgeGroupKey, EdgeGroup> = BTreeMap::new();
+    for edge_idx in source.graph.edge_indices() {
+        let Some(edge) = source.graph.edge_weight(edge_idx) else {
+            continue;
+        };
+        let Some((src_idx, tgt_idx)) = source.graph.edge_endpoints(edge_idx) else {
+            continue;
+        };
+        let conn_type = edge.connection_type_str(&source.interner).to_string();
+        let (Some(src_node), Some(tgt_node)) = (
+            source.graph.node_view(src_idx),
+            source.graph.node_view(tgt_idx),
+        ) else {
+            continue;
+        };
+        let source_type = src_node.node_type_str(&source.interner).to_string();
+        let target_type = tgt_node.node_type_str(&source.interner).to_string();
+        let src_id = src_node.id().into_owned();
+        let tgt_id = tgt_node.id().into_owned();
+        let props = snapshot_edge_properties(source, edge.properties_cloned(&source.interner));
+
+        let group = edge_groups
+            .entry((conn_type, source_type.clone(), target_type.clone()))
+            .or_insert_with(|| EdgeGroup::new(source_type, target_type));
+        for k in props.keys() {
+            group.note_column(k);
+        }
+        group.rows.push((src_id, tgt_id, props));
+    }
+    edge_groups
+}
+
+/// Write the source's rows into the target: every node and edge group is
+/// judged against the target's constraints first, then the nodes, labels and
+/// edges land. A refusal therefore writes nothing — not the node groups, and
+/// not a group that sorts before the refused one.
+fn merge_rows(
+    target: &mut DirGraph,
+    source: &DirGraph,
+    node_groups: BTreeMap<String, NodeGroup>,
+    label_carriers: Vec<(String, Value, Vec<String>)>,
+    edge_groups: BTreeMap<EdgeGroupKey, EdgeGroup>,
+    conflict_handling: &Option<String>,
+    report: &mut ExtendReport,
+) -> Result<(), String> {
+    let conflict_mode = parse_conflict_mode(conflict_handling.as_deref())?;
+    // Whether the target has edges of a connection type from a group's source
+    // type (`maintain::source_owns_its_edges`) is decided before any group
+    // lands: the first group of a pair registers it, so re-detecting per group
+    // would keep the parallel edges of whichever group ran first and fold
+    // every later group's. Node writes register no connection type, so the
+    // gate and the merge see the same answer.
+    let owned: HashSet<(String, String)> = edge_groups
+        .iter()
+        .filter(|((conn_type, _, _), group)| {
+            source_owns_its_edges(target, conn_type, &group.source_type)
+        })
+        .map(|((conn_type, _, _), group)| (conn_type.clone(), group.source_type.clone()))
+        .collect();
+    gate_node_groups(target, &node_groups)?;
+    gate_edge_groups(target, &edge_groups, &owned, conflict_mode)?;
+    write_node_groups(target, source, node_groups, conflict_handling, report)?;
+    union_labels(target, label_carriers, report);
+    copy_spatial_configs(target, source);
+    merge_edge_groups(target, edge_groups, &owned, conflict_handling, report)
+}
+
+/// Judge every node group against the target's node constraints, as its
+/// `add_nodes` call will. Node types are independent, so each alone is exact.
+fn gate_node_groups(
+    target: &mut DirGraph,
+    node_groups: &BTreeMap<String, NodeGroup>,
+) -> Result<(), String> {
+    for (node_type, group) in node_groups {
+        gate_node_rows(target, node_type, "id", "title", || {
+            build_node_dataframe(group)
+        })?;
+    }
+    Ok(())
+}
+
+/// Judge every edge group against the target's relationship constraints,
+/// under the regime its `add_connections` call will run in, before anything
+/// is written. Rows are resolved against the target as it stands: an
+/// endpoint the node pass has yet to create cannot hold a stored edge, so its
+/// row is judged as a create, keyed by ids. Groups never share an endpoint
+/// pair (the key includes both node types), so judging each alone is exact.
+fn gate_edge_groups(
+    target: &mut DirGraph,
+    edge_groups: &BTreeMap<EdgeGroupKey, EdgeGroup>,
+    owned: &HashSet<(String, String)>,
+    conflict_mode: ConflictHandling,
+) -> Result<(), String> {
+    if !target.has_rel_constraints() {
+        return Ok(());
+    }
+    for ((conn_type, source_type, target_type), group) in edge_groups {
+        if !target.type_has_rel_constraints(conn_type) {
+            continue;
+        }
+        let df = build_edge_dataframe(group)?;
+        let mut matched = Vec::new();
+        let mut deferred = Vec::new();
+        for (row, (src_id, tgt_id, _)) in group.rows.iter().enumerate() {
+            match (
+                target.lookup_by_id_normalized(source_type, src_id),
+                target.lookup_by_id_normalized(target_type, tgt_id),
+            ) {
+                (Some(src), Some(tgt)) => matched.push((row, src, tgt)),
+                _ => deferred.push((row, src_id.clone(), tgt_id.clone())),
+            }
+        }
+        let is_owned = owned.contains(&(conn_type.clone(), source_type.clone()));
+        let start_key = merge_start_key(target, conn_type, Some(source_type));
+        ConnectionBatchGate {
+            connection_type: conn_type,
+            rows: &df,
+            property_columns: &resolve_edge_property_columns(&df, "src_id", "tgt_id", None, None),
+            matched: &matched,
+            deferred: &deferred,
+            conflict_mode,
+            folding: RowFolding::for_load(is_owned),
+            start_key: start_key.as_ref(),
+        }
+        .run(target)?;
+    }
+    Ok(())
+}
+
+/// Route each node group through `add_nodes`.
+fn write_node_groups(
+    target: &mut DirGraph,
+    source: &DirGraph,
+    node_groups: BTreeMap<String, NodeGroup>,
+    conflict_handling: &Option<String>,
+    report: &mut ExtendReport,
+) -> Result<(), String> {
     for (node_type, group) in node_groups {
         // Carry the source's id/title field aliases for a type the target
         // doesn't already have, so `MATCH (n {originalIdCol: ...})` keeps
@@ -311,11 +496,17 @@ pub fn extend_graph(
         report.nodes_skipped += r.nodes_skipped;
         report.errors.extend(r.errors);
     }
+    Ok(())
+}
 
-    // ---- Pass 3: union secondary labels onto target nodes ----
-    //
-    // Done after node merge so every carrier's target node exists. Uses
-    // the id-index (rebuilt by add_nodes) for O(1) lookups.
+/// Union the source's secondary labels onto the target nodes. Runs after the
+/// node pass so every carrier's target node exists; the id index (rebuilt by
+/// `add_nodes`) makes each lookup O(1).
+fn union_labels(
+    target: &mut DirGraph,
+    label_carriers: Vec<(String, Value, Vec<String>)>,
+    report: &mut ExtendReport,
+) {
     for (node_type, id, secondaries) in label_carriers {
         if let Some(target_idx) = target.lookup_by_id(&node_type, &id) {
             for label in secondaries {
@@ -326,96 +517,22 @@ pub fn extend_graph(
             }
         }
     }
-
-    // ---- Pass 4: collect + route source edges ----
-    //
-    // Group key: (connection_type, source_type, target_type). The source
-    // and target *node types* are resolved from the edge endpoints in the
-    // source graph so add_connections can id-index-match them in target.
-    let mut edge_groups: HashMap<(String, String, String), EdgeGroup> = HashMap::new();
-
-    for edge_idx in source.graph.edge_indices() {
-        let Some(edge) = source.graph.edge_weight(edge_idx) else {
-            continue;
-        };
-        let Some((src_idx, tgt_idx)) = source.graph.edge_endpoints(edge_idx) else {
-            continue;
-        };
-        let conn_type = edge.connection_type_str(&source.interner).to_string();
-        let (Some(src_node), Some(tgt_node)) = (
-            source.graph.node_view(src_idx),
-            source.graph.node_view(tgt_idx),
-        ) else {
-            continue;
-        };
-        let source_type = src_node.node_type_str(&source.interner).to_string();
-        let target_type = tgt_node.node_type_str(&source.interner).to_string();
-        let src_id = src_node.id().into_owned();
-        let tgt_id = tgt_node.id().into_owned();
-        let props = snapshot_edge_properties(source, edge.properties_cloned(&source.interner));
-
-        let group = edge_groups
-            .entry((conn_type.clone(), source_type.clone(), target_type.clone()))
-            .or_insert_with(|| EdgeGroup::new(source_type, target_type));
-        for k in props.keys() {
-            group.note_column(k);
-        }
-        group.rows.push((src_id, tgt_id, props));
-    }
-
-    report.connection_types_merged = edge_groups
-        .keys()
-        .map(|(ct, _, _)| ct.clone())
-        .collect::<std::collections::HashSet<_>>()
-        .len();
-
-    merge_edges_and_declarations(target, source, edge_groups, &conflict_handling, &mut report)?;
-
-    report.processing_time_ms = start.elapsed().as_secs_f64() * 1000.0;
-    Ok(report)
-}
-
-/// Copy the source's declarations, then merge its edges. The temporal
-/// declarations go in before the edges, so the merge keys declared
-/// relationship types on their `from` bound, and are validated once the edges
-/// have landed — or withdrawn when the merge fails before then.
-fn merge_edges_and_declarations(
-    target: &mut DirGraph,
-    source: &DirGraph,
-    edge_groups: HashMap<(String, String, String), EdgeGroup>,
-    conflict_handling: &Option<String>,
-    report: &mut ExtendReport,
-) -> Result<(), String> {
-    copy_spatial_configs(target, source);
-    let adopted = temporal::adopt_declarations(target, temporal::list(source), &mut report.errors);
-    if let Err(e) = merge_edge_groups(target, edge_groups, conflict_handling, report) {
-        temporal::withdraw_adopted(target, adopted);
-        return Err(e);
-    }
-    temporal::settle_adopted(target, adopted, &mut report.errors);
-    Ok(())
 }
 
 /// Route each source edge group through `add_connections`, tallying the
-/// outcome into `report`. Whether a connection type is new to the target is
-/// decided before any group lands: the first group of a type registers it, so
-/// re-detecting per group would keep the parallel edges of whichever group the
-/// map yields first and fold every later group's.
+/// outcome into `report`, under the ownership `owned` decided before any
+/// group landed (see [`merge_rows`]).
 fn merge_edge_groups(
     target: &mut DirGraph,
-    edge_groups: HashMap<(String, String, String), EdgeGroup>,
+    edge_groups: BTreeMap<EdgeGroupKey, EdgeGroup>,
+    owned: &HashSet<(String, String)>,
     conflict_handling: &Option<String>,
     report: &mut ExtendReport,
 ) -> Result<(), String> {
-    let new_types: HashSet<String> = edge_groups
-        .keys()
-        .map(|(conn_type, _, _)| conn_type)
-        .filter(|conn_type| !target.connection_type_metadata.contains_key(*conn_type))
-        .cloned()
-        .collect();
     for ((conn_type, _, _), group) in edge_groups {
         let df = build_edge_dataframe(&group)?;
-        let initial_load = InitialLoad::Preset(new_types.contains(&conn_type));
+        let initial_load =
+            InitialLoad::Preset(owned.contains(&(conn_type.clone(), group.source_type.clone())));
         let r: ConnectionOperationReport = add_connections_with_initial_load(
             target,
             df,

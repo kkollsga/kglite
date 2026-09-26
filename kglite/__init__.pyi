@@ -1422,10 +1422,12 @@ def from_blueprint(
       ``[T]: N edges (M input rows, K deduped)``.
 
       **What dedupe collapses.** The first source to load a connection
-      type writes one edge per input row, so rows sharing a source and
-      target but differing in their properties stay separate parallel
-      edges. A *later* source feeding that same edge type (a second node
-      spec's FK edge, or a second junction CSV) merges instead: a row
+      type from a given source node type writes one edge per input row,
+      so rows sharing a source and target but differing in their
+      properties stay separate parallel edges — and a spec with a
+      different node type feeding the same edge type owns its rows the
+      same way. A *later* source with the same source node type (an FK
+      edge and a junction on one node spec, say) merges instead: a row
       whose endpoints already carry an edge of the type writes its
       properties onto that edge rather than adding another, and those are
       the rows the ``K deduped`` count reports. Reading a CSV in chunks
@@ -2310,7 +2312,11 @@ class KnowledgeGraph:
             ``processing_time_ms``, ``has_errors``, and optionally ``errors``.
             A row whose ``(connection_type, source, target)`` already has a
             relationship merges into it per ``conflict_handling`` and counts
-            in ``connections_updated``, not ``connections_created``. On a
+            in ``connections_updated``, not ``connections_created``. The
+            first load of a relationship type from a ``source_type`` has
+            nothing to merge into, so it writes one relationship per row and
+            repeated pairs in its frame stay parallel; a later load from the
+            same ``source_type`` merges, rows within its frame included. On a
             relationship type with a declared validity interval the ``from``
             bound joins that key: a row starting a period no stored
             relationship between the pair starts is a new, parallel
@@ -2514,9 +2520,9 @@ class KnowledgeGraph:
           graphs are created once, not twice (mirrors ``add_relationships``'
           dedup so a merge never silently doubles shared edges). Parallel
           edges *other* carries between one pair are all copied when this
-          graph holds no relationship of that type yet, and fold onto one edge
-          per key when it does, as a re-load through ``add_relationships``
-          would.
+          graph holds no relationship of that type from the same source node
+          type, and fold onto one edge per key when it does, as a re-load
+          through ``add_relationships`` would.
         - **Declarations** travel with the data: *other*'s validity-interval
           declarations (see :meth:`set_temporal`) are in place before its
           edges merge and are validated once they have, and its spatial
@@ -2551,6 +2557,16 @@ class KnowledgeGraph:
             ``edges_skipped``, ``node_types_merged``, ``connection_types_merged``,
             ``labels_unioned``, ``processing_time_ms``, ``has_errors``, and
             optionally ``errors``.
+
+        Raises:
+            ConstraintViolationError: A constraint declared on this graph
+                refuses rows of *other*. Every node type and relationship
+                group is judged before the first write, so nothing is merged
+                and no declaration is copied.
+            ArgumentError: Either graph is mapped/disk-backed, a name in
+                *other* collides with this graph's interner, or
+                ``conflict_handling`` is not one of the modes above. Raised
+                before anything is written.
         """
         ...
 

@@ -275,3 +275,87 @@ fn edge_specs_legal_batch_matches_add_connections_counts() {
     assert_eq!(report.skipped_missing_endpoint, 0);
     assert_eq!(via_specs.graph.edge_count(), via_frame.graph.edge_count());
 }
+
+// ── shared relationship types ────────────────────────────────────────
+//
+// Ownership is per (edge type, source node type), as for `add_connections`:
+// a group whose source type the edge type has no edge from yet writes one
+// edge per spec; a group from a source type it has seen merges.
+
+fn licensee(source_type: &str, source_id: i64, from: i64) -> EdgeSpec {
+    EdgeSpec {
+        source_type: source_type.to_string(),
+        source_id: Value::Int64(source_id),
+        target_type: "Company".to_string(),
+        target_id: Value::Int64(1),
+        edge_type: "HAS_LICENSEE".to_string(),
+        properties: HashMap::from([("vf".to_string(), Value::Int64(from))]),
+    }
+}
+
+fn add_typed(graph: &mut DirGraph, node_type: &str, id: i64) {
+    let rows =
+        DataFrame::from_cypher_rows(vec!["id".to_string()], vec![vec![Value::Int64(id)]]).unwrap();
+    add_nodes(
+        graph,
+        rows,
+        node_type.to_string(),
+        "id".to_string(),
+        None,
+        None,
+    )
+    .unwrap();
+}
+
+#[test]
+fn edge_specs_a_second_source_type_owns_its_rows_in_every_storage_mode() {
+    for mode in [StorageMode::Memory, StorageMode::Mapped, StorageMode::Disk] {
+        let tmp = TempDir::new().unwrap();
+        let path = (mode == StorageMode::Disk).then_some(tmp.path());
+        let mut graph = new_dir_graph_in_mode(mode, path).unwrap();
+        add_typed(&mut graph, "Company", 1);
+        add_typed(&mut graph, "Field", 10);
+        add_typed(&mut graph, "Licence", 50);
+
+        // The type's first appearance, from two source types in one call:
+        // each group owns its repeated pair.
+        let first = add_edges_from_specs(
+            &mut graph,
+            vec![
+                licensee("Field", 10, 2001),
+                licensee("Field", 10, 2005),
+                licensee("Licence", 50, 2001),
+                licensee("Licence", 50, 2004),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            (first.connections_created, first.connections_updated),
+            (4, 0),
+            "mode={mode:?}"
+        );
+
+        // A later call from a source type the edge type has not seen owns its
+        // rows too, though the type is registered.
+        add_typed(&mut graph, "Block", 70);
+        let block = add_edges_from_specs(
+            &mut graph,
+            vec![licensee("Block", 70, 2001), licensee("Block", 70, 2002)],
+        )
+        .unwrap();
+        assert_eq!(
+            (block.connections_created, block.connections_updated),
+            (2, 0),
+            "mode={mode:?}"
+        );
+
+        // A re-load from a source type it has seen merges.
+        let reload = add_edges_from_specs(&mut graph, vec![licensee("Licence", 50, 2007)]).unwrap();
+        assert_eq!(
+            (reload.connections_created, reload.connections_updated),
+            (0, 1),
+            "mode={mode:?}"
+        );
+        assert_eq!(graph.graph.edge_count(), 6, "mode={mode:?}");
+    }
+}

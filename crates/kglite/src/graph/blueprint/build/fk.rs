@@ -579,8 +579,8 @@ fn load_streamed_fk_edges(
     let initial_load: HashMap<String, maintain::InitialLoad> = fk_edges
         .keys()
         .map(|edge_type| {
-            let unseen = !graph.connection_type_metadata.contains_key(edge_type);
-            (edge_type.clone(), maintain::InitialLoad::Preset(unseen))
+            let owned = maintain::source_owns_its_edges(graph, edge_type, &spec.node_type);
+            (edge_type.clone(), maintain::InitialLoad::Preset(owned))
         })
         .collect();
     let source = registry

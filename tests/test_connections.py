@@ -568,3 +568,91 @@ class TestOnInvalidConnections:
             report = graph.add_connections(edges, "K", "P", "s", "P", "t", on_invalid=policy)
             assert report["connections_created"] == 1
         assert [str(w.message) for w in recwarn] == []
+
+
+class TestSharedRelationshipTypeOwnership:
+    """One relationship type loaded from several source node types. A load owns
+    its rows — one relationship per row, repeated pairs included — when the
+    relationship type has no relationship from its source node type yet; a
+    load from a source node type the type already has relationships from
+    merges into them."""
+
+    @staticmethod
+    def _graph():
+        g = KnowledgeGraph()
+        g.add_nodes(pd.DataFrame({"id": [1], "name": ["Acme"]}), "Company", "id", "name")
+        g.add_nodes(pd.DataFrame({"id": [10], "name": ["Gullfaks"]}), "Field", "id", "name")
+        g.add_nodes(pd.DataFrame({"id": [50], "name": ["PL050"]}), "Licence", "id", "name")
+        return g
+
+    @staticmethod
+    def _load(g, source_type, source_id, periods):
+        frame = pd.DataFrame(
+            {
+                "src": [source_id] * len(periods),
+                "tgt": [1] * len(periods),
+                "vf": [vf for vf, _ in periods],
+                "vt": [vt for _, vt in periods],
+            }
+        )
+        return g.add_relationships(frame, "HAS_LICENSEE", source_type, "src", "Company", "tgt")
+
+    @staticmethod
+    def _periods(g, source_type):
+        rows = g.cypher(f"MATCH (:{source_type})-[r:HAS_LICENSEE]->(:Company) RETURN r.vf AS vf, r.vt AS vt").to_list()
+        return sorted(((r["vf"], r["vt"]) for r in rows), key=lambda p: (p[0], p[1] or ""))
+
+    FIELD = [("2001-01-01", "2004-12-31"), ("2005-01-01", None)]
+    LICENCE = [("2001-01-01", "2003-12-31"), ("2004-01-01", "2006-12-31"), ("2007-01-01", None)]
+
+    def test_a_second_source_type_keeps_every_row(self):
+        g = self._graph()
+        assert self._load(g, "Field", 10, self.FIELD)["connections_created"] == 2
+        report = self._load(g, "Licence", 50, self.LICENCE)
+        # Licence has no HAS_LICENSEE relationship yet, so its load owns its
+        # rows: three repeated (50, 1) pairs are three relationships, not one
+        # carrying a merged ('2007-01-01', '2006-12-31') interval.
+        assert (report["connections_created"], report["connections_updated"]) == (3, 0)
+        assert self._periods(g, "Licence") == self.LICENCE
+        assert self._periods(g, "Field") == self.FIELD
+
+    def test_a_same_source_reload_merges(self):
+        g = self._graph()
+        self._load(g, "Field", 10, self.FIELD)
+        report = self._load(g, "Field", 10, [("2005-01-01", "2009-12-31")])
+        assert (report["connections_created"], report["connections_updated"]) == (0, 1)
+        assert len(self._periods(g, "Field")) == 2
+
+    def test_a_same_source_reload_on_a_declared_type_keys_on_from(self):
+        g = self._graph()
+        self._load(g, "Field", 10, self.FIELD)
+        self._load(g, "Licence", 50, self.LICENCE)
+        g.cypher(
+            "CALL db.temporal.declare({relationship: 'HAS_LICENSEE', source_type: 'Field', "
+            "from: 'vf', to: 'vt', convention: 'closed'})"
+        )
+        report = self._load(g, "Field", 10, [("2005-01-01", "2009-12-31"), ("2010-01-01", None)])
+        # The 2005 row closes the open period it starts; the 2010 row starts
+        # a period nothing stored starts, so it is a new relationship.
+        assert (report["connections_created"], report["connections_updated"]) == (1, 1)
+        assert self._periods(g, "Field") == [
+            ("2001-01-01", "2004-12-31"),
+            ("2005-01-01", "2009-12-31"),
+            ("2010-01-01", None),
+        ]
+        assert self._periods(g, "Licence") == self.LICENCE
+
+    def test_a_replace_from_a_second_source_type_keeps_every_row(self):
+        g = self._graph()
+        self._load(g, "Field", 10, self.FIELD)
+        frame = pd.DataFrame(
+            {
+                "src": [50] * 3,
+                "tgt": [1] * 3,
+                "vf": [vf for vf, _ in self.LICENCE],
+                "vt": [vt for _, vt in self.LICENCE],
+            }
+        )
+        g.replace_relationships(frame, "HAS_LICENSEE", "Licence", "src", "Company", "tgt")
+        assert self._periods(g, "Licence") == self.LICENCE
+        assert self._periods(g, "Field") == self.FIELD

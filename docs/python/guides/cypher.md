@@ -509,9 +509,9 @@ surviving cohort.
 
 ## Edge provenance via reified nodes
 
-kglite enforces at-most-one edge per `(source, target, edge_type)`.
-A second `add_relationships` (or `MERGE`) for the same triple updates
-the existing edge's properties rather than creating a parallel one.
+A second `add_relationships` (or `MERGE`) for a `(source, target,
+edge_type)` triple that already has an edge updates that edge's
+properties rather than creating a parallel one.
 That keeps the storage layer dense — but if you need to track *who
 applied the edge, when, and why*, you need provenance per
 application, not one shared property bag.

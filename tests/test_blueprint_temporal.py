@@ -242,6 +242,98 @@ class TestTwoSourceRelationship:
         at_1995 = g.date("1995-01-01")
         assert _titles(at_1995.select("Licence").traverse("HAS_LICENSEE")) == ["Statoil"]
 
+    def test_repeated_pairs_from_both_sources_keep_every_period(self, tmp_path):
+        """Each source repeats one endpoint pair. Every source node type's
+        first load of the relationship type owns its rows, so the licence's
+        three periods survive beside the field's two — none folds onto
+        another, and no merged, inverted interval exists to refuse."""
+        path = self._path(tmp_path)
+        pd.DataFrame(
+            {"fid": [10, 10], "cid": [1, 1], "vf": ["2001-01-01", "2005-01-01"], "vt": ["2004-12-31", None]}
+        ).to_csv(tmp_path / "field_lic.csv", index=False)
+        pd.DataFrame(
+            {
+                "lid": [50, 50, 50],
+                "cid": [1, 1, 1],
+                "vf": ["2001-01-01", "2004-01-01", "2007-01-01"],
+                "vt": ["2003-12-31", "2006-12-31", None],
+            }
+        ).to_csv(tmp_path / "lic_lic.csv", index=False)
+        g, _ = _build(path)
+        assert _declarations(g) == [
+            ("relationship", "HAS_LICENSEE", "Field", "vf", "vt", "closed"),
+            ("relationship", "HAS_LICENSEE", "Licence", "lic_from", "lic_to", "closed"),
+        ]
+
+        def periods(source_type, lo, hi):
+            rows = g.cypher(
+                f"MATCH (:{source_type})-[r:HAS_LICENSEE]->(:Company) RETURN r.{lo} AS vf, r.{hi} AS vt"
+            ).to_list()
+            found = [(str(r["vf"]), None if r["vt"] is None else str(r["vt"])) for r in rows]
+            return sorted(found, key=lambda p: (p[0], p[1] or ""))
+
+        assert periods("Field", "vf", "vt") == [("2001-01-01", "2004-12-31"), ("2005-01-01", None)]
+        assert periods("Licence", "lic_from", "lic_to") == [
+            ("2001-01-01", "2003-12-31"),
+            ("2004-01-01", "2006-12-31"),
+            ("2007-01-01", None),
+        ]
+        assert _titles(g.date("2005-06-30").select("Licence").traverse("HAS_LICENSEE")) == ["Statoil"]
+
+
+# ── A filtered subset of a declared type ─────────────────────────────────
+
+
+def test_a_filter_into_type_inherits_the_temporal_key_with_its_properties(tmp_path):
+    """``filter`` with ``into`` copies the source spec — properties,
+    connections and their ``temporal`` keys alike — so the subset declares the
+    same intervals, under its own name and as its own source type."""
+    tables = {
+        "company.csv": pd.DataFrame({"cid": [10], "name": ["Acme"]}),
+        "status.csv": pd.DataFrame(
+            {
+                "sid": [1, 2, 3],
+                "status": ["Approved", "Producing", "Producing"],
+                "sf": ["1980-01-01", "1987-01-01", "1990-01-01"],
+                "st": ["1986-12-31", None, "1995-12-31"],
+                "cid": [10, 10, 10],
+            }
+        ),
+    }
+    bp = {
+        "nodes": {
+            "Company": {"csv": "company.csv", "pk": "cid", "title": "name"},
+            "Status": {
+                "csv": "status.csv",
+                "pk": "sid",
+                "title": "status",
+                "properties": {"sf": "validFrom", "st": "validTo"},
+                "temporal": {"from": "sf", "to": "st", "convention": "closed"},
+                "connections": {
+                    "fk_edges": {
+                        "OF_CO": {
+                            "target": "Company",
+                            "fk": "cid",
+                            "properties": ["sf", "st"],
+                            "property_types": {"sf": "validFrom", "st": "validTo"},
+                            "temporal": {"from": "sf", "to": "st", "convention": "closed"},
+                        }
+                    }
+                },
+            },
+        },
+        "compute": [{"op": "filter", "from": "Status", "into": "Producing", "where": "status == 'Producing'"}],
+    }
+    g, _ = _build(_write(tmp_path, tables, bp))
+    assert _declarations(g) == [
+        ("node", "Producing", None, "sf", "st", "closed"),
+        ("node", "Status", None, "sf", "st", "closed"),
+        ("relationship", "OF_CO", "Producing", "sf", "st", "closed"),
+        ("relationship", "OF_CO", "Status", "sf", "st", "closed"),
+    ]
+    counts = {day: len(g.date(day).select("Producing").collect()) for day in ("1985-06-30", "1992-06-30", "1997-06-30")}
+    assert counts == {"1985-06-30": 0, "1992-06-30": 2, "1997-06-30": 1}
+
 
 # ── Rename, conventions, persistence, refusals ───────────────────────────
 

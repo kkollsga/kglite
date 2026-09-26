@@ -505,9 +505,73 @@ def test_extend_copies_every_parallel_edge_of_a_type_new_to_the_target():
     assert _r_per_source(target) == [("a", 2), ("c", 2)]
 
 
-def test_extend_merges_source_parallels_into_a_type_the_target_holds():
+def test_extend_merges_source_parallels_only_from_a_source_type_the_target_holds():
+    """The target holds R from A, not from C: the A→B parallels fold as a
+    re-load from A would, while the C→D group is C's first R load and keeps
+    both of its edges."""
     target = KnowledgeGraph()
     target.cypher("CREATE (:A {id: 9, title: 'z'})-[:R]->(:B {id: 8, title: 'y'})")
     report = target.extend(_parallel_source())
-    assert _r_per_source(target) == [("a", 1), ("c", 1), ("z", 1)]
-    assert (report["edges_created"], report["edges_updated"]) == (2, 2)
+    assert _r_per_source(target) == [("a", 1), ("c", 2), ("z", 1)]
+    assert (report["edges_created"], report["edges_updated"]) == (3, 1)
+
+
+# ── a refused edge group writes nothing ──────────────────────────────
+
+
+def _two_type_source():
+    """A declared ``AAA`` relationship that any target admits, and an ``R``
+    one missing ``x`` — the violating type sorts last, so every other group
+    would already have been written if the refusal came per group."""
+    source = KnowledgeGraph()
+    source.cypher(
+        "CREATE (a:A {id: 1, title: 'a'}), (b:B {id: 2, title: 'b'}), "
+        "(a)-[:AAA {vf: '2000-01-01', vt: '2001-01-01'}]->(b), (a)-[:R {y: 1}]->(b)"
+    )
+    source.cypher("CALL db.temporal.declare({relationship: 'AAA', from: 'vf', to: 'vt', convention: 'closed'})")
+    return source
+
+
+def _constrained(g):
+    g.cypher("CREATE CONSTRAINT FOR ()-[r:R]-() REQUIRE r.x IS NOT NULL")
+    return g
+
+
+def test_a_refused_edge_group_leaves_the_target_untouched():
+    """Red proof: node groups and earlier edge groups were written before a
+    later group's gate refused, so the refusal left A, B and the AAA edge in
+    the target."""
+    target = _constrained(KnowledgeGraph())
+    with pytest.raises(kglite.ConstraintViolationError, match="NOT NULL constraint on R.x"):
+        target.extend(_two_type_source())
+    assert _all(target, "MATCH (n) RETURN count(n) AS n") == [{"n": 0}]
+    assert _all(target, "MATCH ()-[r]->() RETURN count(r) AS n") == [{"n": 0}]
+    assert _all(target, _DECLARATIONS) == []
+
+
+def test_a_refused_edge_group_reaches_no_durable_commit(tmp_path):
+    """The refusal skips the commit; with the old per-group gate the rows it
+    had already written rode along with the *next* commit into the log."""
+    path = str(tmp_path / "g.kgl")
+    target = _constrained(kglite.open(path, durable=True))
+    with pytest.raises(kglite.ConstraintViolationError):
+        target.extend(_two_type_source())
+    target.cypher("CREATE (:Marker {id: 1})")
+    del target
+    reopened = kglite.open(path, durable=True)
+    rows = _all(reopened, "MATCH (n) RETURN labels(n)[0] AS label ORDER BY label")
+    assert rows == [{"label": "Marker"}]
+    assert _all(reopened, "MATCH ()-[r]->() RETURN count(r) AS n") == [{"n": 0}]
+    assert _all(reopened, _DECLARATIONS) == []
+
+
+def test_a_refused_node_group_leaves_the_target_untouched():
+    """Red proof: node types were written one by one, so a node constraint
+    refusing ``B`` left the ``A`` nodes written before it."""
+    source = KnowledgeGraph()
+    source.cypher("CREATE (:A {id: 1, title: 'a'}), (:B {id: 2, title: 'b'})")
+    target = KnowledgeGraph()
+    target.cypher("CREATE CONSTRAINT FOR (n:B) REQUIRE n.x IS NOT NULL")
+    with pytest.raises(kglite.ConstraintViolationError, match="B.x"):
+        target.extend(source)
+    assert _all(target, "MATCH (n) RETURN count(n) AS n") == [{"n": 0}]

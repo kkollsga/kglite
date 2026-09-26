@@ -140,6 +140,18 @@ before upgrading.
   with several unkeyed declarations keys each row on the first declared
   `from` property it carries. Relationship constraints judge rows by the same
   key. Undeclared types are unchanged.
+- One relationship type loaded from several source node types: each source
+  node type's first load owns its rows. `add_relationships`,
+  `replace_relationships`, `extend()`, the C ABI's edge batch and blueprint
+  FK and junction edges write one relationship per row
+  — repeated endpoint pairs included — when the relationship type has no
+  relationship from that load's source node type yet; a later load from a
+  source node type it already has relationships from merges as before. A
+  second node type's rows used to fold onto one relationship per pair once
+  the type existed, and under `'update'` the survivor could carry an interval
+  no row held (a later row's start with an earlier row's end). Graphs built
+  before this change keep their folded relationships: rebuild from the
+  blueprint (or re-run the loads) to recover the rows.
 
 ### Fixed
 
@@ -188,6 +200,11 @@ before upgrading.
 - `extend()` refused by a relationship constraint raises
   `ConstraintViolationError`, as `add_relationships` does; it raised
   `ArgumentError`.
+- `extend()` judges every node type and relationship group against this
+  graph's constraints before writing any of them. A refusal used to leave the
+  node types and relationship groups merged before the refused one in the
+  graph — and, on a durable graph, outside the write-ahead log until the next
+  committed write, which then persisted them.
 - `create_relationships(properties=...)` copies properties from the nodes of
   the intermediate traversal levels again (the `B` in
   `select('A').traverse(...).traverse(...).create_relationships(..., properties={'B': [...]})`),
@@ -204,7 +221,8 @@ before upgrading.
   frame by position. A frame whose index was not `0..n` (a filtered or sliced
   DataFrame) raised `KeyError`.
 - `extend()` copies every parallel relationship the other graph holds between
-  one pair for a relationship type this graph does not have yet. When that
+  one pair for a relationship type this graph has none of from that source
+  node type. When that
   type connected more than one pair of node types, only the first pair merged
   kept its parallel relationships; which pair that was changed from run to
   run.

@@ -7,7 +7,7 @@ use crate::graph::schema::InternedKey;
 use crate::graph::storage::GraphRead;
 use crate::okf::build::build;
 use crate::okf::build::tests_support::{
-    count_label, edges_of, provisional_count, vault_build, vault_build_with, write,
+    count_label, edges_of, labels_by_id, provisional_count, vault_build, vault_build_with, write,
 };
 use crate::okf::model::{BuildOptions, TAG_LABEL};
 use std::collections::BTreeSet;
@@ -104,6 +104,42 @@ fn vault_parallel_link_edges_survive_an_earlier_group_of_the_same_type() {
             .count(),
         3,
         "and the graph holds three edges"
+    );
+}
+
+/// Two source labels writing one connection type, each with two links to the
+/// same note: every (type, source label) group owns its rows, so the second
+/// label's parallel links are not folded onto one edge.
+#[test]
+fn vault_a_second_source_label_keeps_its_parallel_links() {
+    let dir = tempdir().unwrap();
+    write(dir.path(), "b.md", "leaf");
+    write(
+        dir.path(),
+        "a.md",
+        "---\ntype: Project\n---\n[[b]]\n\n## Sec\n\n[[b]] again",
+    );
+    write(
+        dir.path(),
+        "c.md",
+        "---\ntype: Person\n---\n[[b]]\n\n## Other\n\n[[b]] again",
+    );
+    let out = vault_build(dir.path());
+    let labels = labels_by_id(&out.graph);
+    assert_eq!(
+        (labels["a"].as_str(), labels["c"].as_str()),
+        ("Project", "Person"),
+        "the two linking notes carry different labels: {labels:?}"
+    );
+    let links: Vec<String> = edges_of(&out.graph)
+        .into_iter()
+        .filter(|(_, c, _, _)| c == "LINKS_TO")
+        .map(|(s, _, _, _)| s)
+        .collect();
+    assert_eq!(
+        links,
+        vec!["a", "a", "c", "c"],
+        "one edge per link, per label"
     );
 }
 

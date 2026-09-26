@@ -171,6 +171,52 @@ impl ConstraintColumns {
         Ok(())
     }
 }
+/// Judge the frame `frame` builds as [`add_nodes`] would, writing nothing —
+/// for a caller that merges several node types and must refuse before the
+/// first of them lands (`extend_graph`). The same gate `add_nodes` runs, on the
+/// same pre-call state, so a frame this admits `add_nodes` admits too. The
+/// frame is built only for a type something gates.
+pub(super) fn gate_node_rows(
+    graph: &mut DirGraph,
+    node_type: &str,
+    unique_id_field: &str,
+    title_field: &str,
+    frame: impl FnOnce() -> Result<DataFrame, String>,
+) -> Result<(), String> {
+    let pk_enforced = graph.primary_key_for(node_type).is_some();
+    let gated = pk_enforced
+        || graph.has_unique_constraints()
+        || graph.has_required_fields(node_type)
+        || graph.type_has_property_type_constraints(node_type)
+        || (!graph.property_shapes.is_empty() && !graph.shapes_for_type(node_type).is_empty());
+    if !gated {
+        return Ok(());
+    }
+    let mut df_data = frame()?;
+    let constraint_columns = ConstraintColumns::for_batch(graph, node_type, &df_data);
+    graph.build_id_index(node_type);
+    let id_idx = df_data
+        .get_column_index(unique_id_field)
+        .ok_or_else(|| format!("Column '{}' not found", unique_id_field))?;
+    let title_idx = df_data
+        .get_column_index(title_field)
+        .ok_or_else(|| format!("Column '{}' not found", title_field))?;
+    let derived_titles =
+        snapshot_node_titles(graph, &mut df_data, unique_id_field, title_field, title_idx);
+    gate_batch(
+        graph,
+        node_type,
+        &df_data,
+        constraint_columns.as_ref(),
+        pk_enforced,
+        id_idx,
+        title_idx,
+        unique_id_field,
+        title_field,
+        derived_titles.as_deref(),
+    )
+}
+
 /// Refuse the whole batch before anything is written, by checking every row's
 /// declared constraints (and, for a primary-key type, within-batch id repeats)
 /// in one pass ahead of the build loop.
@@ -492,7 +538,7 @@ impl RowBuilder<'_> {
 
 /// Parse the user-facing `conflict_handling` option shared by `add_nodes`
 /// and `add_connections`; `None` and `"update"` are the default mode.
-fn parse_conflict_mode(option: Option<&str>) -> Result<ConflictHandling, String> {
+pub(super) fn parse_conflict_mode(option: Option<&str>) -> Result<ConflictHandling, String> {
     match option {
         Some("replace") => Ok(ConflictHandling::Replace),
         Some("skip") => Ok(ConflictHandling::Skip),
@@ -955,13 +1001,14 @@ fn batch_report(
 /// no existence lookup, so two rows sharing endpoints stay two parallel edges
 /// instead of folding onto one.
 ///
-/// `Detect` reads the connection-type metadata, which is the right answer for
+/// `Detect` applies [`source_owns_its_edges`], which is the right answer for
 /// a caller that hands over its whole frame in one call. A caller that streams
 /// one logical load in chunks must instead decide once, before its first
-/// chunk, and pass the answer here: the first chunk *registers* the connection
-/// type, so re-detecting flips every later chunk into merging and folds that
-/// load's parallel edges onto the edges the first chunk created — which makes
-/// the chunk size change the graph rather than only the peak RAM.
+/// chunk, and pass the answer here: the first chunk *registers* its source
+/// type on the connection type, so re-detecting flips every later chunk into
+/// merging and folds that load's parallel edges onto the edges the first chunk
+/// created — which makes the chunk size change the graph rather than only the
+/// peak RAM.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum InitialLoad {
     Detect,
@@ -970,13 +1017,37 @@ pub(crate) enum InitialLoad {
 
 impl InitialLoad {
     /// Whether this call may skip the edge-existence check, i.e. whether it
-    /// owns every edge of `connection_type`.
-    fn owns_every_edge(self, graph: &DirGraph, connection_type: &str) -> bool {
+    /// owns every `connection_type` edge leaving a `source_type` node.
+    fn owns_every_edge(self, graph: &DirGraph, connection_type: &str, source_type: &str) -> bool {
         match self {
-            InitialLoad::Detect => !graph.connection_type_metadata.contains_key(connection_type),
+            InitialLoad::Detect => source_owns_its_edges(graph, connection_type, source_type),
             InitialLoad::Preset(initial) => initial,
         }
     }
+}
+
+/// The shared-relationship-type ownership contract: a load owns its edges —
+/// one edge per row, no merge lookup — iff `connection_type` has no edge from
+/// a `source_type` node yet. A load from a source type the relationship type
+/// has already seen merges into those edges.
+///
+/// Exact, not a heuristic: every edge a load writes leaves a node of its own
+/// (primary) source type, so another source type's edges can never share a
+/// pair with it, and skipping the lookup loses no merge. A type registered
+/// with no recorded source types (an N-Triples load registers names only, and
+/// so did files that predate the field) says nothing about who wrote its
+/// edges, so it merges as it always did.
+pub(crate) fn source_owns_its_edges(
+    graph: &DirGraph,
+    connection_type: &str,
+    source_type: &str,
+) -> bool {
+    graph
+        .connection_type_metadata
+        .get(connection_type)
+        .is_none_or(|info| {
+            !info.source_types.is_empty() && !info.source_types.contains(source_type)
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1083,7 +1154,7 @@ pub(crate) fn add_connections_with_initial_load(
         null_source_rows: skipped_null_source,
         null_target_rows: skipped_null_target,
     } = resolved;
-    let is_initial_load = initial_load.owns_every_edge(graph, &connection_type);
+    let is_initial_load = initial_load.owns_every_edge(graph, &connection_type, &source_type);
     let start_key = merge_start_key(graph, &connection_type, Some(&source_type));
     let mut batch = ConnectionBatchProcessor::new(df_data.row_count());
     batch.configure(conflict_mode, is_initial_load, start_key.clone());
@@ -1769,7 +1840,7 @@ pub fn replace_connections(
         deferred: &resolved.deferred,
         conflict_mode,
         // Why this regime and not the loader's: `RowFolding::for_replace`.
-        folding: RowFolding::for_replace(graph, &connection_type),
+        folding: RowFolding::for_replace(graph, &connection_type, &source_type),
         start_key: merge_start_key(graph, &connection_type, Some(&source_type)).as_ref(),
     }
     .run(graph)?;

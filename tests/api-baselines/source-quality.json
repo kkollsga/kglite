@@ -295,13 +295,6 @@
       "nesting": 10
     },
     {
-      "path": "crates/kglite/src/graph/mutation/extend.rs",
-      "qualified_name": "crate::extend_graph",
-      "lines": 202,
-      "branches": 25,
-      "nesting": 4
-    },
-    {
       "path": "crates/kglite/src/graph/mutation/maintain.rs",
       "qualified_name": "crate::add_connections_with_initial_load",
       "lines": 225,

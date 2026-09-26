@@ -1844,9 +1844,9 @@ class TestFkEdgeProperties:
 
     def _two_source_bp(self, tmp_path, with_properties):
         """Two node types writing the same relationship type, each with repeated
-        (source, target) rows. Only the *first* add_connections call per
-        relationship keeps parallel edges, so anything that reorders or resizes
-        the FK frames shows up as a different count here."""
+        (source, target) rows. Each source node type's first load of the
+        relationship keeps parallel edges, so anything that reorders, resizes
+        or merges the FK frames shows up as a different count here."""
         _write_csv(tmp_path / "companies.csv", pd.DataFrame({"company_id": [10], "name": ["Acme"]}))
         for csv_name, id_col in (("employees.csv", "employee_id"), ("contractors.csv", "contractor_id")):
             _write_csv(
@@ -1891,7 +1891,10 @@ class TestFkEdgeProperties:
             return graph.cypher("MATCH ()-[r:WORKS_AT]->(:Company) RETURN count(r) AS n").to_list()[0]["n"]
 
         plain = count(False)
-        assert plain == 4, f"expected 3 parallel edges from the first spec + 1 deduped, got {plain}"
+        assert plain == 6, (
+            "each source node type owns its first load of a relationship type: "
+            f"expected 3 parallel edges from Employee + 3 from Contractor, got {plain}"
+        )
         assert count(True) == plain
 
         graph = from_blueprint(self._two_source_bp(tmp_path, True), save=False)
@@ -3373,12 +3376,12 @@ class TestJunctionDedupeRegime:
     """The 0.16.22 dedupe regime, from the other side.
 
     `load_one_junction_edge` decides once per junction CSV whether it *owns*
-    the edge type (`InitialLoad::Preset(!metadata.contains_key(edge_type))`)
-    and reuses that decision for every chunk. `TestJunctionChunkInvariance`
-    covers the owning source — its duplicate endpoint pairs stay parallel
-    edges at any chunk size. This class covers the half with no test: a
-    *second* source into the same edge type does not own it, so its duplicate
-    endpoint pairs merge into one edge instead.
+    its rows (`maintain::source_owns_its_edges`: the edge type has no edge
+    from the spec's node type yet) and reuses that decision for every chunk.
+    `TestJunctionChunkInvariance` covers one owning source. This class covers
+    a second source node type into the same edge type, which owns its rows
+    too, and a second load from the *same* source node type, which does not:
+    its duplicate endpoint pairs merge into one edge instead.
     """
 
     def _bp(self, tmp_path):
@@ -3436,23 +3439,128 @@ class TestJunctionDedupeRegime:
             for r in graph.cypher("MATCH (a)-[r:LINK]->(b) RETURN head(labels(a)) AS src, r.seq AS seq").to_list()
         )
 
-    def test_the_first_source_keeps_parallel_edges_and_the_second_merges(self, tmp_path, monkeypatch):
+    def _same_source_bp(self, tmp_path):
+        """Person loads LINK twice: an FK edge first (one edge per person),
+        then the junction, whose rows all start from a Person too."""
+        bp_path = self._bp(tmp_path)
+        bp = json.loads(bp_path.read_text())
+        _write_csv(
+            tmp_path / "persons.csv",
+            pd.DataFrame({"person_id": [1, 2, 3], "name": ["A", "B", "C"], "buddy": [2, 3, 1]}),
+        )
+        bp["nodes"]["Person"]["connections"]["fk_edges"] = {"LINK": {"target": "Person", "fk": "buddy"}}
+        del bp["nodes"]["Company"]["connections"]
+        _write_blueprint(bp_path, bp)
+        return bp_path
+
+    def test_each_source_node_type_keeps_parallel_edges(self, tmp_path, monkeypatch):
         edges = self._edges(self._bp(tmp_path), monkeypatch, 1000)
         person = [seq for src, seq in edges if src == "Person"]
         company = [seq for src, seq in edges if src == "Company"]
-        # Owning source: one edge per input row, every `seq` present.
+        # First source: one edge per input row, every `seq` present.
         assert person == [1, 2, 3, 4, 5, 6]
-        # Second source: four rows, two endpoint pairs, two edges — the later
-        # row of each pair wins the property.
-        assert company == [8, 10]
+        # Second source node type: LINK has no edge from a Company yet, so it
+        # owns its rows as well — four rows, four edges.
+        assert company == [7, 8, 9, 10]
 
-    def test_the_regime_does_not_move_with_the_chunk_size(self, tmp_path, monkeypatch):
-        bp_path = self._bp(tmp_path)
+    def test_a_second_load_from_the_same_source_node_type_merges(self, tmp_path, monkeypatch):
+        edges = self._edges(self._same_source_bp(tmp_path), monkeypatch, 1000)
+        # The FK load owns (1,2), (2,3), (3,1); the junction's six rows repeat
+        # those pairs twice each and merge into them — the later row of each
+        # pair wins the property.
+        assert edges == [("Person", 2), ("Person", 4), ("Person", 6)]
+
+    @pytest.mark.parametrize("shape", ["two_sources", "same_source"])
+    def test_the_regime_does_not_move_with_the_chunk_size(self, tmp_path, monkeypatch, shape):
+        bp_path = self._bp(tmp_path) if shape == "two_sources" else self._same_source_bp(tmp_path)
         single = self._edges(bp_path, monkeypatch, 1000)
         for chunk_size in (1, 3, 5):
             assert self._edges(bp_path, monkeypatch, chunk_size) == single, (
                 f"chunk_size={chunk_size} produced a different edge set"
             )
+
+
+class TestSharedRelationshipTypeSources:
+    """Two node specs feeding one relationship type through junctions, each
+    with repeated rows for one endpoint pair: fields and licences both hold
+    licensee periods. Each source node type's first load of the relationship
+    type owns its rows, so the later source's periods survive as they were
+    written instead of folding onto one relationship."""
+
+    def _bp(self, tmp_path):
+        _write_csv(tmp_path / "company.csv", pd.DataFrame({"cid": [1], "name": ["Statoil"]}))
+        _write_csv(tmp_path / "field.csv", pd.DataFrame({"fid": [10], "fname": ["Gullfaks"]}))
+        _write_csv(tmp_path / "licence.csv", pd.DataFrame({"lid": [50], "lname": ["PL050"]}))
+        _write_csv(
+            tmp_path / "field_lic.csv",
+            pd.DataFrame(
+                {"fid": [10, 10], "cid": [1, 1], "vf": ["2001-01-01", "2005-01-01"], "vt": ["2004-12-31", None]}
+            ),
+        )
+        _write_csv(
+            tmp_path / "lic_lic.csv",
+            pd.DataFrame(
+                {
+                    "lid": [50, 50, 50],
+                    "cid": [1, 1, 1],
+                    "vf": ["2001-01-01", "2004-01-01", "2007-01-01"],
+                    "vt": ["2003-12-31", "2006-12-31", None],
+                }
+            ),
+        )
+
+        def junction(csv, source_fk):
+            return {
+                "csv": csv,
+                "source_fk": source_fk,
+                "target": "Company",
+                "target_fk": "cid",
+                "properties": ["vf", "vt"],
+                "property_types": {"vf": "date", "vt": "date"},
+            }
+
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Company": {"csv": "company.csv", "pk": "cid", "title": "name"},
+                "Field": {
+                    "csv": "field.csv",
+                    "pk": "fid",
+                    "title": "fname",
+                    "connections": {"junction_edges": {"HAS_LICENSEE": junction("field_lic.csv", "fid")}},
+                },
+                "Licence": {
+                    "csv": "licence.csv",
+                    "pk": "lid",
+                    "title": "lname",
+                    "connections": {"junction_edges": {"HAS_LICENSEE": junction("lic_lic.csv", "lid")}},
+                },
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        return tmp_path / "bp.json"
+
+    @staticmethod
+    def _periods(graph, source_type):
+        rows = graph.cypher(
+            f"MATCH (:{source_type})-[r:HAS_LICENSEE]->(:Company) RETURN r.vf AS vf, r.vt AS vt"
+        ).to_list()
+        periods = [(str(r["vf"]), None if r["vt"] is None else str(r["vt"])) for r in rows]
+        return sorted(periods, key=lambda p: (p[0], p[1] or ""))
+
+    @pytest.mark.parametrize("chunk", ["1", "1000"])
+    def test_the_later_source_keeps_its_own_periods(self, tmp_path, monkeypatch, chunk):
+        monkeypatch.setenv("KGLITE_BLUEPRINT_JUNCTION_CHUNK_SIZE", chunk)
+        graph = from_blueprint(self._bp(tmp_path), save=False)
+        assert self._periods(graph, "Field") == [("2001-01-01", "2004-12-31"), ("2005-01-01", None)]
+        # Three licence rows, three relationships with their true intervals —
+        # never one relationship carrying ('2007-01-01', '2006-12-31'), an
+        # interval no row held.
+        assert self._periods(graph, "Licence") == [
+            ("2001-01-01", "2003-12-31"),
+            ("2004-01-01", "2006-12-31"),
+            ("2007-01-01", None),
+        ]
 
 
 class TestFilesSection:

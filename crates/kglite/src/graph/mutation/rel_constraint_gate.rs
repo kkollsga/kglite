@@ -37,10 +37,10 @@
 //!
 //! | Caller | `skip_existence_check` | What the loader does | Gate models |
 //! |---|---|---|---|
-//! | `add_connections`, the load's first touch of the connection type | on | no lookup and no consolidation: **one relationship per row** (`batch.rs`, "within-chunk consolidation is the responsibility of the caller in that mode") | [`RowFolding::Independent`] |
-//! | `add_connections`, type already loaded | off | per-chunk lookup, mutated as rows land, so a row merges into a stored edge *or* into one an earlier row created | [`RowFolding::Merging`] with `read_stored` |
-//! | `replace_connections` | delegates to the above | its delete drops the stored edges for these pairs first, but leaves the type in the metadata — so rows still consolidate with each other while nothing stored survives | [`RowFolding::Merging`] **without** `read_stored` (or `Independent` when the type is new) |
-//! | `add_edges_from_specs` | as `add_connections`, per `(source, target, edge type)` group, always under `update` | the same batch engine; a later group of an already-grouped edge type merges | as `add_connections` |
+//! | `add_connections`, the connection type's first load from this source type (`maintain::source_owns_its_edges`) | on | no lookup and no consolidation: **one relationship per row** (`batch.rs`, "within-chunk consolidation is the responsibility of the caller in that mode") | [`RowFolding::Independent`] |
+//! | `add_connections`, type already loaded from this source type | off | per-chunk lookup, mutated as rows land, so a row merges into a stored edge *or* into one an earlier row created | [`RowFolding::Merging`] with `read_stored` |
+//! | `replace_connections` | delegates to the above | its delete drops the stored edges for these pairs first, but leaves the source type registered on the connection type — so rows still consolidate with each other while nothing stored survives | [`RowFolding::Merging`] **without** `read_stored` (or `Independent` when the type has no edges from this source type yet) |
+//! | `add_edges_from_specs` | as `add_connections`, per `(source, target, edge type)` group, always under `update` | the same batch engine; a later group of an already-grouped (edge type, source type) merges | as `add_connections` |
 //! | `create_connections` | off | lookup on, so every row merges | [`RowFolding::Merging`] with `read_stored` |
 //!
 //! Under `Merging` a row folds on the batch's key: the endpoint pair, plus the
@@ -59,6 +59,7 @@ use crate::graph::storage::interner::InternedKey;
 use crate::graph::storage::GraphRead;
 
 use super::batch::{sum_values, ConflictHandling};
+use super::maintain::source_owns_its_edges;
 
 /// Cell access to the rows a gate judges, whatever holds them.
 pub(crate) trait GateRows {
@@ -186,8 +187,8 @@ pub(crate) enum RowFolding {
 
 impl RowFolding {
     /// The regime a plain `add_connections` will use. `skip_existence_check`
-    /// is the batch's own flag, set for a load's first touch of the connection
-    /// type — which a chunked caller pins across all of its chunks
+    /// is the batch's own flag, set for the connection type's first load from
+    /// the load's source type — which a chunked caller pins across all of its chunks
     /// (`maintain::InitialLoad`), so later chunks stay independent too.
     pub(crate) fn for_load(skip_existence_check: bool) -> Self {
         if skip_existence_check {
@@ -198,15 +199,16 @@ impl RowFolding {
     }
 
     /// The regime a `replace_connections` will use. Its delete drops the
-    /// stored edges for these pairs but leaves the connection type registered,
-    /// so rows still fold into each other while nothing stored survives — and
-    /// a type nothing has written yet takes the independent path, exactly as
-    /// the load below it will.
-    pub(crate) fn for_replace(graph: &DirGraph, connection_type: &str) -> Self {
-        if graph.connection_type_metadata.contains_key(connection_type) {
-            RowFolding::Merging { read_stored: false }
-        } else {
+    /// stored edges for these pairs but leaves the source type registered on
+    /// the connection type, so rows still fold into each other while nothing
+    /// stored survives — and a source the type has no edges from yet takes the
+    /// independent path, exactly as the load below it will
+    /// (`maintain::source_owns_its_edges`).
+    pub(crate) fn for_replace(graph: &DirGraph, connection_type: &str, source_type: &str) -> Self {
+        if source_owns_its_edges(graph, connection_type, source_type) {
             RowFolding::Independent
+        } else {
+            RowFolding::Merging { read_stored: false }
         }
     }
 }
