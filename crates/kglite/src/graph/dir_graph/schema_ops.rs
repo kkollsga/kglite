@@ -67,6 +67,11 @@ impl DirGraph {
         schema: SchemaDefinition,
         mode: SchemaInstall,
     ) -> Result<(), KgError> {
+        // Only the incoming declaration: the installed schema cannot hold one
+        // (the parser and this check refuse it, and load drops it).
+        schema
+            .reject_reserved_provenance_constraints()
+            .map_err(KgError::Argument)?;
         let schema = match mode {
             SchemaInstall::Replace => schema,
             SchemaInstall::Merge => self
@@ -392,7 +397,8 @@ impl DirGraph {
     /// (wall-clock now, a `Timestamp` matching `datetime()`) plus the
     /// caller-supplied `git_sha`/`modified_by` when set on the current mutation
     /// (via `ExecuteOptions` or [`Self::with_write_provenance`]). One clock read
-    /// per call. Engine owns these keys — callers overwrite any user value.
+    /// per call. Engine owns these keys: the stamp replaces a user-written
+    /// `updated_at`, and a user-written `git_sha`/`modified_by` when set here.
     pub(crate) fn provenance_props(&self) -> Vec<(&'static str, Value)> {
         let mut v = Vec::with_capacity(3);
         v.push((

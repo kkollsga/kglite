@@ -5466,10 +5466,17 @@ class KnowledgeGraph:
 
                     g.define_schema({"nodes": {"Task": {"auto_timestamp": True}}})
 
+                The provenance keys are engine-owned, so ``required``,
+                ``types``, ``primary_key`` and ``unique`` (and a connection's
+                ``required_properties`` / ``property_types``) may not name
+                ``updated_at``, ``git_sha`` or ``modified_by``.
+
         Raises:
             ConstraintCreationError: A declared ``unique`` tuple or
                 ``primary_key`` is already duplicated by existing nodes. Nothing
                 is changed — deduplicate the node type and call again.
+            ValueError: A constraint-bearing key names a reserved provenance
+                key (``updated_at``, ``git_sha``, ``modified_by``).
 
         Returns:
             Self with schema defined.

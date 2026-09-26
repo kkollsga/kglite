@@ -122,6 +122,22 @@ before upgrading.
   The whole call is refused before anything is written, and it raises
   `ConstraintViolationError`. The C ABI returns
   `KgliteStatusCode::ConstraintViolation`.
+- A constraint on a provenance key (`updated_at`, `git_sha`, `modified_by`) is
+  refused when declared: `CREATE CONSTRAINT` on a node or relationship
+  raises `CypherExecutionError`, and `define_schema` raises `ValueError` for
+  `required`, `types`, `primary_key`, `unique`, `required_properties` or
+  `property_types` naming one. The refusal applies whether or not the type
+  has set `auto_timestamp`. The engine writes these keys, and such a
+  constraint was enforced inconsistently. The bulk loaders stored stamps it
+  forbade (`add_relationships(..., git_sha="abc")` against
+  `IS :: INTEGER`). Cypher `CREATE` and `add_nodes` refused a
+  `required: ["updated_at"]` that the stamp satisfies. `IS UNIQUE` on
+  `git_sha` admitted duplicates. A `.kgl` file, disk graph or write-ahead log
+  saved by an earlier version still loads. Each such constraint is dropped on
+  load, with a message on stderr, and the next save omits it.
+- On an `auto_timestamp` type, `SET n.updated_at = …` and
+  `SET r.updated_at = …` are now replaced by the stamp, as on `CREATE` and in
+  the bulk loaders. The written value used to persist.
 - `extend()` now copies the other graph's validity-interval declarations and
   spatial configurations; it copied neither, so the other graph's periods
   between the same endpoints collapsed into one relationship on merge and its

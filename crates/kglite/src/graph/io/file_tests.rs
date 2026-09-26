@@ -1791,6 +1791,93 @@ mod rel_constraint_roundtrip_tests {
         Arc::unwrap_or_clone(load_file(path.to_str().unwrap()).unwrap())
     }
 
+    /// A file saved before declaration refused constraints on the reserved
+    /// provenance keys still loads; each such constraint is dropped on load
+    /// (every store: DDL node/relationship NOT NULL and type, UNIQUE, and the
+    /// `define_schema` fields), the others survive, and the name registered
+    /// for a dropped one is pruned. The state is written straight into the
+    /// stores because no current declaration path can produce it.
+    #[test]
+    fn a_saved_constraint_on_a_reserved_provenance_key_is_dropped_on_load() {
+        use crate::graph::schema::{ConnectionSchemaDefinition, NodeSchemaDefinition};
+        let dir = tempfile::tempdir().unwrap();
+        let mut graph = knows_graph();
+        graph
+            .create_rel_not_null_constraint("KNOWS", "since", &Interrupt::default())
+            .unwrap();
+        graph
+            .rel_ddl_not_null_constraints
+            .insert(("KNOWS".into(), "updated_at".into()));
+        graph
+            .rel_ddl_property_type_constraints
+            .entry("KNOWS".into())
+            .or_default()
+            .insert("git_sha".into(), DeclaredType::Integer);
+        graph
+            .ddl_not_null_constraints
+            .insert(("Person".into(), "modified_by".into()));
+        graph
+            .ddl_property_type_constraints
+            .entry("Person".into())
+            .or_default()
+            .insert("updated_at".into(), DeclaredType::String);
+        let git_sha_key = ("Person".to_string(), vec!["git_sha".to_string()]);
+        graph.unique_constraint_keys.push(git_sha_key.clone());
+        graph.ddl_unique_constraints.insert(git_sha_key.clone());
+        graph.register_constraint_name(
+            "sha_unique",
+            NamedConstraint {
+                kind: ConstraintKind::Unique,
+                entity: EntityKind::Node,
+                node_type: "Person".into(),
+                properties: vec!["git_sha".into()],
+            },
+        );
+        let mut schema = crate::graph::schema::SchemaDefinition::new();
+        schema.add_node_schema(
+            "Person".into(),
+            NodeSchemaDefinition {
+                required_fields: vec!["person_id".into(), "updated_at".into()],
+                field_types: HashMap::from([("git_sha".into(), "string".into())]),
+                primary_key: Some("modified_by".into()),
+                unique: Some(vec![vec!["updated_at".into()], vec!["person_id".into()]]),
+                ..Default::default()
+            },
+        );
+        schema.add_connection_schema(
+            "KNOWS".into(),
+            ConnectionSchemaDefinition {
+                source_type: "Person".into(),
+                target_type: "Person".into(),
+                cardinality: None,
+                required_properties: vec!["git_sha".into()],
+                property_types: HashMap::from([("updated_at".into(), "string".into())]),
+                auto_timestamp: Some(true),
+            },
+        );
+        graph.schema_definition = Some(schema);
+
+        let loaded = save_and_load(graph, dir.path());
+        assert!(loaded.has_rel_not_null_constraint("KNOWS", "since"));
+        assert!(!loaded.has_rel_not_null_constraint("KNOWS", "updated_at"));
+        assert!(loaded.rel_ddl_property_type_constraints.is_empty());
+        assert!(loaded.ddl_not_null_constraints.is_empty());
+        assert!(loaded.ddl_property_type_constraints.is_empty());
+        assert!(!loaded.unique_constraint_keys.contains(&git_sha_key));
+        assert!(loaded.ddl_unique_constraints.is_empty());
+        assert!(!loaded.constraint_names.contains_key("sha_unique"));
+        let schema = loaded.schema_definition.as_ref().unwrap();
+        let person = &schema.node_schemas["Person"];
+        assert_eq!(person.required_fields, ["person_id"]);
+        assert!(person.field_types.is_empty());
+        assert_eq!(person.primary_key, None);
+        assert_eq!(person.unique, Some(vec![vec!["person_id".to_string()]]));
+        let knows = &schema.connection_schemas["KNOWS"];
+        assert!(knows.required_properties.is_empty());
+        assert!(knows.property_types.is_empty());
+        assert_eq!(knows.auto_timestamp, Some(true));
+    }
+
     #[test]
     fn declared_relationship_constraints_survive_a_round_trip() {
         let dir = tempfile::tempdir().unwrap();

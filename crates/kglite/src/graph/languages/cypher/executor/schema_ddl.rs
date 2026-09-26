@@ -869,6 +869,10 @@ fn execute_create_constraint(
 
     // Reject what cannot be served *before* touching any declaration, so an
     // unsupported statement is a clean no-op rather than a partial apply.
+    crate::graph::schema::reject_reserved_provenance_constraint(
+        create.properties.iter().map(String::as_str),
+        &format!("node type '{label}'"),
+    )?;
     let plan = match &create.requirement {
         ConstraintRequirement::Unique => ConstraintPlan::Unique,
         ConstraintRequirement::NotNull => ConstraintPlan::NotNull,

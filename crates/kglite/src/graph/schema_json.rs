@@ -349,6 +349,10 @@ fn parse_node_schemas(
         }
 
         parse_node_declarations(node_type, node_schema_map, &mut node_schema)?;
+        reject_reserved_keys(
+            node_schema.constrained_properties(),
+            &format!("node type '{node_type}'"),
+        )?;
         schema.add_node_schema(node_type.to_string(), node_schema);
     }
     Ok(())
@@ -418,10 +422,27 @@ fn parse_connection_schemas(
                 &mut conn_schema.property_types,
             )?;
         }
+        reject_reserved_keys(
+            conn_schema.constrained_properties(),
+            &format!("connection type '{conn_type}'"),
+        )?;
 
         schema.add_connection_schema(conn_type.to_string(), conn_schema);
     }
     Ok(())
+}
+
+/// Refuse a constraint-bearing declaration (`required`, `types`,
+/// `primary_key`, `unique`, `required_properties`, `property_types`) that
+/// names a reserved provenance key, as a parse error, before `set_schema`'s
+/// backstop ([`SchemaDefinition::reject_reserved_provenance_constraints`])
+/// would see it.
+fn reject_reserved_keys<'a>(
+    constrained: impl Iterator<Item = &'a str>,
+    subject: &str,
+) -> ParseResult<()> {
+    crate::graph::schema::reject_reserved_provenance_constraint(constrained, subject)
+        .map_err(value_error)
 }
 
 /// One of a connection schema's two mandatory endpoint keys.
@@ -833,6 +854,109 @@ mod tests {
         assert!(
             e.message.contains("'nodes' and 'connections'"),
             "{}",
+            e.message
+        );
+    }
+    /// Every constraint-bearing key refuses a reserved provenance key, with or
+    /// without `auto_timestamp` in the same declaration; `optional` documents
+    /// and constrains nothing, so it may still name one.
+    #[test]
+    fn a_constraint_on_a_reserved_provenance_key_is_refused() {
+        for key in ["updated_at", "git_sha", "modified_by"] {
+            for declaration in [
+                format!(r#"{{"nodes": {{"T": {{"required": ["{key}"]}}}}}}"#),
+                format!(r#"{{"nodes": {{"T": {{"types": {{"{key}": "string"}}}}}}}}"#),
+                format!(r#"{{"nodes": {{"T": {{"primary_key": "{key}"}}}}}}"#),
+                format!(r#"{{"nodes": {{"T": {{"unique": [["name", "{key}"]]}}}}}}"#),
+                format!(r#"{{"nodes": {{"T": {{"auto_timestamp": true, "unique": "{key}"}}}}}}"#),
+                format!(
+                    r#"{{"connections": {{"R": {{"source": "T", "target": "T",
+                        "required_properties": ["{key}"]}}}}}}"#
+                ),
+                format!(
+                    r#"{{"connections": {{"R": {{"source": "T", "target": "T",
+                        "property_types": {{"{key}": "string"}}}}}}}}"#
+                ),
+            ] {
+                let e = err(&declaration);
+                assert_eq!(e.kind, SchemaParseErrorKind::Value, "{declaration}");
+                assert!(e.message.contains(&format!("'{key}'")), "{}", e.message);
+                assert!(e.message.contains("engine owns"), "{}", e.message);
+            }
+        }
+        let optional = parse(r#"{"nodes": {"T": {"optional": ["updated_at"]}}}"#);
+        assert_eq!(optional.node_schemas["T"].optional_fields, ["updated_at"]);
+    }
+    /// The store-level backstop: a definition built by hand, never parsed,
+    /// is refused by `set_schema` and installs nothing — for a node and a
+    /// connection field, opted in or not.
+    #[test]
+    fn set_schema_refuses_a_hand_built_reserved_key_constraint() {
+        use crate::error::KgError;
+        use crate::graph::schema::SchemaInstall;
+        use crate::graph::DirGraph;
+        let node = NodeSchemaDefinition {
+            unique: Some(vec![vec!["name".into(), "git_sha".into()]]),
+            ..Default::default()
+        };
+        let conn = ConnectionSchemaDefinition {
+            source_type: "T".into(),
+            target_type: "T".into(),
+            cardinality: None,
+            required_properties: vec!["updated_at".into()],
+            property_types: std::collections::HashMap::new(),
+            auto_timestamp: Some(true),
+        };
+        let mut by_node = SchemaDefinition::new();
+        by_node.add_node_schema("T".into(), node);
+        let mut by_conn = SchemaDefinition::new();
+        by_conn.add_connection_schema("R".into(), conn);
+        for (schema, key, subject) in [
+            (by_node, "git_sha", "node type 'T'"),
+            (by_conn, "updated_at", "connection type 'R'"),
+        ] {
+            for mode in [SchemaInstall::Merge, SchemaInstall::Replace] {
+                let mut graph = DirGraph::new();
+                match graph.set_schema(schema.clone(), mode) {
+                    Err(KgError::Argument(message)) => {
+                        assert!(message.contains(&format!("'{key}'")), "{message}");
+                        assert!(message.contains(subject), "{message}");
+                        assert!(message.contains("engine owns"), "{message}");
+                    }
+                    other => panic!("expected an Argument refusal, got {other:?}"),
+                }
+                assert!(graph.schema_definition.is_none());
+                assert!(graph.unique_constraint_keys.is_empty());
+            }
+        }
+    }
+
+    /// The parser refuses first, as a `ValueError`-kind parse error carrying
+    /// the same wording, so `set_schema` is never reached from a binding.
+    #[test]
+    fn the_parser_refuses_a_reserved_key_before_set_schema_sees_it() {
+        let e = err(r#"{"nodes": {"T": {"unique": [["name", "git_sha"]]}}}"#);
+        assert_eq!(e.kind, SchemaParseErrorKind::Value);
+        assert!(
+            e.message
+                .starts_with("cannot constrain 'git_sha' on node type 'T'"),
+            "{}",
+            e.message
+        );
+        let hand_built = SchemaDefinition {
+            node_schemas: std::collections::HashMap::from([(
+                "T".to_string(),
+                NodeSchemaDefinition {
+                    unique: Some(vec![vec!["name".into(), "git_sha".into()]]),
+                    ..Default::default()
+                },
+            )]),
+            connection_schemas: std::collections::HashMap::new(),
+        };
+        assert_eq!(
+            hand_built
+                .reject_reserved_provenance_constraints()
+                .unwrap_err(),
             e.message
         );
     }

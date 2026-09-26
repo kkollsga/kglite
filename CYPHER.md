@@ -2887,8 +2887,14 @@ g.cypher("MERGE (t:Task {id: $id}) SET t.status = 'done'",
 
 These are **metadata, not data**: queryable directly (`n.updated_at`,
 `n.git_sha`, `r.updated_at`) but hidden from `properties(n)` / `keys(n)` /
-`RETURN n` / `describe()`. The engine owns them (a user-supplied value is
-overwritten) and only stamps opted-in types, so other writes stay deterministic.
+`RETURN n` / `describe()`. The engine owns them and only stamps opted-in
+types, so other writes stay deterministic. On an opted-in type the stamp
+replaces a user-written `updated_at` — on `CREATE`, `SET` and the bulk loaders
+alike — and a user-written `git_sha` / `modified_by` whenever the call passes
+its own. Because the engine writes them, none of the three can carry a
+constraint: `CREATE CONSTRAINT` and `define_schema` (`required`, `types`,
+`primary_key`, `unique`, `required_properties`, `property_types`) refuse them,
+whether or not the type has opted in yet.
 
 **Staleness is a pure query — the engine never touches the filesystem.** Have
 the *writer* stamp the linked file's state (`file_path`, `file_mtime` /

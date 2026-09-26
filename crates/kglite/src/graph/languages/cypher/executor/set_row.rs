@@ -359,8 +359,8 @@ pub(super) fn apply_node_property_set<'a>(
 /// property's type, and notes the node for the post-loop `updated_at` bump.
 ///
 /// Order is load-bearing: the index move needs the old value, so it runs before
-/// the constraint plan is redeemed. The `updated_at` bump is skipped when the
-/// write *is* to `updated_at`, which would otherwise recurse. A `title` write
+/// the constraint plan is redeemed. A write to `updated_at` itself is noted
+/// too, so the post-loop stamp overwrites it. A `title` write
 /// touches only the title field, not a property map, so it registers no schema
 /// key — but it still moves the node between index buckets: an index on
 /// `title`, or one registered under the type's title-alias spelling, is built
@@ -419,7 +419,7 @@ fn finish_node_property_write(
         graph.upsert_node_type_metadata(write.node_type, prop_type);
     }
 
-    if write.owed.auto_timestamp && write.property != "updated_at" {
+    if write.owed.auto_timestamp {
         nodes_to_stamp.insert(write.node_idx, write.node_type.to_string());
     }
 }

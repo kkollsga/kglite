@@ -1052,3 +1052,48 @@ fn cypher_created_indexes_reach_the_persisted_key_list() {
         )]
     );
 }
+
+/// The node counterpart of the relationship arm's refusal: every node write
+/// path gates before the stamp (and a SET's stamp is never gated), so no kind
+/// of constraint on a provenance key is enforceable. Nothing is installed.
+#[test]
+fn a_node_constraint_on_a_reserved_key_is_refused() {
+    for key in ["updated_at", "git_sha", "modified_by"] {
+        for requirement in ["IS NOT NULL", "IS UNIQUE", "IS NODE KEY", "IS :: STRING"] {
+            let mut graph = person_graph();
+            let error = run_err(
+                &mut graph,
+                &format!("CREATE CONSTRAINT FOR (n:Person) REQUIRE n.{key} {requirement}"),
+            );
+            assert!(
+                error.contains(&format!("'{key}'")),
+                "{key} {requirement}: {error}"
+            );
+            assert!(
+                error.contains("engine owns"),
+                "{key} {requirement}: {error}"
+            );
+            assert!(
+                graph.unique_constraint_keys.is_empty(),
+                "{key} {requirement}"
+            );
+            assert!(
+                graph.ddl_not_null_constraints.is_empty(),
+                "{key} {requirement}"
+            );
+            assert!(
+                graph.ddl_property_type_constraints.is_empty(),
+                "{key} {requirement}"
+            );
+            assert!(graph.schema_definition.is_none(), "{key} {requirement}");
+        }
+    }
+    // A composite naming one reserved key is refused as a whole.
+    let mut graph = person_graph();
+    let error = run_err(
+        &mut graph,
+        "CREATE CONSTRAINT FOR (n:Person) REQUIRE (n.name, n.git_sha) IS UNIQUE",
+    );
+    assert!(error.contains("'git_sha'"), "{error}");
+    assert!(graph.unique_constraint_keys.is_empty());
+}

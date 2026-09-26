@@ -72,6 +72,7 @@ mod payloads;
 mod persistence_lifecycle;
 pub mod range_index_layer;
 pub(crate) mod rel_constraints;
+mod reserved_constraints;
 pub(crate) mod rollback;
 pub(crate) mod schema_cow;
 mod schema_ops;

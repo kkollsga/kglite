@@ -621,6 +621,19 @@ fn install_constraint(
         }
         return Ok(());
     }
+    // Read-compat for a log written before declaration refused these; the
+    // checkpoint's copy is dropped on load the same way
+    // (`DirGraph::drop_reserved_provenance_constraints`).
+    if let Some(key) = properties
+        .iter()
+        .find(|p| crate::graph::schema::is_reserved_provenance_key(p))
+    {
+        eprintln!(
+            "kglite: dropped a constraint on replay ({kind:?} on {entity_type}.{key}): \
+             provenance keys are engine-owned and cannot be constrained"
+        );
+        return Ok(());
+    }
     match entity {
         EntityKind::Node => {
             declare_node_constraint(graph, kind, entity_type, properties, declared_type)?

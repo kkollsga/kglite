@@ -77,6 +77,10 @@ pub(super) fn execute_create_rel_constraint(
 
     // Reject what cannot be served *before* touching any declaration, so an
     // unsupported statement is a clean no-op rather than a partial apply.
+    crate::graph::schema::reject_reserved_provenance_constraint(
+        create.properties.iter().map(String::as_str),
+        &format!("relationship type '{rel_type}'"),
+    )?;
     let plan = match &create.requirement {
         ConstraintRequirement::NotNull => RelConstraintPlan::NotNull,
         ConstraintRequirement::Unique => {
@@ -479,6 +483,32 @@ mod tests {
                 error.contains("IS NOT NULL"),
                 "for `{requirement}`: the message must name what *is* served: {error}"
             );
+        }
+    }
+
+    /// The engine stamps the provenance keys after the bulk-load gate and
+    /// before the Cypher CREATE gate, so a constraint on one would hold on one
+    /// path and not the other; declaration refuses it, and installs nothing.
+    #[test]
+    fn a_relationship_constraint_on_a_reserved_key_is_refused() {
+        for key in ["updated_at", "git_sha", "modified_by"] {
+            for requirement in ["IS NOT NULL", "IS :: STRING"] {
+                let mut graph = knows_graph(StorageMode::Memory);
+                let error = run_err(
+                    &mut graph,
+                    &format!("CREATE CONSTRAINT FOR ()-[r:KNOWS]-() REQUIRE r.{key} {requirement}"),
+                );
+                assert!(
+                    error.contains(&format!("'{key}'")),
+                    "{key} {requirement}: {error}"
+                );
+                assert!(
+                    error.contains("engine owns"),
+                    "{key} {requirement}: {error}"
+                );
+                assert!(!graph.has_rel_not_null_constraint("KNOWS", key));
+                assert!(graph.rel_property_type_for("KNOWS", key).is_none());
+            }
         }
     }
 

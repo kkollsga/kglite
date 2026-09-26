@@ -570,6 +570,14 @@ impl FileMetadata {
         graph.ddl_property_type_constraints = self.ddl_property_type_constraints;
         graph.rel_ddl_not_null_constraints = self.rel_ddl_not_null_constraints;
         graph.rel_ddl_property_type_constraints = self.rel_ddl_property_type_constraints;
+        graph.property_shapes = self.property_shapes;
+        // Read-compat for files saved before declaration refused these.
+        for dropped in graph.drop_reserved_provenance_constraints() {
+            eprintln!(
+                "kglite: dropped a constraint on load ({dropped}): provenance keys are \
+                 engine-owned and cannot be constrained"
+            );
+        }
         graph.node_type_metadata = Arc::new(self.node_type_metadata);
         graph.connection_type_metadata = Arc::new(self.connection_type_metadata);
         graph.id_field_aliases = Arc::new(self.id_field_aliases);
@@ -579,7 +587,6 @@ impl FileMetadata {
         graph.ontology = Arc::new(self.ontology);
         graph.managed_labels = self.managed_labels;
         graph.table_property_meta = self.table_property_meta;
-        graph.property_shapes = self.property_shapes;
         graph.rebuild_ontology_closures();
         graph.graph_instructions = self.graph_instructions;
         graph.source_root = self.source_root;

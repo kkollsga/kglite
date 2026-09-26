@@ -1073,6 +1073,36 @@ fn a_dropped_constraint_replays_as_a_withdrawal() {
     assert!(g.constraint_by_name("nn").is_none());
 }
 
+/// A log written before declaration refused constraints on the provenance
+/// keys still replays: the declaration is dropped, not reinstated (the row
+/// below lacks `updated_at`, so reinstating the NOT NULL would refuse replay).
+#[test]
+fn a_logged_constraint_on_a_reserved_provenance_key_is_dropped_on_replay() {
+    let mut g = DirGraph::new();
+    let frames = vec![frame(
+        1,
+        vec![
+            upsert_node(1, "Alice", vec![]),
+            not_null(&["updated_at"], true),
+            MutationOp::SetConstraint {
+                name: Some("u".into()),
+                entity: EntityKind::Relationship,
+                kind: ConstraintKind::PropertyType,
+                entity_type: "KNOWS".into(),
+                properties: vec!["git_sha".into()],
+                declared_type: Some(crate::graph::property_types::DeclaredType::Integer),
+                present: true,
+            },
+        ],
+    )];
+    apply_frames(&mut g, &frames, 0).unwrap();
+    assert_eq!(g.graph.node_count(), 1);
+    assert!(g.constraint_by_name("nn").is_none());
+    assert!(g.constraint_by_name("u").is_none());
+    assert!(g.ddl_not_null_constraints.is_empty());
+    assert!(g.rel_property_type_for("KNOWS", "git_sha").is_none());
+}
+
 #[test]
 fn a_constraint_the_recovered_rows_violate_refuses_replay_loudly() {
     // The writer that logged the declaration had it satisfied. Recovering rows

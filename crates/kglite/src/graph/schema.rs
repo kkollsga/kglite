@@ -33,6 +33,33 @@ pub fn is_reserved_provenance_key(key: &str) -> bool {
     RESERVED_PROVENANCE_KEYS.contains(&key)
 }
 
+/// Refuse a declared constraint on a reserved provenance key, naming the key
+/// and the `subject` (e.g. "node type 'Task'").
+///
+/// The engine writes these keys on every write to an `auto_timestamp` type,
+/// and the write paths stamp them after (bulk loads) or before (Cypher CREATE)
+/// the constraint gate, and never gate a SET's stamp, so a constraint on one
+/// is not enforceable. Refused whether or not the type has opted in yet,
+/// since the opt-in may follow the declaration. Every declaration surface
+/// calls this: both `CREATE CONSTRAINT` arms, the `define_schema` parser, and
+/// `DirGraph::set_schema` as the backstop for a hand-built definition.
+pub fn reject_reserved_provenance_constraint<'a>(
+    properties: impl IntoIterator<Item = &'a str>,
+    subject: &str,
+) -> Result<(), String> {
+    match properties
+        .into_iter()
+        .find(|p| is_reserved_provenance_key(p))
+    {
+        None => Ok(()),
+        Some(key) => Err(format!(
+            "cannot constrain '{key}' on {subject}: updated_at, git_sha and modified_by are \
+             provenance keys the engine owns and stamps on writes to auto_timestamp types, so \
+             they cannot carry a constraint. Constrain a property of your own instead."
+        )),
+    }
+}
+
 /// Node-type names the engine owns — graph-carried skills and recipes. A
 /// system-labelled node is ordinary data to Cypher (`MATCH (s:KgliteSkill)`
 /// returns it, `MATCH (n) RETURN count(n)` counts it, exports and digests
@@ -2209,6 +2236,55 @@ impl SchemaDefinition {
         schema: ConnectionSchemaDefinition,
     ) {
         self.connection_schemas.insert(connection_type, schema);
+    }
+
+    /// Refuse a schema whose constraint-bearing fields name a reserved
+    /// provenance key — the store-level backstop behind the parser's earlier
+    /// per-type refusal, so a hand-built definition passed to `set_schema` is
+    /// refused the same way. Types are walked in name order so the reported
+    /// type is deterministic.
+    pub fn reject_reserved_provenance_constraints(&self) -> Result<(), String> {
+        let mut node_types: Vec<&String> = self.node_schemas.keys().collect();
+        node_types.sort();
+        for node_type in node_types {
+            reject_reserved_provenance_constraint(
+                self.node_schemas[node_type].constrained_properties(),
+                &format!("node type '{node_type}'"),
+            )?;
+        }
+        let mut conn_types: Vec<&String> = self.connection_schemas.keys().collect();
+        conn_types.sort();
+        for conn_type in conn_types {
+            reject_reserved_provenance_constraint(
+                self.connection_schemas[conn_type].constrained_properties(),
+                &format!("connection type '{conn_type}'"),
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl NodeSchemaDefinition {
+    /// Every property a constraint-bearing field names: `required`, `types`,
+    /// `primary_key` and each `unique` tuple. `optional` constrains nothing.
+    pub fn constrained_properties(&self) -> impl Iterator<Item = &str> {
+        self.required_fields
+            .iter()
+            .chain(self.field_types.keys())
+            .chain(self.primary_key.iter())
+            .chain(self.unique.iter().flatten().flatten())
+            .map(String::as_str)
+    }
+}
+
+impl ConnectionSchemaDefinition {
+    /// Every property a constraint-bearing field names: `required_properties`
+    /// and `property_types`.
+    pub fn constrained_properties(&self) -> impl Iterator<Item = &str> {
+        self.required_properties
+            .iter()
+            .chain(self.property_types.keys())
+            .map(String::as_str)
     }
 }
 

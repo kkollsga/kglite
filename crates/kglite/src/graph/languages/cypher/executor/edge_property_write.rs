@@ -93,24 +93,22 @@ pub(super) fn set_edge_property(
         Some(property),
     );
 
-    // Record for a post-loop updated_at bump if the edge type opted in (skip
-    // writes to the reserved key).
-    if property != "updated_at" {
-        // Arena guard: edge_weight materializes on the disk backend (protocol
-        // in disk/graph.rs); scoped so the borrow ends before the next item's
-        // &mut uses.
-        let ct_key = {
-            let _arena_guard = graph.graph.begin_query();
-            graph
-                .graph
-                .edge_weight(edge_index)
-                .map(|e| e.connection_type)
-        };
-        if let Some(ct_key) = ct_key {
-            let ct = graph.interner.resolve(ct_key).to_string();
-            if graph.auto_timestamp_for_connection(&ct) {
-                edges_to_stamp.insert(edge_index);
-            }
+    // Record for the post-loop stamp if the edge type opted in. A write to
+    // `updated_at` itself is recorded too, so the stamp overwrites it.
+    // Arena guard: edge_weight materializes on the disk backend (protocol
+    // in disk/graph.rs); scoped so the borrow ends before the next item's
+    // &mut uses.
+    let ct_key = {
+        let _arena_guard = graph.graph.begin_query();
+        graph
+            .graph
+            .edge_weight(edge_index)
+            .map(|e| e.connection_type)
+    };
+    if let Some(ct_key) = ct_key {
+        let ct = graph.interner.resolve(ct_key).to_string();
+        if graph.auto_timestamp_for_connection(&ct) {
+            edges_to_stamp.insert(edge_index);
         }
     }
     Ok(true)
