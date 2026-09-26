@@ -213,7 +213,7 @@ impl UnparsedCells {
             on_invalid,
             format!(
                 "Column '{col_name}': {count} {plural} could not be parsed as a {kind} \
-                 (row {row} holds {value}) and {verb} stored as NULL. Accepted text is \
+                 (row {row} (0-based) holds {value}) and {verb} stored as NULL. Accepted text is \
                  'YYYY-MM-DD' with an optional 'HH:MM[:SS[.fff]]' after a space or 'T', \
                  or 'YYYYMMDD' (as text or a whole number); declare the column 'string' \
                  to keep the text as written."
@@ -324,7 +324,7 @@ fn duration_cells(
             on_invalid,
             format!(
                 "Column '{col_name}': {rejected} value(s) could not be stored as a duration of \
-                 whole seconds (row {row} holds {shown}) and are stored as NULL. Round the \
+                 whole seconds (row {row} (0-based) holds {shown}) and are stored as NULL. Round the \
                  column to whole seconds (e.g. .dt.round('s')) to keep them."
             ),
         )?;
@@ -807,7 +807,7 @@ fn warn_object_stringification(
         return Ok(());
     }
     let offender = match first_non_text_cell(series) {
-        Some((row, value)) => format!(" (row {row} holds {value})"),
+        Some((row, value)) => format!(" (row {row} (0-based) holds {value})"),
         None => String::new(),
     };
     on_invalid::report(
@@ -1072,4 +1072,37 @@ pub fn parse_sort_fields(
             }
         })
         .collect()
+}
+
+/// A fluent temporal date argument (`date()`, `valid_at()`, `valid_during()`,
+/// `traverse(at=, during=)`): a `datetime.date`, a `datetime.datetime` (an
+/// aware one normalised to UTC) or a string, read as the query date with its
+/// precision. A datetime is taken at its date — the grain the fluent filters
+/// work at — as a datetime string is.
+pub fn query_date(
+    value: &Bound<'_, PyAny>,
+    argument: &str,
+) -> PyResult<(
+    chrono::NaiveDate,
+    kglite_core::api::timeseries::DatePrecision,
+)> {
+    use kglite_core::api::timeseries::{parse_date_or_datetime_query, DatePrecision};
+    use pyo3::types::{PyDate, PyDateTime, PyString};
+    let argument_error =
+        |message: String| crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(message));
+    if let Ok(datetime) = value.cast::<PyDateTime>() {
+        let utc = super::py_value::datetime_to_utc_naive(datetime)?;
+        return Ok((utc.date(), DatePrecision::Day));
+    }
+    if value.is_instance_of::<PyDate>() {
+        return Ok((value.extract::<chrono::NaiveDate>()?, DatePrecision::Day));
+    }
+    if let Ok(text) = value.cast::<PyString>() {
+        return parse_date_or_datetime_query(text.to_str()?)
+            .map_err(|e| argument_error(format!("{argument}: {e}")));
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(format!(
+        "{argument} must be a date string, a datetime.date or a datetime.datetime, not {}",
+        value.get_type().name()?
+    )))
 }

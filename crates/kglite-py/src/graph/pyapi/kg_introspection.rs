@@ -834,8 +834,8 @@ impl KnowledgeGraph {
         sort_target: Option<&Bound<'_, PyAny>>,
         limit: Option<usize>,
         new_level: Option<bool>,
-        at: Option<&str>,
-        during: Option<(String, String)>,
+        at: Option<&Bound<'_, PyAny>>,
+        during: Option<(Bound<'_, PyAny>, Bound<'_, PyAny>)>,
         temporal: Option<bool>,
         target_type: Option<&Bound<'_, PyAny>>,
         r#where: Option<&Bound<'_, PyDict>>,
@@ -890,26 +890,14 @@ impl KnowledgeGraph {
         };
         let temporal_filter = if temporal == Some(false) {
             None
-        } else if let Some(at_str) = at {
-            let (date, _) = kglite_core::api::timeseries::parse_date_query(at_str).map_err(
-                |e: String| -> PyErr {
-                    crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-                },
-            )?;
+        } else if let Some(at_value) = at {
+            let (date, _) = crate::datatypes::py_in::query_date(at_value, "at")?;
             Some(requested("at", &|configs| {
                 kglite_core::api::fluent::TemporalEdgeFilter::At(configs, date)
             }))
-        } else if let Some((start_str, end_str)) = &during {
-            let (start, _) = kglite_core::api::timeseries::parse_date_query(start_str).map_err(
-                |e: String| -> PyErr {
-                    crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-                },
-            )?;
-            let (end, _) = kglite_core::api::timeseries::parse_date_query(end_str).map_err(
-                |e: String| -> PyErr {
-                    crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-                },
-            )?;
+        } else if let Some((start_value, end_value)) = &during {
+            let (start, _) = crate::datatypes::py_in::query_date(start_value, "during")?;
+            let (end, _) = crate::datatypes::py_in::query_date(end_value, "during")?;
             Some(requested("during", &|configs| {
                 kglite_core::api::fluent::TemporalEdgeFilter::During(configs, start, end)
             }))

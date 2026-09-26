@@ -546,9 +546,9 @@ pub mod api {
     /// are the config/data types.
     pub mod timeseries {
         pub use crate::graph::features::timeseries::{
-            date_from_ymd, expand_end, find_range, parse_date_query, validate_channel_length,
-            validate_keys_sorted, validate_resolution, DatePrecision, InlineTimeseriesConfig,
-            NodeTimeseries, TimeSpec, TimeseriesConfig,
+            date_from_ymd, expand_end, find_range, parse_date_or_datetime_query, parse_date_query,
+            validate_channel_length, validate_keys_sorted, validate_resolution, DatePrecision,
+            InlineTimeseriesConfig, NodeTimeseries, TimeSpec, TimeseriesConfig,
         };
     }
 

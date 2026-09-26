@@ -408,8 +408,7 @@ def test_a_write_on_a_read_handle_is_one_class_on_every_handle(people, handle):
     exc = excinfo.value
     assert exc.code == "InvalidArgument"
     assert isinstance(exc, kglite.KgError)
-    # A client mistake must not be published as an execution failure: that code
-    # maps to Neo.DatabaseError.Statement.ExecutionFailed on the Bolt wire.
+    # A refusal of the handle, not a statement that failed while executing.
     assert not isinstance(exc, kglite.CypherExecutionError)
     # The refusal still names the remedy it always named.
     assert "CREATE" in str(exc)

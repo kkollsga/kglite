@@ -165,7 +165,7 @@
       "classification": "boundary"
     },
     {
-      "identity": "crates/kglite-py/src/graph/pyapi/kg_introspection.rs::fn:traverse:fn traverse( &self, py: Python<'_>, connection_type: String, level_index: Option<usize>, direction: Option<String>, sort_target: Option<&Bound<'_, PyAny>>, limit: Option<usize>, new_level: Option<bool>, at: Option<&str>, during: Option<(String, String)>, temporal: Option<bool>, target_type: Option<&::clippy::too_many_arguments",
+      "identity": "crates/kglite-py/src/graph/pyapi/kg_introspection.rs::fn:traverse:fn traverse( &self, py: Python<'_>, connection_type: String, level_index: Option<usize>, direction: Option<String>, sort_target: Option<&Bound<'_, PyAny>>, limit: Option<usize>, new_level: Option<bool>, at: Option<&Bound<'_, PyAny>>, during: Option<(Bound<'_, PyAny>, Bound<'_, PyAny>)>, temporal: Op::clippy::too_many_arguments",
       "classification": "boundary"
     },
     {

@@ -285,7 +285,7 @@ fn gate_batch(
                 if let Some(value) = df_data.get_value(row_idx, &property) {
                     shape
                         .check(&property, &value)
-                        .map_err(|e| format!("add_nodes row {row_idx}: {e}"))?;
+                        .map_err(|e| format!("add_nodes row {row_idx} (0-based): {e}"))?;
                 }
             }
         }

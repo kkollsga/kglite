@@ -156,6 +156,13 @@ both forms: under `half_open` the `to` day is the first day no longer valid,
 which is what a registry whose periods end on their successor's start day
 means.
 
+A declaration validates the rows stored when it is made. Writes made after it
+— a later load, `SET`, `CREATE` — are not re-validated: a bound that is not a
+date raises, naming the element, from the next query that filters on it, and
+an inverted interval is valid on no date. Add
+`CREATE CONSTRAINT FOR (r:Role) REQUIRE r.end_date IS :: DATE` to refuse such
+writes when they happen.
+
 ### Point-in-time: `valid_at(entity, date, 'from_field', 'to_field')`
 
 ```python

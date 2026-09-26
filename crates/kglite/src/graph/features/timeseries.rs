@@ -127,6 +127,19 @@ pub fn parse_date_query(s: &str) -> Result<(NaiveDate, DatePrecision), String> {
     }
 }
 
+/// [`parse_date_query`], or a datetime string read the way Cypher's
+/// `datetime()` reads it (`'2009-06-30T12:00'`, an offset applied and
+/// normalised to UTC), taken at its date at day precision — the grain the
+/// fluent temporal filters work at. The error is `parse_date_query`'s, naming
+/// the datetime form too.
+pub fn parse_date_or_datetime_query(s: &str) -> Result<(NaiveDate, DatePrecision), String> {
+    parse_date_query(s).or_else(|err| {
+        crate::graph::languages::cypher::executor::scalar_functions::parse_datetime_utc(s.trim())
+            .map(|datetime| (datetime.date(), DatePrecision::Day))
+            .ok_or_else(|| format!("{err}. A datetime such as '2009-06-30T12:00' is also accepted"))
+    })
+}
+
 /// Expand a date to the end of its precision period.
 /// Year: 2020-01-01 → 2020-12-31, Month: 2020-02-01 → 2020-02-29, Day: identity.
 pub fn expand_end(date: NaiveDate, precision: DatePrecision) -> NaiveDate {
@@ -376,6 +389,33 @@ impl InlineTimeseriesConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_datetime_query_reads_at_its_utc_date() {
+        let day = |y, m, dd| {
+            (
+                NaiveDate::from_ymd_opt(y, m, dd).unwrap(),
+                DatePrecision::Day,
+            )
+        };
+        assert_eq!(
+            parse_date_or_datetime_query("2009-06-30T12:00").unwrap(),
+            day(2009, 6, 30)
+        );
+        assert_eq!(
+            parse_date_or_datetime_query("2009-06-30T23:30:00-02:00").unwrap(),
+            day(2009, 7, 1)
+        );
+        assert_eq!(
+            parse_date_or_datetime_query("2009").unwrap(),
+            (
+                NaiveDate::from_ymd_opt(2009, 1, 1).unwrap(),
+                DatePrecision::Year
+            )
+        );
+        let err = parse_date_or_datetime_query("garbage").unwrap_err();
+        assert!(err.contains("2009-06-30T12:00"), "{err}");
+    }
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()

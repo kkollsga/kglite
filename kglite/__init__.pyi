@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 from pathlib import Path
 from typing import (
     Any,
@@ -2087,7 +2088,9 @@ class KnowledgeGraph:
             column_types: Override column dtypes, e.g. ``{'col': 'string'}``.
                 Supported: ``'string'``, ``'integer'``, ``'float'``,
                 ``'datetime'``, ``'timestamp'``, ``'uniqueid'``, ``'list'``,
-                ``'map'``, ``'duration'``.
+                ``'map'``, ``'duration'``, and ``'validFrom'`` /
+                ``'validTo'`` (a validity interval, with its end rule set by
+                *convention*; see below).
                 A ``timedelta64`` column (numpy or pyarrow-backed) or a column
                 of ``datetime.timedelta`` loads as ``'duration'`` values —
                 equal to ``duration({...})``, and read back as
@@ -2120,16 +2123,24 @@ class KnowledgeGraph:
                 ``'shape.<name>'``.
                 ``'validFrom'`` and ``'validTo'`` (both or neither) load their
                 columns as dates and declare them the type's validity
-                interval, as :meth:`set_temporal` does. The declaration is
-                checked before anything is written: a declaration of the type
-                naming other properties or another ``convention``, a row of
-                this call whose interval is inverted (or empty under
-                ``'half_open'``), and a stored bound that is not a date, a
-                datetime or an ISO date string each raise
-                :class:`ArgumentError`. A later load onto the declared type
-                adds rows without validating them. A closed declaration whose
-                rows end on the day another begins emits a ``UserWarning``
-                suggesting ``'half_open'``.
+                interval, as :meth:`set_temporal` does. When the call makes
+                the declaration, it is checked before anything is written: a
+                declaration of the type naming other properties or another
+                ``convention``, a row of this call whose interval is inverted
+                (or empty under ``'half_open'``), and a stored bound that is
+                not a date, a datetime or an ISO date string each raise
+                :class:`ArgumentError`. A closed declaration whose rows end on
+                the day another begins emits a ``UserWarning`` suggesting
+                ``'half_open'``. **Writes onto a type that is already declared
+                are not validated** — a later ``add_nodes`` with these column
+                types, a Cypher ``SET``/``CREATE``, a fluent ``update()`` — so
+                that the declaration costs the write path nothing. A bound
+                that is not a date then raises, naming the element and the
+                property, from the next ``valid_at``/``valid_during`` or
+                date-filtered ``select()``/``traverse()`` that reads it; an
+                inverted interval is valid on no date. To refuse such a write,
+                declare a property-type constraint:
+                ``CREATE CONSTRAINT FOR (m:T) REQUIRE m.valid_to IS :: DATE``.
             nullable_int_downcast: When ``True``, Float64 columns whose non-null
                 values are all integer-valued (e.g. ``pd.NA``-bearing ints that
                 pandas auto-promoted to float64) are silently downcast to Int64.
@@ -2184,6 +2195,10 @@ class KnowledgeGraph:
                   written, so the graph is exactly as it was.
                 - ``'skip'`` — as ``'warn'``, without the warning. The counts
                   stay in the returned report.
+
+                A row named in any load error or warning is its 0-based
+                position in *data* (``data.iloc[n]``), labelled ``(0-based)``,
+                not its index label.
 
                 ``'error'`` also refuses an object-dtype column that would be
                 stringified wholesale (see ``column_types``).
@@ -2868,7 +2883,7 @@ class KnowledgeGraph:
 
     def valid_at(
         self,
-        date: Optional[str] = None,
+        date: Optional[Union[str, _dt.date]] = None,
         date_from_field: Optional[str] = None,
         date_to_field: Optional[str] = None,
     ) -> KnowledgeGraph:
@@ -2887,7 +2902,12 @@ class KnowledgeGraph:
         If *date* is not specified, uses the ``date()`` context or today.
 
         Args:
-            date: Date string (e.g. ``'2024-01-15'``). Defaults to reference date or today.
+            date: A date string (``'2024'``, ``'2024-01'``, ``'2024-01-15'``,
+                ``'20240115'``, or a datetime string such as
+                ``'2024-01-15T12:00'``), a ``datetime.date`` or a
+                ``datetime.datetime``. A datetime is taken at its date (an
+                aware one in UTC) — the fluent filters work at date grain.
+                Defaults to the ``date()`` context or today.
             date_from_field: Name of the start-date property. Auto-detected if temporal config exists.
             date_to_field: Name of the end-date property. Auto-detected if temporal config exists.
 
@@ -2901,13 +2921,15 @@ class KnowledgeGraph:
                 named field) — rather than reading the missing property as an
                 open bound and keeping every node; or if a node's validity
                 bound is not a date, a datetime or an ISO date string.
+            ArgumentError: If *date* is a string that is not a date.
+            TypeError: If *date* is neither a string nor a ``datetime.date``.
         """
         ...
 
     def valid_during(
         self,
-        start_date: str,
-        end_date: str,
+        start_date: Union[str, _dt.date],
+        end_date: Union[str, _dt.date],
         date_from_field: Optional[str] = None,
         date_to_field: Optional[str] = None,
     ) -> KnowledgeGraph:
@@ -2918,8 +2940,9 @@ class KnowledgeGraph:
         convention then applies, else ``date_from`` / ``date_to``.
 
         Args:
-            start_date: Start of the query range.
-            end_date: End of the query range.
+            start_date: Start of the query range — a string, ``datetime.date``
+                or ``datetime.datetime``, read as :meth:`valid_at` reads *date*.
+            end_date: End of the query range, likewise.
             date_from_field: Name of the start-date property. Auto-detected if temporal config exists.
             date_to_field: Name of the end-date property. Auto-detected if temporal config exists.
 
@@ -3798,8 +3821,8 @@ class KnowledgeGraph:
         sort_target: Optional[Union[str, list[tuple[str, bool]]]] = None,
         limit: Optional[int] = None,
         new_level: Optional[bool] = None,
-        at: Optional[str] = None,
-        during: Optional[tuple[str, str]] = None,
+        at: Optional[Union[str, _dt.date]] = None,
+        during: Optional[tuple[Union[str, _dt.date], Union[str, _dt.date]]] = None,
         temporal: Optional[bool] = None,
         target_type: Optional[Union[str, list[str]]] = None,
         where: Optional[dict[str, Any]] = None,
@@ -3821,10 +3844,16 @@ class KnowledgeGraph:
             sort_target: Sort targets per source. Field name or
                 ``[(field, ascending)]`` list.
             limit: Max target nodes per source.
-            at: Temporal point-in-time filter (e.g. ``'2005'``) on the
-                relationships, under the relationship type's declared interval.
+            at: Temporal point-in-time filter (e.g. ``'2005'``, a
+                ``datetime.date`` or a ``datetime.datetime``, read as
+                :meth:`valid_at` reads its date) on the relationships, under
+                the relationship type's declared interval.
             during: Temporal range filter (e.g. ``('2000', '2010')``), likewise.
             temporal: Override temporal filtering. ``False`` = disable.
+                Temporal filtering — *at*, *during* or the ``date()`` context
+                — applies to the relationships only; the target nodes are not
+                filtered by their own declaration. Chain ``.valid_at()`` for
+                that.
             level_index: Source level in the hierarchy (advanced).
             new_level: Add targets as new hierarchy level. Default ``True``.
 
@@ -7559,6 +7588,13 @@ class KnowledgeGraph:
         no-op; a different one for the same type (and source type) is
         refused — undeclare it first.
 
+        Only the rows stored when the declaration is made are validated.
+        Later writes onto the type (a load, a Cypher ``SET``/``CREATE``, a
+        fluent ``update()``) are not: a bound that is not a date raises,
+        naming the element, from the next temporal filter that reads it, and
+        an inverted interval is valid on no date. A property-type constraint
+        (``REQUIRE n.valid_to IS :: DATE``) refuses such writes up front.
+
         A *type_name* that is both a node type and a relationship type is the
         node type unless *source_type* is given.
 
@@ -7591,14 +7627,20 @@ class KnowledgeGraph:
 
     def date(
         self,
-        date_str: Optional[str] = None,
-        end_str: Optional[str] = None,
+        date_str: Optional[Union[str, _dt.date]] = None,
+        end_str: Optional[Union[str, _dt.date]] = None,
     ) -> KnowledgeGraph:
         """Set the temporal context for auto-filtering.
 
         Returns a new KnowledgeGraph. All subsequent ``select()`` and
         ``traverse()`` calls on the returned graph use this context for
-        temporal filtering.
+        temporal filtering, on declared types only (``set_temporal()``,
+        ``CALL db.temporal.declare`` or a loader's ``validFrom``/``validTo``):
+        ``select()`` keeps the nodes valid under their type's declaration;
+        ``traverse()`` keeps the relationships valid under the relationship
+        type's declaration, and does **not** filter the target nodes by their
+        own — chain ``.valid_at()`` (which reads this context's date) to do
+        that. Undeclared types pass unfiltered.
 
         Modes:
             - ``date('2013')`` — point-in-time (valid at 2013-01-01).
@@ -7608,9 +7650,20 @@ class KnowledgeGraph:
             - ``date()`` — reset to today (default).
 
         Args:
-            date_str: Date string, ``'all'``, or ``None`` to reset.
-            end_str: Optional end date for range mode. End dates expand to
-                period end (``'2015'`` → 2015-12-31, ``'2015-06'`` → 2015-06-30).
+            date_str: A date string (``'2013'``, ``'2013-06'``,
+                ``'2013-06-30'``, ``'20130630'``, or a datetime string such as
+                ``'2013-06-30T12:00'``), a ``datetime.date``, a
+                ``datetime.datetime``, ``'all'``, or ``None`` to reset. A
+                datetime is taken at its date (an aware one in UTC): the
+                context works at date grain.
+            end_str: Optional end date for range mode, in the same forms. End
+                dates expand to period end (``'2015'`` → 2015-12-31,
+                ``'2015-06'`` → 2015-06-30).
+
+        Raises:
+            ArgumentError: If a string is not a date.
+            TypeError: If a date argument is neither a string nor a
+                ``datetime.date``.
 
         Returns:
             A new KnowledgeGraph with the given temporal context.

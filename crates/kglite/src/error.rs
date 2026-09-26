@@ -151,11 +151,11 @@ impl KgErrorCode {
     /// - `CypherTimeout` → 408 Request Timeout
     /// - `TransactionConflict` → 409 Conflict
     /// - `Schema`, `Validation`, `Expr`, `ConstraintViolation`,
-    ///   `ConstraintCreationFailed` → 422 Unprocessable Entity
+    ///   `ConstraintCreationFailed`, `CypherExecution` → 422 Unprocessable
+    ///   Entity
     /// - `LoadMemoryLimit` → 507 Insufficient Storage
     /// - `Cancelled` → 499 Client Closed Request
-    /// - `CypherExecution`, `FileFormat`, `FileIo`, `Internal` →
-    ///   500 Internal Server Error
+    /// - `FileFormat`, `FileIo`, `Internal` → 500 Internal Server Error
     ///
     /// Companion to [`Self::neo4j_status_code`] for HTTP-shaped bindings.
     pub fn http_status_code(&self) -> u16 {
@@ -187,16 +187,19 @@ impl KgErrorCode {
             // deliberately not a 4xx the client is invited to repeat.
             KgErrorCode::LoadMemoryLimit => 507,
 
+            // A statement that failed on what it was given — a malformed
+            // `valid_at` date, a property the type does not have, an
+            // undeclared type, `1/0`, a work budget exceeded — is the
+            // client's to fix, as `Validation` / `Expr` are. Server faults
+            // surface as `Internal` / `FileIo`.
             KgErrorCode::Schema
             | KgErrorCode::Validation
             | KgErrorCode::Expr
+            | KgErrorCode::CypherExecution
             | KgErrorCode::ConstraintViolation
             | KgErrorCode::ConstraintCreationFailed => 422,
 
-            KgErrorCode::CypherExecution
-            | KgErrorCode::FileFormat
-            | KgErrorCode::FileIo
-            | KgErrorCode::Internal => 500,
+            KgErrorCode::FileFormat | KgErrorCode::FileIo | KgErrorCode::Internal => 500,
         }
     }
 
@@ -215,7 +218,6 @@ impl KgErrorCode {
             KgErrorCode::CypherTimeout => "Neo.ClientError.Transaction.TransactionTimedOut",
             KgErrorCode::Cancelled => "Neo.ClientError.Transaction.Terminated",
             KgErrorCode::CypherTypeMismatch => "Neo.ClientError.Statement.TypeError",
-            KgErrorCode::CypherExecution => "Neo.DatabaseError.Statement.ExecutionFailed",
             KgErrorCode::Schema => "Neo.ClientError.Schema.ConstraintValidationFailed",
             KgErrorCode::ConstraintViolation => "Neo.ClientError.Schema.ConstraintValidationFailed",
             KgErrorCode::ConstraintCreationFailed => {
@@ -233,7 +235,10 @@ impl KgErrorCode {
             // tests/test_bolt_server_transactions.py, and the JS/Java
             // conformance corpora).
             KgErrorCode::TransactionConflict => "Neo.TransientError.Transaction.Outdated",
-            KgErrorCode::Validation | KgErrorCode::Expr => {
+            // `CypherExecution` is a statement that failed on its inputs (see
+            // `http_status_code`); publishing it as `DatabaseError` told a
+            // driver the server broke when the query was at fault.
+            KgErrorCode::Validation | KgErrorCode::Expr | KgErrorCode::CypherExecution => {
                 "Neo.ClientError.Statement.ArgumentError"
             }
             KgErrorCode::NodeNotFound
@@ -297,9 +302,12 @@ pub enum KgError {
         message: String,
     },
 
-    /// Cypher executor failure (mutation conflict, predicate panic,
-    /// missing aggregate context, etc.). Optional position points at
-    /// the AST node when known.
+    /// A statement that failed while executing, on what it was given — a
+    /// malformed function argument, a property or declaration the query
+    /// relies on that does not exist, a stored value an operation cannot
+    /// read, an exceeded work budget. A client error on every wire (Bolt
+    /// `ClientError`, HTTP 422). Optional position points at the AST node
+    /// when known.
     CypherExecution {
         message: String,
         position: Option<(usize, usize)>,
@@ -828,8 +836,8 @@ mod tests {
         assert_eq!(KgErrorCode::Schema.http_status_code(), 422);
         assert_eq!(KgErrorCode::Validation.http_status_code(), 422);
         assert_eq!(KgErrorCode::Expr.http_status_code(), 422);
+        assert_eq!(KgErrorCode::CypherExecution.http_status_code(), 422);
 
-        assert_eq!(KgErrorCode::CypherExecution.http_status_code(), 500);
         assert_eq!(KgErrorCode::FileFormat.http_status_code(), 500);
         assert_eq!(KgErrorCode::FileIo.http_status_code(), 500);
         assert_eq!(KgErrorCode::Internal.http_status_code(), 500);

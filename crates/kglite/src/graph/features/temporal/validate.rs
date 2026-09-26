@@ -303,7 +303,7 @@ pub(super) fn check_frame(frame: &DataFrame, config: &TemporalConfig) -> Result<
     };
     for row in 0..frame.row_count() {
         check_row(&cell(row, from), &cell(row, to), config)
-            .map_err(|reason| format!("row {row} of the load, {reason}"))?;
+            .map_err(|reason| format!("row {row} (0-based) of the load, {reason}"))?;
     }
     Ok(())
 }

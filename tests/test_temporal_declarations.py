@@ -409,7 +409,7 @@ class TestLoaderDeclarations:
 
     def test_an_inverted_row_is_refused_naming_the_row(self):
         g = _docs()
-        with pytest.raises(kglite.ArgumentError, match="row 1 of the load.*is after the to bound"):
+        with pytest.raises(kglite.ArgumentError, match=r"row 1 \(0-based\) of the load.*is after the to bound"):
             _link(g, [(1, 2, "2000-01-01", "2005-01-01"), (2, 1, "2010-01-01", "2009-01-01")])
         assert _periods(g) == []
         assert _declarations(g) == []

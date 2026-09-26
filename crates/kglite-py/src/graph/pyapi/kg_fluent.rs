@@ -87,31 +87,26 @@ impl KnowledgeGraph {
     /// - `date("all")` — disable temporal filtering entirely
     /// - `date()` — reset to today
     #[pyo3(signature = (date_str=None, end_str=None))]
-    fn date(&self, date_str: Option<&str>, end_str: Option<&str>) -> PyResult<Self> {
+    fn date(
+        &self,
+        date_str: Option<&Bound<'_, PyAny>>,
+        end_str: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        use crate::datatypes::py_in::query_date;
+        let is_all = date_str
+            .and_then(|value| value.extract::<String>().ok())
+            .is_some_and(|text| text == "all");
         let mut new_kg = self.clone();
         new_kg.cursor.temporal_context = match (date_str, end_str) {
-            (Some("all"), _) => TemporalContext::All,
+            _ if is_all => TemporalContext::All,
             (Some(start), Some(end)) => {
-                let (start_date, _) = kglite_core::api::timeseries::parse_date_query(start)
-                    .map_err(|e: String| -> PyErr {
-                        crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-                    })?;
-                let (end_date, end_precision) = kglite_core::api::timeseries::parse_date_query(end)
-                    .map_err(|e: String| -> PyErr {
-                        crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-                    })?;
+                let (start_date, _) = query_date(start, "date_str")?;
+                let (end_date, end_precision) = query_date(end, "end_str")?;
                 let expanded_end =
                     kglite_core::api::timeseries::expand_end(end_date, end_precision);
                 TemporalContext::During(start_date, expanded_end)
             }
-            (Some(s), None) => {
-                let (date, _) = kglite_core::api::timeseries::parse_date_query(s).map_err(
-                    |e: String| -> PyErr {
-                        crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-                    },
-                )?;
-                TemporalContext::At(date)
-            }
+            (Some(start), None) => TemporalContext::At(query_date(start, "date_str")?.0),
             (None, None) => TemporalContext::Today,
             (None, Some(_)) => {
                 return Err(crate::error_py::kg_to_pyerr(
@@ -403,20 +398,13 @@ impl KnowledgeGraph {
     #[pyo3(signature = (date=None, date_from_field=None, date_to_field=None))]
     fn valid_at(
         &mut self,
-        date: Option<&str>,
+        date: Option<&Bound<'_, PyAny>>,
         date_from_field: Option<&str>,
         date_to_field: Option<&str>,
     ) -> PyResult<Self> {
         let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         let ref_date = match date {
-            Some(d) => {
-                let (parsed, _) = kglite_core::api::timeseries::parse_date_query(d).map_err(
-                    |e: String| -> PyErr {
-                        crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-                    },
-                )?;
-                parsed
-            }
+            Some(d) => crate::datatypes::py_in::query_date(d, "date")?.0,
             None => match &self.cursor.temporal_context {
                 TemporalContext::At(d) => *d,
                 _ => chrono::Local::now().date_naive(),
@@ -464,21 +452,14 @@ impl KnowledgeGraph {
     #[pyo3(signature = (start_date, end_date, date_from_field=None, date_to_field=None))]
     fn valid_during(
         &mut self,
-        start_date: &str,
-        end_date: &str,
+        start_date: &Bound<'_, PyAny>,
+        end_date: &Bound<'_, PyAny>,
         date_from_field: Option<&str>,
         date_to_field: Option<&str>,
     ) -> PyResult<Self> {
         let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
-        let (start_parsed, _) = kglite_core::api::timeseries::parse_date_query(start_date)
-            .map_err(|e: String| -> PyErr {
-                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-            })?;
-        let (end_parsed, _) = kglite_core::api::timeseries::parse_date_query(end_date).map_err(
-            |e: String| -> PyErr {
-                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-            },
-        )?;
+        let (start_parsed, _) = crate::datatypes::py_in::query_date(start_date, "start_date")?;
+        let (end_parsed, _) = crate::datatypes::py_in::query_date(end_date, "end_date")?;
         let request = kglite_core::api::temporal::NodeValidityRequest::new(
             &self.inner,
             "valid_during",

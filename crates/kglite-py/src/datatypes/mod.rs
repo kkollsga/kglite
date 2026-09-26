@@ -14,7 +14,7 @@ pub mod values {
 pub mod on_invalid;
 pub mod py_in;
 pub mod py_out;
-mod py_value;
+pub(crate) mod py_value;
 pub mod type_conversions;
 
 pub(crate) mod pandas_out;

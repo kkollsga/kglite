@@ -165,7 +165,7 @@ pub fn unusable_rows_err(
     raw_value: &str,
 ) -> PyErr {
     crate::error_py::ArgumentError::new_err(format!(
-        "{loader}: {} of {total_rows} rows cannot be loaded — row {} has {} in ID column '{}'. \
+        "{loader}: {} of {total_rows} rows cannot be loaded — row {} (0-based) has {} in ID column '{}'. \
          Nothing was written (on_invalid='error'). Pass on_invalid='warn' to load the rest and \
          report the skips, or on_invalid='skip' to load the rest silently.",
         bad.count, bad.first_row, raw_value, bad.first_column

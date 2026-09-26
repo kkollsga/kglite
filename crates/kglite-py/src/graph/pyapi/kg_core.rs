@@ -136,9 +136,7 @@ pub(crate) fn concurrent_access_pyerr() -> PyErr {
 /// `Argument`, not `CypherExecution`: the query did not fail to execute, it was
 /// refused for the handle it was aimed at — the same policy `Session`,
 /// `FrozenGraph` and a read-only `Transaction` refuse under, and one a caller
-/// routes on by class. `CypherExecution` also publishes as
-/// `Neo.DatabaseError.Statement.ExecutionFailed` on the Bolt wire, i.e. a
-/// client mistake dressed as a server fault.
+/// routes on by class.
 fn refuse_mutation_on_a_read_only_graph(slf: &Bound<'_, KnowledgeGraph>) -> PyResult<()> {
     let this = slf.try_borrow().map_err(|_| concurrent_access_pyerr())?;
     if this.inner.read_only {

@@ -193,7 +193,9 @@ pub(crate) fn interval_contains(
 }
 
 /// Whether the element's interval shares an instant with the closed query
-/// range `[a, b]`.
+/// range `[a, b]`. An empty interval — inverted, or `from == to` under
+/// half-open, which a write after the declaration can leave — shares none, as
+/// [`interval_contains`] finds it valid on no date.
 pub(crate) fn interval_overlaps(
     from: &Value,
     to: &Value,
@@ -202,7 +204,11 @@ pub(crate) fn interval_overlaps(
     convention: IntervalConvention,
 ) -> Result<bool, TemporalError> {
     let (from, to) = parse_bounds(from, to)?;
-    Ok(starts_by(from, b) && ends_after(to, a, convention))
+    let non_empty = match (from, to) {
+        (Some(from), Some(to)) => end_admits(to, from, convention),
+        _ => true,
+    };
+    Ok(non_empty && starts_by(from, b) && ends_after(to, a, convention))
 }
 
 fn starts_by(from: Option<Instant>, t: Instant) -> bool {
@@ -231,6 +237,26 @@ pub(crate) fn end_admits(end: Instant, t: Instant, convention: IntervalConventio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_interval_overlaps_no_range() {
+        let (a, b) = (
+            Instant::Date(NaiveDate::from_ymd_opt(1900, 1, 1).unwrap()),
+            Instant::Date(NaiveDate::from_ymd_opt(2100, 1, 1).unwrap()),
+        );
+        let closed = IntervalConvention::Closed;
+        let half_open = IntervalConvention::HalfOpen;
+        let inverted = (d("2005-01-01"), d("1990-01-01"));
+        assert!(!interval_overlaps(&inverted.0, &inverted.1, a, b, closed).unwrap());
+        assert!(!interval_overlaps(&inverted.0, &inverted.1, a, b, half_open).unwrap());
+        let one_day = (d("2005-01-01"), d("2005-01-01"));
+        assert!(interval_overlaps(&one_day.0, &one_day.1, a, b, closed).unwrap());
+        assert!(!interval_overlaps(&one_day.0, &one_day.1, a, b, half_open).unwrap());
+        // A datetime end later on the start day leaves part of that day.
+        let part_day = (d("2005-01-01"), ts("2005-01-01T20:00"));
+        assert!(interval_overlaps(&part_day.0, &part_day.1, a, b, half_open).unwrap());
+        assert!(interval_overlaps(&Value::Null, &inverted.1, a, b, half_open).unwrap());
+    }
 
     fn d(s: &str) -> Value {
         Value::DateTime(NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap())

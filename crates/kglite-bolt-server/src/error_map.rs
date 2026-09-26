@@ -14,9 +14,8 @@
 //! | `CypherSyntax`            | `Neo.ClientError.Statement.SyntaxError`            | CypherSyntaxError  |
 //! | `CypherTimeout`           | `Neo.ClientError.Transaction.TransactionTimedOut`  | ClientError        |
 //! | `CypherTypeMismatch`      | `Neo.ClientError.Statement.TypeError`              | ClientError        |
-//! | `CypherExecution`         | `Neo.DatabaseError.Statement.ExecutionFailed`      | DatabaseError      |
 //! | `Schema`                  | `Neo.ClientError.Schema.ConstraintValidationFailed`| ClientError        |
-//! | `Validation` / `Expr`     | `Neo.ClientError.Statement.ArgumentError`          | ClientError        |
+//! | `Validation` / `Expr` / `CypherExecution` | `Neo.ClientError.Statement.ArgumentError` | ClientError |
 //! | `NodeNotFound` / `ConnectionNotFound` / `PropertyNotFound` | `Neo.ClientError.Statement.EntityNotFound` | ClientError |
 //! | `InvalidArgument`         | `Neo.ClientError.Statement.ArgumentError`          | ClientError        |
 //! | `MissingArgument`         | `Neo.ClientError.Statement.ParameterMissing`       | ClientError        |
@@ -78,6 +77,23 @@ mod tests {
         match bolt {
             BoltError::Query { code, .. } => {
                 assert_eq!(code, "Neo.ClientError.Statement.SyntaxError");
+            }
+            other => panic!("expected Query, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_execution_failure_is_published_as_a_client_error() {
+        // A statement that failed on its inputs (a malformed `valid_at` date,
+        // an undeclared type) is the client's to fix; a `DatabaseError` class
+        // told drivers and retry logic the server broke.
+        let bolt = kg_to_bolt(KgError::CypherExecution {
+            message: "valid_at(): the date argument 'garbage' is not a date".into(),
+            position: None,
+        });
+        match bolt {
+            BoltError::Query { code, .. } => {
+                assert_eq!(code, "Neo.ClientError.Statement.ArgumentError");
             }
             other => panic!("expected Query, got {other:?}"),
         }

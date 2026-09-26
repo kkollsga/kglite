@@ -201,7 +201,9 @@ mod tests {
         let r2 = parse_cypher_cached(q);
         assert!(r1.is_err());
         assert!(r2.is_err());
-        // Cache should not have any entry for the failing query.
-        assert_eq!(entry_count_for_tests(), 0);
+        // No entry for the failing query. Not a zero total: any test elsewhere
+        // in the binary that runs Cypher adds entries to the process-global
+        // cache without taking `TEST_LOCK` (see `cache_hit_returns_equivalent_ast`).
+        assert!(!is_cached_for_tests(q));
     }
 }

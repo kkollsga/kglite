@@ -650,7 +650,7 @@ fn convert_dict(dict: &Bound<'_, PyDict>, state: &mut ConversionState) -> PyResu
     )))
 }
 
-pub(super) fn datetime_to_utc_naive(
+pub(crate) fn datetime_to_utc_naive(
     value: &Bound<'_, PyDateTime>,
 ) -> PyResult<chrono::NaiveDateTime> {
     if value.get_tzinfo().is_none() {

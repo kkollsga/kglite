@@ -96,7 +96,7 @@ fn an_inverted_row_of_the_load_is_refused_by_position() {
     let err = declare_from_column_types(&mut graph, status(), "vf", "vt", None, &frame)
         .err()
         .expect("inverted row");
-    assert!(err.starts_with("row 1 of the load, "), "{err}");
+    assert!(err.starts_with("row 1 (0-based) of the load, "), "{err}");
     assert!(err.contains("is after the to bound"), "{err}");
     assert!(list(&graph).is_empty());
 }

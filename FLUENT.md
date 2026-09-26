@@ -210,22 +210,83 @@ graph.select('Person').sort('name').offset(20).limit(10)  # page 3 of 10
 
 ## Temporal Filtering
 
-Date-range filtering on node properties. NULL semantics: NULL `from` = valid since beginning, NULL `to` = still valid.
+A node or relationship type with a validity interval — two properties holding
+its `from` and `to` bounds — can be filtered by date. NULL `from` = valid since
+the beginning, NULL `to` = still valid. Bounds may be dates, datetimes or ISO
+date strings.
+
+### Declaring the interval
+
+Declare the two properties once and every temporal filter reads them, with the
+end rule you choose: `'closed'` (the `to` day is still valid) or `'half_open'`
+(the `to` day is the first day no longer valid — what a registry whose periods
+end on their successor's start day means).
 
 ```python
-# Nodes valid at a specific date
-graph.select('Employee').valid_at('2024-01-15')
-# Uses default fields: date_from, date_to
+graph.set_temporal('Employee', 'start_date', 'end_date', convention='half_open')
 
-# Custom field names
+# or at load time
+graph.add_nodes(df, 'Employee', 'emp_id',
+    column_types={'start_date': 'validFrom', 'end_date': 'validTo'},
+    convention='half_open')
+
+# or in Cypher
+graph.cypher("CALL db.temporal.declare({node: 'Employee', from: 'start_date', "
+             "to: 'end_date', convention: 'half_open'})")
+```
+
+The declaration validates the rows stored when it is made. Later writes onto
+the type are not re-validated: a bound that is not a date raises from the next
+filter that reads it, naming the element. See `set_temporal()` and the
+[Cypher validity-interval declarations](https://kglite.readthedocs.io/en/latest/reference/cypher-reference.html#validity-interval-declarations).
+
+### Explicit filters
+
+```python
+# Nodes valid at a date, under the type's declaration
+graph.select('Employee').valid_at('2024-01-15')
+
+# Name the bounds instead (an undeclared type defaults to date_from / date_to)
 graph.select('Contract').valid_at('2024-06-01',
     date_from_field='start_date',
     date_to_field='end_date')
 
-# Nodes valid during a range (overlap check)
-graph.select('Regulation').valid_during('2020-01-01', '2022-12-31',
-    date_from_field='effective_from',
-    date_to_field='effective_to')
+# Validity overlapping a range
+graph.select('Regulation').valid_during('2020-01-01', '2022-12-31')
+
+# Relationships valid at a date (the relationship type must be declared)
+graph.select('Person').traverse('EMPLOYED_AT', at='2019-01-01')
+graph.select('Person').traverse('EMPLOYED_AT', during=('2018', '2020'))
+```
+
+A date argument is a string (`'2024'`, `'2024-06'`, `'2024-06-01'`,
+`'20240601'`, or a datetime string such as `'2024-06-01T12:00'`), a
+`datetime.date` or a `datetime.datetime`. The fluent filters work at date
+grain, so a datetime is taken at its date (an aware one in UTC).
+
+An explicit filter raises rather than keeping every row when it has nothing to
+read: a field name the type does not have, a type with no declaration and no
+`date_from`/`date_to` properties, or `traverse(at=…)` on an undeclared
+relationship type.
+
+### The date context
+
+```python
+g2010 = graph.date('2010')             # point in time
+g2010.select('Municipality')           # declared types: only valid nodes
+g2010.select('Person').traverse('EMPLOYED_AT')   # only valid relationships
+
+graph.date('2010', '2015')             # anything valid during 2010-01-01 .. 2015-12-31
+graph.date('all')                      # no temporal filtering
+graph.select('Municipality', temporal=False)     # opt out for one call
+```
+
+The context filters declared types only; undeclared types pass unfiltered.
+`traverse()` filters the relationships, not the target nodes by their own
+declaration — chain `.valid_at()`, which reads the context's date:
+
+```python
+g2010.select('Person').traverse('EMPLOYED_AT').valid_at()
 ```
 
 ---

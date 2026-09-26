@@ -32,6 +32,11 @@ before upgrading.
   set's export columns from the type's schema. `kglite::api::fluent::
   TemporalEdgeFilter` gains an `Undeclared` variant, so an exhaustive match
   over it needs a new arm.
+- Fluent `date()`, `valid_at()`, `valid_during()` and `traverse(at=…,
+  during=…)` take a `datetime.date` or `datetime.datetime`, as `cypher()`
+  parameters do, and a datetime string such as `'2009-06-30T12:00'`. The
+  fluent filters work at date grain, so a datetime is taken at its date (an
+  aware one in UTC). Rust: `kglite::api::timeseries::parse_date_or_datetime_query`.
 - Rust API: `kglite::api::blueprint::TemporalSpec`, the `temporal` field's type on
   `NodeSpec`, `FkEdge` and `JunctionEdge`.
 - Rust API: `SchemaDefinition::reject_reserved_provenance_constraints` and
@@ -216,6 +221,32 @@ before upgrading.
 
 ### Fixed
 
+- A Cypher statement that fails on what it was given — a malformed
+  `valid_at` date, a property the type does not have, a type with no declared
+  validity interval — is a client error on every wire: the Bolt server sends
+  `Neo.ClientError.Statement.ArgumentError` (Neo4j drivers raise
+  `ClientError`) instead of `Neo.DatabaseError.Statement.ExecutionFailed`,
+  which told drivers and retry logic the server broke, and
+  `KgErrorCode::CypherExecution` maps to HTTP 422 instead of 500 (also
+  through the C ABI's `kglite_status_code_neo4j_status` / `_http_status`).
+  The Python class stays `CypherExecutionError`.
+- `valid_during()` — Cypher and fluent — no longer reports an empty interval
+  (inverted, or `from == to` under `half_open`) as overlapping a range wide
+  enough to cover both bounds; `valid_at()` already found it valid on no date.
+  Such an interval can only be written after the type is declared.
+- The `add_nodes` docstring said a call onto a type with `validFrom` /
+  `validTo` column types checks its rows' intervals; that holds only for the
+  call that makes the declaration. Writes onto a declared type are not
+  re-validated, which the docstring, `set_temporal()`, CYPHER.md and the
+  temporal guide now say, with the property-type constraint
+  (`REQUIRE n.valid_to IS :: DATE`) that refuses a bad write up front.
+- Load errors and warnings (`add_nodes` and the validity-interval check) name
+  a row by its 0-based position and now say so: `row 1 (0-based)`.
+- Docs: `date()` and `traverse()` say that a date context filters
+  relationships, not the target nodes by their own declaration (chain
+  `.valid_at()`); FLUENT.md's temporal section covers declarations,
+  conventions, relationship dates and the date context; `column_types` lists
+  `validFrom` / `validTo`.
 - Cypher `valid_at()` / `valid_during()` on a null entity — an unmatched
   `OPTIONAL MATCH` — return null in every form, so `WHERE` drops the row. They
   returned `true`, reporting a missing membership as valid.

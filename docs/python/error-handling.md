@@ -115,11 +115,14 @@ except kglite.ArgumentError as exc:
 ```
 
 The refusal is deliberately *not* `CypherExecutionError`: the query did not
-fail to execute, it was aimed at a handle that does not take it. That
-distinction is visible on the wire too — `CypherExecution` maps to
-`Neo.DatabaseError.Statement.ExecutionFailed`, which tells a Bolt driver the
-server broke, while `InvalidArgument` maps to
-`Neo.ClientError.Statement.ArgumentError`.
+fail to execute, it was aimed at a handle that does not take it, and a caller
+routes on the class. Both are client errors on the wire — `CypherExecution`
+and `InvalidArgument` map to `Neo.ClientError.Statement.ArgumentError` over
+Bolt (HTTP 422 and 400). A `CypherExecutionError` is a statement that failed
+on what it was given — a malformed function argument, a property or
+declaration the query relies on that does not exist, a stored value an
+operation cannot read — so it is the query or the data to fix, not the
+server; server faults are `InternalError` / `FileIoError`.
 
 The same rule covers an **unknown node type**: `properties()`,
 `neighbors_schema()`, `sample()`, `describe(types=[...])`, `set_parent_type()`

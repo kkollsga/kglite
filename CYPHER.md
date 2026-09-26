@@ -1462,6 +1462,14 @@ CALL db.temporal.declarations()
   bound must be NULL, a date, a datetime or an ISO string, with `from` before
   `to` (strictly before under `half_open`). The first row that fails is
   refused, naming the node's id or the relationship's endpoints.
+- **Later writes are not re-validated.** Only the rows stored at declare time
+  are checked; a `SET`, `CREATE` or load onto a declared type is not, so a
+  declaration adds no cost to the write path. A bound that is not a date then
+  raises from the next `valid_at` / `valid_during` (or fluent temporal filter)
+  that reads it, naming the node's id or the relationship's endpoints and the
+  property; an inverted interval is valid on no date. To refuse such writes,
+  add a property-type constraint:
+  `CREATE CONSTRAINT FOR (m:FieldStatus) REQUIRE m.date_to IS :: DATE`.
 - **Re-declaring** the same target with the same properties and convention is
   a no-op (`declared: false`); different ones are refused until the target is
   undeclared.

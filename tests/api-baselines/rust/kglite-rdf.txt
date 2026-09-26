@@ -3463,6 +3463,7 @@ pub fn kglite::api::timeseries::TimeseriesConfig::deserialize<__D>(__deserialize
 pub fn kglite::api::timeseries::date_from_ymd(year: i32, month: u32, day: u32) -> core::result::Result<chrono::naive::date::NaiveDate, alloc::string::String>
 pub fn kglite::api::timeseries::expand_end(date: chrono::naive::date::NaiveDate, precision: kglite::api::timeseries::DatePrecision) -> chrono::naive::date::NaiveDate
 pub fn kglite::api::timeseries::find_range(keys: &[chrono::naive::date::NaiveDate], start: core::option::Option<chrono::naive::date::NaiveDate>, end: core::option::Option<chrono::naive::date::NaiveDate>) -> (usize, usize)
+pub fn kglite::api::timeseries::parse_date_or_datetime_query(s: &str) -> core::result::Result<(chrono::naive::date::NaiveDate, kglite::api::timeseries::DatePrecision), alloc::string::String>
 pub fn kglite::api::timeseries::parse_date_query(s: &str) -> core::result::Result<(chrono::naive::date::NaiveDate, kglite::api::timeseries::DatePrecision), alloc::string::String>
 pub fn kglite::api::timeseries::validate_channel_length(keys_len: usize, channel_len: usize, channel_name: &str) -> core::result::Result<(), alloc::string::String>
 pub fn kglite::api::timeseries::validate_keys_sorted(keys: &[chrono::naive::date::NaiveDate]) -> core::result::Result<(), alloc::string::String>
