@@ -596,6 +596,9 @@ pub unsafe extern "C" fn kglite_session_execute_mut_batch(
 /// transaction: the whole batch commits together, or — on error — none
 /// of it lands. Endpoints must already exist; an edge whose source or
 /// target id isn't found for its declared type is skipped and counted.
+/// A batch that would leave a relationship violating a declared
+/// relationship constraint (`IS NOT NULL`, `IS :: <type>`) is refused
+/// whole with `KgliteStatusCode::ConstraintViolation`.
 ///
 /// On success `out_report_json` is set to an owned JSON object
 /// `{"connections_created": N, "connections_updated": U,
@@ -637,9 +640,15 @@ pub unsafe extern "C" fn kglite_create_edges_batch(
             // execute_mut writers (no last-writer-wins Arc-swap losing
             // their commits) and atomic — an error drops the fork with
             // no partial writes.
-            let transaction: Result<_, String> = session_state
-                .inner
-                .transact(|working| add_edges_from_specs(working, specs));
+            // A refusal by a declared constraint is taken off the fork before
+            // `transact` drops it, so it surfaces as `ConstraintViolation`.
+            let transaction: Result<_, (String, Option<Box<kglite::api::KgError>>)> =
+                session_state.inner.transact(|working| {
+                    add_edges_from_specs(working, specs).map_err(|message| {
+                        let typed = working.take_constraint_error(&message).map(Box::new);
+                        (message, typed)
+                    })
+                });
             match transaction {
                 Ok(report) => {
                     let json = serde_json::json!({
@@ -658,16 +667,23 @@ pub unsafe extern "C" fn kglite_create_edges_batch(
                     }
                     KgliteStatusCode::Ok
                 }
-                Err(msg) => {
+                Err((message, typed)) => {
                     unsafe {
                         *out_report_json = std::ptr::null();
                     }
+                    let (code, message) = match typed {
+                        Some(err) => (
+                            KgliteStatusCode::from_kg_error_code(err.code()),
+                            err.to_string(),
+                        ),
+                        None => (KgliteStatusCode::Internal, message),
+                    };
                     if !out_error_msg.is_null() {
                         unsafe {
-                            *out_error_msg = alloc_c_string(&msg);
+                            *out_error_msg = alloc_c_string(&message);
                         }
                     }
-                    KgliteStatusCode::Internal
+                    code
                 }
             }
         },

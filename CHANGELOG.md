@@ -113,6 +113,15 @@ before upgrading.
 
 ### Fixed
 
+- Relationship `IS NOT NULL` and `IS :: <type>` constraints were not checked
+  by the C ABI's `kglite_create_edges_batch` (and so the Java binding), by
+  `create_relationships()`, or by the Rust `kglite::api::blueprint::from_records`
+  loading into a graph that declares them with `on_missing_endpoint` set to
+  `"drop"` or `"error"`. These paths could store relationships the
+  constraint forbids. They now use the same check as `add_relationships`.
+  The whole call is refused before anything is written, and it raises
+  `ConstraintViolationError`. The C ABI returns
+  `KgliteStatusCode::ConstraintViolation`.
 - `extend()` now copies the other graph's validity-interval declarations and
   spatial configurations; it copied neither, so the other graph's periods
   between the same endpoints collapsed into one relationship on merge and its

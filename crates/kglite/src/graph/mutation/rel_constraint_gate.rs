@@ -1,4 +1,6 @@
-//! The whole-frame relationship-constraint gate for `add_connections`.
+//! The whole-frame relationship-constraint gate for the bulk relationship
+//! loaders: `add_connections`, `replace_connections`, `create_connections` and
+//! `add_edges_from_specs` (the C ABI's and `from_records`' edge path).
 //!
 //! **Why a pre-pass and not a per-row skip.** The bulk loaders' contract is
 //! all-or-nothing on validation: `replace_connections` hoists every check
@@ -38,6 +40,8 @@
 //! | `add_connections`, the load's first touch of the connection type | on | no lookup and no consolidation: **one relationship per row** (`batch.rs`, "within-chunk consolidation is the responsibility of the caller in that mode") | [`RowFolding::Independent`] |
 //! | `add_connections`, type already loaded | off | per-chunk lookup, mutated as rows land, so a row merges into a stored edge *or* into one an earlier row created | [`RowFolding::Merging`] with `read_stored` |
 //! | `replace_connections` | delegates to the above | its delete drops the stored edges for these pairs first, but leaves the type in the metadata — so rows still consolidate with each other while nothing stored survives | [`RowFolding::Merging`] **without** `read_stored` (or `Independent` when the type is new) |
+//! | `add_edges_from_specs` | as `add_connections`, per `(source, target, edge type)` group, always under `update` | the same batch engine; a later group of an already-grouped edge type merges | as `add_connections` |
+//! | `create_connections` | off | lookup on, so every row merges | [`RowFolding::Merging`] with `read_stored` |
 //!
 //! Under `Merging` a row folds on the batch's key: the endpoint pair, plus the
 //! `from` value for a declared temporal type ([`ConnectionBatchGate::start_key`]).
@@ -54,10 +58,93 @@ use crate::graph::storage::GraphRead;
 
 use super::batch::{sum_values, ConflictHandling};
 
-/// One `add_connections` frame, as its gate sees it.
+/// Cell access to the rows a gate judges, whatever holds them.
+pub(crate) trait GateRows {
+    /// The value at `(row, column)`; `None` when absent.
+    fn cell(&self, row: usize, column: usize) -> Option<Value>;
+}
+
+impl GateRows for DataFrame {
+    fn cell(&self, row: usize, column: usize) -> Option<Value> {
+        self.get_value_by_index(row, column)
+    }
+}
+
+/// Rows already held as interned property lists ([`gate_property_rows`]).
+/// Column `i` is `keys[i]`; a row that does not carry a key is absent there.
+struct PropertyRows<'a> {
+    pub keys: &'a [InternedKey],
+    pub rows: &'a [Vec<(InternedKey, Value)>],
+}
+
+impl GateRows for PropertyRows<'_> {
+    fn cell(&self, row: usize, column: usize) -> Option<Value> {
+        let key = self.keys.get(column)?;
+        self.rows
+            .get(row)?
+            .iter()
+            .find(|(stored, _)| stored == key)
+            .map(|(_, value)| value.clone())
+    }
+}
+
+/// Gate rows already resolved to endpoints and interned property lists — the
+/// shape `add_edges_from_specs` and `create_connections` hold. Row `i` of
+/// `matched` reads `properties[i]`; the frame's columns are every key any row
+/// carries.
+pub(crate) fn gate_property_rows(
+    graph: &mut DirGraph,
+    connection_type: &str,
+    matched: &[(
+        usize,
+        petgraph::graph::NodeIndex,
+        petgraph::graph::NodeIndex,
+    )],
+    properties: &[Vec<(InternedKey, Value)>],
+    conflict_mode: ConflictHandling,
+    folding: RowFolding,
+    start_key: Option<InternedKey>,
+) -> Result<(), String> {
+    // The gate's own fast-out, taken before the column list is built.
+    if !graph.has_rel_constraints() || !graph.type_has_rel_constraints(connection_type) {
+        return Ok(());
+    }
+    let mut keys: Vec<InternedKey> = Vec::new();
+    for (key, _) in properties.iter().flatten() {
+        if !keys.contains(key) {
+            keys.push(*key);
+        }
+    }
+    let property_columns: Vec<(String, InternedKey, usize)> = keys
+        .iter()
+        .enumerate()
+        .filter_map(|(index, key)| {
+            graph
+                .interner
+                .try_resolve(*key)
+                .map(|name| (name.to_string(), *key, index))
+        })
+        .collect();
+    ConnectionBatchGate {
+        connection_type,
+        rows: &PropertyRows {
+            keys: &keys,
+            rows: properties,
+        },
+        property_columns: &property_columns,
+        matched,
+        deferred: &[],
+        conflict_mode,
+        folding,
+        start_key,
+    }
+    .run(graph)
+}
+
+/// One bulk frame, as its gate sees it.
 pub(crate) struct ConnectionBatchGate<'a> {
     pub connection_type: &'a str,
-    pub df_data: &'a DataFrame,
+    pub rows: &'a dyn GateRows,
     /// `(column name, interned key, column index)` for the frame's edge
     /// property columns — the same list Pass A reads rows through.
     pub property_columns: &'a [(String, InternedKey, usize)],
@@ -327,7 +414,7 @@ impl ConnectionBatchGate<'_> {
     /// start key, or the cell is missing or NULL.
     fn row_start(&self, row_idx: usize, start_column: Option<usize>) -> Start {
         start_column
-            .and_then(|index| self.df_data.get_value_by_index(row_idx, index))
+            .and_then(|index| self.rows.cell(row_idx, index))
             .filter(|value| !matches!(value, Value::Null))
     }
 
@@ -339,7 +426,7 @@ impl ConnectionBatchGate<'_> {
             .iter()
             .map(|column| {
                 column
-                    .and_then(|index| self.df_data.get_value_by_index(row_idx, index))
+                    .and_then(|index| self.rows.cell(row_idx, index))
                     .filter(|value| !matches!(value, Value::Null))
             })
             .collect()

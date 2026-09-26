@@ -38,7 +38,7 @@ struct InlineConfig {
 /// parks the structured violation on the graph alongside the message it
 /// produced. Recovering it here is what makes a bulk write raise
 /// `kglite.ConstraintViolationError` rather than the generic `ArgumentError`.
-fn bulk_write_err(graph: &mut DirGraph, message: String) -> pyo3::PyErr {
+pub(super) fn bulk_write_err(graph: &mut DirGraph, message: String) -> pyo3::PyErr {
     let error = graph
         .take_constraint_error(&message)
         .unwrap_or(crate::error::KgError::Argument(message));

@@ -670,6 +670,92 @@ fn create_edges_batch_props_decode_date_and_duration_tags() {
     unsafe { kglite_session_free(session) };
 }
 
+/// `kglite_create_edges_batch` for `edges`, returning (status, report or
+/// error text).
+fn create_edges(session: *mut KgliteSession, edges: &str) -> (KgliteStatusCode, String) {
+    let edges = CString::new(edges).unwrap();
+    let mut out: *const c_char = std::ptr::null();
+    let mut err: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_create_edges_batch(
+            session,
+            edges.as_ptr(),
+            &mut out as *mut _,
+            &mut err as *mut _,
+        )
+    };
+    let owned = if rc == KgliteStatusCode::Ok { out } else { err };
+    let text = unsafe { CStr::from_ptr(owned) }
+        .to_str()
+        .unwrap()
+        .to_string();
+    unsafe { kglite_free_string(owned) };
+    (rc, text)
+}
+
+/// Declared relationship constraints refuse a violating batch whole, with the
+/// typed status, exactly as a Cypher write would be refused.
+#[test]
+fn create_edges_batch_enforces_relationship_constraints() {
+    let session = seed_notes("CREATE (:P {id: 1}), (:P {id: 2}), (:P {id: 3})");
+    for ddl in [
+        "CREATE CONSTRAINT r_since FOR ()-[r:R]-() REQUIRE r.since IS NOT NULL",
+        "CREATE CONSTRAINT r_weight FOR ()-[r:R]-() REQUIRE r.weight IS :: INTEGER",
+    ] {
+        let q = CString::new(ddl).unwrap();
+        let mut result: *mut KgliteCypherResult = std::ptr::null_mut();
+        let mut err: *const c_char = std::ptr::null();
+        let rc = unsafe {
+            kglite_session_execute_mut(
+                session,
+                q.as_ptr(),
+                std::ptr::null(),
+                &mut result as *mut _,
+                &mut err as *mut _,
+            )
+        };
+        assert_eq!(rc, KgliteStatusCode::Ok, "{ddl}");
+        unsafe { kglite_cypher_result_free(result) };
+    }
+    let count = |session| query_rows(session, "MATCH ()-[r]->() RETURN count(r) AS c", "{}");
+
+    // The first edge is legal; the second lacks `since`. Nothing lands.
+    let (rc, message) = create_edges(
+        session,
+        r#"[{"src_id":1,"src_type":"P","dst_id":2,"dst_type":"P","type":"R","props":{"since":2020}},
+            {"src_id":2,"src_type":"P","dst_id":3,"dst_type":"P","type":"R","props":{"weight":1}}]"#,
+    );
+    assert_eq!(rc, KgliteStatusCode::ConstraintViolation, "{message}");
+    assert!(message.contains("R.since"), "{message}");
+    assert_eq!(count(session), serde_json::json!([{"c": 0}]));
+
+    let (rc, message) = create_edges(
+        session,
+        r#"[{"src_id":1,"src_type":"P","dst_id":2,"dst_type":"P","type":"R","props":{"since":2020,"weight":"heavy"}}]"#,
+    );
+    assert_eq!(rc, KgliteStatusCode::ConstraintViolation, "{message}");
+    assert!(message.contains("R.weight"), "{message}");
+    assert_eq!(count(session), serde_json::json!([{"c": 0}]));
+
+    let (rc, report) = create_edges(
+        session,
+        r#"[{"src_id":1,"src_type":"P","dst_id":2,"dst_type":"P","type":"R","props":{"since":2020,"weight":1}},
+            {"src_id":2,"src_type":"P","dst_id":3,"dst_type":"P","type":"R","props":{"since":2021}}]"#,
+    );
+    assert_eq!(rc, KgliteStatusCode::Ok, "{report}");
+    let report: serde_json::Value = serde_json::from_str(&report).unwrap();
+    assert_eq!(
+        report,
+        serde_json::json!({
+            "connections_created": 2,
+            "connections_updated": 0,
+            "skipped_missing_endpoint": 0,
+        })
+    );
+    assert_eq!(count(session), serde_json::json!([{"c": 2}]));
+    unsafe { kglite_session_free(session) };
+}
+
 #[test]
 fn create_edges_batch_by_id() {
     let graph = kglite_graph_new();

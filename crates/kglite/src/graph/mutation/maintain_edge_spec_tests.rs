@@ -66,3 +66,209 @@ fn edge_specs_interner_preflight_is_atomic() {
     assert_eq!(graph.graph.edge_count(), 0);
     assert!(graph.connection_type_metadata.is_empty());
 }
+
+// ── declared relationship constraints ────────────────────────────────
+//
+// The spec path must judge a batch exactly as `add_connections` does: the
+// C ABI (`kglite_create_edges_batch`) and `from_records` with a `drop`/`error`
+// endpoint policy reach the graph only through here.
+
+fn spec(source_id: i64, target_id: i64, edge_type: &str, props: &[(&str, Value)]) -> EdgeSpec {
+    EdgeSpec {
+        source_type: "Doc".to_string(),
+        source_id: Value::Int64(source_id),
+        target_type: "Doc".to_string(),
+        target_id: Value::Int64(target_id),
+        edge_type: edge_type.to_string(),
+        properties: props
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect(),
+    }
+}
+
+fn three_docs() -> DirGraph {
+    let mut graph = DirGraph::new();
+    let rows = DataFrame::from_cypher_rows(
+        vec!["id".to_string()],
+        (1..=3).map(|id| vec![Value::Int64(id)]).collect(),
+    )
+    .unwrap();
+    add_nodes(
+        &mut graph,
+        rows,
+        "Doc".to_string(),
+        "id".to_string(),
+        Some("id".to_string()),
+        None,
+    )
+    .unwrap();
+    graph
+}
+
+fn require_since(graph: &mut DirGraph) {
+    graph
+        .create_rel_not_null_constraint(
+            "LINKS",
+            "since",
+            &crate::graph::algorithms::Interrupt::default(),
+        )
+        .unwrap();
+}
+
+fn integer_weight(graph: &mut DirGraph) {
+    graph
+        .create_rel_property_type_constraint(
+            "LINKS",
+            "weight",
+            crate::graph::property_types::DeclaredType::Integer,
+            &crate::graph::algorithms::Interrupt::default(),
+        )
+        .unwrap();
+}
+
+#[test]
+fn edge_specs_refuse_a_missing_required_relationship_property() {
+    let mut graph = three_docs();
+    require_since(&mut graph);
+
+    let error = add_edges_from_specs(
+        &mut graph,
+        vec![
+            spec(1, 2, "LINKS", &[("since", Value::Int64(2020))]),
+            spec(2, 3, "LINKS", &[("weight", Value::Int64(1))]),
+        ],
+    )
+    .expect_err("a LINKS without `since` violates the NOT NULL constraint");
+
+    assert!(error.contains("LINKS.since"), "{error}");
+    assert_eq!(graph.graph.edge_count(), 0, "the refusal is all-or-nothing");
+}
+
+#[test]
+fn edge_specs_refuse_a_wrongly_typed_relationship_property() {
+    let mut graph = three_docs();
+    integer_weight(&mut graph);
+
+    let error = add_edges_from_specs(
+        &mut graph,
+        vec![spec(
+            1,
+            2,
+            "LINKS",
+            &[("weight", Value::String("heavy".into()))],
+        )],
+    )
+    .expect_err("a STRING weight violates the IS :: INTEGER constraint");
+
+    assert!(error.contains("STRING"), "{error}");
+    assert!(error.contains("LINKS.weight"), "{error}");
+    assert_eq!(graph.graph.edge_count(), 0);
+}
+
+/// A violation in a later group refuses the whole call — an earlier group of a
+/// different, unconstrained edge type must not have been written.
+#[test]
+fn edge_specs_refusal_in_a_later_group_writes_no_earlier_group() {
+    let mut graph = three_docs();
+    require_since(&mut graph);
+
+    // Groups run in `(source, target, edge type)` order: CITES before LINKS.
+    let error = add_edges_from_specs(
+        &mut graph,
+        vec![spec(1, 2, "CITES", &[]), spec(2, 3, "LINKS", &[])],
+    )
+    .expect_err("the LINKS row violates NOT NULL");
+
+    assert!(error.contains("LINKS.since"), "{error}");
+    assert_eq!(graph.graph.edge_count(), 0);
+    assert!(!graph.connection_type_metadata.contains_key("CITES"));
+}
+
+/// The spec path merges under `update`: a row that omits the required
+/// property merges into a stored edge that has it, so the result is legal.
+#[test]
+fn edge_specs_admit_an_update_that_keeps_the_stored_required_value() {
+    let mut graph = three_docs();
+    add_edges_from_specs(
+        &mut graph,
+        vec![spec(1, 2, "LINKS", &[("since", Value::Int64(2020))])],
+    )
+    .unwrap();
+    require_since(&mut graph);
+
+    let report = add_edges_from_specs(
+        &mut graph,
+        vec![spec(1, 2, "LINKS", &[("weight", Value::Int64(5))])],
+    )
+    .expect("the stored `since` survives an update merge");
+
+    assert_eq!(report.connections_created, 0);
+    assert_eq!(report.connections_updated, 1);
+    assert_eq!(graph.graph.edge_count(), 1);
+}
+
+/// A legal batch still lands under both constraints, with the counters
+/// `add_connections` reports for the same rows.
+#[test]
+fn edge_specs_legal_batch_matches_add_connections_counts() {
+    let rows = [(1, 2, 2020, 1), (2, 3, 2021, 2), (1, 3, 2022, 3)];
+
+    let mut via_specs = three_docs();
+    require_since(&mut via_specs);
+    integer_weight(&mut via_specs);
+    let report = add_edges_from_specs(
+        &mut via_specs,
+        rows.iter()
+            .map(|(s, t, since, weight)| {
+                spec(
+                    *s,
+                    *t,
+                    "LINKS",
+                    &[
+                        ("since", Value::Int64(*since)),
+                        ("weight", Value::Int64(*weight)),
+                    ],
+                )
+            })
+            .collect(),
+    )
+    .unwrap();
+
+    let mut via_frame = three_docs();
+    require_since(&mut via_frame);
+    integer_weight(&mut via_frame);
+    let frame = DataFrame::from_cypher_rows(
+        ["s", "t", "since", "weight"].map(String::from).to_vec(),
+        rows.iter()
+            .map(|(s, t, since, weight)| {
+                vec![
+                    Value::Int64(*s),
+                    Value::Int64(*t),
+                    Value::Int64(*since),
+                    Value::Int64(*weight),
+                ]
+            })
+            .collect(),
+    )
+    .unwrap();
+    let frame_report = add_connections(
+        &mut via_frame,
+        frame,
+        "LINKS".to_string(),
+        "Doc".to_string(),
+        "s".to_string(),
+        "Doc".to_string(),
+        "t".to_string(),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(report.connections_created, 3);
+    assert_eq!(report.connections_created, frame_report.connections_created);
+    assert_eq!(report.connections_updated, frame_report.connections_updated);
+    assert_eq!(report.skipped_missing_endpoint, 0);
+    assert_eq!(via_specs.graph.edge_count(), via_frame.graph.edge_count());
+}

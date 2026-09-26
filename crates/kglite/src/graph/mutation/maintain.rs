@@ -17,7 +17,9 @@ use crate::graph::mutation::edge_props::{
 use crate::graph::mutation::endpoints::{
     report_null_id_skips, resolve_endpoints, resolve_pairs, ResolvedEndpoints,
 };
-use crate::graph::mutation::rel_constraint_gate::{ConnectionBatchGate, RowFolding};
+use crate::graph::mutation::rel_constraint_gate::{
+    gate_property_rows, ConnectionBatchGate, RowFolding,
+};
 use crate::graph::schema::{
     CompositeValue, CurrentSelection, DirGraph, InternedKey, TypeSchema, PROVISIONAL_KEY,
     RESERVED_PROVENANCE_KEYS,
@@ -972,6 +974,9 @@ pub struct EdgeSpecReport {
 /// Specs are grouped by `(source_type, target_type, edge_type)`; each
 /// group gets one type lookup and one batch, mirroring `add_connections`.
 /// Endpoints must already exist (see `skipped_missing_endpoint`).
+/// Declared relationship constraints are judged over every group before any
+/// is written, by the gate `add_connections` uses: a violation refuses the
+/// whole call and writes nothing.
 pub fn add_edges_from_specs(
     graph: &mut DirGraph,
     specs: Vec<EdgeSpec>,
@@ -984,6 +989,9 @@ pub fn add_edges_from_specs(
     if specs.is_empty() {
         return Ok(EdgeSpecReport::default());
     }
+    // Batch entry point: no violation parked by an earlier write may be
+    // attributed to this one.
+    graph.clear_pending_constraint_violation();
     let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     use std::collections::BTreeMap;
     let mut interned_names = Vec::from(RESERVED_PROVENANCE_KEYS);
@@ -1011,6 +1019,10 @@ pub fn add_edges_from_specs(
     }
 
     let mut report = EdgeSpecReport::default();
+    // Resolve every group before writing any: the relationship-constraint gate
+    // judges the whole call up front, so a refusal in a later group leaves
+    // nothing from an earlier one behind.
+    let mut prepared: Vec<PreparedSpecGroup> = Vec::with_capacity(groups.len());
     // The id→node lookup depends only on (source_type, target_type), not the
     // edge type, and creating edges never invalidates it (no nodes added). So
     // cache it per node-type pair instead of rebuilding the full type scan for
@@ -1029,12 +1041,8 @@ pub fn add_edges_from_specs(
             lookup_cache.insert(pair.clone(), lookup);
         }
         let lookup = &lookup_cache[&pair];
-        let mut batch = ConnectionBatchProcessor::new(edges.len());
-        // Same initial-load fast path and merge key as `add_connections`.
-        let is_initial_load = !graph.connection_type_metadata.contains_key(&edge_type);
-        let start_key = merge_start_key(graph, &edge_type, Some(&source_type));
-        batch.configure(ConflictHandling::Update, is_initial_load, start_key);
-
+        let mut endpoints = Vec::with_capacity(edges.len());
+        let mut properties = Vec::with_capacity(edges.len());
         for (source_id, target_id, props) in edges {
             match (
                 lookup.check_source(&source_id),
@@ -1047,27 +1055,88 @@ pub fn add_edges_from_specs(
                         .into_iter()
                         .map(|(k, v)| (graph.interner.get_or_intern(&k), v))
                         .collect();
-                    batch.add_connection(src_idx, tgt_idx, props, graph, &edge_type)?;
+                    endpoints.push((endpoints.len(), src_idx, tgt_idx));
+                    properties.push(props);
                 }
                 _ => report.skipped_missing_endpoint += 1,
             }
+        }
+        // Same initial-load fast path and merge key as `add_connections`. The
+        // first group of an edge type registers it, so a later group of the
+        // same type merges — decided here, before anything is written.
+        let is_initial_load = !graph.connection_type_metadata.contains_key(&edge_type)
+            && !prepared.iter().any(|group| group.edge_type == edge_type);
+        let start_key = merge_start_key(graph, &edge_type, Some(&source_type));
+        prepared.push(PreparedSpecGroup {
+            source_type,
+            target_type,
+            edge_type,
+            endpoints,
+            properties,
+            is_initial_load,
+            start_key,
+        });
+    }
+
+    for group in &prepared {
+        group.gate(graph)?;
+    }
+
+    for group in prepared {
+        let mut batch = ConnectionBatchProcessor::new(group.endpoints.len());
+        batch.configure(
+            ConflictHandling::Update,
+            group.is_initial_load,
+            group.start_key,
+        );
+        for ((_, src_idx, tgt_idx), props) in group.endpoints.into_iter().zip(group.properties) {
+            batch.add_connection(src_idx, tgt_idx, props, graph, &group.edge_type)?;
         }
 
         // Register the connection in the schema before consuming the batch.
         update_schema_node(
             graph,
-            &edge_type,
-            &source_type,
-            &target_type,
+            &group.edge_type,
+            &group.source_type,
+            &group.target_type,
             batch.schema_property_types(graph),
         )?;
 
-        let (stats, _metrics) = batch.execute(graph, edge_type)?;
+        let (stats, _metrics) = batch.execute(graph, group.edge_type)?;
         report.connections_created += stats.connections_created;
         report.connections_updated += stats.connections_updated;
     }
     graph.bump_version();
     Ok(report)
+}
+
+/// One `(source_type, target_type, edge_type)` group of an
+/// [`add_edges_from_specs`] call, resolved but not yet written.
+struct PreparedSpecGroup {
+    source_type: String,
+    target_type: String,
+    edge_type: String,
+    /// `(row, source, target)` — the row indexes `properties`.
+    endpoints: Vec<(usize, NodeIndex, NodeIndex)>,
+    properties: Vec<Vec<(InternedKey, Value)>>,
+    is_initial_load: bool,
+    start_key: Option<InternedKey>,
+}
+
+impl PreparedSpecGroup {
+    /// Judge the group against the declared relationship constraints with the
+    /// gate `add_connections` uses, under the regime its batch will run in.
+    fn gate(&self, graph: &mut DirGraph) -> Result<(), String> {
+        gate_property_rows(
+            graph,
+            &self.edge_type,
+            &self.endpoints,
+            &self.properties,
+            ConflictHandling::Update,
+            RowFolding::for_load(self.is_initial_load),
+            self.start_key,
+        )
+    }
 }
 
 /// The report for one connection batch: its created and updated counts, the
@@ -1255,7 +1324,7 @@ pub(crate) fn add_connections_with_initial_load(
 
     ConnectionBatchGate {
         connection_type: &connection_type,
-        df_data: &df_data,
+        rows: &df_data,
         property_columns: &property_columns,
         matched: &matched,
         deferred: &deferred,
@@ -1895,7 +1964,7 @@ pub fn replace_connections(
     //    removes whatever these pairs hold, which makes every row a create.
     ConnectionBatchGate {
         connection_type: &connection_type,
-        df_data: &df_data,
+        rows: &df_data,
         property_columns: &resolve_edge_property_columns(
             &df_data,
             &source_id_field,
@@ -2037,6 +2106,7 @@ pub fn create_connections(
     graph
         .prepare_mutation()
         .map_err(|e| format!("disk mutation lease failed: {e}"))?;
+    graph.clear_pending_constraint_violation();
     let conflict_mode = parse_conflict_mode(conflict_handling.as_deref())?;
 
     let level_count = selection.get_level_count();
@@ -2119,6 +2189,8 @@ pub fn create_connections(
     let mut errors = Vec::new();
     let mut detected_source_type = None;
     let mut detected_target_type = None;
+    let mut pending: Vec<(usize, NodeIndex, NodeIndex)> = Vec::new();
+    let mut pending_props: Vec<Vec<(InternedKey, Value)>> = Vec::new();
 
     // For the common 2-level case (source_level=0, target_level=1), each group's
     // parent IS the source node, so we don't need parent maps at all.
@@ -2229,19 +2301,30 @@ pub fn create_connections(
                     HashMap::new()
                 };
                 let edge_props = intern_edge_props(edge_props, &mut graph.interner);
-
-                if let Err(e) = batch.add_connection(
-                    source_idx,
-                    target_idx,
-                    edge_props,
-                    graph,
-                    &connection_type,
-                ) {
-                    skipped += 1;
-                    errors.push(format!("Failed to add connection: {}", e));
-                    continue;
-                }
+                pending.push((pending.len(), source_idx, target_idx));
+                pending_props.push(edge_props);
             }
+        }
+    }
+
+    // Every edge is resolved before any is added, so a declared relationship
+    // constraint refuses the whole call rather than the rows after the first
+    // violation.
+    gate_property_rows(
+        graph,
+        &connection_type,
+        &pending,
+        &pending_props,
+        conflict_mode,
+        RowFolding::for_load(false),
+        start_key,
+    )?;
+    for ((_, source_idx, target_idx), edge_props) in pending.into_iter().zip(pending_props) {
+        if let Err(e) =
+            batch.add_connection(source_idx, target_idx, edge_props, graph, &connection_type)
+        {
+            skipped += 1;
+            errors.push(format!("Failed to add connection: {}", e));
         }
     }
 

@@ -1486,6 +1486,9 @@ KgliteStatusCode kglite_session_execute_mut_batch(struct KgliteSession *session,
  * transaction: the whole batch commits together, or — on error — none
  * of it lands. Endpoints must already exist; an edge whose source or
  * target id isn't found for its declared type is skipped and counted.
+ * A batch that would leave a relationship violating a declared
+ * relationship constraint (`IS NOT NULL`, `IS :: <type>`) is refused
+ * whole with `KgliteStatusCode::ConstraintViolation`.
  *
  * On success `out_report_json` is set to an owned JSON object
  * `{"connections_created": N, "connections_updated": U,

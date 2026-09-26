@@ -1100,9 +1100,7 @@ impl KnowledgeGraph {
             source_type,
             target_type,
         )
-        .map_err(|e: String| -> PyErr {
-            crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-        })?;
+        .map_err(|message| super::kg_mutation::bulk_write_err(graph, message))?;
         self.commit_wal()?;
 
         let mut new_kg = self.detached_view(keep_selection.unwrap_or(false));

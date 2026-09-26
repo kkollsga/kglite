@@ -234,3 +234,48 @@ fn labels_survive_a_spec_whose_records_are_empty() {
         "vivified Doc(7) carries {labels:?}, not the spec's declared 'Text'"
     );
 }
+
+/// Every endpoint policy judges declared relationship constraints alike:
+/// `vivify` loads through `add_connections`, `drop` and `error` through
+/// `add_edges_from_specs`, and both refuse a record the constraint forbids.
+#[test]
+fn every_endpoint_policy_enforces_relationship_constraints() {
+    let interrupt = crate::graph::algorithms::Interrupt::default();
+    for policy in ["vivify", "drop", "error"] {
+        let mut spec = endpoint_spec(policy);
+        // Keep only the record whose endpoints both exist.
+        spec["connections"][0]["records"] = json!([{"source": 1, "target": 2, "weight": 3}]);
+
+        let mut required = DirGraph::new();
+        required
+            .create_rel_not_null_constraint("LINKS", "since", &interrupt)
+            .unwrap();
+        let error = from_records(&mut required, &spec)
+            .expect_err("a LINKS without `since` violates NOT NULL");
+        assert!(error.contains("LINKS.since"), "policy={policy}: {error}");
+        assert_eq!(required.graph.edge_count(), 0, "policy={policy}");
+
+        let mut typed = DirGraph::new();
+        typed
+            .create_rel_property_type_constraint(
+                "LINKS",
+                "weight",
+                crate::graph::property_types::DeclaredType::String,
+                &interrupt,
+            )
+            .unwrap();
+        let error =
+            from_records(&mut typed, &spec).expect_err("an INTEGER weight violates IS :: STRING");
+        assert!(error.contains("LINKS.weight"), "policy={policy}: {error}");
+        assert_eq!(typed.graph.edge_count(), 0, "policy={policy}");
+
+        spec["connections"][0]["records"][0]["since"] = json!(2020);
+        let mut legal = DirGraph::new();
+        legal
+            .create_rel_not_null_constraint("LINKS", "since", &interrupt)
+            .unwrap();
+        let report = from_records(&mut legal, &spec).unwrap();
+        assert_eq!(report.edges_added, 1, "policy={policy}");
+        assert_eq!(legal.graph.edge_count(), 1, "policy={policy}");
+    }
+}

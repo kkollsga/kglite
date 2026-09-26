@@ -210,6 +210,49 @@ def test_a_refused_frame_leaves_the_existing_relationships_alone():
     assert graph.cypher("MATCH ()-[r:KNOWS]->() RETURN count(r) AS n").to_list() == [{"n": 1}]
 
 
+# ── enforcement through create_relationships ─────────────────────────
+
+
+def _traversal_graph() -> kglite.KnowledgeGraph:
+    """Two `Person`s with an `age`, both `WORKS_AT` one `Company`."""
+    graph = kglite.KnowledgeGraph()
+    graph.add_nodes(
+        pd.DataFrame({"pid": [1, 2], "name": ["Alice", "Bob"], "age": [30, 40]}),
+        "Person",
+        "pid",
+        "name",
+    )
+    graph.add_nodes(pd.DataFrame({"cid": [10], "name": ["Acme"]}), "Company", "cid", "name")
+    graph.add_connections(pd.DataFrame({"s": [1, 2], "t": [10, 10]}), "WORKS_AT", "Person", "s", "Company", "t")
+    return graph
+
+
+def _employs(graph, **kwargs):
+    return graph.select("Person").traverse("WORKS_AT", target_type="Company").create_relationships("EMPLOYS", **kwargs)
+
+
+@pytest.mark.filterwarnings("ignore:create_relationships.*chained graph view")
+def test_create_relationships_refuses_a_missing_required_property():
+    graph = _traversal_graph()
+    graph.cypher("CREATE CONSTRAINT FOR ()-[r:EMPLOYS]-() REQUIRE r.age IS NOT NULL")
+    with pytest.raises(kglite.ConstraintViolationError) as exc:
+        _employs(graph)
+    assert "EMPLOYS.age" in str(exc.value), str(exc.value)
+    # Copying the property satisfies it: both relationships land.
+    built = _employs(graph, properties={"Person": ["age"]})
+    rows = built.cypher("MATCH ()-[r:EMPLOYS]->() RETURN r.age AS age ORDER BY age").to_list()
+    assert rows == [{"age": 30}, {"age": 40}]
+
+
+@pytest.mark.filterwarnings("ignore:create_relationships.*chained graph view")
+def test_create_relationships_refuses_a_wrongly_typed_property():
+    graph = _traversal_graph()
+    graph.cypher("CREATE CONSTRAINT FOR ()-[r:EMPLOYS]-() REQUIRE r.age IS :: STRING")
+    with pytest.raises(kglite.ConstraintViolationError) as exc:
+        _employs(graph, properties={"Person": ["age"]})
+    assert "EMPLOYS.age" in str(exc.value), str(exc.value)
+
+
 # ── DROP ─────────────────────────────────────────────────────────────
 
 
