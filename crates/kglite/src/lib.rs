@@ -260,10 +260,12 @@ pub mod api {
         // `AddPropertiesReport` is deliberately not re-exported: it was not part
         // of the public surface before this module was split out, and the API
         // baseline pins that surface.
+        pub use crate::graph::mutation::edge_specs::{
+            add_edges_from_specs, EdgeSpec, EdgeSpecReport,
+        };
         pub use crate::graph::mutation::maintain::{
-            add_connections, add_edges_from_specs, add_nodes, create_connections,
-            purge_provisional_nodes, replace_connections, update_node_properties, EdgeSpec,
-            EdgeSpecReport,
+            add_connections, add_nodes, create_connections, purge_provisional_nodes,
+            replace_connections, update_node_properties,
         };
         /// Validate a graph against a `SchemaDefinition`.
         pub use crate::graph::mutation::validation::validate_graph;

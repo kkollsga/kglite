@@ -41,7 +41,7 @@
 //! so there is no duplicated mutation logic.
 
 use crate::datatypes::values::{DataFrame, Value};
-use crate::graph::mutation::maintain;
+use crate::graph::mutation::{edge_specs, maintain};
 use crate::graph::DirGraph;
 use serde_json::Value as Json;
 
@@ -299,7 +299,7 @@ fn load_connection_spec(
                     endpoint_policy,
                 };
                 let edge_specs = edge_specs_from_frame(graph, &df, &edge_context)?;
-                let rep = maintain::add_edges_from_specs(graph, edge_specs)
+                let rep = edge_specs::add_edges_from_specs(graph, edge_specs)
                     .map_err(|e| format!("{}: {}", ctx(), e))?;
                 report.edges_added += rep.connections_created;
                 report.edges_dropped_missing_endpoint += rep.skipped_missing_endpoint;
@@ -497,7 +497,7 @@ fn edge_specs_from_frame(
     graph: &DirGraph,
     frame: &DataFrame,
     context: &EdgeFrameContext<'_>,
-) -> Result<Vec<maintain::EdgeSpec>, String> {
+) -> Result<Vec<edge_specs::EdgeSpec>, String> {
     let property_columns: Vec<String> = frame
         .get_column_names()
         .into_iter()
@@ -543,7 +543,7 @@ fn edge_specs_from_frame(
                     .map(|value| (name.clone(), value))
             })
             .collect();
-        specs.push(maintain::EdgeSpec {
+        specs.push(edge_specs::EdgeSpec {
             source_type: context.source_type.to_string(),
             source_id,
             target_type: context.target_type.to_string(),

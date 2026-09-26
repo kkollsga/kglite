@@ -763,7 +763,7 @@ mod tests {
     /// as a real write.
     #[test]
     fn an_empty_edge_spec_batch_writes_nothing_and_bumps_nothing() {
-        use crate::graph::mutation::maintain::add_edges_from_specs;
+        use crate::graph::mutation::edge_specs::add_edges_from_specs;
 
         let s = Session::new(empty_graph());
         let before = s.snapshot();

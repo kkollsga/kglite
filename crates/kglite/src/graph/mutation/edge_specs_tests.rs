@@ -1,5 +1,8 @@
 use super::*;
+use crate::datatypes::DataFrame;
+use crate::graph::mutation::maintain::{add_connections, add_nodes};
 use crate::graph::storage::mode::{new_dir_graph_in_mode, StorageMode};
+use crate::graph::storage::GraphRead;
 use tempfile::TempDir;
 
 fn add_pair(graph: &mut DirGraph) {

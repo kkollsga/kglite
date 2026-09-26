@@ -12,9 +12,8 @@ use super::eval::IntervalConvention::Closed;
 use crate::datatypes::{DataFrame, Value};
 use crate::graph::dir_graph::DirGraph;
 use crate::graph::introspection::reporting::ConnectionOperationReport;
-use crate::graph::mutation::maintain::{
-    add_connections, add_edges_from_specs, add_nodes, replace_connections, EdgeSpec,
-};
+use crate::graph::mutation::edge_specs::{add_edges_from_specs, EdgeSpec};
+use crate::graph::mutation::maintain::{add_connections, add_nodes, replace_connections};
 use crate::graph::session::execute::{execute_mut, execute_read, ExecuteOptions};
 
 fn day(text: &str) -> Value {

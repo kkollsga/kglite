@@ -159,9 +159,9 @@ fn graphml_export_carries_a_label_key_from_the_node_title() {
 #[test]
 fn graphml_export_carries_an_edge_label_key_from_the_connection_type() {
     let mut g = docs_graph();
-    crate::graph::mutation::maintain::add_edges_from_specs(
+    crate::graph::mutation::edge_specs::add_edges_from_specs(
         &mut g,
-        vec![crate::graph::mutation::maintain::EdgeSpec {
+        vec![crate::graph::mutation::edge_specs::EdgeSpec {
             source_type: "Doc".to_string(),
             source_id: Value::Int64(1),
             target_type: "Doc".to_string(),
