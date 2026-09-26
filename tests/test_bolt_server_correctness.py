@@ -326,7 +326,9 @@ _DEEP_QUERY_SHAPES = {
     "additive_chain": lambda n: "RETURN " + " + ".join(["1"] * n) + " AS s",
     "multiplicative_chain": lambda n: "RETURN " + " * ".join(["1"] * n) + " AS s",
     "concat_chain": lambda n: "RETURN " + " || ".join(["'a'"] * n) + " AS s",
-    "subscript_chain": lambda n: "RETURN [1]" + "[0]" * n + " AS s",
+    # `[null]`: past the first subscript the container is null, which indexes
+    # to null, where an integer would be a type error.
+    "subscript_chain": lambda n: "RETURN [null]" + "[0]" * n + " AS s",
     # Recursively-parsed shapes — already guarded before this fix; kept so
     # both families stay covered by one test.
     "paren_nest": lambda n: "RETURN " + "(" * n + "1" + ")" * n + " AS s",
