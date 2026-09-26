@@ -19,6 +19,8 @@ Marker: `bolt` (default-excluded; opt-in via `pytest -m bolt`).
 
 from __future__ import annotations
 
+import datetime
+
 import pytest
 
 # Reuse the corpus + the fixture builders the pyapi differential test uses.
@@ -73,6 +75,9 @@ def _canonical_cell(value):
         }
     elif isinstance(value, (neo4j.time.Date, neo4j.time.Time, neo4j.time.DateTime)):
         return value.iso_format()
+    elif isinstance(value, datetime.date) and not isinstance(value, datetime.datetime):
+        # The direct API returns dates as datetime.date; Bolt sends the ISO text.
+        return value.isoformat()
 
     if isinstance(value, dict):
         return "{" + ", ".join(f"{k!r}: {_canonical_cell(value[k])!r}" for k in sorted(value)) + "}"
