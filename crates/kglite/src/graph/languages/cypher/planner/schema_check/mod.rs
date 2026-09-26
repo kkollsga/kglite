@@ -934,6 +934,7 @@ fn validate_pattern_subquery_scope(
     subquery: &Expression,
     scope: &HashSet<String>,
 ) -> Result<(), SchemaError> {
+    let mut inner = scope.clone();
     let (patterns, where_clause, projection) = match subquery {
         Expression::CountSubquery {
             patterns,
@@ -941,17 +942,20 @@ fn validate_pattern_subquery_scope(
             ..
         } => (patterns.as_slice(), where_clause.as_deref(), None),
         Expression::PatternComprehension {
+            path_variable,
             pattern,
             where_clause,
             map_expr,
-        } => (
-            std::slice::from_ref(pattern.as_ref()),
-            where_clause.as_deref(),
-            Some(map_expr.as_ref()),
-        ),
+        } => {
+            inner.extend(path_variable.iter().cloned());
+            (
+                std::slice::from_ref(pattern.as_ref()),
+                where_clause.as_deref(),
+                Some(map_expr.as_ref()),
+            )
+        }
         _ => return Ok(()),
     };
-    let mut inner = scope.clone();
     for pattern in patterns {
         bind_pattern(pattern, &mut inner);
     }

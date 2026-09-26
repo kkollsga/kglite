@@ -1022,18 +1022,21 @@ impl CypherParser {
             return self.parse_list_comprehension();
         }
 
-        if matches!(self.peek(), Some(CypherToken::Identifier(_)))
-            && self.peek_at(1) == Some(&CypherToken::Equals)
-            && self.peek_at(2) == Some(&CypherToken::LParen)
+        // `[p = (a)-->(b) | …]` names the path; `[x = (1)]` is a comparison.
+        if let (Some(CypherToken::Identifier(name)), Some(CypherToken::Equals)) =
+            (self.peek().cloned(), self.peek_at(1))
         {
-            return Err(
-                "A named path in a pattern comprehension is not supported; project \
-                 the nodes and relationships instead, e.g. [(a)-[r]->(b) | [a, r, b]]"
-                    .to_string(),
-            );
+            let start = self.pos;
+            self.pos += 2;
+            if self.check(&CypherToken::LParen) && self.looks_like_pattern_start() {
+                if let Some(comprehension) = self.try_parse_pattern_comprehension(Some(name))? {
+                    return Ok(comprehension);
+                }
+            }
+            self.pos = start;
         }
         if self.check(&CypherToken::LParen) && self.looks_like_pattern_start() {
-            if let Some(comprehension) = self.try_parse_pattern_comprehension()? {
+            if let Some(comprehension) = self.try_parse_pattern_comprehension(None)? {
                 return Ok(comprehension);
             }
         }
@@ -1051,12 +1054,16 @@ impl CypherParser {
         Ok(Expression::ListLiteral(items))
     }
 
-    /// Parse `pattern [WHERE pred] | expr ]` after the opening `[`, when the
+    /// Parse `pattern [WHERE pred] | expr ]` after the opening `[` (and a
+    /// `p =` naming the path, if any), when the
     /// brackets hold a pattern comprehension: a pattern with at least one
     /// relationship, followed by `WHERE` or `|`. Anything else — `[(n:A)]`,
     /// `[(a)-->(b)]` (a list holding a pattern predicate) — rewinds and
     /// answers `None`, leaving the list-literal parse to read it.
-    fn try_parse_pattern_comprehension(&mut self) -> Result<Option<Expression>, String> {
+    fn try_parse_pattern_comprehension(
+        &mut self,
+        path_variable: Option<String>,
+    ) -> Result<Option<Expression>, String> {
         let (start, depth, parked) = (self.pos, self.depth, self.inline_map_exprs.len());
         let pattern = self
             .extract_pattern_subquery_string(&CypherToken::RBracket)
@@ -1088,6 +1095,7 @@ impl CypherParser {
         let map_expr = Box::new(self.parse_expression_with_predicates()?);
         self.expect(&CypherToken::RBracket)?;
         Ok(Some(Expression::PatternComprehension {
+            path_variable,
             pattern: Box::new(pattern),
             where_clause,
             map_expr,

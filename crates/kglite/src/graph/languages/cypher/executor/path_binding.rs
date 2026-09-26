@@ -73,7 +73,11 @@ impl<'a> CypherExecutor<'a> {
     }
 
     /// The path `pattern` matched on `row`, or `None` when a piece is missing.
-    fn assemble_pattern_path(&self, pattern: &Pattern, row: &ResultRow) -> Option<PathBinding> {
+    pub(super) fn assemble_pattern_path(
+        &self,
+        pattern: &Pattern,
+        row: &ResultRow,
+    ) -> Option<PathBinding> {
         let (mut fixed_edges, mut var_length_edges) = (0usize, 0usize);
         for element in &pattern.elements {
             if let PatternElement::Edge(ep) = element {

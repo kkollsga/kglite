@@ -148,6 +148,10 @@ fn a_bracketed_non_comprehension_stays_a_list() {
         ),
         ("RETURN [(1) - (2)] AS r", vec![Value::Int64(-1)]),
         (
+            "WITH 1 AS x RETURN [x = (1)] AS r",
+            vec![Value::Boolean(true)],
+        ),
+        (
             "MATCH (n:P {name: 'a'}) RETURN [(n)-->(), 1] AS r",
             vec![Value::Boolean(true), Value::Int64(1)],
         ),
@@ -169,10 +173,53 @@ fn pattern_variables_stay_inside_and_malformed_forms_are_errors() {
             "MATCH (n:P) RETURN [(n)-->(m) WHERE m.name = 'c'] AS r",
             "projection",
         ),
-        ("MATCH (n:P) RETURN [p = (n)-->(m) | p] AS r", "named path"),
+        ("MATCH (n:P) WITH [p = (n)-->(m) | 1] AS r RETURN p", "p"),
         ("MATCH (n:P) RETURN [(n)-->(m) | z] AS r", "z"),
     ] {
         let error = run(&graph, query).expect_err(query);
         assert!(error.contains(needle), "{query}: {error}");
     }
+}
+
+#[test]
+fn a_named_path_binds_each_match() {
+    let graph = graph();
+    for (query, expected) in [
+        (
+            "MATCH (n:P {name: 'a'}) RETURN [p = (n)-->(m) | length(p)] AS r",
+            vec![Value::Int64(1), Value::Int64(1)],
+        ),
+        (
+            "MATCH (n:P {name: 'a'}) RETURN [p = (n)-->()-->(m) | [x IN nodes(p) | x.name]] AS r",
+            vec![Value::List(vec![text("a"), text("b"), text("c")])],
+        ),
+        (
+            "MATCH (n:P {name: 'a'}) RETURN [p = (n)-[:K*1..2]->(m) WHERE length(p) = 2 | size(relationships(p))] AS r",
+            vec![Value::Int64(2)],
+        ),
+        (
+            "MATCH (n:P {name: 'a'}) RETURN [p = (n)-[r:K]->(m) WHERE r.w > 1 | [startNode(relationships(p)[0]).name, m.name]] AS r",
+            vec![Value::List(vec![text("a"), text("c")])],
+        ),
+        (
+            "MATCH (n:P {name: 'b'}) RETURN [p = (n)-->()<--(x) | x.name] AS r",
+            vec![text("a")],
+        ),
+    ] {
+        let rows = run(&graph, query).unwrap_or_else(|error| panic!("{query}: {error}"));
+        assert_eq!(rows, vec![vec![Value::List(expected)]], "{query}");
+    }
+    // The bound value is a path: its nodes and relationships in order.
+    let rows = run(
+        &graph,
+        "MATCH (n:P {name: 'a'}) RETURN [p = (n)-[:K {w: 5}]->(m) | p] AS r",
+    )
+    .unwrap();
+    let Value::List(paths) = &rows[0][0] else {
+        panic!("{rows:?}");
+    };
+    assert!(
+        matches!(paths.as_slice(), [Value::Path(path)] if path.nodes.len() == 2 && path.rels.len() == 1),
+        "{rows:?}"
+    );
 }

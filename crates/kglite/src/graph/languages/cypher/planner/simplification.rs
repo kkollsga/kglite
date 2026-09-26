@@ -1977,6 +1977,7 @@ pub(crate) fn collect_expression_refs(expr: &Expression, out: &mut HashSet<Strin
             pattern,
             where_clause,
             map_expr,
+            ..
         } => {
             collect_pattern_refs(std::slice::from_ref(pattern), out);
             if let Some(p) = where_clause {

@@ -1161,6 +1161,13 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         None,
     ),
     (
+        "pattern_comprehension_named_path",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.person_id AS id, "
+        "[path = (p)-[:KNOWS*1..2]->(f) WHERE length(path) = 2 | f.person_id] AS fs ORDER BY id",
+        None,
+    ),
+    (
         "pattern_comprehension_grouped",
         "social_graph",
         "MATCH (p:Person) RETURN size([(p)-[:KNOWS]->() | 1]) AS out_degree, count(*) AS n ORDER BY out_degree",

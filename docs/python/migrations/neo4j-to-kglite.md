@@ -337,7 +337,6 @@ Current unsupported and partial constructs:
 | `CALL { ... } IN TRANSACTIONS` | Not supported | Server batching; no in-memory analogue |
 | `OPTIONAL CALL` | Not supported | A read `CALL` subquery is an inner join; restructure the body to return an aggregate/default row when the outer row must survive |
 | `LET` | Not supported | Use an explicit `WITH` projection, keeping every variable the next clause needs |
-| Named paths in pattern comprehensions `[p = (n)-->(m) \| p]` | Not supported | Project the parts: `[(n)-[r]->(m) \| [n, r, m]]` |
 | Quantified path patterns `((a)-->(b))+` | Not supported | Variable-length paths `-[:R*1..3]->` (supported) |
 | `LOAD CSV` | Supported — `file://` and local paths, leading position only | `http(s)://` needs a prior download; off by default for Bolt clients (see above) |
 | `exists(n.prop)` (property existence) | Not supported | `WHERE n.prop IS NOT NULL` / `IS NULL` |

@@ -450,6 +450,7 @@ fn resolve_expression(
             pattern,
             where_clause,
             map_expr,
+            ..
         } => {
             resolve_pattern(pattern, params)?;
             if let Some(inner) = where_clause {

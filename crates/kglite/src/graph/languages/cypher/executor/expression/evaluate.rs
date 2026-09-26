@@ -179,33 +179,40 @@ impl<'a> CypherExecutor<'a> {
                 self.evaluate_count_subquery(patterns, pattern_groups, where_clause.as_deref(), row)
             }
             Expression::PatternComprehension {
+                path_variable,
                 pattern,
                 where_clause,
                 map_expr,
             } => self.evaluate_pattern_comprehension(
+                path_variable.as_deref(),
                 pattern,
-                where_clause.as_deref(),
-                map_expr,
+                (where_clause.as_deref(), map_expr),
                 row,
             ),
             other => Err(format!("not a subquery expression: {other:?}")),
         }
     }
 
-    /// `[pattern WHERE pred | expr]`: `expr` for each match of `pattern` joined
-    /// with `row` (as a `COUNT { }` subquery joins it), keeping the matches
-    /// `pred` holds for.
+    /// `[p = pattern WHERE pred | expr]`: `expr` for each match of `pattern`
+    /// joined with `row` (as a `COUNT { }` subquery joins it), keeping the
+    /// matches `pred` holds for; `p`, when named, is bound to the match's path.
     fn evaluate_pattern_comprehension(
         &self,
+        path_variable: Option<&str>,
         pattern: &crate::graph::core::pattern_matching::Pattern,
-        where_clause: Option<&Predicate>,
-        map_expr: &Expression,
+        (where_clause, map_expr): (Option<&Predicate>, &Expression),
         row: &ResultRow,
     ) -> Result<Value, String> {
-        let rows = self.evaluate_count_join_rows(std::slice::from_ref(pattern), &[0], row)?;
+        let mut rows = self.evaluate_count_join_rows(std::slice::from_ref(pattern), &[0], row)?;
         let mut items = Vec::new();
-        for (index, joined) in rows.iter().enumerate() {
+        for (index, joined) in rows.iter_mut().enumerate() {
             self.check_interrupt_periodic(index)?;
+            if let Some(name) = path_variable {
+                let path = self
+                    .assemble_pattern_path(pattern, joined)
+                    .ok_or("internal error: a pattern comprehension match has no path")?;
+                joined.path_bindings.insert(name.to_string(), path);
+            }
             if let Some(predicate) = where_clause {
                 if self.evaluate_predicate_tristate(predicate, joined)? != Some(true) {
                     continue;

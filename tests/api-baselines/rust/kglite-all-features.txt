@@ -812,6 +812,7 @@ pub kglite::api::cypher::Expression::Negate(alloc::boxed::Box<kglite::api::cyphe
 pub kglite::api::cypher::Expression::Parameter(alloc::string::String)
 pub kglite::api::cypher::Expression::PatternComprehension
 pub kglite::api::cypher::Expression::PatternComprehension::map_expr: alloc::boxed::Box<kglite::api::cypher::Expression>
+pub kglite::api::cypher::Expression::PatternComprehension::path_variable: core::option::Option<alloc::string::String>
 pub kglite::api::cypher::Expression::PatternComprehension::pattern: alloc::boxed::Box<kglite::graph::core::pattern_matching::pattern::Pattern>
 pub kglite::api::cypher::Expression::PatternComprehension::where_clause: core::option::Option<alloc::boxed::Box<kglite::graph::languages::cypher::ast::Predicate>>
 pub kglite::api::cypher::Expression::PredicateExpr(alloc::boxed::Box<kglite::graph::languages::cypher::ast::Predicate>)

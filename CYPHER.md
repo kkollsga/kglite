@@ -1698,8 +1698,9 @@ pattern introduces (`f`, `k`) are visible only inside the brackets. The pattern
 needs at least one relationship, and the `| expression` projection is required.
 A person with no match gets `[]`, as does a row whose correlated variable is
 `null`. The order of the elements is the match order, which is not specified.
-A named path (`[p = (a)-->(b) | p]`) is not supported; project the parts
-(`[(a)-[r]->(b) | [a, r, b]]`) instead.
+Naming the path binds it for each match, so `length(p)`, `nodes(p)` and
+`relationships(p)` work inside the brackets:
+`[p = (a)-[:KNOWS*1..2]->(f) | length(p)]`.
 
 ## List Quantifier Predicates
 

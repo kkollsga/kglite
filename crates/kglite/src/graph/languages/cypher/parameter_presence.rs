@@ -465,6 +465,7 @@ fn visit_expression(expression: &Expression, names: &mut BTreeSet<String>) {
             pattern,
             where_clause,
             map_expr,
+            ..
         } => {
             visit_pattern(pattern, names);
             if let Some(predicate) = where_clause {

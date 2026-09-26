@@ -614,6 +614,9 @@ pub enum Expression {
     /// the variables it introduces are visible only to `where_clause` and
     /// `map_expr`.
     PatternComprehension {
+        /// `p` in `[p = (a)-->(b) | …]`: each match's path, visible to
+        /// `where_clause` and `map_expr`.
+        path_variable: Option<String>,
         pattern: Box<crate::graph::core::pattern_matching::Pattern>,
         where_clause: Option<Box<Predicate>>,
         map_expr: Box<Expression>,
