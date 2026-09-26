@@ -2583,8 +2583,9 @@ class KnowledgeGraph:
         When a temporal config exists for this node type (via ``set_temporal()``
         or ``CALL db.temporal.declare``), nodes are auto-filtered to those valid
         at the reference date (today or ``date()`` context), under the
-        declaration's convention: ``'half_open'`` excludes the ``to`` day.
-        Pass ``temporal=False`` to include all nodes.
+        declaration's convention: ``'half_open'`` excludes the ``to`` day
+        (a datetime ``to`` excludes only from its own time, so a ``to`` after
+        midnight leaves its day valid). Pass ``temporal=False`` to include all nodes.
 
         Args:
             node_type: The node type to select (e.g. ``'Person'``).
@@ -2778,7 +2779,9 @@ class KnowledgeGraph:
 
         If field names are not specified, auto-detects from the type's temporal
         config (``set_temporal()`` or ``CALL db.temporal.declare``), and then
-        follows its convention: under ``'half_open'`` the ``to`` day is excluded.
+        follows its convention: under ``'half_open'`` the ``to`` day is excluded
+        (a datetime ``to`` excludes only from its own time, so a ``to`` after
+        midnight leaves its day valid).
         If *date* is not specified, uses the ``date()`` context or today.
 
         Args:
@@ -7413,9 +7416,11 @@ class KnowledgeGraph:
 
         After configuration, ``select()`` auto-filters temporal nodes and
         ``traverse()`` auto-filters temporal connections to "current" (today
-        or the ``date()`` context). The interval is closed and the column is
-        not validated; ``CALL db.temporal.declare`` validates every stored
-        bound and also takes a half-open convention and a source type.
+        or the ``date()`` context). The interval is closed unless the type
+        already carries a declaration for the same properties, which is kept
+        as it is. The column is not validated; ``CALL db.temporal.declare``
+        validates every stored bound and also takes a half-open convention and
+        a source type.
 
         Auto-detects whether *type_name* is a node type or connection type.
 

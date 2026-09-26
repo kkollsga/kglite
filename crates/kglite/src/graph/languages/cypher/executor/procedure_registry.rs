@@ -309,7 +309,7 @@ pub(super) const PROCEDURES: &[ProcedureSpec] = &[
     ProcedureSpec {
         name: "db.temporal.undeclare",
         aliases: &[],
-        description: "Remove one validity-interval declaration (node, or relationship with optional source_type)",
+        description: "Remove one validity-interval declaration (node, or relationship with optional source_type). Relationships a removed source_type declaration covered fall to the unkeyed declaration without being re-validated; a bound it cannot read then surfaces as the error of the query that filters on it",
         columns: &["undeclared"],
     },
     ProcedureSpec {

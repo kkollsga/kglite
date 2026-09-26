@@ -1412,7 +1412,8 @@ graph.cypher("MATCH (e:Estimate) WHERE valid_at(e, date('2020-06-15'), 'date_fro
 `db.temporal.declare` records which two properties bound a node label's or a
 relationship type's validity interval, and whether the `to` day is still valid
 (`convention: 'closed'`) or is the first day no longer valid (`'half_open'`).
-The convention is required. The fluent `select()`, `valid_at()`,
+A datetime `to` under `half_open` excludes only from its own time, so a `to`
+after midnight leaves its day valid. The convention is required. The fluent `select()`, `valid_at()`,
 `valid_during()` and `traverse()` filters read a declaration; `valid_at` and
 `valid_during` in Cypher take the property names explicitly and are closed.
 

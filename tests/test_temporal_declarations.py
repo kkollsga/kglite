@@ -208,6 +208,72 @@ class TestHalfOpenFluent:
         assert _titles(field_one.traverse("HAS_LICENSEE", at="2009-12-30")) == ["Alpha"]
 
 
+class TestHalfOpenTimestampEnd:
+    """Under half-open a datetime ``to`` excludes only from its own time, so an
+    interval ending mid-day is valid on that day: the fluent filters compare it
+    with the day's midnight, not at date grain."""
+
+    @pytest.fixture
+    def shifts(self):
+        g = kglite.KnowledgeGraph()
+        g.cypher(
+            """
+            CREATE (:Shift {id: 1, title: 'Day', vf: datetime('2009-06-30T08:00'),
+                            vt: datetime('2009-06-30T20:00')}),
+                   (:Shift {id: 2, title: 'Month', vf: date('2009-06-01'),
+                            vt: datetime('2009-06-30T12:00')}),
+                   (:Shift {id: 3, title: 'Midnight', vf: date('2009-06-01'),
+                            vt: datetime('2009-06-30T00:00')})
+            """
+        )
+        _declare(g, "{node: 'Shift', from: 'vf', to: 'vt', convention: 'half_open'}")
+        return g
+
+    def test_valid_on_its_own_day(self, shifts):
+        assert _titles(shifts.date("2009-06-30").select("Shift")) == ["Day", "Month"]
+        assert _titles(shifts.date("2009-07-01").select("Shift")) == []
+
+    def test_valid_during_its_own_day(self, shifts):
+        got = shifts.select("Shift", temporal=False).valid_during("2009-06-30", "2009-06-30")
+        assert _titles(got) == ["Day", "Month"]
+
+    def test_overlaps_a_range_starting_on_its_day(self, shifts):
+        got = shifts.select("Shift", temporal=False).valid_during("2009-06-30", "2009-07-10")
+        assert _titles(got) == ["Day", "Month"]
+
+    def test_declare_accepts_a_mid_day_end_and_refuses_a_midnight_one(self):
+        g = kglite.KnowledgeGraph()
+        g.cypher("CREATE (:S {id: 1, vf: date('2009-06-30'), vt: datetime('2009-06-30T18:00')})")
+        _declare(g, "{node: 'S', from: 'vf', to: 'vt', convention: 'half_open'}")
+        g.cypher("CREATE (:T {id: 1, vf: date('2009-06-30'), vt: datetime('2009-06-30T00:00')})")
+        with pytest.raises(Exception, match="an empty interval"):
+            _declare(g, "{node: 'T', from: 'vf', to: 'vt', convention: 'half_open'}")
+
+
+class TestSetTemporalBesideDeclaration:
+    """``set_temporal`` naming the properties a declaration already bounds keeps
+    that declaration, convention included."""
+
+    def test_relationship_declaration_is_kept(self, licensees):
+        _declare(licensees, "{relationship: 'HAS_LICENSEE', from: 'ff', to: 'ft', convention: 'half_open'}")
+        licensees.set_temporal("HAS_LICENSEE", "ff", "ft")
+        rows = _declarations(licensees)
+        assert [(r["name"], r["source_type"], r["convention"]) for r in rows] == [("HAS_LICENSEE", None, "half_open")]
+        field_one = licensees.select("Field").where({"title": "F1"})
+        assert _titles(field_one.traverse("HAS_LICENSEE", at="2009-12-31")) == ["Beta"]
+        undeclared = licensees.cypher(
+            "CALL db.temporal.undeclare({relationship: 'HAS_LICENSEE'}) YIELD undeclared RETURN undeclared"
+        ).to_list()
+        assert undeclared == [{"undeclared": True}]
+        assert _declarations(licensees) == []
+
+    def test_node_declaration_is_kept(self, statuses):
+        _declare(statuses, "{node: 'Status', from: 'vf', to: 'vt', convention: 'half_open'}")
+        statuses.set_temporal("Status", "vf", "vt")
+        assert [r["convention"] for r in _declarations(statuses)] == ["half_open"]
+        assert [r["title"] for r in statuses.date("2010-06-01").select("Status").collect()] == ["Shut down"]
+
+
 class TestLookupOrder:
     """A relationship takes its source's keyed declaration, and the unkeyed
     one only when its source has none."""

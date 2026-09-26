@@ -60,8 +60,8 @@ impl TemporalTarget {
 /// The outcome of [`declare`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeclareReport {
-    /// `false` when an identical declaration (or an unkeyed one covering every
-    /// source with the same properties) was already in place.
+    /// `false` when an identical declaration was already in place for the same
+    /// key (the node label, or the relationship type plus its source type).
     pub changed: bool,
     /// Rows validated. 0 for a no-op, which validates nothing.
     pub rows: usize,
@@ -127,8 +127,12 @@ fn lookup_order(target: &TemporalTarget) -> (u8, &str, bool, Option<&str>) {
     }
 }
 
+fn same_properties(a: &TemporalConfig, b: &TemporalConfig) -> bool {
+    a.valid_from == b.valid_from && a.valid_to == b.valid_to
+}
+
 fn same_interval(a: &TemporalConfig, b: &TemporalConfig) -> bool {
-    a.valid_from == b.valid_from && a.valid_to == b.valid_to && a.convention == b.convention
+    same_properties(a, b) && a.convention == b.convention
 }
 
 impl TemporalDeclarations {
@@ -156,17 +160,31 @@ impl TemporalDeclarations {
     }
 
     /// Insert or replace a node config without validation — the loader and
-    /// `set_temporal` route, which keep their own semantics.
+    /// `set_temporal` route. A config already naming the same properties is
+    /// kept as it is, so a repeated load or `set_temporal` never turns a
+    /// half-open declaration closed.
     pub(crate) fn legacy_set_node(&mut self, label: String, config: TemporalConfig) {
+        if self
+            .nodes
+            .get(&label)
+            .is_some_and(|existing| same_properties(existing, &config))
+        {
+            return;
+        }
         self.abutting.remove(&TemporalTarget::Node(label.clone()));
         self.nodes.insert(label, config);
     }
 
-    /// Append a relationship config without validation unless an identical one
-    /// is already listed, so a repeated load adds nothing.
+    /// Append a relationship config without validation unless the same key
+    /// already holds one naming the same properties, whatever its convention —
+    /// so a repeated load adds nothing and never lists a closed twin beside a
+    /// half-open declaration.
     pub(crate) fn legacy_push_edge(&mut self, rel_type: String, config: TemporalConfig) {
         let configs = self.edges.entry(rel_type.clone()).or_default();
-        if configs.contains(&config) {
+        if configs
+            .iter()
+            .any(|c| c.source_type == config.source_type && same_properties(c, &config))
+        {
             return;
         }
         self.abutting.remove(&TemporalTarget::Relationship {
@@ -392,16 +410,16 @@ pub fn edge_configs<'g>(graph: &'g DirGraph, rel_type: &str) -> &'g [TemporalCon
 
 /// Insert or replace `label`'s config without validating the column — the
 /// route `set_temporal` and the loaders' `validFrom`/`validTo` column types
-/// take. Bumps nothing: those callers hold the graph through a handle that
-/// already bumps.
+/// take. A config already naming the same properties is kept. Bumps nothing:
+/// those callers hold the graph through a handle that already bumps.
 #[doc(hidden)]
 pub fn legacy_set_node(graph: &mut DirGraph, label: String, config: TemporalConfig) {
     graph.temporal.legacy_set_node(label, config);
 }
 
-/// Append a relationship config without validating the column, skipping an
-/// identical one already listed. Same callers and version rule as
-/// [`legacy_set_node`].
+/// Append a relationship config without validating the column, skipping it
+/// when the same key already lists a config naming the same properties. Same
+/// callers and version rule as [`legacy_set_node`].
 #[doc(hidden)]
 pub fn legacy_push_edge(graph: &mut DirGraph, rel_type: String, config: TemporalConfig) {
     graph.temporal.legacy_push_edge(rel_type, config);

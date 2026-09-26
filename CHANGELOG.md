@@ -30,7 +30,8 @@ before upgrading.
   source_type?: 'Label', from: 'vf', to: 'vt', convention: 'closed' |
   'half_open'})` declares which two properties bound an element's validity
   interval, with a closed end (the `to` day is still valid) or a half-open
-  one (the `to` day is the first day no longer valid). The declaration reads
+  one (the `to` day is the first day no longer valid; a datetime `to`
+  excludes only from its own time). The declaration reads
   every stored bound first and refuses a missing property, an unreadable
   bound or an inverted interval, naming the node or the relationship's
   endpoints. It yields `declared`, `rows` and `abutting_rows`: the rows whose

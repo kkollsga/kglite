@@ -6,7 +6,7 @@
 
 use crate::datatypes::values::Value;
 use crate::graph::property_types::value_type_name;
-use chrono::{NaiveDate, NaiveDateTime};
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt;
@@ -45,7 +45,9 @@ pub enum IntervalConvention {
     /// `[from, to]`: the `to` day is the last valid day.
     #[default]
     Closed,
-    /// `[from, to)`: the `to` day is the first day no longer valid.
+    /// `[from, to)`: a date `to` is the first day no longer valid; a datetime
+    /// `to` is the first instant, so its day is still valid when it ends after
+    /// midnight.
     HalfOpen,
 }
 
@@ -176,7 +178,8 @@ pub(crate) fn parse_bounds(
     ))
 }
 
-/// `from <= t` and `t <= to` (`t < to` when half-open). NULL bounds are open.
+/// `from <= t` and `t <= to` (`t < to` when half-open, as [`end_admits`]
+/// reads it). NULL bounds are open.
 /// Both bounds are read before either is compared, so a bad bound errors
 /// whatever the instant.
 pub(crate) fn interval_contains(
@@ -207,10 +210,22 @@ fn starts_by(from: Option<Instant>, t: Instant) -> bool {
 }
 
 fn ends_after(to: Option<Instant>, t: Instant, convention: IntervalConvention) -> bool {
-    to.is_none_or(|end| match convention {
-        IntervalConvention::Closed => end.chrono_cmp(t) != Ordering::Less,
-        IntervalConvention::HalfOpen => end.chrono_cmp(t) == Ordering::Greater,
-    })
+    to.is_none_or(|end| end_admits(end, t, convention))
+}
+
+/// Whether the end bound `end` still admits `t`: `t <= end` closed, `t < end`
+/// half-open, at [`Instant::chrono_cmp`]'s grain. One exception: half-open, a
+/// timestamp end against a date `t` is compared with `t`'s midnight exactly,
+/// so `[.., 2009-06-30T20:00)` holds part of 06-30 and is valid on it, while
+/// `[.., 2009-06-30T00:00)` holds none of it.
+pub(crate) fn end_admits(end: Instant, t: Instant, convention: IntervalConvention) -> bool {
+    match (convention, end, t) {
+        (IntervalConvention::Closed, _, _) => end.chrono_cmp(t) != Ordering::Less,
+        (IntervalConvention::HalfOpen, Instant::Timestamp(end), Instant::Date(day)) => {
+            end > day.and_time(NaiveTime::MIN)
+        }
+        (IntervalConvention::HalfOpen, _, _) => end.chrono_cmp(t) == Ordering::Greater,
+    }
 }
 
 #[cfg(test)]
@@ -358,6 +373,62 @@ mod tests {
         assert!(contains(&from, &ts_to, ts("2009-06-30T11:59"), HALF_OPEN));
         assert!(!contains(&from, &ts_to, ts("2009-06-30T12:00"), HALF_OPEN));
         assert!(contains(&from, &ts_to, ts("2009-06-30T12:00"), CLOSED));
+    }
+
+    #[test]
+    fn a_half_open_timestamp_end_is_exact_against_a_dates_midnight() {
+        // The interval exists only on 06-30, so it is valid on 06-30.
+        let from = ts("2009-06-30T08:00");
+        let to = ts("2009-06-30T20:00");
+        assert!(contains(&from, &to, d("2009-06-30"), HALF_OPEN));
+        assert!(!contains(&from, &to, d("2009-07-01"), HALF_OPEN));
+        assert!(!contains(&from, &to, d("2009-06-29"), HALF_OPEN));
+        // A date from with a mid-day end is valid on its day; an end at
+        // midnight holds none of that day.
+        assert!(contains(
+            &d("2009-06-01"),
+            &ts("2009-06-30T12:00"),
+            d("2009-06-30"),
+            HALF_OPEN
+        ));
+        assert!(!contains(
+            &d("2009-06-01"),
+            &ts("2009-06-30T00:00"),
+            d("2009-06-30"),
+            HALF_OPEN
+        ));
+        // A string timestamp end reads the same.
+        assert!(contains(
+            &from,
+            &s("2009-06-30T20:00:00"),
+            d("2009-06-30"),
+            HALF_OPEN
+        ));
+        // Every other pairing keeps the date-grain rule.
+        assert!(!contains(
+            &from,
+            &d("2009-06-30"),
+            d("2009-06-30"),
+            HALF_OPEN
+        ));
+        assert!(contains(&from, &to, d("2009-06-30"), CLOSED));
+    }
+
+    #[test]
+    fn a_half_open_timestamp_end_overlaps_a_range_starting_on_its_day() {
+        let overlaps = |to: Value, a: &str| {
+            interval_overlaps(
+                &d("2009-06-01"),
+                &to,
+                at(s(a)),
+                at(s("2009-07-10")),
+                HALF_OPEN,
+            )
+            .unwrap()
+        };
+        assert!(overlaps(ts("2009-06-30T12:00"), "2009-06-30"));
+        assert!(!overlaps(ts("2009-06-30T00:00"), "2009-06-30"));
+        assert!(!overlaps(ts("2009-06-30T12:00"), "2009-07-01"));
     }
 
     #[test]

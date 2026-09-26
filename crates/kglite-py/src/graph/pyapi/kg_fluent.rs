@@ -27,16 +27,8 @@ fn fluent_arg_err(e: String) -> PyErr {
 
 #[pymethods]
 impl KnowledgeGraph {
-    /// Configure temporal validity for a node type or connection type.
-    ///
-    /// After configuration, `select()` auto-filters temporal nodes to "current" and
-    /// `traverse()` auto-filters temporal connections to "current". Use `date()` to
-    /// shift the temporal context.
-    ///
-    /// Args:
-    ///     type_name: Node type (e.g. "FieldStatus") or connection type (e.g. "HAS_LICENSEE").
-    ///     valid_from: Property name holding the start date (e.g. "fldLicenseeFrom").
-    ///     valid_to: Property name holding the end date (e.g. "fldLicenseeTo").
+    /// Configure a closed validity interval for a node type or connection type,
+    /// unless the type already carries a declaration for the same properties.
     #[pyo3(signature = (type_name, valid_from, valid_to))]
     fn set_temporal(
         &mut self,

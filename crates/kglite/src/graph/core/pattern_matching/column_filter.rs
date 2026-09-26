@@ -166,7 +166,10 @@ impl<'a> ColumnData<'a> {
 /// Whether a compiled predicate reads a property column or an identity sidecar.
 #[derive(Clone, Copy, PartialEq)]
 enum Source {
-    /// A stored property: absent or tombstoned rows answer `false`.
+    /// A stored property. An absent value answers the matcher's
+    /// `accepts_absent()`; a tombstoned or out-of-range row answers `false`,
+    /// or falls back to the row route when the matcher accepts an absent
+    /// property.
     Property,
     /// `id` / `title`, which resolve through the node's inline field first.
     Identity,

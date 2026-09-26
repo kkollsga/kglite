@@ -15,7 +15,7 @@ use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::Direction;
 
 use super::declarations::{TemporalTarget, DISK_NODE_ABUTMENT_CAP};
-use super::eval::{self, BoundSide, Instant, IntervalConvention, TemporalError};
+use super::eval::{self, BoundSide, Instant, TemporalError};
 use crate::datatypes::values::Value;
 use crate::graph::core::value_operations::format_value_compact;
 use crate::graph::dir_graph::DirGraph;
@@ -300,12 +300,11 @@ fn check_row(from: &Value, to: &Value, config: &TemporalConfig) -> Result<Bounds
         };
         format!("property '{property}': {err}")
     })?;
+    // Empty exactly when the evaluator's end test refuses the interval's own
+    // start: then no instant it could be asked about is admitted.
     if let (Some(f), Some(t)) = (from_at, to_at) {
-        let order = f.chrono_cmp(t);
-        let empty = order == Ordering::Greater
-            || (order == Ordering::Equal && config.convention == IntervalConvention::HalfOpen);
-        if empty {
-            let relation = if order == Ordering::Greater {
+        if !eval::end_admits(t, f, config.convention) {
+            let relation = if f.chrono_cmp(t) == Ordering::Greater {
                 "is after"
             } else {
                 "equals"
@@ -378,6 +377,7 @@ pub(super) fn abutment_warning(target: &TemporalTarget, count: usize, rows: usiz
 
 #[cfg(test)]
 mod tests {
+    use super::super::eval::IntervalConvention;
     use super::*;
 
     fn d(s: &str) -> Option<Instant> {
@@ -473,6 +473,27 @@ mod tests {
         assert!(err.contains("equals the to bound"), "{err}");
         assert!(err.contains("'half_open'"), "{err}");
         assert!(check_row(&Value::Null, &s("2009-01-01"), &half).is_ok());
+    }
+
+    #[test]
+    fn a_half_open_row_is_empty_exactly_when_the_evaluator_never_admits_it() {
+        let dv = |t: &str| Value::DateTime(NaiveDate::parse_from_str(t, "%Y-%m-%d").unwrap());
+        let tv =
+            |t: &str| Value::Timestamp(NaiveDateTime::parse_from_str(t, "%Y-%m-%dT%H:%M").unwrap());
+        let half = config(IntervalConvention::HalfOpen);
+        // Valid on 06-30 until 18:00 / 20:00: not empty.
+        assert!(check_row(&dv("2009-06-30"), &tv("2009-06-30T18:00"), &half).is_ok());
+        assert!(check_row(&tv("2009-06-30T08:00"), &tv("2009-06-30T20:00"), &half).is_ok());
+        // Ends at the from day's midnight, or a date end on a timestamp
+        // from's day: empty.
+        let err = check_row(&dv("2009-06-30"), &tv("2009-06-30T00:00"), &half).unwrap_err();
+        assert!(err.contains("an empty interval"), "{err}");
+        let err = check_row(&tv("2009-06-30T08:00"), &dv("2009-06-30"), &half).unwrap_err();
+        assert!(err.contains("an empty interval"), "{err}");
+        // Closed keeps the date grain: a date from and a same-day end is a
+        // one-day interval.
+        let closed = config(IntervalConvention::Closed);
+        assert!(check_row(&dv("2009-06-30"), &tv("2009-06-30T00:00"), &closed).is_ok());
     }
 
     #[test]
