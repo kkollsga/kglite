@@ -3802,6 +3802,8 @@ pub kglite::api::ConnectionSchemaDefinition::property_types: std::collections::h
 pub kglite::api::ConnectionSchemaDefinition::required_properties: alloc::vec::Vec<alloc::string::String>
 pub kglite::api::ConnectionSchemaDefinition::source_type: alloc::string::String
 pub kglite::api::ConnectionSchemaDefinition::target_type: alloc::string::String
+impl kglite::api::ConnectionSchemaDefinition
+pub fn kglite::api::ConnectionSchemaDefinition::constrained_properties(&self) -> impl core::iter::traits::iterator::Iterator<Item = &str>
 impl core::clone::Clone for kglite::api::ConnectionSchemaDefinition
 pub fn kglite::api::ConnectionSchemaDefinition::clone(&self) -> kglite::api::ConnectionSchemaDefinition
 impl core::fmt::Debug for kglite::api::ConnectionSchemaDefinition
@@ -4283,6 +4285,8 @@ pub kglite::api::NodeSchemaDefinition::optional_fields: alloc::vec::Vec<alloc::s
 pub kglite::api::NodeSchemaDefinition::primary_key: core::option::Option<alloc::string::String>
 pub kglite::api::NodeSchemaDefinition::required_fields: alloc::vec::Vec<alloc::string::String>
 pub kglite::api::NodeSchemaDefinition::unique: core::option::Option<alloc::vec::Vec<alloc::vec::Vec<alloc::string::String>>>
+impl kglite::api::NodeSchemaDefinition
+pub fn kglite::api::NodeSchemaDefinition::constrained_properties(&self) -> impl core::iter::traits::iterator::Iterator<Item = &str>
 impl core::clone::Clone for kglite::api::NodeSchemaDefinition
 pub fn kglite::api::NodeSchemaDefinition::clone(&self) -> kglite::api::NodeSchemaDefinition
 impl core::default::Default for kglite::api::NodeSchemaDefinition
@@ -4525,6 +4529,7 @@ pub fn kglite::api::SchemaDefinition::add_connection_schema(&mut self, connectio
 pub fn kglite::api::SchemaDefinition::add_node_schema(&mut self, node_type: alloc::string::String, schema: kglite::api::NodeSchemaDefinition)
 pub fn kglite::api::SchemaDefinition::merged_with(self, incoming: kglite::api::SchemaDefinition) -> Self
 pub fn kglite::api::SchemaDefinition::new() -> Self
+pub fn kglite::api::SchemaDefinition::reject_reserved_provenance_constraints(&self) -> core::result::Result<(), alloc::string::String>
 impl core::clone::Clone for kglite::api::SchemaDefinition
 pub fn kglite::api::SchemaDefinition::clone(&self) -> kglite::api::SchemaDefinition
 impl core::default::Default for kglite::api::SchemaDefinition
