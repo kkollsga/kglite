@@ -47,6 +47,8 @@ pub(crate) fn equality_keys(value: &Value) -> Option<Vec<Value>> {
             if let Some(inner) = json_single_element_string(s) {
                 keys.push(Value::String(inner.to_string()));
             }
+            // A stored date or datetime equals the text it parses from.
+            keys.extend(temporal_keys_of_text(s));
         }
         Value::Boolean(_) => {}
         // A date equals midnight on that date (`scalar_values_equal`), and the
@@ -65,6 +67,57 @@ pub(crate) fn equality_keys(value: &Value) -> Option<Vec<Value>> {
         _ => return None,
     }
     Some(keys)
+}
+
+/// The stored temporal values `=` finds equal to the text `s`: a date when `s`
+/// parses as one (and midnight on it), a datetime when it parses as that.
+fn temporal_keys_of_text(s: &str) -> Vec<Value> {
+    let probe = Value::String(s.to_string());
+    let mut keys = Vec::new();
+    // Recovered through `compare_values`, the rule `=` applies, so the keys
+    // cannot drift from it: a date equal to `s` is the one it orders equal to.
+    if !crate::graph::core::filtering::parses_as_temporal(s) {
+        return keys;
+    }
+    for candidate in text_temporal_candidates(s) {
+        if compare_values(&candidate, &probe) == Some(Ordering::Equal) && !keys.contains(&candidate)
+        {
+            keys.push(candidate);
+        }
+    }
+    keys
+}
+
+/// The date and datetime spellings `s` could denote, for
+/// [`temporal_keys_of_text`] to confirm against `compare_values`.
+fn text_temporal_candidates(s: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    for format in ["%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%m/%d/%Y"] {
+        if let Ok(date) = chrono::NaiveDate::parse_from_str(s, format) {
+            out.push(Value::DateTime(date));
+            if let Some(midnight) = date.and_hms_opt(0, 0, 0) {
+                out.push(Value::Timestamp(midnight));
+            }
+        }
+    }
+    if let Ok(datetime) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
+        out.push(Value::Timestamp(datetime));
+    }
+    out
+}
+
+/// Whether a temporal probe's [`equality_keys`] are an incomplete answer for
+/// an index holding `keys`: a stored string that parses to the probe equals it
+/// too, and no finite key set spells every such string. Scans the index's keys,
+/// so only a temporal probe pays it.
+pub(crate) fn temporal_probe_needs_scan<'a>(
+    probe: &Value,
+    mut keys: impl Iterator<Item = &'a Value>,
+) -> bool {
+    matches!(probe, Value::DateTime(_) | Value::Timestamp(_))
+        && keys.any(|key| {
+            matches!(key, Value::String(s) if crate::graph::core::filtering::parses_as_temporal(s))
+        })
 }
 
 /// Bound tuple expansion before probing; unsupported domains always decline
@@ -109,8 +162,10 @@ pub(crate) fn string_index_hits(
 ) -> Option<Vec<NodeIndex>> {
     let mut hits = Vec::new();
     for key in equality_keys(&Value::String(value.to_string()))? {
+        // An exact-string store holds no date a date-shaped probe could equal
+        // only when it holds no dates at all, which it cannot say: decline.
         let Value::String(key) = key else {
-            unreachable!()
+            return None;
         };
         hits.extend(lookup(&key)?);
     }

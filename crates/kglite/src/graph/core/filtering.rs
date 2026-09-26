@@ -128,8 +128,48 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::List(_), Value::List(_)) | (Value::Map(_), Value::Map(_)) => {
             predicate_values_equal(a, b) == Some(true)
         }
+        _ if is_temporal_text_pair(a, b) => temporal_text_equal(a, b) == Some(true),
         _ => scalar_values_equal(a, b),
     }
+}
+
+/// A date or datetime against a string: the pair `=` compares by parsing the
+/// string, exactly as `<`/`>` do in [`compare_values`].
+#[inline]
+fn is_temporal_text_pair(a: &Value, b: &Value) -> bool {
+    matches!(
+        (a, b),
+        (Value::DateTime(_) | Value::Timestamp(_), Value::String(_))
+            | (Value::String(_), Value::DateTime(_) | Value::Timestamp(_))
+    )
+}
+
+/// `=` for an [`is_temporal_text_pair`]: the ordering rule's answer, so `=`,
+/// `<>`, `<=` and `>=` agree whenever the string parses. A string that does
+/// not parse is another type family, and `=` across families is false
+/// (openCypher), exactly as `<` across them is null.
+#[inline]
+fn temporal_text_equal(a: &Value, b: &Value) -> Option<bool> {
+    Some(compare_values(a, b).is_some_and(std::cmp::Ordering::is_eq))
+}
+
+/// Whether `s` is text some date or datetime compares with — the strings a
+/// membership index must keep for a temporal probe.
+pub(crate) fn parses_as_temporal(s: &str) -> bool {
+    may_parse_as_temporal(s) && parse_datetime_string(s).is_some()
+}
+
+/// A few byte tests that every string [`parses_as_temporal`] passes: it starts
+/// with a digit and has a `-` or `/` among its first five bytes. The string
+/// fast paths (`str_prop_eq`, the column filter's string tests) answer `=`
+/// against a stored date with `false`, so a target passing this must take the
+/// value route instead — decided per row, so it has to be this cheap.
+#[inline]
+pub(crate) fn may_parse_as_temporal(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    bytes.len() >= 8
+        && bytes[0].is_ascii_digit()
+        && bytes[1..5].iter().any(|b| matches!(b, b'-' | b'/'))
 }
 
 /// Cypher predicate equality is recursive and nullable; Value's structural
@@ -155,6 +195,7 @@ pub(crate) fn predicate_values_equal(a: &Value, b: &Value) -> Option<bool> {
                 }
             }))
         }
+        _ if is_temporal_text_pair(a, b) => temporal_text_equal(a, b),
         _ => Some(scalar_values_equal(a, b)),
     }
 }
@@ -1634,12 +1675,16 @@ mod tests {
         let other = Value::DateTime(NaiveDate::from_ymd_opt(2024, 3, 16).unwrap());
         assert_eq!(predicate_values_equal(&other, &midnight), Some(false));
 
-        // A string stays unequal to a temporal: `=` across those two type
-        // families is false, and only the *ordering* comparison parses a
-        // date string (`test_compare_values_datetime_vs_string`).
+        // A string is compared by parsing it, for `=` as for `<`
+        // (`test_compare_values_datetime_vs_string`); text that does not parse
+        // is another type family, so `=` is false.
         let text = Value::String("2024-03-15".into());
-        assert_eq!(predicate_values_equal(&day, &text), Some(false));
-        assert_eq!(predicate_values_equal(&midnight, &text), Some(false));
+        assert_eq!(predicate_values_equal(&day, &text), Some(true));
+        assert_eq!(predicate_values_equal(&midnight, &text), Some(true));
+        assert_eq!(predicate_values_equal(&noon, &text), Some(false));
+        let garbage = Value::String("garbage".into());
+        assert_eq!(predicate_values_equal(&day, &garbage), Some(false));
+        assert!(!values_equal(&day, &garbage));
     }
 
     /// The property that would have caught the class: for any two temporal

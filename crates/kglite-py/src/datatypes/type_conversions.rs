@@ -2,7 +2,7 @@
 use chrono::{NaiveDate, NaiveDateTime};
 use kglite_core::api::blueprint::scalar;
 use pyo3::prelude::*;
-use pyo3::types::{PyDateTime, PyInt};
+use pyo3::types::{PyBool, PyDateTime, PyFloat, PyInt};
 use pyo3::Bound;
 
 pub fn to_u32(value: &Bound<'_, PyAny>) -> Option<u32> {
@@ -92,6 +92,16 @@ pub fn to_datetime(value: &Bound<'_, PyAny>, csv_text: bool) -> Option<NaiveDate
             }
         }
 
+        // A number is a date only as `YYYYMMDD` here; the CSV grammar also
+        // reads a larger magnitude as epoch milliseconds.
+        if let Some(n) = whole_number(value) {
+            return if csv_text {
+                scalar::date_from_integer(n)
+            } else {
+                scalar::parse_basic_date(&n.to_string())
+            };
+        }
+
         if let Ok(text) = value.extract::<String>() {
             if csv_text {
                 return scalar::parse_date(&text);
@@ -99,6 +109,9 @@ pub fn to_datetime(value: &Bound<'_, PyAny>, csv_text: bool) -> Option<NaiveDate
             // Direct loaders retain their historical date aliases. Blueprint
             // declared text above uses the CSV grammar without those aliases.
             let text = text.trim();
+            if let Some(date) = scalar::parse_basic_date(text) {
+                return Some(date);
+            }
             for format in ["%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%m/%d/%Y"] {
                 if let Ok(date) = NaiveDate::parse_from_str(text, format) {
                     return Some(date);
@@ -114,6 +127,23 @@ pub fn to_datetime(value: &Bound<'_, PyAny>, csv_text: bool) -> Option<NaiveDate
 
         None
     })
+}
+
+/// An integer cell, or a float cell holding a whole number (an integer column
+/// with a missing value arrives from pandas as float). `bool` is not a number;
+/// numpy integers extract through `__index__`.
+fn whole_number(value: &Bound<'_, PyAny>) -> Option<i64> {
+    if value.is_instance_of::<PyBool>() {
+        return None;
+    }
+    if let Ok(n) = value.extract::<i64>() {
+        return Some(n);
+    }
+    if value.is_instance_of::<PyFloat>() {
+        let f = value.extract::<f64>().ok()?;
+        return (f.is_finite() && f.fract() == 0.0 && f.abs() < 9.0e15).then_some(f as i64);
+    }
+    None
 }
 
 /// Text spellings of a date+time accepted by both temporal column paths.
@@ -183,7 +213,11 @@ pub fn to_timestamp(value: &Bound<'_, PyAny>) -> Option<NaiveDateTime> {
                 return Some(dt);
             }
             // Date-only string → midnight.
-            if let Ok(date) = NaiveDate::parse_from_str(st.trim(), "%Y-%m-%d") {
+            let st = st.trim();
+            if let Some(date) = NaiveDate::parse_from_str(st, "%Y-%m-%d")
+                .ok()
+                .or_else(|| scalar::parse_basic_date(st))
+            {
                 return date.and_hms_opt(0, 0, 0);
             }
         }

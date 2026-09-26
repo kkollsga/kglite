@@ -373,6 +373,14 @@ above. Within a rank:
   deliberate divergence from openCypher, which makes every comparison between
   a date and a datetime null. `DISTINCT` and grouping keys remain structural,
   so the two stay separate keys there.
+- **A date or datetime against a string** compares by parsing the string —
+  `YYYY-MM-DD` (and `YYYY/MM/DD`, `DD-MM-YYYY`, `MM/DD/YYYY`) for a date, also
+  `YYYY-MM-DDTHH:MM:SS` for a datetime — for `=`, `<>` and `IN` exactly as for
+  `<` and `>`. `n.valid_to = '1990-01-01'` finds the date a query returned as
+  text. A string that does not parse is another type family: `=` is false and
+  `<>` true, `<` null, as openCypher answers every cross-type pair. Comparing
+  a parseable string is a divergence from openCypher, where `=` across the two
+  types is false.
 - **Lists** rank element by element, then by length — ascending, `[1]`,
   `[1,1,9]`, `[1,2]`, `[2]`. This is the *sort* rank; the `<` operator has no
   rule for two lists (see below).
@@ -1326,7 +1334,7 @@ Date-range filtering on nodes and relationships with explicit field names.
 
 | Function | Description |
 |----------|-------------|
-| `date(str)` | Parse a date string to a DateTime (date-only) value |
+| `date(str)` | Parse a date string to a DateTime (date-only) value: `'YYYY'`, `'YYYY-MM'`, `'YYYY-MM-DD'`, or ISO 8601 basic `'YYYYMMDD'`; anything else is null |
 | `datetime(str)` | Parse an ISO-8601 stamp to a Timestamp (date + time, second precision). Accepts `YYYY-MM-DD`, `…THH:MM`, `…THH:MM:SS[.fff]`, and a zoned `…Z` / `…±HH:MM`. **A zone is normalised to UTC**, since `Value::Timestamp` carries no zone; sub-second digits truncate. Unparseable input is NULL |
 | `datetime()` | Current local datetime (no-arg form) |
 | `localdatetime()` | Local wall-clock datetime; 1-arg form parses/normalises a string (NULL on bad input). Unlike `datetime(str)` it keeps the wall-clock reading of a zoned input and drops only the zone label |
@@ -1346,6 +1354,10 @@ Date-range filtering on nodes and relationships with explicit field names.
 | `valid_during(entity, start, end, 'from_field', 'to_field')` | True if entity's range overlaps the given interval |
 
 **NULL semantics:** NULL `from` = valid since beginning. NULL `to` = still valid. Both NULL = always valid.
+A property name that no element of the type has at all — a misspelling such as `'validfrom'` — raises
+`CypherExecutionError` rather than reading as an open bound on every row. A property the type has but a
+row leaves null is open, as above; a relationship type's declared bound counts as known even before any
+relationship has a value for it.
 
 **Query dates:** `valid_at` / `valid_during` take a `date()` or `datetime()` value, or a string read as
 those functions read it (`'2009'` = `date('2009')` = 2009-01-01; an offset in a datetime string is applied
@@ -4359,7 +4371,7 @@ claimed openCypher-compatible subset.
 |---------|--------|-------|
 | Arithmetic (`+`, `-`, `*`, `/`) | Covered | Numeric arithmetic plus list/list and element/list composition |
 | String concat (`\|\|`) | Extension | Auto-converts non-strings |
-| Comparison (`=`, `<>`, `<`, `>`, `<=`, `>=`) | Partial | Scalar comparisons, null propagation and cross-type ordering follow openCypher: `<`/`<=`/`>`/`>=` are `null` between values no ordering rule relates, `=` is `false` and `<>` is `true`. Two deliberate divergences: a date equals midnight on that date (see Sort order), and lists and maps have no ordering rule of their own, so `[1] < [2]` is `null` rather than element-wise |
+| Comparison (`=`, `<>`, `<`, `>`, `<=`, `>=`) | Partial | Scalar comparisons, null propagation and cross-type ordering follow openCypher: `<`/`<=`/`>`/`>=` are `null` between values no ordering rule relates, `=` is `false` and `<>` is `true`. Three deliberate divergences: a date equals midnight on that date, a date or datetime compares with a string by parsing it (both under Sort order), and lists and maps have no ordering rule of their own, so `[1] < [2]` is `null` rather than element-wise |
 | Boolean (`AND`, `OR`, `XOR`, `NOT`) | Covered | Predicate and expression positions preserve three-valued results |
 | `IS NULL` / `IS NOT NULL` | Covered | Also works as expressions in RETURN/WITH |
 | `IN [list]` | Covered | Null operands and null-containing no-match lists preserve unknown; an **empty** list is `false` for every operand, `null` included |

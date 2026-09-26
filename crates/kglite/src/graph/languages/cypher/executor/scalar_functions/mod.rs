@@ -19,9 +19,7 @@ mod spatial;
 mod string;
 mod temporal;
 mod timeseries;
-// `utility` mints the two retrieval-lane errors `helpers::is_user_input_error`
-// asks about, so the module is reachable from the executor rather than private.
-pub(super) mod utility;
+mod utility;
 mod vector;
 
 pub(super) use function_registry::{FunctionSpec, FUNCTIONS};

@@ -36,6 +36,7 @@
 //! | `Boolean` | its own key |
 //! | `DateTime` (a date) | `Timestamp(midnight on that date)` — a date equals midnight on that date |
 //! | `Timestamp` | `Timestamp(t)` |
+//! | a date or datetime against a string | **no shared key** — equal when the string parses to it; each side is also kept in a small cross list the other side's probe scans |
 //! | `Null` | **no key** — recorded as [`MembershipSet::has_null`] for the caller's Kleene rule |
 //! | anything else (`Point`, `Duration`, `List`, `Map`, `Node`, …) | *residual*: compared with `values_equal` |
 //!
@@ -57,7 +58,7 @@
 
 use crate::datatypes::Value;
 use crate::graph::core::filtering::{
-    json_single_element_string, predicate_values_equal, values_equal,
+    json_single_element_string, parses_as_temporal, predicate_values_equal, values_equal,
 };
 use chrono::NaiveDateTime;
 use rustc_hash::FxHashSet;
@@ -98,6 +99,12 @@ struct MembershipIndex {
     /// Elements whose equality cannot be expressed as a key (see the
     /// module docs): compared with `values_equal` on a key miss.
     residual: Vec<Value>,
+    /// A date or datetime equals a string by parsing it, which no key
+    /// expresses: the string elements that parse, for a temporal probe, and
+    /// the temporal elements, for a string probe. Both empty for a list that
+    /// never mixes the two.
+    temporal_strings: Vec<Value>,
+    temporals: Vec<Value>,
 }
 
 /// A list of values prepared for repeated membership testing.
@@ -273,7 +280,22 @@ impl MembershipIndex {
                 return Some(true);
             }
         }
-        kleene_contains_linear(value, &self.residual)
+        let cross = match value {
+            Value::String(_) => self.temporals.as_slice(),
+            Value::DateTime(_) | Value::Timestamp(_) => self.temporal_strings.as_slice(),
+            _ => &[],
+        };
+        if cross.is_empty() {
+            return kleene_contains_linear(value, &self.residual);
+        }
+        match (
+            kleene_contains_linear(value, &self.residual),
+            kleene_contains_linear(value, cross),
+        ) {
+            (Some(true), _) | (_, Some(true)) => Some(true),
+            (Some(false), Some(false)) => Some(false),
+            _ => None,
+        }
     }
 }
 
@@ -282,6 +304,8 @@ fn build_index(values: &[Value]) -> MembershipIndex {
         scalars: FxHashSet::with_capacity_and_hasher(values.len(), Default::default()),
         strings: FxHashSet::default(),
         residual: Vec::new(),
+        temporal_strings: Vec::new(),
+        temporals: Vec::new(),
     };
     for value in values {
         match value {
@@ -294,12 +318,18 @@ fn build_index(values: &[Value]) -> MembershipIndex {
                 if let Some(inner) = json_single_element_string(s) {
                     index.strings.insert(inner.into());
                 }
+                if parses_as_temporal(s) {
+                    index.temporal_strings.push(value.clone());
+                }
             }
             other => match scalar_key(other) {
                 Some(key) => {
                     index.scalars.insert(key);
                     if beyond_exact_int_range(other) {
                         index.residual.push(other.clone());
+                    }
+                    if matches!(other, Value::DateTime(_) | Value::Timestamp(_)) {
+                        index.temporals.push(other.clone());
                     }
                 }
                 None => index.residual.push(other.clone()),
@@ -420,6 +450,40 @@ mod tests {
         assert_agrees(&padded(&list), &probes);
         assert!(MembershipSet::new(padded(&list))
             .matches(&Value::Timestamp(date.and_hms_opt(0, 0, 0).unwrap())));
+    }
+
+    /// A date equals the text it parses from, and the index must say so on
+    /// both sides of `LINEAR_MAX`: a string probe against dates, a date probe
+    /// against strings, and text that is not a date against either.
+    #[test]
+    fn a_date_and_its_text_are_members_of_each_other() {
+        let date = chrono::NaiveDate::from_ymd_opt(1990, 1, 1).unwrap();
+        let dates = [
+            Value::DateTime(date),
+            Value::Timestamp(date.and_hms_opt(10, 0, 0).unwrap()),
+        ];
+        let texts = [
+            Value::String("1990-01-01".into()),
+            Value::String("1990-01-01T10:00:00".into()),
+            Value::String("not a date".into()),
+        ];
+        let probes = [
+            Value::DateTime(date),
+            Value::Timestamp(date.and_hms_opt(0, 0, 0).unwrap()),
+            Value::Timestamp(date.and_hms_opt(10, 0, 0).unwrap()),
+            Value::DateTime(chrono::NaiveDate::from_ymd_opt(1990, 1, 2).unwrap()),
+            Value::String("1990-01-01".into()),
+            Value::String("1990/01/01".into()),
+            Value::String("1990-01-01T10:00:00".into()),
+            Value::String("1990-01-02".into()),
+            Value::String("not a date".into()),
+        ];
+        for list in [&dates[..], &texts[..]] {
+            assert_agrees(list, &probes);
+            assert_agrees(&padded(list), &probes);
+        }
+        assert!(MembershipSet::new(padded(&dates)).matches(&Value::String("1990-01-01".into())));
+        assert!(MembershipSet::new(padded(&texts)).matches(&Value::DateTime(date)));
     }
 
     #[test]

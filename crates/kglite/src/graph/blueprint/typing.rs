@@ -10,7 +10,7 @@ mod integer;
 pub mod scalar;
 use scalar::parse_date as parse_date_cell;
 
-use super::table::{looks_like_a_missed_list, ListMisparseTally, RawCsv};
+use super::table::{looks_like_a_missed_list, MisparseTally, RawCsv};
 use crate::datatypes::values::{ColumnData, ColumnType, DataFrame, Value};
 use chrono::NaiveDate;
 use std::collections::HashMap;
@@ -23,7 +23,7 @@ pub fn typed_dataframe(
     keep_columns: &[String],
     declared_types: &HashMap<String, String>,
     rename: &HashMap<String, String>,
-    misparses: &mut ListMisparseTally,
+    misparses: &mut MisparseTally,
 ) -> Result<DataFrame, String> {
     let mut df = DataFrame::new(Vec::new());
     append_typed_columns(
@@ -47,7 +47,7 @@ pub fn append_typed_columns(
     keep_columns: &[String],
     declared_types: &HashMap<String, String>,
     rename: &HashMap<String, String>,
-    misparses: &mut ListMisparseTally,
+    misparses: &mut MisparseTally,
 ) -> Result<(), String> {
     let mut columns: Vec<(String, ColumnType)> = Vec::with_capacity(keep_columns.len());
     let mut data: Vec<ColumnData> = Vec::with_capacity(keep_columns.len());
@@ -281,7 +281,7 @@ fn build_column_data(
     src_idx: usize,
     col_type: &ColumnType,
     column: &str,
-    misparses: &mut ListMisparseTally,
+    misparses: &mut MisparseTally,
 ) -> Result<ColumnData, String> {
     let n = raw.row_count();
     match col_type {
@@ -326,7 +326,11 @@ fn build_column_data(
                     continue;
                 }
                 let s = row[src_idx].trim();
-                out.push(parse_date_cell(s));
+                let parsed = parse_date_cell(s);
+                if parsed.is_none() && !s.is_empty() {
+                    misparses.record_date(column, raw.row_id(r), s);
+                }
+                out.push(parsed);
             }
             Ok(ColumnData::DateTime(out))
         }
@@ -486,7 +490,7 @@ mod typing_tests {
 
     /// `typed_dataframe` with no rename and a throwaway tally.
     fn typed(raw: &RawCsv, cols: &[&str], types: &[(&str, &str)]) -> DataFrame {
-        let mut tally = ListMisparseTally::default();
+        let mut tally = MisparseTally::default();
         typed_dataframe(
             raw,
             &keep(cols),
@@ -776,10 +780,11 @@ mod typing_tests {
                 &["2021-01-01"],
                 &["2021-01-01 06:30:00"],
                 &["2021-01-01T06:30:00"],
-                // Bare digits under `date` are epoch milliseconds, so an id
-                // column mis-declared as a date silently becomes 1970.
                 &["1609459200000"],
                 &["1609459200000.0"],
+                // Eight digits are YYYYMMDD. Read as epoch milliseconds they
+                // were 1970-01-01, silently — as was any small integer.
+                &["19650701"],
                 &["7"],
                 &["not-a-date"],
             ],
@@ -794,7 +799,8 @@ mod typing_tests {
                 Some(date(2021, 1, 1)),
                 Some(date(2021, 1, 1)),
                 Some(date(2021, 1, 1)),
-                Some(date(1970, 1, 1)),
+                Some(date(1965, 7, 1)),
+                None,
                 None,
             ]
         );
@@ -849,7 +855,7 @@ mod typing_tests {
             &["l"],
             &[&["ok"], &["a|b"], &["c;d"], &["e,f"], &["[\"g,h\"]"]],
         );
-        let mut tally = ListMisparseTally::default();
+        let mut tally = MisparseTally::default();
         let df = typed_dataframe(
             &r,
             &keep(&["l"]),
@@ -883,7 +889,7 @@ mod typing_tests {
         // chunk 3 names the file row, not the chunk-local index.
         let mut r = raw(&["l"], &[&["x|y"]]);
         r.row_ids = vec![5001];
-        let mut tally = ListMisparseTally::default();
+        let mut tally = MisparseTally::default();
         typed_dataframe(
             &r,
             &keep(&["l"]),
@@ -902,7 +908,7 @@ mod typing_tests {
     fn a_long_misparse_cell_is_truncated_in_the_warning() {
         let long: String = std::iter::repeat_n('z', 200).collect::<String>() + "|tail";
         let r = raw(&["l"], &[&[long.as_str()]]);
-        let mut tally = ListMisparseTally::default();
+        let mut tally = MisparseTally::default();
         typed_dataframe(
             &r,
             &keep(&["l"]),
@@ -921,7 +927,7 @@ mod typing_tests {
         let r = raw(&["a", "b"], &[&["1", "x"]]);
         let mut rename = HashMap::new();
         rename.insert("a".to_string(), "renamed".to_string());
-        let mut tally = ListMisparseTally::default();
+        let mut tally = MisparseTally::default();
         let df = typed_dataframe(
             &r,
             &keep(&["a", "b"]),
@@ -939,7 +945,7 @@ mod typing_tests {
     #[test]
     fn a_missing_keep_column_is_an_error_naming_the_headers() {
         let r = raw(&["a"], &[&["1"]]);
-        let mut tally = ListMisparseTally::default();
+        let mut tally = MisparseTally::default();
         let err = typed_dataframe(
             &r,
             &keep(&["nope"]),
@@ -963,7 +969,7 @@ mod typing_tests {
             ColumnData::UniqueId(vec![Some(10), Some(11)]),
         )
         .unwrap();
-        let mut tally = ListMisparseTally::default();
+        let mut tally = MisparseTally::default();
         append_typed_columns(
             &mut df,
             &r,
@@ -984,7 +990,7 @@ mod typing_tests {
         // and `infer_type` never yields them, so these arms are unreachable
         // through a blueprint. They must still be shape-correct.
         let r = raw(&["x"], &[&["7"], &[""], &["oops"]]);
-        let mut tally = ListMisparseTally::default();
+        let mut tally = MisparseTally::default();
         match build_column_data(&r, 0, &ColumnType::UniqueId, "x", &mut tally).unwrap() {
             ColumnData::UniqueId(v) => assert_eq!(v, vec![Some(7), None, None]),
             other => panic!("wrong variant: {other:?}"),
@@ -1138,7 +1144,7 @@ mod incremental_inference_tests {
             &["d".to_string(), "k".to_string(), "i".to_string()],
             &declared,
             &HashMap::new(),
-            &mut ListMisparseTally::default(),
+            &mut MisparseTally::default(),
         )
         .unwrap();
         assert_eq!(df.get_column_type("d"), Some(ColumnType::String));

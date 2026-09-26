@@ -165,8 +165,7 @@ impl<'a> CypherExecutor<'a> {
 
 /// The error for `text_bm25(r, '<property>', …)` when the relationship type
 /// carries no text index over that property. Starts with the node lane's
-/// prefix, so the fused paths classify it the same way (a missing retrieval
-/// source, never a per-row condition to swallow).
+/// prefix, so both lanes read alike.
 fn missing_edge_text_index_error(rel_type: &str, prop_name: &str) -> String {
     format!(
         "text_bm25(): no text index on '{rel_type}.{prop_name}' (relationship). BM25 ranking \

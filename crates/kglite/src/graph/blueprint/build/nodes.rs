@@ -4,7 +4,7 @@
 use super::super::filter::apply_filter;
 use super::super::geometry::{convert_geojson, has_spatial_properties, spatial_targets};
 use super::super::input::InputRegistry;
-use super::super::table::{ListMisparseTally, RawCsv};
+use super::super::table::{MisparseTally, RawCsv};
 use super::super::timeseries as ts;
 use super::super::typing::{map_blueprint_type, overlay_known_types, typed_dataframe};
 use super::cache::{CsvCache, IdTypeCache};
@@ -141,7 +141,7 @@ fn prep_node_spec(
         .filter(|h| seen.insert(h.clone()))
         .collect();
 
-    let mut misparses = ListMisparseTally::default();
+    let mut misparses = MisparseTally::default();
     let df = typed_dataframe(
         &raw_for_nodes,
         &keep,
@@ -443,7 +443,7 @@ fn load_streamed_node_spec(
     let mut auto_pk_counter: u64 = 1;
     // One tally for the whole CSV: a malformed list column is malformed in
     // every chunk, and a per-chunk warning would repeat it once per 250k rows.
-    let mut misparses = ListMisparseTally::default();
+    let mut misparses = MisparseTally::default();
 
     for chunk_result in chunks {
         let mut raw = chunk_result.map_err(|e| format!("[{}] {}", spec.node_type, e))?;

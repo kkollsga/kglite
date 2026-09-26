@@ -86,6 +86,18 @@ before upgrading.
 
 ### Changed
 
+- Cypher: `=`, `<>` and `IN` compare a date or datetime with a string by
+  parsing the string, as `<` and `>` already did. `n.valid_to = '1990-01-01'`
+  matched nothing — as a literal, a parameter, an inline map `{valid_to: …}` or
+  a fluent `where({'valid_to': …})` — while `n.valid_to > '1990-01-01'` worked,
+  so a date returned to Python as ISO text and fed back into an equality found
+  no row. A string that is not a date stays unequal, as before. The same
+  holds on indexed properties, where a date probe over an index holding
+  date-like text now scans. openCypher makes `=` across the two types false.
+- A blueprint `"date"` cell holding a number of fewer than nine digits is no
+  longer read as epoch milliseconds: eight digits are `YYYYMMDD`, and a smaller
+  number is not a date (NULL, reported). Every such value used to become
+  1970-01-01. Epoch milliseconds of nine digits or more read as before.
 - Durable graphs journal validity-interval declarations in the write-ahead
   log, whichever route made them — `CALL db.temporal.declare` / `undeclare`,
   `set_temporal()`, a loader's `validFrom`/`validTo` column types, or
@@ -162,6 +174,34 @@ before upgrading.
 
 ### Fixed
 
+- Cypher `valid_at()` / `valid_during()` refuse a bound property that no element
+  of the type has — a misspelled `'validfrom'` — instead of reading it as an
+  open bound on every row and answering with a plausible but wrong count. The
+  error names the property and the type. A property the type has but one row
+  leaves null is still open.
+- Blueprints: an edge now finds a node whose `pk` is declared `"string"` by its
+  zero-padded code. The `fk_edges` and `junction_edges` id columns were typed
+  by inference, so `0001` was read as the integer 1, matched no node `'0001'`,
+  and every such row vivified a stub node with no properties — under a
+  temporal declaration, a node valid on every date. An id column that refers
+  to a string-keyed node type is now read as text.
+- Dates written as ISO 8601 basic `YYYYMMDD` — the native format of many
+  registries — load as the date they spell. A blueprint `"date"` column read
+  eight digits as epoch milliseconds and stored 1970-01-01 without a warning,
+  while `add_nodes` stored NULL. Both now read `19650701` as 1965-07-01, as
+  text, an integer, or a whole-number float (an integer column with a gap
+  arrives from pandas as float), and Cypher `date('19650701')` returns it too.
+  A blueprint date cell that is not a date is still stored as NULL, and is now
+  reported in one build warning per column naming the count and the first
+  cell. The `add_nodes` warning no longer counts empty or blank cells as
+  values that could not be parsed.
+- Cypher: a `WHERE` predicate that failed to evaluate under an aggregate or a
+  top-K query no longer answers with rows. `MATCH (m:M) WHERE 1/0 > 0 RETURN
+  count(*)`, a `valid_at()` with a malformed date, or a stored bound that is
+  not a date returned `0` (or a count of the rows that did evaluate) from
+  `count(*)`, `count(m)`, `sum`, `min`, a grouped count, `ORDER BY … LIMIT`,
+  `HAVING` and `WITH … WHERE` after an aggregate; each now raises the error,
+  as the same `WHERE` does under a plain `RETURN`.
 - On a disk graph, merging into an existing relationship left its stored
   properties unchanged when read afterwards: `add_relationships` with
   `conflict_handling='update'`, `'sum'` or `'preserve'`, rows folding into one

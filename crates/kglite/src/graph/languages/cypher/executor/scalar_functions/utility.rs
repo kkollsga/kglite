@@ -162,6 +162,7 @@ impl CypherExecutor<'_> {
             to_field: &to_field,
             to_val: self.resolve_property(var_name, &to_field, row)?,
         };
+        self.require_known_bounds(&bounds, row)?;
         let instant = bounds.instant(&date_val, "date")?;
         temporal_eval::interval_contains(
             &bounds.from_val,
@@ -210,6 +211,7 @@ impl CypherExecutor<'_> {
             to_field: &to_field,
             to_val: self.resolve_property(var_name, &to_field, row)?,
         };
+        self.require_known_bounds(&bounds, row)?;
         let start = bounds.instant(&start_val, "start")?;
         let end = bounds.instant(&end_val, "end")?;
         temporal_eval::interval_overlaps(
@@ -221,6 +223,93 @@ impl CypherExecutor<'_> {
         )
         .map(Value::Boolean)
         .map_err(|e| self.validity_bound_error(&bounds, e, row))
+    }
+
+    /// Refuse a null bound read from a property the element's type does not
+    /// have at all. A null bound is open, so a misspelled name (`'validfrom'`)
+    /// used to answer every row as unbounded on that side, silently. A property
+    /// the type records but this row leaves null stays open — the same test
+    /// `db.temporal.declare` applies to the two names.
+    fn require_known_bounds(
+        &self,
+        bounds: &ValidityBounds<'_>,
+        row: &ResultRow,
+    ) -> Result<(), String> {
+        for (field, value) in [
+            (bounds.from_field, &bounds.from_val),
+            (bounds.to_field, &bounds.to_val),
+        ] {
+            if !matches!(value, Value::Null) {
+                continue;
+            }
+            if let Some((kind, type_name)) =
+                self.unknown_property_owner(bounds.var_name, field, row)
+            {
+                return Err(format!(
+                    "{}(): property '{field}' does not exist on {kind} '{type_name}' — no \
+                     element of that type has it — so {}.{field} cannot bound an interval. \
+                     Check the property name",
+                    bounds.function, bounds.var_name
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// `Some((kind, type))` when `var`'s element type records no property
+    /// `field`; `None` when it does, or when the binding is not a node or
+    /// relationship (an unmatched `OPTIONAL MATCH` answers null on its own).
+    fn unknown_property_owner(
+        &self,
+        var: &str,
+        field: &str,
+        row: &ResultRow,
+    ) -> Option<(&'static str, String)> {
+        let graph = self.graph;
+        if let Some(&idx) = row.node_bindings.get(var) {
+            let node_type = graph
+                .graph
+                .node_view(idx)?
+                .node_type_str(&graph.interner)
+                .to_string();
+            let declared = crate::graph::features::temporal::node_config(graph, &node_type)
+                .is_some_and(|config| config.valid_from == field || config.valid_to == field);
+            let known = declared
+                || matches!(
+                    field,
+                    "id" | "title" | "name" | "label" | "type" | "node_type"
+                )
+                || graph
+                    .id_field_aliases
+                    .get(&node_type)
+                    .is_some_and(|a| a == field)
+                || graph
+                    .title_field_aliases
+                    .get(&node_type)
+                    .is_some_and(|a| a == field)
+                || graph
+                    .node_type_metadata
+                    .get(&node_type)
+                    .is_some_and(|props| props.contains_key(field));
+            return (!known).then_some(("node type", node_type));
+        }
+        let edge = row.edge_bindings.get(var)?;
+        let rel_type = graph
+            .graph
+            .edge_weight(edge.edge_index)?
+            .connection_type_str(&graph.interner)
+            .to_string();
+        // A relationship type's metadata lists only the properties some
+        // relationship holds a value for, so a declared bound nobody has set
+        // yet (no period has ended) is known through its declaration.
+        let known = crate::graph::features::temporal::edge_configs(graph, &rel_type)
+            .iter()
+            .any(|config| config.valid_from == field || config.valid_to == field)
+            || graph
+                .connection_type_metadata
+                .get(&rel_type)
+                .is_some_and(|info| info.property_types.contains_key(field));
+        (!known).then_some(("relationship type", rel_type))
     }
 
     /// The error for a stored bound the evaluator cannot read, naming the
@@ -915,50 +1004,6 @@ const NO_EMBEDDING_PREFIX: &str = "vector_score(): no embedding '";
 
 /// Prefix of the same messages for a `text_score` call.
 const TEXT_SCORE_NO_EMBEDDING_PREFIX: &str = "text_score(): no embedding for property '";
-
-/// The retrieval scalars. Each reports a lane its entity's type lacks as
-/// `<name>(): no embedding …` or `<name>(): no text index on '…'` — the one
-/// shape [`is_missing_retrieval_source_error`] recognises, so a scalar added
-/// here is covered without listing its message.
-const RETRIEVAL_SCALARS: &[&str] = &[
-    "vector_score",
-    "text_score",
-    "embedding_norm",
-    "embedding",
-    "text_bm25",
-];
-
-/// True when `message` reports a retrieval lane the graph does not have — no
-/// text index over the property, or no embedding store of that name — from
-/// any of the [`RETRIEVAL_SCALARS`].
-///
-/// The fused execution paths consult this (through
-/// [`super::super::helpers::is_user_input_error`]) before swallowing a
-/// predicate error. Neither message is about the row being tested: the lane is
-/// missing for every node of the type, no row can make it present, and the
-/// unfused path raises on the first one. Swallowing them answered the
-/// documented `WHERE text_bm25(…) > 0 … ORDER BY … LIMIT k` shape with zero
-/// rows, and the same predicate under `count()` with zero.
-pub(in crate::graph::languages::cypher::executor) fn is_missing_retrieval_source_error(
-    message: &str,
-) -> bool {
-    RETRIEVAL_SCALARS.iter().any(|name| {
-        message
-            .strip_prefix(name)
-            .and_then(|rest| rest.strip_prefix("(): "))
-            .is_some_and(|rest| {
-                rest.starts_with("no embedding ") || rest.starts_with("no text index on '")
-            })
-    })
-}
-
-/// Vector shape, metric and options failures are query errors even when
-/// reached through a fused predicate instead of a projected scalar call.
-pub(in crate::graph::languages::cypher::executor) fn is_vector_argument_error(
-    message: &str,
-) -> bool {
-    message.starts_with("vector_score():") || message.starts_with("vector_score() requires")
-}
 
 /// The error for `text_bm25(n, '<property>', …)` when the node's type carries no
 /// text index over that property.

@@ -266,7 +266,53 @@ def edge_text_differential_graph():
     return graph
 
 
+@pytest.fixture
+def date_text_graph():
+    """Stored dates and datetimes compared against their ISO text, with an
+    equality index on the date so the pushed and the indexed routes both run."""
+    graph = kglite.KnowledgeGraph()
+    graph.cypher(
+        "CREATE (:M {id: 1, vt: date('1990-01-01'), ts: datetime('1990-01-01T10:00:00')}),"
+        " (:M {id: 2, vt: date('2020-06-01'), ts: datetime('2020-06-01T00:00:00')}),"
+        " (:M {id: 3, label: '1990-01-01'})"
+    ).to_list()
+    graph.create_index("M", "vt")
+    return graph
+
+
 DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
+    # A date equals the text it parses from, for `=` / `<>` / `IN` / an
+    # inline map exactly as for `<` — on the scan, the pushed matcher, the
+    # equality index and the fused count alike.
+    ("date_eq_text", "date_text_graph", "MATCH (m:M) WHERE m.vt = '1990-01-01' RETURN m.id AS id", None),
+    (
+        "date_eq_text_param",
+        "date_text_graph",
+        "MATCH (m:M) WHERE m.vt = $s RETURN m.id AS id",
+        {"s": "1990-01-01"},
+    ),
+    ("date_ne_text", "date_text_graph", "MATCH (m:M) WHERE m.vt <> '1990-01-01' RETURN m.id AS id", None),
+    ("date_eq_text_inline_map", "date_text_graph", "MATCH (m:M {vt: '1990-01-01'}) RETURN m.id AS id", None),
+    (
+        "date_in_texts",
+        "date_text_graph",
+        "MATCH (m:M) WHERE m.vt IN ['1990-01-01', '2020-06-01'] RETURN m.id AS id",
+        None,
+    ),
+    ("date_eq_text_count", "date_text_graph", "MATCH (m:M) WHERE m.vt = '1990-01-01' RETURN count(*) AS c", None),
+    (
+        "datetime_eq_text",
+        "date_text_graph",
+        "MATCH (m:M) WHERE m.ts = '1990-01-01T10:00:00' RETURN m.id AS id",
+        None,
+    ),
+    ("date_gt_text", "date_text_graph", "MATCH (m:M) WHERE m.vt > '2000-01-01' RETURN m.id AS id", None),
+    (
+        "text_eq_date",
+        "date_text_graph",
+        "MATCH (m:M) WHERE m.label = date('1990-01-01') RETURN m.id AS id",
+        None,
+    ),
     # A node the row holds as a value (`UNWIND collect(d)`, `startNode(r)`) or
     # a `CALL { }` import anchors a subquery pattern; the answers must not move.
     (
@@ -6688,6 +6734,101 @@ def test_optimized_matches_naive(
             f"  diff (in isolated but not naive): {[r for r in isolated if r not in naive][:3]}\n"
             f"  diff (in naive but not isolated): {[r for r in naive if r not in isolated][:3]}"
         )
+
+
+# ── Errors must raise on every path ──────────────────────────────────
+#
+# A WHERE predicate that fails to evaluate is a query error on the unoptimised
+# path. The fused scans (`FusedNodeScanAggregate`, `FusedNodeScanTopK`, the
+# fused HAVING / `WITH … WHERE` filters) used to drop the row instead, so a
+# malformed `valid_at` date, a stored non-date bound, or `1/0` under
+# `count(*)` answered with a confident 0 — or a partial count — rather than
+# the error. Each entry is `(name, query, expected error substring)`, run
+# against `error_graph`; the optimised path, the naive path and every
+# single-pass-disabled path must all raise the same message.
+
+
+@pytest.fixture
+def error_graph():
+    graph = kglite.KnowledgeGraph()
+    graph.cypher(
+        "CREATE (a:M {x: 1, vf: date('2000-01-01'), vt: date('2010-01-01')})"
+        "-[:R {w: 1}]->(:M {x: 2, vf: 'notadate'}), (:M {x: 3})"
+    ).to_list()
+    return graph
+
+
+_DIV0 = "division by zero"
+_VALID_AT_DATE = "valid_at(): the date argument 'garbage'"
+_VALID_AT_BOUND = "the from bound 'notadate'"
+
+DIFFERENTIAL_ERROR_QUERIES: list[tuple[str, str, str]] = [
+    ("error_count_star", "MATCH (m:M) WHERE 1/0 > 0 RETURN count(*) AS c", _DIV0),
+    ("error_count_var", "MATCH (m:M) WHERE m.x/0 > 0 RETURN count(m) AS c", _DIV0),
+    ("error_sum", "MATCH (m:M) WHERE m.x/0 > 0 RETURN sum(m.x) AS c", _DIV0),
+    ("error_min", "MATCH (m:M) WHERE m.x/0 > 0 RETURN min(m.x) AS c", _DIV0),
+    ("error_grouped_count", "MATCH (m:M) WHERE m.x/0 > 0 RETURN m.x AS x, count(*) AS c", _DIV0),
+    ("error_top_k", "MATCH (m:M) WHERE m.x/0 > 0 RETURN m.x ORDER BY m.x LIMIT 2", _DIV0),
+    ("error_edge_count", "MATCH (:M)-[r:R]->() WHERE r.w/0 > 0 RETURN count(r) AS c", _DIV0),
+    (
+        "error_having",
+        "MATCH (m:M)-[:R]->(n) RETURN m.x AS x, count(n) AS c HAVING c/0 > 0",
+        _DIV0,
+    ),
+    (
+        "error_with_where_after_aggregate",
+        "MATCH (m:M)-[:R]->(n) WITH m, count(n) AS c WHERE c/0 > 0 RETURN m.x",
+        _DIV0,
+    ),
+    (
+        "error_valid_at_bad_date_count",
+        "MATCH (m:M) WHERE valid_at(m, 'garbage', 'vf', 'vt') RETURN count(*) AS c",
+        _VALID_AT_DATE,
+    ),
+    (
+        "error_valid_at_bad_date_count_var",
+        "MATCH (m:M) WHERE valid_at(m, 'garbage', 'vf', 'vt') RETURN count(m) AS c",
+        _VALID_AT_DATE,
+    ),
+    (
+        "error_valid_at_stored_bound_count",
+        "MATCH (m:M) WHERE valid_at(m, '2005-01-01', 'vf', 'vt') RETURN count(*) AS c",
+        _VALID_AT_BOUND,
+    ),
+]
+
+
+def _error_of(graph: kglite.KnowledgeGraph, query: str, **kwargs) -> str:
+    try:
+        rows = graph.cypher(query, **kwargs).to_list()
+    except Exception as exc:  # noqa: BLE001 — the message is what is compared
+        return str(exc)
+    pytest.fail(f"`{query}` answered {rows!r} instead of raising ({kwargs or 'optimised'})")
+
+
+@pytest.mark.differential
+@pytest.mark.parametrize(
+    "name,query,expected",
+    DIFFERENTIAL_ERROR_QUERIES,
+    ids=[entry[0] for entry in DIFFERENTIAL_ERROR_QUERIES],
+)
+def test_optimized_raises_like_naive(name: str, query: str, expected: str, error_graph) -> None:
+    naive = _error_of(error_graph, query, disable_optimizer=True)
+    assert expected in naive, f"{name}: naive error {naive!r}"
+    assert _error_of(error_graph, query) == naive, name
+    for pass_name in kglite.cypher_pass_names():
+        assert _error_of(error_graph, query, disabled_passes=[pass_name]) == naive, (name, pass_name)
+
+
+def test_error_corpus_reaches_the_fused_scans(error_graph) -> None:
+    """Non-vacuity: the shapes above really run on the fused operators."""
+    plans = {
+        name: " | ".join(row["operation"] for row in error_graph.cypher("EXPLAIN " + query).to_list())
+        for name, query, _ in DIFFERENTIAL_ERROR_QUERIES
+    }
+    for name in ("error_count_star", "error_count_var", "error_sum", "error_grouped_count"):
+        assert "FusedNodeScanAggregate" in plans[name], (name, plans[name])
+    assert "FusedNodeScanTopK" in plans["error_top_k"], plans["error_top_k"]
 
 
 # ── Known divergences (xfail) ────────────────────────────────────────

@@ -2,7 +2,7 @@
 //! optional property columns, always streamed in row chunks.
 
 use super::super::input::InputRegistry;
-use super::super::table::{ListMisparseTally, RawCsv};
+use super::super::table::{MisparseTally, RawCsv};
 use super::super::typing::{map_blueprint_type, overlay_known_types, typed_dataframe};
 use super::cache::CsvCache;
 use super::fk::connect;
@@ -128,6 +128,21 @@ fn load_one_junction_edge(
     };
 
     overlay_known_types(&mut declared, &source.known_column_types());
+    // An endpoint column referring to a string-keyed node type is read as
+    // text, whatever its cells look like: see `EndpointIdTypes`. A union
+    // target is fixed only when every one of its types agrees.
+    let endpoints = super::fk::EndpointIdTypes::of(graph);
+    if endpoints.for_type(&spec.node_type).is_some() {
+        declared.insert(junc.source_fk.clone(), "string".to_string());
+    }
+    if !junc.target.is_empty()
+        && junc
+            .target
+            .iter()
+            .all(|target| endpoints.for_type(target).is_some())
+    {
+        declared.insert(junc.target_fk.clone(), "string".to_string());
+    }
 
     // A junction is always chunked, so a kept column the blueprint did not
     // type is resolved over the whole input first — including the two FK
@@ -160,7 +175,7 @@ fn load_one_junction_edge(
 
     // One tally per junction input, not per chunk — see the node loader's for
     // why. Same for the unroutable-row counts.
-    let mut misparses = ListMisparseTally::default();
+    let mut misparses = MisparseTally::default();
     let mut unroutable: BTreeMap<String, usize> = BTreeMap::new();
     let mut reported_missing_type_column = false;
 
@@ -353,7 +368,7 @@ fn typed_target_ids(
     let keep = vec![target_fk.to_string()];
     // Discarded: the real frame types the same column again and tallies it
     // there, and counting a misparse twice would double the warning's count.
-    let mut scratch = ListMisparseTally::default();
+    let mut scratch = MisparseTally::default();
     match typed_dataframe(chunk, &keep, declared, &HashMap::new(), &mut scratch) {
         Ok(df) => (0..chunk.row_count())
             .map(|r| df.get_value_by_index(r, 0))

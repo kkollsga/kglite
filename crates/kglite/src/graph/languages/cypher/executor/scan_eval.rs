@@ -723,20 +723,11 @@ impl ScanPred<'_> {
         }
     }
 
-    /// Whether a fused scan should keep this row, with the fused paths'
-    /// error contract applied.
-    ///
-    /// A predicate that merely *does not evaluate* for a row — an unbound
-    /// binding, an aggregate reference outside an aggregation — drops the row
-    /// rather than failing the query, which is what these scans have always
-    /// done. An uncompilable regex, an unbound `$parameter` and a retrieval
-    /// lane the graph does not have (no text index over the property, no
-    /// embedding store of that name) are not that: they are wrong for every
-    /// row, they can never become right, and the unfused path raises all three.
-    /// Swallowing them turned an invalid pattern into a silent empty result, an
-    /// unbound parameter into a zero count, and the documented
-    /// `WHERE text_bm25(…) > 0 … ORDER BY … LIMIT k` shape into no rows at all.
-    /// See [`super::helpers::is_user_input_error`].
+    /// Whether a fused scan should keep this row: only a `true` predicate
+    /// keeps it, and an evaluation error fails the query, exactly as the
+    /// unfused `WHERE` does. The fused scans once dropped the row instead,
+    /// which answered `WHERE 1/0 > 0 … RETURN count(*)` — or a malformed
+    /// `valid_at` date — with a confident zero.
     pub(super) fn keeps_row(
         &self,
         executor: &CypherExecutor<'_>,
@@ -744,11 +735,7 @@ impl ScanPred<'_> {
         node: Option<NodeView<'_>>,
         row: &ResultRow,
     ) -> Result<bool, String> {
-        match self.eval(executor, runtime, node, row) {
-            Ok(outcome) => Ok(outcome == Some(true)),
-            Err(e) if super::helpers::is_user_input_error(&e) => Err(e),
-            Err(_) => Ok(false),
-        }
+        Ok(self.eval(executor, runtime, node, row)? == Some(true))
     }
 
     /// The borrowed string test, with the two non-string outcomes routed back

@@ -338,11 +338,16 @@ def temporal_pair_graph():
         (f"coalesce(null, {DAY}) = {MIDNIGHT}", True),
         (f"CASE WHEN {MIDNIGHT} = {DAY} THEN 'y' ELSE 'n' END", "y"),
         (f"CASE WHEN {NOON} = {DAY} THEN 'y' ELSE 'n' END", "n"),
-        # A string is a different type family: `=` stays false, and only the
-        # ordering comparison parses a date string.
-        (f"{DAY} = '2024-03-15'", False),
-        (f"{DAY} <> '2024-03-15'", True),
-        (f"{MIDNIGHT} = '2024-03-15T00:00:00'", False),
+        # A string is compared by parsing it, for `=` exactly as for `<`: a
+        # value read back as ISO text finds the date it came from.
+        (f"{DAY} = '2024-03-15'", True),
+        (f"{DAY} <> '2024-03-15'", False),
+        (f"{MIDNIGHT} = '2024-03-15T00:00:00'", True),
+        (f"{DAY} = '2024-03-16'", False),
+        (f"{DAY} <= '2024-03-15'", True),
+        # Text that is not a date is another type family: `=` is false.
+        (f"{DAY} = 'garbage'", False),
+        (f"{DAY} <> 'garbage'", True),
         # Null still propagates through both.
         (f"{DAY} = null", None),
         (f"null = {MIDNIGHT}", None),

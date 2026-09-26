@@ -3,7 +3,7 @@
 
 use super::super::filter::apply_filter;
 use super::super::input::InputRegistry;
-use super::super::table::{ListMisparseTally, RawCsv};
+use super::super::table::{MisparseTally, RawCsv};
 use super::super::timeseries as ts;
 use super::super::typing::map_blueprint_type;
 use super::cache::{CsvCache, IdTypeCache};
@@ -45,6 +45,7 @@ fn prep_fk_edges(
     spec: &FlatSpec,
     registry: &InputRegistry,
     cache: &CsvCache,
+    endpoints: &EndpointIdTypes,
 ) -> Option<PreppedFkEdges> {
     let input = spec.input.as_deref()?;
 
@@ -114,6 +115,7 @@ fn prep_fk_edges(
         let props = match fk_edge_properties(edge_type, &spec.node_type, edge, &pk) {
             Ok(mut p) => {
                 super::super::typing::overlay_known_types(&mut p.declared, &known_types);
+                p.endpoint_ids = endpoints.for_edge(&spec.node_type, &edge.target);
                 p
             }
             Err(e) => {
@@ -122,7 +124,7 @@ fn prep_fk_edges(
             }
         };
 
-        let mut misparses = ListMisparseTally::default();
+        let mut misparses = MisparseTally::default();
         let frame = match fk_edge_frame(
             &raw,
             &pk,
@@ -185,6 +187,12 @@ struct FkEdgeProperties {
     /// rename applies to the output name only.
     declared: HashMap<String, String>,
     rename: HashMap<String, String>,
+    /// The source and target id columns' types where the referenced node
+    /// type fixes them — see [`EndpointIdTypes`]. Wins over inference.
+    endpoint_ids: (
+        Option<crate::datatypes::values::ColumnType>,
+        Option<crate::datatypes::values::ColumnType>,
+    ),
 }
 
 /// Validate one FK edge's `properties` / `property_types` / `rename` against
@@ -250,6 +258,7 @@ fn fk_edge_properties(
         columns,
         declared,
         rename,
+        endpoint_ids: (None, None),
     })
 }
 
@@ -283,19 +292,17 @@ fn fk_edge_frame(
     idx: IdColumnIdx,
     props: &FkEdgeProperties,
     id_types: &IdTypes<'_>,
-    misparses: &mut ListMisparseTally,
+    misparses: &mut MisparseTally,
 ) -> Result<Option<FkEdgeFrame>, String> {
     let cols = build_fk_columns(raw, pk, &edge.fk, idx.pk, idx.fk);
     if cols.src.is_empty() {
         return Ok(None);
     }
-    let mut df = build_edge_df(
-        pk,
-        &cols.target_col,
-        cols.src,
-        cols.tgt,
-        id_types.for_columns(pk, &edge.fk),
-    )?;
+    let mut df = build_edge_df(pk, &cols.target_col, cols.src, cols.tgt, {
+        let (src, tgt) = id_types.for_columns(pk, &edge.fk);
+        let (src_fixed, tgt_fixed) = props.endpoint_ids.clone();
+        (src_fixed.or(src), tgt_fixed.or(tgt))
+    })?;
 
     let mut missing_properties = Vec::new();
     let mut present = Vec::new();
@@ -412,9 +419,10 @@ pub(super) fn load_fk_edges(
 
     // Buffered path: parallel prep, serial connect.
     let t_par = std::time::Instant::now();
+    let endpoints = EndpointIdTypes::of(graph);
     let prepped: Vec<Option<PreppedFkEdges>> = buffered
         .par_iter()
-        .map(|spec| prep_fk_edges(spec, registry, cache))
+        .map(|spec| prep_fk_edges(spec, registry, cache, &endpoints))
         .collect();
     let t_par_ms = t_par.elapsed().as_millis();
 
@@ -599,11 +607,13 @@ fn load_streamed_fk_edges(
     // property of the spec, and an edge carrying one is skipped whole rather
     // than half-built. An edge missing from this map is one such.
     let known_types = source.known_column_types();
+    let endpoints = EndpointIdTypes::of(graph);
     let mut edge_props: IndexMap<String, FkEdgeProperties> = IndexMap::new();
     for (edge_type, edge) in &fk_edges {
         match fk_edge_properties(edge_type, &spec.node_type, edge, &pk) {
             Ok(mut props) => {
                 super::super::typing::overlay_known_types(&mut props.declared, &known_types);
+                props.endpoint_ids = endpoints.for_edge(&spec.node_type, &edge.target);
                 edge_props.insert(edge_type.clone(), props);
             }
             Err(e) => report.errors.push(e),
@@ -637,7 +647,7 @@ fn load_streamed_fk_edges(
     let mut reported_missing_prop: HashSet<(String, String)> = HashSet::new();
     // One tally per edge across every chunk of this CSV — the junction
     // loader's reason applies here too.
-    let mut misparses: IndexMap<String, ListMisparseTally> = IndexMap::new();
+    let mut misparses: IndexMap<String, MisparseTally> = IndexMap::new();
 
     for chunk_result in chunks {
         let mut raw = chunk_result.map_err(|e| format!("[{}] {}", spec.node_type, e))?;
@@ -733,6 +743,51 @@ fn load_streamed_fk_edges(
         )));
     }
     Ok(())
+}
+
+/// The node types whose nodes the graph keys by string ids, read after the
+/// node phase. An id column referring to one of them must be typed string: a
+/// blueprint that declares `pk` as `"string"` keeps `"0001"` on the node, and
+/// an edge column left to inference read the same cell as the integer 1, found
+/// no node, and vivified a stub for every row.
+pub(super) struct EndpointIdTypes(HashSet<String>);
+
+impl EndpointIdTypes {
+    pub(super) fn of(graph: &DirGraph) -> Self {
+        use crate::graph::storage::GraphRead;
+        Self(
+            graph
+                .type_indices
+                .iter()
+                .filter(|(_, nodes)| {
+                    nodes
+                        .iter()
+                        .next()
+                        .and_then(|idx| graph.graph.get_node_id(idx))
+                        .is_some_and(|id| matches!(id, crate::datatypes::values::Value::String(_)))
+                })
+                .map(|(node_type, _)| node_type.to_string())
+                .collect(),
+        )
+    }
+
+    /// The type an id column referring to `node_type` must take, if fixed.
+    pub(super) fn for_type(&self, node_type: &str) -> Option<crate::datatypes::values::ColumnType> {
+        self.0
+            .contains(node_type)
+            .then_some(crate::datatypes::values::ColumnType::String)
+    }
+
+    fn for_edge(
+        &self,
+        source_type: &str,
+        target_type: &str,
+    ) -> (
+        Option<crate::datatypes::values::ColumnType>,
+        Option<crate::datatypes::values::ColumnType>,
+    ) {
+        (self.for_type(source_type), self.for_type(target_type))
+    }
 }
 
 /// Id types resolved ahead of the frame, when the caller reads its input in

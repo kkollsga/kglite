@@ -76,8 +76,14 @@ pub fn validate_resolution(resolution: &str) -> Result<(), String> {
 /// - `"2020"` → `(2020-01-01, Year)`
 /// - `"2020-2"` or `"2020-02"` → `(2020-02-01, Month)`
 /// - `"2020-2-15"` → `(2020-02-15, Day)`
+/// - `"20200215"` (ISO 8601 basic) → `(2020-02-15, Day)`
 pub fn parse_date_query(s: &str) -> Result<(NaiveDate, DatePrecision), String> {
     let trimmed = s.trim();
+    // Eight digits cannot be a year chrono represents, so `YYYYMMDD` is
+    // unambiguous here.
+    if let Some(date) = crate::graph::blueprint::typing::scalar::parse_basic_date(trimmed) {
+        return Ok((date, DatePrecision::Day));
+    }
     let parts: Vec<&str> = trimmed.split('-').collect();
 
     match parts.len() {
@@ -115,7 +121,7 @@ pub fn parse_date_query(s: &str) -> Result<(NaiveDate, DatePrecision), String> {
             Ok((date, DatePrecision::Day))
         }
         _ => Err(format!(
-            "Invalid date string '{}'. Expected: 'YYYY', 'YYYY-M', or 'YYYY-M-D'",
+            "Invalid date string '{}'. Expected: 'YYYY', 'YYYY-M', 'YYYY-M-D' or 'YYYYMMDD'",
             s
         )),
     }
@@ -415,6 +421,14 @@ mod tests {
         assert!(parse_date_query("2020-abc").is_err());
         assert!(parse_date_query("2020-13").is_err()); // invalid month
         assert!(parse_date_query("2020-2-30").is_err()); // invalid day
+        assert_eq!(
+            parse_date_query("19650701").unwrap(),
+            (
+                NaiveDate::from_ymd_opt(1965, 7, 1).unwrap(),
+                DatePrecision::Day
+            )
+        );
+        assert!(parse_date_query("19651301").is_err());
     }
 
     #[test]

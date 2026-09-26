@@ -249,6 +249,8 @@ pub fn kglite::api::algorithms::vector_search(graph: &kglite::api::DirGraph, sel
 pub fn kglite::api::algorithms::weakly_connected_components(graph: &kglite::api::DirGraph, deadline: kglite::api::algorithms::Interrupt) -> core::result::Result<alloc::vec::Vec<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>, alloc::string::String>
 pub mod kglite::api::blueprint
 pub mod kglite::api::blueprint::scalar
+pub fn kglite::api::blueprint::scalar::date_from_integer(n: i64) -> core::option::Option<chrono::naive::date::NaiveDate>
+pub fn kglite::api::blueprint::scalar::parse_basic_date(text: &str) -> core::option::Option<chrono::naive::date::NaiveDate>
 pub fn kglite::api::blueprint::scalar::parse_boolean(text: &str) -> core::option::Option<bool>
 pub fn kglite::api::blueprint::scalar::parse_date(text: &str) -> core::option::Option<chrono::naive::date::NaiveDate>
 pub fn kglite::api::blueprint::scalar::parse_float(text: &str) -> core::option::Option<f64>

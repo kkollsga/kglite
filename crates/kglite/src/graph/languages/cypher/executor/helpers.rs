@@ -13,28 +13,6 @@ use std::collections::{HashMap, HashSet};
 
 pub use super::super::ast::is_aggregate_expression;
 
-/// True when an evaluation error reports a mistake in the *query or its
-/// parameters* rather than something about the row being tested.
-///
-/// The fused execution paths — the scan-aggregate, the top-K scan, `HAVING`,
-/// and `WITH … WHERE` — drop a row whose predicate cannot be evaluated instead
-/// of failing the query. That swallow is load-bearing: an unbound
-/// `OPTIONAL MATCH` binding and an aggregate reference outside an aggregation
-/// both surface as evaluation errors, and both must keep meaning "this row
-/// does not match".
-///
-/// Invalid regexes, missing parameters/retrieval sources, malformed vector
-/// arguments and a list operator over a non-list remain query errors. A fused
-/// filter must raise them just as scalar evaluation does; it must not report a silent empty result or zero
-/// count. Each recognizer lives beside the errors it classifies.
-pub(super) fn is_user_input_error(message: &str) -> bool {
-    is_list_type_error(message)
-        || super::regex_cache::is_compile_error(message)
-        || super::expression::is_missing_parameter_error(message)
-        || super::scalar_functions::utility::is_missing_retrieval_source_error(message)
-        || super::scalar_functions::utility::is_vector_argument_error(message)
-}
-
 /// Variables a grouped aggregation still pins down on its output rows.
 ///
 /// Every non-aggregate projection item is a grouping key, so any variable it
@@ -91,8 +69,8 @@ pub(crate) fn carry_group_bindings(
 /// aggregate return item, so HAVING predicates like `count(m) > 1` can
 /// resolve even when the RETURN item is aliased (`count(m) AS c`).
 /// Without this, the aliased aggregate is stored only under `c` and a
-/// HAVING reference to `count(m)` would fall through to scalar dispatch
-/// (which errors for aggregates and gets swallowed by unwrap_or(false)).
+/// HAVING reference to `count(m)` would fall through to scalar dispatch,
+/// which errors for aggregates.
 pub(super) fn augment_rows_with_aggregate_keys(rows: &mut [ResultRow], items: &[ReturnItem]) {
     for item in items {
         if !is_aggregate_expression(&item.expression) {
@@ -1306,8 +1284,7 @@ pub(in crate::graph::languages::cypher) fn parse_list_value(val: &Value) -> Vec<
     }
 }
 
-/// Stem of every list type error, and what [`is_list_type_error`] recognises
-/// it by.
+/// Stem of every list type error.
 const LIST_TYPE_ERROR: &str = " expects a list";
 
 /// The type error for `construct` applied to `value`, which is not a list.
@@ -1359,12 +1336,6 @@ pub(in crate::graph::languages::cypher) fn iteration_items(
     Ok(list_operand(value, construct)?
         .map(std::borrow::Cow::into_owned)
         .unwrap_or_default())
-}
-
-/// Whether `message` is a list type error — wrong for the query, not for one
-/// row, so a fused filter must raise it rather than drop the row.
-fn is_list_type_error(message: &str) -> bool {
-    message.contains(LIST_TYPE_ERROR)
 }
 
 /// Parse a single value token (the same grammar as items inside a
@@ -1808,60 +1779,6 @@ pub(super) fn yield_alias(yield_items: &[YieldItem], expected: &str) -> Option<S
 #[cfg(test)]
 #[path = "node_record_golden_tests.rs"]
 mod node_record_golden_tests;
-
-#[cfg(test)]
-mod user_input_error_tests {
-    use super::is_user_input_error;
-    use crate::graph::languages::cypher::executor::expression::missing_parameter_error;
-    use crate::graph::languages::cypher::executor::regex_cache::{
-        function_compile_error, operator_compile_error,
-    };
-
-    #[test]
-    fn all_propagating_classes_are_recognised() {
-        // Bound, not inlined: `clippy::invalid_regex` rejects a literal bad
-        // pattern at `Regex::new`, and this test needs one.
-        let bad = String::from("[");
-        let err = regex::Regex::new(&bad).expect_err("'[' must not compile");
-        assert!(is_user_input_error(&operator_compile_error("[", &err)));
-        assert!(is_user_input_error(&function_compile_error(
-            "text_match_regex",
-            &err
-        )));
-        assert!(is_user_input_error(&missing_parameter_error("flag")));
-        // `dynamic_labels` suffixes the same mint for pattern positions.
-        assert!(is_user_input_error(&format!(
-            "{} (used as a label or relationship type)",
-            missing_parameter_error("label")
-        )));
-        // The retrieval lanes, spelled the way their own mints spell them.
-        assert!(is_user_input_error(
-            "text_bm25(): no text index on 'Doc.body'. BM25 ranking is opt-in"
-        ));
-        assert!(is_user_input_error(
-            "vector_score(): no embedding 'nope_emb' found for node type 'Doc'"
-        ));
-        assert!(is_user_input_error(
-            "text_score(): no embedding for property 'nope' on node type 'Doc'. Embed it first"
-        ));
-    }
-
-    #[test]
-    fn the_swallowed_classes_are_not_recognised() {
-        // The messages the fused paths must keep dropping rows for.
-        for message in [
-            "Cannot evaluate aggregate function in this context",
-            "Variable 'x' not bound",
-            "Unknown function: nope",
-            // A lane that *is* present but declines this row: null in, null
-            // out is a row fact, and the fused paths must keep dropping it.
-            "text_bm25(): third argument must be a query string",
-            "",
-        ] {
-            assert!(!is_user_input_error(message), "{message}");
-        }
-    }
-}
 
 #[cfg(test)]
 mod split_list_top_level_tests {

@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn typed_column_uses_exact_parser_and_preserves_nulls() {
-        use super::super::{build_column_data, ColumnData, ColumnType, ListMisparseTally, RawCsv};
+        use super::super::{build_column_data, ColumnData, ColumnType, MisparseTally, RawCsv};
         let cells = [
             "9223372036854775807.0",
             "-9223372036854775808.0",
@@ -161,7 +161,7 @@ mod tests {
             0,
             &ColumnType::Int64,
             "v",
-            &mut ListMisparseTally::default(),
+            &mut MisparseTally::default(),
         )
         .unwrap();
         let ColumnData::Int64(values) = column else {

@@ -18,9 +18,9 @@ pub fn parse_boolean(text: &str) -> Option<bool> {
     }
 }
 
-/// Parse a date cell. Accepts ISO dates, ISO datetimes, and epoch milliseconds.
-/// The Python loader fed epoch-ms values (strings of digits) through
-/// `pd.to_datetime(unit="ms")` — mirror that behaviour.
+/// Parse a date cell: an ISO date or datetime (the date is kept), eight digits
+/// as ISO 8601 basic `YYYYMMDD`, or epoch milliseconds (see
+/// [`date_from_integer`] for how a number is read).
 pub fn parse_date(text: &str) -> Option<NaiveDate> {
     let s = text.trim();
     if s.is_empty() {
@@ -35,21 +35,45 @@ pub fn parse_date(text: &str) -> Option<NaiveDate> {
     if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
         return Some(dt.date());
     }
-    // Epoch millis — e.g. "1609459200000"
-    if let Ok(ms) = s.parse::<i64>() {
-        if let Some(dt) = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms) {
-            return Some(dt.date_naive());
-        }
+    if let Ok(n) = s.parse::<i64>() {
+        return date_from_integer(n);
     }
-    // Floating-point epoch ms — e.g. "1609459200000.0"
-    if let Ok(ms) = s.parse::<f64>() {
-        if ms.is_finite() {
-            if let Some(dt) = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms as i64) {
-                return Some(dt.date_naive());
-            }
-        }
+    // "1609459200000.0": a float column written out as text.
+    let f = s.parse::<f64>().ok().filter(|f| f.is_finite())?;
+    if f.fract() == 0.0 {
+        date_from_integer(f as i64)
+    } else {
+        epoch_millis_date(f as i64)
     }
-    None
+}
+
+/// Eight ASCII digits read as an ISO 8601 basic date, `YYYYMMDD`.
+pub fn parse_basic_date(text: &str) -> Option<NaiveDate> {
+    let s = text.trim();
+    if s.len() != 8 || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let n: u32 = s.parse().ok()?;
+    NaiveDate::from_ymd_opt((n / 10_000) as i32, n / 100 % 100, n % 100)
+}
+
+/// A whole number read as a date. Eight digits are `YYYYMMDD` — the native
+/// date format of many registries — and never epoch milliseconds, which would
+/// put every such value on 1970-01-01. A larger magnitude is epoch
+/// milliseconds. Anything smaller is not a date: as epoch milliseconds it would
+/// also land on 1970-01-01, which no one means.
+pub fn date_from_integer(n: i64) -> Option<NaiveDate> {
+    if (10_000_000..100_000_000).contains(&n) {
+        return parse_basic_date(&n.to_string());
+    }
+    epoch_millis_date(n)
+}
+
+fn epoch_millis_date(ms: i64) -> Option<NaiveDate> {
+    if ms.unsigned_abs() < 100_000_000 {
+        return None;
+    }
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms).map(|dt| dt.date_naive())
 }
 
 #[cfg(test)]
@@ -73,6 +97,26 @@ mod tests {
             NaiveDate::from_ymd_opt(2025, 1, 2)
         );
         assert_eq!(parse_date("2025/01/02"), None);
+        assert_eq!(
+            parse_date("19650701"),
+            NaiveDate::from_ymd_opt(1965, 7, 1),
+            "eight digits are YYYYMMDD, not epoch milliseconds"
+        );
+        assert_eq!(
+            parse_date("19650701.0"),
+            NaiveDate::from_ymd_opt(1965, 7, 1)
+        );
+        for not_a_date in ["19651301", "20100230", "7", "-7", "1234567", "99999999.5"] {
+            assert_eq!(parse_date(not_a_date), None, "{not_a_date}");
+        }
+        assert_eq!(
+            parse_date("1609459200000"),
+            NaiveDate::from_ymd_opt(2021, 1, 1)
+        );
+        assert_eq!(
+            parse_date("-100000000"),
+            NaiveDate::from_ymd_opt(1969, 12, 30)
+        );
         for invalid in ["", "bad"] {
             assert_eq!(parse_integer(invalid), None);
             assert_eq!(parse_float(invalid), None);

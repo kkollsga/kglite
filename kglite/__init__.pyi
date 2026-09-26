@@ -2095,10 +2095,14 @@ class KnowledgeGraph:
                 ``'datetime'`` to force date-only. Both accept text spelled
                 ``YYYY-MM-DD`` with an optional ``HH:MM[:SS[.fff]]`` after a
                 space or a ``T`` — ``'datetime'`` keeps the date part and drops
-                the time. A cell that parses as neither is stored as NULL and
+                the time — and ISO 8601 basic ``YYYYMMDD``, as text or as a
+                whole number (an integer column with a gap arrives from pandas
+                as float, which is read the same). No other number is a date.
+                A cell that parses as neither is stored as NULL and
                 reported through ``on_invalid`` (a ``UserWarning`` by default,
                 a refusal under ``'error'``), naming the column, the count and
-                the first offending row.
+                the first offending row; an empty or blank cell is a missing
+                value and is not reported.
                 Also supports spatial types: ``'location.lat'``, ``'location.lon'``,
                 ``'geometry'``, ``'point.<name>.lat'``, ``'point.<name>.lon'``,
                 ``'shape.<name>'``.

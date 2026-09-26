@@ -77,7 +77,7 @@ Available types:
 | `"int"` | integer | Whole numbers |
 | `"float"` | float | Decimal numbers |
 | `"bool"` / `"boolean"` | boolean | Accepts true/false and common 1/0/yes/no forms |
-| `"date"` / `"datetime"` | date | Accepts `YYYY-MM-DD`, timestamp text, or epoch milliseconds; stores the date |
+| `"date"` / `"datetime"` | date | Accepts `YYYY-MM-DD`, timestamp text, `YYYYMMDD`, or epoch milliseconds (nine digits or more); stores the date. A cell that is none of these is stored as NULL and reported in one build warning per column |
 | `"list"` / `"array"` | list | Cell is a JSON array, e.g. `["a","b"]` — see below |
 | `"duration"` | duration | Cell is a `{"months", "days", "seconds"}` object (each field optional), e.g. `{"days": 1, "seconds": 7200}`; anything else is null |
 | `"validFrom"` / `"validTo"` | date | Same as `"date"`; declares nothing on its own — see [Temporal Properties](#temporal-properties) |
@@ -240,6 +240,13 @@ And you have `companies.csv`:
 ```
 
 This creates `(Employee)-[:WORKS_AT]->(Company)` edges. The `fk` column in the source CSV must match the `pk` values of the target node type.
+
+Ids that look like numbers are read as integers unless you say otherwise, so a
+zero-padded code such as `0001` becomes `1`. To keep codes as written, declare
+the `pk` column `"string"` in the node's `properties`
+(`"properties": {"code": "string"}`). Every `fk`, `source_fk` and `target_fk`
+column that refers to a string-keyed node type is then read as text too, so
+`0001` in an edge row finds the node `0001`.
 
 > **Tip:** Add FK columns to `skipped` if you don't want them stored as node properties — the edge already captures the relationship.
 

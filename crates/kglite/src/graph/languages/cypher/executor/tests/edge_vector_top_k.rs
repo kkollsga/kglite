@@ -620,9 +620,9 @@ fn embedding_without_the_store_is_refused_naming_type_and_property() {
 }
 
 /// A missing store is an error in a fused `WHERE` too, never a row that
-/// "does not match": the fused filters swallow per-row evaluation errors, and
-/// counted `0` for `embedding()` / `embedding_norm()` where `vector_score`
-/// raised.
+/// "does not match": the fused filters once swallowed per-row evaluation
+/// errors, and counted `0` for `embedding()` / `embedding_norm()` where
+/// `vector_score` raised.
 #[test]
 fn a_missing_store_raises_inside_a_fused_where() {
     let mut graph = cross_type_corpus(false);

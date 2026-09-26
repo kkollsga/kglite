@@ -425,10 +425,9 @@ fn fused_sum_keeps_the_unfused_paths_numeric_type_on_mixed_columns() {
 // Uncompilable regexes on the fused scan
 // ========================================================================
 //
-// The fused scan drops a row whose WHERE predicate cannot be evaluated
-// rather than failing the query — that is how an unbound binding behaves,
-// and it stays. A pattern that does not compile is not that case: it is
-// wrong for every row, and the unfused path has always raised it. Swallowing
+// The fused scan once dropped a row whose WHERE predicate could not be
+// evaluated rather than failing the query. A pattern that does not compile
+// is wrong for every row, and the unfused path has always raised it. Swallowing
 // it answered `WHERE n.v =~ '['` with a silent empty result, and turned a
 // lookaround pattern (valid in Neo4j, unsupported by the `regex` crate) into
 // "no matches" rather than "unsupported".
@@ -478,8 +477,8 @@ fn fused_scan_raises_on_a_pattern_that_does_not_compile() {
 // Same shape as the uncompilable regex above, one class wider. A parameter
 // the caller never bound is missing for every row and no row can supply it,
 // and the unfused path has always raised it — but the fused scan swallowed it
-// with the "this predicate does not evaluate for this row" errors it drops by
-// design, so `WHERE v.flag = $flag RETURN count(v)` answered `0` and no error.
+// with the "this predicate does not evaluate for this row" errors it then
+// dropped, so `WHERE v.flag = $flag RETURN count(v)` answered `0` and no error.
 // A zero count is the worst possible answer here: the caller reads it as "the
 // graph has none of those" off their own mistake.
 

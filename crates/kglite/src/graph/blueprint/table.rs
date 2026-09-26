@@ -88,25 +88,58 @@ pub(super) fn looks_like_a_missed_list(cell: &str) -> bool {
     cell.contains(['|', ';', ','])
 }
 
-/// Cells the list parser wrapped whole where their author probably meant
-/// several values, tallied per column across every chunk of one CSV.
+/// Declared cells that did not read as their type the way their author meant,
+/// tallied per column across every chunk of one CSV: list cells the list parser
+/// wrapped whole where the author probably meant several values, and date cells
+/// that are not a date (stored as NULL).
 ///
 /// One warning per column, not per cell: a malformed export usually has the
 /// whole column wrong, and a per-cell warning on a 100k-row file is a denial
 /// of service on the report.
 #[derive(Default)]
-pub struct ListMisparseTally {
-    hits: Vec<(String, usize, usize, String)>,
+pub struct MisparseTally {
+    hits: Vec<MisparseHit>,
 }
 
-impl ListMisparseTally {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MisparseKind {
+    List,
+    Date,
+}
+
+struct MisparseHit {
+    kind: MisparseKind,
+    column: String,
+    count: usize,
+    row_id: usize,
+    cell: String,
+}
+
+impl MisparseTally {
     pub(super) fn record(&mut self, column: &str, row_id: usize, cell: &str) {
-        if let Some(hit) = self.hits.iter_mut().find(|(c, _, _, _)| c == column) {
-            hit.1 += 1;
+        self.note(MisparseKind::List, column, row_id, cell);
+    }
+
+    pub(super) fn record_date(&mut self, column: &str, row_id: usize, cell: &str) {
+        self.note(MisparseKind::Date, column, row_id, cell);
+    }
+
+    fn note(&mut self, kind: MisparseKind, column: &str, row_id: usize, cell: &str) {
+        if let Some(hit) = self
+            .hits
+            .iter_mut()
+            .find(|hit| hit.kind == kind && hit.column == column)
+        {
+            hit.count += 1;
             return;
         }
-        self.hits
-            .push((column.to_string(), 1, row_id, cell.to_string()));
+        self.hits.push(MisparseHit {
+            kind,
+            column: column.to_string(),
+            count: 1,
+            row_id,
+            cell: cell.to_string(),
+        });
     }
 
     /// One line per affected column, naming the count, the first offending
@@ -114,19 +147,35 @@ impl ListMisparseTally {
     pub fn into_warnings(self, where_: &str) -> Vec<String> {
         self.hits
             .into_iter()
-            .map(|(column, count, row_id, cell)| {
+            .map(|hit| {
+                let MisparseHit {
+                    kind,
+                    column,
+                    count,
+                    row_id,
+                    cell,
+                } = hit;
                 let cell = if cell.chars().count() > 80 {
                     let head: String = cell.chars().take(80).collect();
                     format!("{head}…")
                 } else {
                     cell
                 };
-                format!(
-                    "{where_}: column '{column}' is declared list but {count} cell(s) are not a \
-                     JSON array and contain a separator ('|', ';' or ','); each was kept whole \
-                     as a one-element list. First at row {row_id}: '{cell}'. Write list cells \
-                     as JSON arrays, e.g. [\"a\",\"b\"]."
-                )
+                match kind {
+                    MisparseKind::List => format!(
+                        "{where_}: column '{column}' is declared list but {count} cell(s) are not a \
+                         JSON array and contain a separator ('|', ';' or ','); each was kept whole \
+                         as a one-element list. First at row {row_id}: '{cell}'. Write list cells \
+                         as JSON arrays, e.g. [\"a\",\"b\"]."
+                    ),
+                    MisparseKind::Date => format!(
+                        "{where_}: column '{column}' is declared date but {count} cell(s) are not \
+                         a date and were stored as NULL. First at row {row_id}: '{cell}'. A date \
+                         cell is 'YYYY-MM-DD' (a time after it is dropped), 'YYYYMMDD', or epoch \
+                         milliseconds (nine digits or more); declare the column 'string' to keep \
+                         the text as written."
+                    ),
+                }
             })
             .collect()
     }

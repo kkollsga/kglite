@@ -179,13 +179,16 @@ Aware Python datetime cells normalize to naive UTC, just like query parameters
 and nested maps/lists. Explicit date-only loading retains the local calendar
 date. Direct date loading keeps its historical `YYYY/MM/DD`, `DD-MM-YYYY` and
 `MM/DD/YYYY` aliases; blueprint declared date strings use the CSV grammar
-(ISO date/datetime or epoch milliseconds).
+(ISO date/datetime, or epoch milliseconds of nine digits or more).
 
 A column declared `'datetime'` or `'timestamp'` accepts `YYYY-MM-DD` with an
 optional `HH:MM[:SS[.fff]]` after a space or a `T`; `'datetime'` keeps the
-date and drops the time, `'timestamp'` keeps both. On the direct
-`add_nodes`/`add_relationships` path a cell that parses as neither is stored as
-NULL **and reported** through `on_invalid` — a warning by default, a refusal
-under `on_invalid='error'`. Blueprint declared cells keep their documented
-NULL-on-invalid behaviour and are reported by the build's per-property audit
-instead.
+date and drops the time, `'timestamp'` keeps both. Both routes also read ISO
+8601 basic `YYYYMMDD` — as text, an integer, or a whole-number float — as the
+date it spells; eight digits are never epoch milliseconds. On the direct
+`add_nodes`/`add_relationships` path a cell that parses as none of these is
+stored as NULL **and reported** through `on_invalid` — a warning by default, a
+refusal under `on_invalid='error'`. Blueprint declared cells keep their
+documented NULL-on-invalid behaviour and are reported by one build warning per
+column instead. An empty or blank cell is a missing value on both routes and is
+not reported.

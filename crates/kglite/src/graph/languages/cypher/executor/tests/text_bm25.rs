@@ -487,8 +487,8 @@ fn a_stale_index_ranks_its_unindexed_rows_the_way_the_unoptimised_plan_does() {
 // ── The fused scans must refuse an unindexed property ────────────────────────
 //
 // `WHERE text_bm25(…) > 0 … ORDER BY … LIMIT k` — the ranked-retrieval shape the
-// docs recommend — is claimed by `FusedNodeScanTopK`, whose WHERE filter drops
-// any row whose predicate cannot be evaluated. "No text index on this type" is
+// docs recommend — is claimed by `FusedNodeScanTopK`, whose WHERE filter once
+// dropped any row whose predicate could not be evaluated. "No text index on this type" is
 // wrong for every row and no row can make it right, so dropping answered the
 // recommended query with zero rows and no error while the bare scalar raised.
 // Reported downstream on 0.16.21.

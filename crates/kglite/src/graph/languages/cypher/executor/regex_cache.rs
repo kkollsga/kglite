@@ -85,19 +85,11 @@ impl RegexCache {
 }
 
 // ---------------------------------------------------------------------------
-// Compile-failure messages, and recognising one again
+// Compile-failure messages
 // ---------------------------------------------------------------------------
 //
 // A pattern that does not compile is an error in the *query text*, not a
-// property of the row being tested: it is wrong for every row and it can never
-// become right. The unfused WHERE path has always raised it. The fused paths
-// deliberately swallow predicate errors — a predicate that merely does not
-// evaluate for a row (an unbound OPTIONAL MATCH binding, an aggregate
-// reference in HAVING) drops the row rather than failing the query — so they
-// need a way to tell the one class apart from the other before swallowing.
-//
-// Both messages are built here and recognised here, over shared constants, so
-// the recogniser cannot drift away from the wording it recognises.
+// property of the row being tested, and raises from every execution path.
 
 /// Opening words of the `=~` compile-failure message. Pinned by
 /// `tests/test_regex_operator.py` and `tests/test_error_types.py`.
@@ -115,16 +107,6 @@ pub(super) fn operator_compile_error(pattern: &str, err: &regex::Error) -> Strin
 /// `function` is the bare name, without parentheses.
 pub(super) fn function_compile_error(function: &str, err: &regex::Error) -> String {
     format!("{function}{FUNCTION_INFIX}{err}")
-}
-
-/// True when `message` reports a regex the user supplied and the engine could
-/// not compile — i.e. one of the two messages above.
-///
-/// The fused execution paths call this before swallowing a predicate error:
-/// a flagged message propagates (matching the unfused path), anything else
-/// keeps the historical "this row does not match" behaviour.
-pub(super) fn is_compile_error(message: &str) -> bool {
-    message.starts_with(OPERATOR_PREFIX) || message.contains(FUNCTION_INFIX)
 }
 
 static CACHE: LazyLock<RegexCache> = LazyLock::new(|| RegexCache::new(CACHE_CAPACITY));
@@ -321,19 +303,6 @@ mod tests {
         let function = function_compile_error("text_match_regex", &err);
         assert!(operator.starts_with("Invalid regular expression '['"));
         assert!(function.starts_with("text_match_regex() invalid pattern: "));
-        assert!(is_compile_error(&operator));
-        assert!(is_compile_error(&function));
-    }
-
-    #[test]
-    fn other_evaluation_errors_are_not_compile_errors() {
-        // The messages the fused paths must keep swallowing.
-        assert!(!is_compile_error("Missing parameter: $min"));
-        assert!(!is_compile_error(
-            "Cannot evaluate aggregate function in this context"
-        ));
-        assert!(!is_compile_error("Variable 'x' not bound"));
-        assert!(!is_compile_error(""));
     }
 
     #[test]

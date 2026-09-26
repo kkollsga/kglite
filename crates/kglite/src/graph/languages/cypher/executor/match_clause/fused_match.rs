@@ -1455,11 +1455,7 @@ impl<'a> CypherExecutor<'a> {
                 None
             };
 
-            // WHERE filter. A predicate that cannot be evaluated does not
-            // match (the row is dropped, not raised) — except for an
-            // uncompilable regex, an unbound parameter, or a missing
-            // retrieval lane, which the unfused path raises. See
-            // `ScanPred::keeps_row`.
+            // WHERE filter; an evaluation error fails the query.
             if let Some(pred) = &compiled_where {
                 if !pred.keeps_row(self, &runtime, node, &eval_row)? {
                     continue;

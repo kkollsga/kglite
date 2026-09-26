@@ -214,8 +214,9 @@ impl UnparsedCells {
             format!(
                 "Column '{col_name}': {count} {plural} could not be parsed as a {kind} \
                  (row {row} holds {value}) and {verb} stored as NULL. Accepted text is \
-                 'YYYY-MM-DD' with an optional 'HH:MM[:SS[.fff]]' after a space or 'T'; \
-                 declare the column 'string' to keep the text as written."
+                 'YYYY-MM-DD' with an optional 'HH:MM[:SS[.fff]]' after a space or 'T', \
+                 or 'YYYYMMDD' (as text or a whole number); declare the column 'string' \
+                 to keep the text as written."
             ),
         )
     }
@@ -245,7 +246,8 @@ fn parse_temporal_cells<T>(
         } else {
             let item = py_list.get_item(i)?;
             let parsed = parse(&item);
-            if parsed.is_none() {
+            // An empty or blank text cell is a missing value, not a failed parse.
+            if parsed.is_none() && !is_blank_text(&item) {
                 unparsed.note(i, &item);
             }
             vec.push(parsed);
@@ -255,6 +257,11 @@ fn parse_temporal_cells<T>(
         unparsed.report(py_list.py(), col_name, kind, on_invalid)?;
     }
     Ok(vec)
+}
+
+fn is_blank_text(item: &Bound<'_, PyAny>) -> bool {
+    item.extract::<String>()
+        .is_ok_and(|text| text.trim().is_empty())
 }
 
 /// An object column's cells through `convert`; a null cell stays null.

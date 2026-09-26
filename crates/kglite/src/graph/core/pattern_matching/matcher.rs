@@ -1,5 +1,7 @@
 use crate::datatypes::values::Value;
-use crate::graph::core::filtering::{compare_values, str_values_equal, values_equal};
+use crate::graph::core::filtering::{
+    compare_values, may_parse_as_temporal, str_values_equal, values_equal,
+};
 use crate::graph::core::relationship_property::edge_ref_property;
 use crate::graph::dir_graph::indexes::predicate_queries::string_index_hits;
 use crate::graph::languages::cypher::executor::budget::MatchCeiling;
@@ -249,13 +251,16 @@ fn str_starts_with(s: &str, prefix: &str) -> bool {
 /// [`PatternExecutor::prop_matches`], which calls the same function through
 /// `str_prop_eq`, so the two routes cannot disagree.
 pub(super) fn str_field_test(matcher: &PropertyMatcher) -> Option<impl Fn(&str) -> bool + '_> {
-    if !matches!(
-        matcher,
-        PropertyMatcher::Equals(Value::String(_))
-            | PropertyMatcher::StartsWith(_)
-            | PropertyMatcher::EndsWith(_)
-            | PropertyMatcher::Contains(_)
-    ) {
+    let string_only = match matcher {
+        // A date-shaped target also equals a stored date or datetime, which
+        // the string form cannot see.
+        PropertyMatcher::Equals(Value::String(target)) => !may_parse_as_temporal(target),
+        PropertyMatcher::StartsWith(_)
+        | PropertyMatcher::EndsWith(_)
+        | PropertyMatcher::Contains(_) => true,
+        _ => false,
+    };
+    if !string_only {
         return None;
     }
     Some(move |s: &str| match matcher {
@@ -1754,7 +1759,9 @@ impl<'a> PatternExecutor<'a> {
             "name" | "title" | "id" | "type" | "node_type" | "label"
         ) {
             if let PropertyMatcher::Equals(Value::String(target)) = matcher {
-                return node.str_prop_eq(key, target) == Some(true);
+                if !may_parse_as_temporal(target) {
+                    return node.str_prop_eq(key, target) == Some(true);
+                }
             }
         }
 

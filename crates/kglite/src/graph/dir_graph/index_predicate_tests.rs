@@ -86,6 +86,37 @@ fn temporal_equality_index_admits_the_date_and_its_midnight() {
     );
 }
 
+/// A date equals the text it parses from. A text probe finds the stored dates
+/// it names; a date probe on an index holding date-like text declines, since
+/// no finite key set spells every text that parses to it.
+#[test]
+fn temporal_text_equality_admits_dates_and_declines_date_probes_over_text() {
+    let date = chrono::NaiveDate::from_ymd_opt(1990, 1, 1).unwrap();
+    let dates = indexed(vec![
+        Value::DateTime(date),
+        Value::Timestamp(date.and_hms_opt(0, 0, 0).unwrap()),
+        Value::Timestamp(date.and_hms_opt(10, 0, 0).unwrap()),
+        Value::String("1990-01-01".into()),
+    ]);
+    assert_eq!(
+        slots(dates.lookup_by_index("N", "v", &Value::String("1990-01-01".into()))),
+        vec![0, 1, 3]
+    );
+    assert_eq!(
+        slots(dates.lookup_by_index("N", "v", &Value::String("1990-01-01T10:00:00".into()))),
+        vec![2]
+    );
+    assert!(dates
+        .lookup_by_index("N", "v", &Value::DateTime(date))
+        .is_none());
+
+    let only_dates = indexed(vec![Value::DateTime(date), Value::String("abc".into())]);
+    assert_eq!(
+        slots(only_dates.lookup_by_index("N", "v", &Value::DateTime(date))),
+        vec![0]
+    );
+}
+
 #[test]
 fn numeric_range_translates_bounds_without_losing_variants() {
     let graph = indexed(vec![
