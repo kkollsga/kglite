@@ -6,6 +6,9 @@ Red proof: before the procedures existed every call here failed as an unknown
 procedure.
 """
 
+import warnings
+
+import pandas as pd
 import pytest
 
 import kglite
@@ -339,3 +342,202 @@ class TestDescribe:
         assert (
             'temporal_from="ff" temporal_to="ft" temporal_source="Field" temporal_abutting="1"' in licensees.describe()
         )
+
+
+# ── Loaders and set_temporal declare through the same store ──────────────
+
+PERIOD_TYPES = {"vf": "validFrom", "vt": "validTo"}
+
+
+def _docs():
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(pd.DataFrame({"id": [1, 2], "title": ["D1", "D2"]}), "Doc", "id", "title")
+    return g
+
+
+def _link(g, rows, mode=None, column_types=PERIOD_TYPES, **kwargs):
+    frame = pd.DataFrame(rows, columns=["src", "tgt", "vf", "vt"])
+    return g.add_connections(
+        frame,
+        "IN",
+        "Doc",
+        "src",
+        "Doc",
+        "tgt",
+        conflict_handling=mode,
+        column_types=column_types,
+        **kwargs,
+    )
+
+
+def _periods(g):
+    rows = g.cypher("MATCH (:Doc)-[r:IN]->(:Doc) RETURN r.vf AS vf, r.vt AS vt ORDER BY vf").to_list()
+    return [(str(r["vf"])[:10], None if r["vt"] is None else str(r["vt"])[:10]) for r in rows]
+
+
+def _counts(report):
+    return report["connections_created"], report["connections_updated"]
+
+
+class TestLoaderDeclarations:
+    def test_repeated_and_chunked_loads_leave_one_declaration(self):
+        g = _docs()
+        _link(g, [(1, 2, "2000-01-01", "2005-01-01")])
+        _link(g, [(2, 1, "2001-01-01", None)])
+        _link(g, [(1, 1, "2002-01-01", None)])
+        rows = _declarations(g)
+        assert [(r["kind"], r["name"], r["source_type"], r["convention"]) for r in rows] == [
+            ("relationship", "IN", None, "closed")
+        ]
+
+    def test_half_open_convention_round_trips(self):
+        g = _docs()
+        _link(g, [(1, 2, "2000-01-01", "2005-01-01")], convention="half_open")
+        assert [r["convention"] for r in _declarations(g)] == ["half_open"]
+        # A later load that names no convention keeps it.
+        _link(g, [(1, 2, "2005-01-01", None)])
+        assert [r["convention"] for r in _declarations(g)] == ["half_open"]
+
+    def test_a_conflicting_convention_is_refused_before_the_load(self):
+        g = _docs()
+        _link(g, [(1, 2, "2000-01-01", "2005-01-01")])
+        with pytest.raises(kglite.ArgumentError, match="already declared"):
+            _link(g, [(1, 2, "2010-01-01", None)], convention="half_open")
+        assert _periods(g) == [("2000-01-01", "2005-01-01")]
+
+    def test_an_inverted_row_is_refused_naming_the_row(self):
+        g = _docs()
+        with pytest.raises(kglite.ArgumentError, match="row 1 of the load.*is after the to bound"):
+            _link(g, [(1, 2, "2000-01-01", "2005-01-01"), (2, 1, "2010-01-01", "2009-01-01")])
+        assert _periods(g) == []
+        assert _declarations(g) == []
+
+    def test_a_stored_dirty_bound_refuses_the_load(self):
+        g = _docs()
+        g.cypher("MATCH (a:Doc {id: 1}), (b:Doc {id: 2}) CREATE (a)-[:IN {vf: 'someday'}]->(b)")
+        with pytest.raises(kglite.ArgumentError, match="someday"):
+            _link(g, [(2, 1, "2000-01-01", None)])
+        assert _declarations(g) == []
+        assert len(_periods(g)) == 1
+
+    def test_convention_needs_validity_column_types(self):
+        g = _docs()
+        with pytest.raises(ValueError, match="validFrom/validTo"):
+            _link(g, [(1, 2, "2000-01-01", None)], column_types=None, convention="closed")
+        with pytest.raises(kglite.ArgumentError, match="'closed' or 'half_open'"):
+            _link(g, [(1, 2, "2000-01-01", None)], convention="open")
+
+    def test_the_abutment_advisory_reaches_the_loader_caller(self):
+        g = _docs()
+        with pytest.warns(UserWarning, match="half_open"):
+            _link(g, [(1, 2, "2000-01-01", "2005-01-01"), (1, 1, "2005-01-01", None)])
+        g = _docs()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            _link(g, [(1, 2, "2000-01-01", "2005-01-01"), (1, 1, "2005-01-01", None)], convention="half_open")
+
+    def test_add_nodes_declares_and_warns(self):
+        g = kglite.KnowledgeGraph()
+        frame = pd.DataFrame({"id": [1, 2], "vf": ["2000-01-01", "2005-01-01"], "vt": ["2005-01-01", None]})
+        with pytest.warns(UserWarning, match="node label 'Status'"):
+            g.add_nodes(frame, "Status", "id", column_types=PERIOD_TYPES)
+        g2 = kglite.KnowledgeGraph()
+        g2.add_nodes(frame, "Status", "id", column_types=PERIOD_TYPES, convention="half_open")
+        assert [(r["kind"], r["convention"]) for r in _declarations(g2)] == [("node", "half_open")]
+
+
+class TestSetTemporalDeclares:
+    def test_a_name_that_is_both_kinds_declares_the_node_type(self):
+        g = kglite.KnowledgeGraph()
+        g.cypher(
+            "CREATE (:Link {id: 1, a: '2000-01-01', b: '2001-01-01'})"
+            "-[:Link {a: '2000-01-01', b: '2001-01-01'}]->(:Link {id: 2})"
+        )
+        g.set_temporal("Link", "a", "b")
+        assert [r["kind"] for r in _declarations(g)] == ["node"]
+
+    def test_a_relationship_only_name_and_a_source_type(self):
+        g = kglite.KnowledgeGraph()
+        g.cypher(
+            "CREATE (:A {id: 1})"
+            "-[:R {a: '2000-01-01', b: '2001-01-01', c: '2002-01-01', d: '2003-01-01'}]->(:B {id: 2})"
+        )
+        g.set_temporal("R", "a", "b")
+        g.set_temporal("R", "c", "d", convention="half_open", source_type="A")
+        rows = _declarations(g)
+        assert [(r["kind"], r["source_type"], r["from"], r["convention"]) for r in rows] == [
+            ("relationship", "A", "c", "half_open"),
+            ("relationship", None, "a", "closed"),
+        ]
+        with pytest.raises(kglite.ArgumentError, match="source_type applies to a relationship type"):
+            g.set_temporal("A", "a", "b", source_type="A")
+
+    def test_a_different_redeclare_is_refused(self, statuses):
+        with pytest.warns(UserWarning, match="1 of 2 rows"):
+            statuses.set_temporal("Status", "vf", "vt")
+        with pytest.raises(kglite.ArgumentError, match="already declared"):
+            statuses.set_temporal("Status", "vf", "vt", convention="half_open")
+
+    def test_a_missing_property_is_refused(self, statuses):
+        with pytest.raises(kglite.ArgumentError, match="nope"):
+            statuses.set_temporal("Status", "nope", "vt")
+
+
+MODES = [None, "update", "replace", "preserve", "skip", "sum"]
+
+
+class TestDeclaredMergeKey:
+    """A later period between the same endpoints is a parallel relationship on
+    a declared type, and merges into the stored one on an undeclared type."""
+
+    @pytest.mark.parametrize("mode", MODES)
+    def test_declared_type_keeps_both_periods(self, mode):
+        g = _docs()
+        _link(g, [(1, 2, "2000-01-01", "2005-01-01")])
+        report = _link(g, [(1, 2, "2010-01-01", None)], mode=mode)
+        assert _counts(report) == (1, 0)
+        assert _periods(g) == [("2000-01-01", "2005-01-01"), ("2010-01-01", None)]
+
+    @pytest.mark.parametrize(
+        ("mode", "period", "counts"),
+        [
+            (None, ("2010-01-01", "2005-01-01"), (0, 1)),
+            ("update", ("2010-01-01", "2005-01-01"), (0, 1)),
+            ("replace", ("2010-01-01", None), (0, 1)),
+            ("preserve", ("2000-01-01", "2005-01-01"), (0, 1)),
+            ("skip", ("2000-01-01", "2005-01-01"), (0, 0)),
+            ("sum", ("2010-01-01", "2005-01-01"), (0, 1)),
+        ],
+    )
+    def test_undeclared_type_merges_on_the_endpoints(self, mode, period, counts):
+        g = _docs()
+        _link(g, [(1, 2, "2000-01-01", "2005-01-01")], column_types=None)
+        report = _link(g, [(1, 2, "2010-01-01", None)], mode=mode, column_types=None)
+        assert _counts(report) == counts
+        assert _periods(g) == [period]
+
+    def test_the_same_start_closes_the_open_period(self):
+        g = _docs()
+        _link(g, [(1, 2, "2000-01-01", "2005-01-01"), (1, 2, "2010-01-01", None)])
+        report = _link(g, [(1, 2, "2010-01-01", "2015-01-01")])
+        assert _counts(report) == (0, 1)
+        assert _periods(g) == [("2000-01-01", "2005-01-01"), ("2010-01-01", "2015-01-01")]
+
+    def test_a_corrected_start_is_a_new_relationship(self):
+        g = _docs()
+        _link(g, [(1, 2, "2000-01-01", "2005-01-01")])
+        report = _link(g, [(1, 2, "2000-02-01", "2005-01-01")])
+        assert _counts(report) == (1, 0)
+        g.cypher("MATCH (:Doc)-[r:IN {vf: date('2000-01-01')}]->(:Doc) DELETE r")
+        assert _periods(g) == [("2000-02-01", "2005-01-01")]
+
+    def test_the_constraint_gate_uses_the_same_key(self):
+        g = _docs()
+        frame = pd.DataFrame({"src": [1], "tgt": [2], "vf": ["2000-01-01"], "vt": ["2005-01-01"], "x": [7]})
+        g.add_connections(frame, "IN", "Doc", "src", "Doc", "tgt", column_types=PERIOD_TYPES)
+        g.cypher("CREATE CONSTRAINT FOR ()-[r:IN]-() REQUIRE r.x IS NOT NULL")
+        with pytest.raises(kglite.ConstraintViolationError):
+            _link(g, [(1, 2, "2010-01-01", None)])
+        assert _periods(g) == [("2000-01-01", "2005-01-01")]
+        report = _link(g, [(1, 2, "2000-01-01", "2006-01-01")])
+        assert _counts(report) == (0, 1)

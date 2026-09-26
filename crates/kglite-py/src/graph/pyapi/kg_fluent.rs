@@ -27,35 +27,52 @@ fn fluent_arg_err(e: String) -> PyErr {
 
 #[pymethods]
 impl KnowledgeGraph {
-    /// Configure a closed validity interval for a node type or connection type,
-    /// unless the type already carries a declaration for the same properties.
-    #[pyo3(signature = (type_name, valid_from, valid_to))]
+    /// Declare which two properties bound a node type's or relationship type's validity interval.
+    #[pyo3(signature = (type_name, valid_from, valid_to, convention=None, source_type=None))]
     fn set_temporal(
         &mut self,
+        py: Python<'_>,
         type_name: String,
         valid_from: String,
         valid_to: String,
+        convention: Option<&str>,
+        source_type: Option<String>,
     ) -> PyResult<()> {
-        use kglite_core::api::{temporal, TemporalConfig};
-        let config = TemporalConfig {
-            valid_from,
-            valid_to,
-            ..Default::default()
+        use kglite_core::api::temporal::{self, TemporalTarget};
+        let convention = crate::graph::parse_interval_convention(convention)?;
+        let argument = |message: String| {
+            crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(message))
         };
         let graph = get_graph_mut(&mut self.inner);
-        if graph.type_indices.contains_key(&type_name) {
-            temporal::legacy_set_node(graph, type_name, config);
-        } else if graph.connection_type_metadata.contains_key(&type_name) {
-            temporal::legacy_push_edge(graph, type_name, config);
-        } else {
-            return Err(crate::error_py::kg_to_pyerr(
-                crate::error::KgError::Argument(format!(
-                    "'{}' is not a known node type or connection type",
-                    type_name
-                )),
-            ));
-        }
-        Ok(())
+        let is_node = graph.type_indices.contains_key(&type_name);
+        let is_relationship = graph.connection_type_metadata.contains_key(&type_name);
+        // A name that is both a node type and a relationship type is the node
+        // type, unless a source type says otherwise.
+        let target = match (is_node, is_relationship, source_type) {
+            (_, true, Some(source)) => TemporalTarget::Relationship {
+                rel_type: type_name,
+                source_type: Some(source),
+            },
+            (_, false, Some(_)) => {
+                return Err(argument(format!(
+                    "source_type applies to a relationship type, and '{type_name}' is not one"
+                )))
+            }
+            (true, _, None) => TemporalTarget::Node(type_name),
+            (false, true, None) => TemporalTarget::Relationship {
+                rel_type: type_name,
+                source_type: None,
+            },
+            (false, false, None) => {
+                return Err(argument(format!(
+                    "'{type_name}' is not a known node type or connection type"
+                )))
+            }
+        };
+        let report =
+            temporal::declare_defaulted(graph, &target, &valid_from, &valid_to, convention)
+                .map_err(argument)?;
+        crate::graph::warn_declaration(py, &report)
     }
 
     /// Set the temporal context for auto-filtering.

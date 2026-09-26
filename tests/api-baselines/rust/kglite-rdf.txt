@@ -3273,8 +3273,14 @@ pub fn kglite::api::temporal::DeclareReport::eq(&self, other: &kglite::api::temp
 impl core::fmt::Debug for kglite::api::temporal::DeclareReport
 pub fn kglite::api::temporal::DeclareReport::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for kglite::api::temporal::DeclareReport
+pub struct kglite::api::temporal::LoadDeclaration
+impl kglite::api::temporal::LoadDeclaration
+pub fn kglite::api::temporal::LoadDeclaration::abandon(self, graph: &mut kglite::api::DirGraph)
+pub fn kglite::api::temporal::LoadDeclaration::finish(self, graph: &mut kglite::api::DirGraph) -> core::result::Result<kglite::api::temporal::DeclareReport, alloc::string::String>
 pub const kglite::api::temporal::DISK_NODE_ABUTMENT_CAP: usize
 pub fn kglite::api::temporal::declare(graph: &mut kglite::api::DirGraph, target: &kglite::api::temporal::TemporalTarget, valid_from: &str, valid_to: &str, convention: kglite::api::temporal::IntervalConvention) -> core::result::Result<kglite::api::temporal::DeclareReport, alloc::string::String>
+pub fn kglite::api::temporal::declare_defaulted(graph: &mut kglite::api::DirGraph, target: &kglite::api::temporal::TemporalTarget, valid_from: &str, valid_to: &str, convention: core::option::Option<kglite::api::temporal::IntervalConvention>) -> core::result::Result<kglite::api::temporal::DeclareReport, alloc::string::String>
+pub fn kglite::api::temporal::declare_from_column_types(graph: &mut kglite::api::DirGraph, target: kglite::api::temporal::TemporalTarget, valid_from: &str, valid_to: &str, convention: core::option::Option<kglite::api::temporal::IntervalConvention>, frame: &kglite::datatypes::values::DataFrame) -> core::result::Result<kglite::api::temporal::LoadDeclaration, alloc::string::String>
 pub fn kglite::api::temporal::declare_loaded(graph: &mut kglite::api::DirGraph, target: &kglite::api::temporal::TemporalTarget, valid_from: &str, valid_to: &str, convention: kglite::api::temporal::IntervalConvention, written: &[&str]) -> core::result::Result<kglite::api::temporal::DeclareReport, alloc::string::String>
 pub fn kglite::api::temporal::edge_configs<'g>(graph: &'g kglite::api::DirGraph, rel_type: &str) -> &'g [kglite::api::TemporalConfig]
 pub fn kglite::api::temporal::list(graph: &kglite::api::DirGraph) -> alloc::vec::Vec<kglite::api::temporal::DeclarationInfo>

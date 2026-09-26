@@ -16,7 +16,7 @@ use petgraph::Direction;
 
 use super::declarations::{TemporalTarget, DISK_NODE_ABUTMENT_CAP};
 use super::eval::{self, BoundSide, Instant, TemporalError};
-use crate::datatypes::values::Value;
+use crate::datatypes::values::{DataFrame, Value};
 use crate::graph::core::value_operations::format_value_compact;
 use crate::graph::dir_graph::DirGraph;
 use crate::graph::schema::{InternedKey, TemporalConfig};
@@ -285,6 +285,27 @@ fn walk_edges(
         abutting: Some(abutting),
     };
     Ok((walk, seen))
+}
+
+/// Refuse a load whose own rows hold an unreadable, inverted or empty
+/// interval, naming the first by its position in the load. A bound column the
+/// load does not carry reads as NULL.
+pub(super) fn check_frame(frame: &DataFrame, config: &TemporalConfig) -> Result<(), String> {
+    let from = frame.get_column_index(&config.valid_from);
+    let to = frame.get_column_index(&config.valid_to);
+    if from.is_none() && to.is_none() {
+        return Ok(());
+    }
+    let cell = |row: usize, column: Option<usize>| {
+        column
+            .and_then(|column| frame.get_value_by_index(row, column))
+            .unwrap_or(Value::Null)
+    };
+    for row in 0..frame.row_count() {
+        check_row(&cell(row, from), &cell(row, to), config)
+            .map_err(|reason| format!("row {row} of the load, {reason}"))?;
+    }
+    Ok(())
 }
 
 /// Read one row's bounds; refuse an unreadable or inverted one. The error is

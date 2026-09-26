@@ -720,6 +720,9 @@ pub struct ConnectionBatchProcessor {
     conflict_mode: ConflictHandling,
     accumulated_stats: ConnectionBatchStats,
     skip_existence_check: bool,
+    /// Set for a declared temporal relationship type: the `from` property that
+    /// joins the endpoint pair in the merge key (see [`MergeKey`]).
+    start_key: Option<InternedKey>,
 }
 
 impl ConnectionBatchProcessor {
@@ -740,20 +743,30 @@ impl ConnectionBatchProcessor {
             conflict_mode: ConflictHandling::Update,
             accumulated_stats: ConnectionBatchStats::default(),
             skip_existence_check: false,
+            start_key: None,
         }
     }
 
-    pub fn set_conflict_mode(&mut self, mode: ConflictHandling) {
+    /// Set how rows fold into relationships.
+    ///
+    /// `skip_existence_check` makes every row its own edge, parallel ones
+    /// included. It is set for a load's first touch of a connection type, and
+    /// held across every chunk of a chunked load (`maintain::InitialLoad`) — so
+    /// "on" does not imply the type has no stored edges, only that this load
+    /// owns all of them. Otherwise a row merges per `mode` into the stored or
+    /// earlier-queued edge with the same key: the endpoint pair, plus — when
+    /// `start_key` names a declared temporal relationship type's `from`
+    /// property (`features::temporal::merge_start_key`) — that property's
+    /// value, so a row starting a different period is a new, parallel edge.
+    pub fn configure(
+        &mut self,
+        mode: ConflictHandling,
+        skip_existence_check: bool,
+        start_key: Option<InternedKey>,
+    ) {
         self.conflict_mode = mode;
-    }
-
-    /// Skip edge existence checks: every row becomes its own edge, parallel
-    /// ones included. Set for a load's first touch of a connection type, and
-    /// held across every chunk of a chunked load (`maintain::InitialLoad`) —
-    /// so "on" does not imply the type has no stored edges, only that this
-    /// load owns all of them.
-    pub fn set_skip_existence_check(&mut self, skip: bool) {
-        self.skip_existence_check = skip;
+        self.skip_existence_check = skip_existence_check;
+        self.start_key = start_key;
     }
 
     pub fn add_connection(
@@ -772,7 +785,22 @@ impl ConnectionBatchProcessor {
         // (single chokepoint for every `add_connections` route; registered into
         // `schema_properties` below so the columnar edge store gets a slot).
         graph.inject_edge_provenance_interned(connection_type, &mut properties);
-        if !self.skip_existence_check {
+        if let (false, Some(start)) = (self.skip_existence_check, self.start_key) {
+            if self.conflict_mode == ConflictHandling::Skip {
+                let conn_type_key = graph.interner.get_or_intern(connection_type);
+                let row = row_start(&properties, start);
+                if graph
+                    .graph
+                    .edges_connecting(source_idx, target_idx)
+                    .any(|e| {
+                        e.connection_type() == conn_type_key
+                            && graph.graph.get_edge_property(e.id(), start) == row
+                    })
+                {
+                    return Ok(());
+                }
+            }
+        } else if !self.skip_existence_check {
             let conn_type_key = graph.interner.get_or_intern(connection_type);
             let existing_edge = graph
                 .graph
@@ -819,131 +847,72 @@ impl ConnectionBatchProcessor {
         graph: &mut DirGraph,
         connection_type: &str,
     ) -> Result<ConnectionBatchStats, String> {
+        // Chosen once per flush, so the undeclared path runs the endpoint-pair
+        // loop with no per-row branch on the start key.
+        match self.start_key {
+            None => Ok(self.flush_keyed(graph, connection_type, Endpoints)),
+            Some(key) => Ok(self.flush_keyed(graph, connection_type, EndpointsAndStart(key))),
+        }
+    }
+
+    fn flush_keyed<K: MergeKey>(
+        &mut self,
+        graph: &mut DirGraph,
+        connection_type: &str,
+        merge: K,
+    ) -> ConnectionBatchStats {
         let start = Instant::now();
         let mut stats = ConnectionBatchStats::default();
 
         let conn_type_key = graph.interner.get_or_intern(connection_type);
+        let skip_existence_check = self.skip_existence_check;
 
-        // Per-flush (source, target) -> edge_id map over the chunk's unique
-        // source set and this connection type. The per-edge
+        // Per-flush merge-key -> edge_id map over the chunk's unique source
+        // set and this connection type. The per-edge
         // `edges_connecting().find()` walk it replaces was O(N * max_degree)
         // for hub-source fan-out into an *existing* connection type; this is
         // O(sum_of_unique_source_degrees). Mutated as we go, preserving that
         // code's within-chunk dedup semantics: two chunk entries with the same
-        // (src, tgt) consolidate onto one edge.
+        // key consolidate onto one edge.
         //
         // `skip_existence_check` (initial-load fast path) skips both the build
         // and the per-edge lookup — the caller has declared this load owns
         // every edge of the type, so nothing may fold, and within-chunk
         // consolidation is the caller's job in that mode.
-        let mut existing_lookup: HashMap<(NodeIndex, NodeIndex), EdgeIndex> = HashMap::new();
-        if !self.skip_existence_check {
+        let mut existing_lookup: HashMap<K::Key, EdgeIndex> = HashMap::new();
+        if !skip_existence_check {
             let unique_sources: HashSet<NodeIndex> =
                 self.connections.iter().map(|c| c.source_idx).collect();
             for src in &unique_sources {
                 for edge_ref in graph.graph.edges_directed(*src, Direction::Outgoing) {
-                    if edge_ref.weight().connection_type == conn_type_key {
-                        existing_lookup.insert((*src, edge_ref.target()), edge_ref.id());
+                    if edge_ref.connection_type() == conn_type_key {
+                        let key = merge.stored(graph, edge_ref.id(), *src, edge_ref.target());
+                        existing_lookup.insert(key, edge_ref.id());
                     }
                 }
             }
         }
 
         for conn in self.connections.drain(..) {
-            let existing_edge = if self.skip_existence_check {
-                None
-            } else {
-                existing_lookup
-                    .get(&(conn.source_idx, conn.target_idx))
-                    .copied()
-            };
+            let key = (!skip_existence_check).then(|| merge.row(&conn));
+            let existing_edge = key
+                .as_ref()
+                .and_then(|key| existing_lookup.get(key).copied());
 
             if let Some(edge_idx) = existing_edge {
-                match self.conflict_mode {
-                    ConflictHandling::Skip => {
-                        // Defensive: `add_connection` already filtered these.
-                        continue;
-                    }
-                    ConflictHandling::Replace => {
-                        crate::graph::edge_embeddings::remove_edge_with_embeddings(graph, edge_idx);
-                        let edge_data = EdgeData::new_interned(conn_type_key, conn.properties);
-                        let new_id = GraphWrite::add_edge(
-                            &mut graph.graph,
-                            conn.source_idx,
-                            conn.target_idx,
-                            edge_data,
-                        );
-                        crate::graph::index_freshness::write_hooks::note_edge_created(
-                            graph, new_id,
-                        );
-                        // Update the lookup so any later chunk entry with
-                        // the same (src, tgt) hits the freshly-created edge,
-                        // not the removed one.
-                        existing_lookup.insert((conn.source_idx, conn.target_idx), new_id);
-                        stats.connections_updated += 1;
-                    }
-                    ConflictHandling::Update => {
-                        let interned_props = conn.properties;
-                        if let Some(EdgeData {
-                            properties: edge_props,
-                            ..
-                        }) = GraphWrite::edge_weight_mut(&mut graph.graph, edge_idx)
-                        {
-                            for (k, v) in interned_props {
-                                if let Some((_, existing)) =
-                                    edge_props.iter_mut().find(|(ek, _)| *ek == k)
-                                {
-                                    *existing = v;
-                                } else {
-                                    edge_props.push((k, v));
-                                }
-                            }
-                            stats.connections_updated += 1;
-                        }
-                        crate::graph::index_freshness::write_hooks::note_edge_property_written(
-                            graph, edge_idx, None,
-                        );
-                    }
-                    ConflictHandling::Preserve => {
-                        let interned_props = conn.properties;
-                        if let Some(EdgeData {
-                            properties: edge_props,
-                            ..
-                        }) = GraphWrite::edge_weight_mut(&mut graph.graph, edge_idx)
-                        {
-                            for (k, v) in interned_props {
-                                if !edge_props.iter().any(|(ek, _)| *ek == k) {
-                                    edge_props.push((k, v));
-                                }
-                            }
-                            stats.connections_updated += 1;
-                        }
-                        crate::graph::index_freshness::write_hooks::note_edge_property_written(
-                            graph, edge_idx, None,
-                        );
-                    }
-                    ConflictHandling::Sum => {
-                        let interned_props = conn.properties;
-                        if let Some(EdgeData {
-                            properties: edge_props,
-                            ..
-                        }) = GraphWrite::edge_weight_mut(&mut graph.graph, edge_idx)
-                        {
-                            for (k, v) in interned_props {
-                                if let Some((_, existing)) =
-                                    edge_props.iter_mut().find(|(ek, _)| *ek == k)
-                                {
-                                    *existing = sum_values(existing, &v);
-                                } else {
-                                    edge_props.push((k, v));
-                                }
-                            }
-                            stats.connections_updated += 1;
-                        }
-                        crate::graph::index_freshness::write_hooks::note_edge_property_written(
-                            graph, edge_idx, None,
-                        );
-                    }
+                // Skip rows were filtered by `add_connection` already.
+                if self.conflict_mode == ConflictHandling::Skip {
+                    continue;
+                }
+                let (updated, replacement) =
+                    merge_into_edge(graph, self.conflict_mode, conn_type_key, edge_idx, conn);
+                // A later chunk entry with the same key must hit the
+                // freshly-created edge, not the removed one.
+                if let (Some(new_id), Some(key)) = (replacement, key) {
+                    existing_lookup.insert(key, new_id);
+                }
+                if updated {
+                    stats.connections_updated += 1;
                 }
             } else {
                 let edge_data = EdgeData::new_interned(conn_type_key, conn.properties);
@@ -954,11 +923,11 @@ impl ConnectionBatchProcessor {
                     edge_data,
                 );
                 crate::graph::index_freshness::write_hooks::note_edge_created(graph, new_id);
-                // Within-chunk dedup: later iterations targeting the same
-                // (src, tgt) resolve to this edge via Update/Preserve/Sum.
-                // Skipped for the initial-load path, whose lookup stays empty.
-                if !self.skip_existence_check {
-                    existing_lookup.insert((conn.source_idx, conn.target_idx), new_id);
+                // Within-chunk dedup: later iterations with the same key
+                // resolve to this edge via Update/Preserve/Sum. Skipped for
+                // the initial-load path, whose lookup stays empty.
+                if let Some(key) = key {
+                    existing_lookup.insert(key, new_id);
                 }
                 stats.connections_created += 1;
             }
@@ -971,7 +940,7 @@ impl ConnectionBatchProcessor {
         self.metrics.memory_used = self.connections.capacity();
 
         stats.properties_tracked = self.schema_properties.len();
-        Ok(stats)
+        stats
     }
 
     pub fn execute(
@@ -1022,6 +991,125 @@ impl ConnectionBatchProcessor {
             })
             .collect()
     }
+}
+
+/// How a flush matches a queued row to the stored relationship it merges into.
+trait MergeKey {
+    type Key: std::hash::Hash + Eq;
+    fn stored(
+        &self,
+        graph: &DirGraph,
+        edge: EdgeIndex,
+        source: NodeIndex,
+        target: NodeIndex,
+    ) -> Self::Key;
+    fn row(&self, conn: &ConnectionCreation) -> Self::Key;
+}
+
+/// The endpoint pair: a row merges into the relationship its pair holds.
+struct Endpoints;
+
+impl MergeKey for Endpoints {
+    type Key = (NodeIndex, NodeIndex);
+
+    #[inline]
+    fn stored(
+        &self,
+        _: &DirGraph,
+        _: EdgeIndex,
+        source: NodeIndex,
+        target: NodeIndex,
+    ) -> Self::Key {
+        (source, target)
+    }
+
+    #[inline]
+    fn row(&self, conn: &ConnectionCreation) -> Self::Key {
+        (conn.source_idx, conn.target_idx)
+    }
+}
+
+/// The endpoint pair plus the value of a declared temporal type's `from`
+/// property (absent or NULL is `None`), so each period between a pair is its
+/// own relationship. The stored value is read without materialising the edge,
+/// which keeps a disk graph's query arena flat. Values compare structurally:
+/// a date and a datetime on the same day are different starts.
+struct EndpointsAndStart(InternedKey);
+
+impl MergeKey for EndpointsAndStart {
+    type Key = (NodeIndex, NodeIndex, Option<Value>);
+
+    fn stored(
+        &self,
+        graph: &DirGraph,
+        edge: EdgeIndex,
+        source: NodeIndex,
+        target: NodeIndex,
+    ) -> Self::Key {
+        (source, target, graph.graph.get_edge_property(edge, self.0))
+    }
+
+    fn row(&self, conn: &ConnectionCreation) -> Self::Key {
+        (
+            conn.source_idx,
+            conn.target_idx,
+            row_start(&conn.properties, self.0),
+        )
+    }
+}
+
+/// A queued row's value for `key`; NULL reads as absent, as a stored edge's
+/// does through `GraphRead::get_edge_property`.
+fn row_start(properties: &[(InternedKey, Value)], key: InternedKey) -> Option<Value> {
+    properties
+        .iter()
+        .find(|(k, v)| *k == key && !matches!(v, Value::Null))
+        .map(|(_, v)| v.clone())
+}
+
+/// Merge `conn` into the stored edge `edge_idx` per `mode` (never `Skip`).
+/// Returns whether the edge was updated, and the replacement's index when
+/// `Replace` rebuilt it.
+fn merge_into_edge(
+    graph: &mut DirGraph,
+    mode: ConflictHandling,
+    conn_type_key: InternedKey,
+    edge_idx: EdgeIndex,
+    conn: ConnectionCreation,
+) -> (bool, Option<EdgeIndex>) {
+    if mode == ConflictHandling::Replace {
+        crate::graph::edge_embeddings::remove_edge_with_embeddings(graph, edge_idx);
+        let edge_data = EdgeData::new_interned(conn_type_key, conn.properties);
+        let new_id = GraphWrite::add_edge(
+            &mut graph.graph,
+            conn.source_idx,
+            conn.target_idx,
+            edge_data,
+        );
+        crate::graph::index_freshness::write_hooks::note_edge_created(graph, new_id);
+        return (true, Some(new_id));
+    }
+    let mut updated = false;
+    if let Some(EdgeData {
+        properties: edge_props,
+        ..
+    }) = GraphWrite::edge_weight_mut(&mut graph.graph, edge_idx)
+    {
+        for (k, v) in conn.properties {
+            let existing = edge_props.iter_mut().find(|(ek, _)| *ek == k);
+            match (mode, existing) {
+                (ConflictHandling::Preserve, Some(_)) => {}
+                (ConflictHandling::Sum, Some((_, existing))) => {
+                    *existing = sum_values(existing, &v);
+                }
+                (_, Some((_, existing))) => *existing = v,
+                (_, None) => edge_props.push((k, v)),
+            }
+        }
+        updated = true;
+    }
+    crate::graph::index_freshness::write_hooks::note_edge_property_written(graph, edge_idx, None);
+    (updated, None)
 }
 
 #[cfg(test)]

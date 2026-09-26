@@ -456,12 +456,14 @@ pub mod api {
     /// label's or relationship type's validity interval, and whether the end
     /// day belongs to it (`closed`) or ends it (`half_open`). `declare`
     /// validates every stored bound first. Cypher reaches the same functions
-    /// through `db.temporal.declare` / `undeclare` / `declarations`.
+    /// through `db.temporal.declare` / `undeclare` / `declarations`;
+    /// `set_temporal` and a load's `validFrom`/`validTo` column types through
+    /// `declare_defaulted` / `declare_from_column_types`.
     pub mod temporal {
         pub use crate::graph::features::temporal::{
-            declare, declare_loaded, edge_configs, legacy_push_edge, legacy_set_node, list,
-            node_config, undeclare, DeclarationInfo, DeclareReport, IntervalConvention,
-            TemporalTarget, DISK_NODE_ABUTMENT_CAP,
+            declare, declare_defaulted, declare_from_column_types, declare_loaded, edge_configs,
+            list, node_config, undeclare, DeclarationInfo, DeclareReport, IntervalConvention,
+            LoadDeclaration, TemporalTarget, DISK_NODE_ABUTMENT_CAP,
         };
     }
 

@@ -13,7 +13,8 @@
 //!   `preserve` / `sum`),
 //! - `TypeSchema` / interner extension for new properties,
 //! - eager id-index rebuild (`build_id_index`),
-//! - edge dedup keyed on `(connection_type, src, tgt)` with per-mode
+//! - edge dedup keyed on `(connection_type, src, tgt)`, plus a declared
+//!   temporal `from` bound, with per-mode
 //!   property merge.
 //!
 //! Re-implementing any of that here would risk drift. Instead we
@@ -34,16 +35,22 @@
 //!   onto the matched/created target node via
 //!   [`DirGraph::add_node_label`] — idempotent, never removes a label.
 //! - **Edges** dedup exactly as `add_connections` does: an edge with the
-//!   same `(connection_type, src, tgt)` that already exists in the
+//!   same `(connection_type, src, tgt)` — plus the same `from` bound when
+//!   the type carries a temporal declaration — that already exists in the
 //!   target is *not* duplicated; its properties merge per
 //!   `conflict_handling`. This is the defensible choice over petgraph's
 //!   raw parallel-edge capability — a merge that silently doubled every
 //!   shared edge would be surprising. Genuinely parallel edges that the
 //!   *source* itself carries between the same pair are preserved only up
-//!   to one per `(type, src, tgt)` after the merge, matching
+//!   to one per `(type, src, tgt)` — one per `from` bound for a declared
+//!   temporal type — after the merge, matching
 //!   `add_connections`' within-batch consolidation.
 //! - **Property schemas** merge through the same `upsert_node_type_metadata`
 //!   / `type_schemas` extension path `add_nodes` uses.
+//! - **Declarations**: the source's temporal declarations and spatial
+//!   configs are copied onto the target. The target's own declaration of the
+//!   same key wins; a temporal one that conflicts with it, or that the
+//!   merged rows refuse, is not copied and is named in `errors`.
 //!
 //! ## v1 scope limits
 //!
@@ -56,6 +63,7 @@
 //!   after the merge.
 
 use crate::datatypes::{DataFrame, Value};
+use crate::graph::features::temporal;
 use crate::graph::introspection::reporting::{ConnectionOperationReport, NodeOperationReport};
 use crate::graph::mutation::maintain::{add_connections, add_nodes};
 use crate::graph::schema::DirGraph;
@@ -361,10 +369,28 @@ pub fn extend_graph(
         .collect::<std::collections::HashSet<_>>()
         .len();
 
-    merge_edge_groups(target, edge_groups, &conflict_handling, &mut report)?;
+    merge_edges_and_declarations(target, source, edge_groups, &conflict_handling, &mut report)?;
 
     report.processing_time_ms = start.elapsed().as_secs_f64() * 1000.0;
     Ok(report)
+}
+
+/// Copy the source's declarations, then merge its edges. The temporal
+/// declarations go in before the edges, so the merge keys declared
+/// relationship types on their `from` bound, and are validated once the edges
+/// have landed.
+fn merge_edges_and_declarations(
+    target: &mut DirGraph,
+    source: &DirGraph,
+    edge_groups: HashMap<(String, String, String), EdgeGroup>,
+    conflict_handling: &Option<String>,
+    report: &mut ExtendReport,
+) -> Result<(), String> {
+    copy_spatial_configs(target, source);
+    let adopted = temporal::adopt_declarations(target, temporal::list(source), &mut report.errors);
+    merge_edge_groups(target, edge_groups, conflict_handling, report)?;
+    temporal::settle_adopted(target, adopted, &mut report.errors);
+    Ok(())
 }
 
 /// Route each source edge group through `add_connections`, tallying the
@@ -395,6 +421,21 @@ fn merge_edge_groups(
         report.errors.extend(r.errors);
     }
     Ok(())
+}
+
+/// Carry the source's spatial configs onto node types the target has none
+/// for; a type the target already configures keeps its own.
+fn copy_spatial_configs(target: &mut DirGraph, source: &DirGraph) {
+    let mut configs: Vec<_> = source
+        .spatial_configs
+        .iter()
+        .filter(|(node_type, _)| !target.spatial_configs.contains_key(*node_type))
+        .map(|(node_type, config)| (node_type.clone(), config.clone()))
+        .collect();
+    configs.sort_by(|a, b| a.0.cmp(&b.0));
+    for (node_type, config) in configs {
+        target.set_spatial_config(&node_type, config);
+    }
 }
 
 fn scope_error(which: &str) -> String {

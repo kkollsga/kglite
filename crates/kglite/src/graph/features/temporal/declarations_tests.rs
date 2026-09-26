@@ -354,43 +354,6 @@ fn a_secondary_label_is_a_node_target() {
     assert_eq!(list(&g)[0].target, node("Tracked"));
 }
 
-/// `set_temporal` and the loaders' auto-config write through the legacy
-/// route. Naming the properties a declaration already bounds the same key by
-/// keeps that declaration, convention included, rather than adding or
-/// substituting a closed twin.
-#[test]
-fn a_legacy_config_for_already_declared_properties_keeps_the_declaration() {
-    use super::declarations::{legacy_push_edge, legacy_set_node};
-    use crate::graph::schema::TemporalConfig;
-    let legacy = |from: &str, to: &str| TemporalConfig {
-        valid_from: from.into(),
-        valid_to: to.into(),
-        ..TemporalConfig::default()
-    };
-    let mut g = graph(&[
-        STATUS,
-        "CREATE (:A {id: 1}), (:C {id: 3})",
-        "MATCH (a:A), (c:C) CREATE (a)-[:R {vf: '2000', vt: '2001', wf: '2002', wt: '2003'}]->(c)",
-    ]);
-    declare(&mut g, &rel("R", None), "vf", "vt", HalfOpen).unwrap();
-    declare(&mut g, &node("Status"), "vf", "vt", HalfOpen).unwrap();
-    legacy_push_edge(&mut g, "R".into(), legacy("vf", "vt"));
-    legacy_set_node(&mut g, "Status".into(), legacy("vf", "vt"));
-    let listed: Vec<_> = list(&g)
-        .into_iter()
-        .map(|info| (info.target, info.config.convention))
-        .collect();
-    assert_eq!(
-        listed,
-        vec![(node("Status"), HalfOpen), (rel("R", None), HalfOpen)]
-    );
-    // Other properties are still added (edges) or replace (nodes).
-    legacy_push_edge(&mut g, "R".into(), legacy("wf", "wt"));
-    assert_eq!(super::declarations::edge_configs(&g, "R").len(), 2);
-    assert!(undeclare(&mut g, &rel("R", None)));
-    assert!(super::declarations::edge_configs(&g, "R").is_empty());
-}
-
 #[test]
 fn undeclare_removes_and_bumps_only_when_something_was_declared() {
     let mut g = graph(LICENSEES);

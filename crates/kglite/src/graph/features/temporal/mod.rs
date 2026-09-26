@@ -8,16 +8,24 @@ pub(crate) mod declarations;
 #[cfg(test)]
 mod declarations_tests;
 pub(crate) mod eval;
+mod loader;
+#[cfg(test)]
+mod loader_tests;
+#[cfg(test)]
+mod merge_key_tests;
 pub(crate) mod persist;
 #[cfg(test)]
 mod persist_tests;
 mod validate;
 
+pub(crate) use declarations::merge_start_key;
 pub use declarations::{
-    declare, declare_loaded, edge_configs, legacy_push_edge, legacy_set_node, list, node_config,
-    undeclare, DeclarationInfo, DeclareReport, TemporalTarget, DISK_NODE_ABUTMENT_CAP,
+    declare, declare_loaded, edge_configs, list, node_config, undeclare, DeclarationInfo,
+    DeclareReport, TemporalTarget, DISK_NODE_ABUTMENT_CAP,
 };
 pub use eval::IntervalConvention;
+pub(crate) use loader::{adopt_declarations, settle_adopted};
+pub use loader::{declare_defaulted, declare_from_column_types, LoadDeclaration};
 
 use crate::datatypes::values::Value;
 use crate::graph::schema::{InternedKey, TemporalConfig};

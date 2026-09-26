@@ -1022,6 +1022,40 @@ pub(crate) fn parse_temporal_column_types(
     Ok((config, cleaned.unbind()))
 }
 
+/// Read the `convention=` argument of `set_temporal` and the loaders.
+pub(crate) fn parse_interval_convention(
+    convention: Option<&str>,
+) -> PyResult<Option<kglite_core::api::temporal::IntervalConvention>> {
+    convention
+        .map(|text| {
+            kglite_core::api::temporal::IntervalConvention::parse(text).ok_or_else(|| {
+                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(format!(
+                    "convention must be 'closed' or 'half_open', got '{text}'"
+                )))
+            })
+        })
+        .transpose()
+}
+
+/// Raise the advisory a closed declaration with abutting rows earns as a
+/// `UserWarning` — the channel `set_temporal` and the loaders have, where a
+/// Cypher declaration reports it in the result's diagnostics.
+pub(crate) fn warn_declaration(
+    py: Python<'_>,
+    report: &kglite_core::api::temporal::DeclareReport,
+) -> PyResult<()> {
+    let Some(warning) = &report.warning else {
+        return Ok(());
+    };
+    let message = std::ffi::CString::new(warning.as_str()).unwrap_or_default();
+    PyErr::warn(
+        py,
+        py.get_type::<pyo3::exceptions::PyUserWarning>().as_any(),
+        message.as_c_str(),
+        1,
+    )
+}
+
 pub(crate) use kglite_core::api::timeseries::{InlineTimeseriesConfig, TimeSpec};
 
 /// Parse the `timeseries` PyDict parameter from `add_nodes`.

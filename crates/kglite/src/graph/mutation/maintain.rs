@@ -1,6 +1,7 @@
 use crate::datatypes::values::{classify_value_set, ValueSetType};
 use crate::datatypes::{DataFrame, Value};
 use crate::graph::constraints::{ConstraintResult, UniqueConstraintKey};
+use crate::graph::features::temporal::merge_start_key;
 use crate::graph::introspection::reporting::{ConnectionOperationReport, NodeOperationReport};
 use crate::graph::mutation::batch::{
     BatchProcessor, BatchStats, ConflictHandling, ConnectionBatchProcessor, NodeAction,
@@ -949,8 +950,9 @@ pub struct EdgeSpecReport {
     /// Edges the batch engine actually created.
     pub connections_created: usize,
     /// Specs that met an existing edge of the same type between the same
-    /// endpoints and merged their properties into it (the default `update`
-    /// conflict mode), creating nothing.
+    /// endpoints — and the same `from` bound, for a declared temporal type —
+    /// and merged their properties into it (the default `update` conflict
+    /// mode), creating nothing.
     pub connections_updated: usize,
     /// Edges skipped because a source or target id had no node of its
     /// declared type. Unlike [`add_connections`], this primitive does NOT
@@ -1028,9 +1030,10 @@ pub fn add_edges_from_specs(
         }
         let lookup = &lookup_cache[&pair];
         let mut batch = ConnectionBatchProcessor::new(edges.len());
-        // Same initial-load fast path as `add_connections`.
+        // Same initial-load fast path and merge key as `add_connections`.
         let is_initial_load = !graph.connection_type_metadata.contains_key(&edge_type);
-        batch.set_skip_existence_check(is_initial_load);
+        let start_key = merge_start_key(graph, &edge_type, Some(&source_type));
+        batch.configure(ConflictHandling::Update, is_initial_load, start_key);
 
         for (source_id, target_id, props) in edges {
             match (
@@ -1218,11 +1221,10 @@ pub(crate) fn add_connections_with_initial_load(
         null_source_rows: skipped_null_source,
         null_target_rows: skipped_null_target,
     } = resolved;
-    let mut batch = ConnectionBatchProcessor::new(df_data.row_count());
-    batch.set_conflict_mode(conflict_mode);
-    // Skip edge existence checks when this load owns every edge of the type.
     let is_initial_load = initial_load.owns_every_edge(graph, &connection_type);
-    batch.set_skip_existence_check(is_initial_load);
+    let start_key = merge_start_key(graph, &connection_type, Some(&source_type));
+    let mut batch = ConnectionBatchProcessor::new(df_data.row_count());
+    batch.configure(conflict_mode, is_initial_load, start_key);
 
     let mut skipped_count = skipped_null_source + skipped_null_target;
 
@@ -1259,6 +1261,7 @@ pub(crate) fn add_connections_with_initial_load(
         deferred: &deferred,
         conflict_mode,
         folding: RowFolding::for_load(is_initial_load),
+        start_key,
     }
     .run(graph)?;
 
@@ -1905,6 +1908,7 @@ pub fn replace_connections(
         conflict_mode,
         // Why this regime and not the loader's: `RowFolding::for_replace`.
         folding: RowFolding::for_replace(graph, &connection_type),
+        start_key: merge_start_key(graph, &connection_type, Some(&source_type)),
     }
     .run(graph)?;
 
@@ -2033,19 +2037,7 @@ pub fn create_connections(
     graph
         .prepare_mutation()
         .map_err(|e| format!("disk mutation lease failed: {e}"))?;
-    let conflict_mode = match conflict_handling.as_deref() {
-        Some("replace") => ConflictHandling::Replace,
-        Some("skip") => ConflictHandling::Skip,
-        Some("preserve") => ConflictHandling::Preserve,
-        Some("sum") => ConflictHandling::Sum,
-        Some("update") | None => ConflictHandling::Update,
-        Some(other) => {
-            return Err(format!(
-                "Unknown conflict handling mode: '{}'. Valid: 'update' (default), 'replace', 'skip', 'preserve', 'sum'",
-                other
-            ))
-        }
-    };
+    let conflict_mode = parse_conflict_mode(conflict_handling.as_deref())?;
 
     let level_count = selection.get_level_count();
     if level_count == 0 {
@@ -2120,7 +2112,8 @@ pub fn create_connections(
     };
 
     let mut batch = ConnectionBatchProcessor::new(target_level_data.node_count());
-    batch.set_conflict_mode(conflict_mode);
+    let start_key = merge_start_key(graph, &connection_type, source_type_filter.as_deref());
+    batch.configure(conflict_mode, false, start_key);
 
     let mut skipped = 0;
     let mut errors = Vec::new();

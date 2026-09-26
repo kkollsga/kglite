@@ -383,3 +383,82 @@ def test_timing_50k_into_50k_50pct_overlap(n):
     assert rep["edges_created"] == n - 1
     # Generous bound; the merge is single-pass with id-index lookups.
     assert elapsed < 5.0, f"extend took {elapsed:.2f}s (expected < 5s)"
+
+
+# ─────────────────────────── declarations ───────────────────────────
+
+_DECLARATIONS = (
+    "CALL db.temporal.declarations() YIELD kind, name, source_type, from, to, convention "
+    "RETURN kind, name, source_type, from, to, convention"
+)
+
+
+def _licensed(periods):
+    g = KnowledgeGraph()
+    g.add_nodes(pd.DataFrame({"id": [1, 2], "title": ["F", "C"]}), "Field", "id", "title")
+    frame = pd.DataFrame(periods, columns=["src", "tgt", "vf", "vt"])
+    g.add_relationships(
+        frame,
+        "HOLDS",
+        "Field",
+        "src",
+        "Field",
+        "tgt",
+        column_types={"vf": "validFrom", "vt": "validTo"},
+        convention="half_open",
+    )
+    return g
+
+
+def _periods(g):
+    rows = g.cypher("MATCH ()-[r:HOLDS]->() RETURN r.vf AS vf ORDER BY vf").to_list()
+    return [str(r["vf"])[:10] for r in rows]
+
+
+def test_extend_copies_temporal_declarations_and_keeps_parallel_periods():
+    source = _licensed([(1, 2, "2000-01-01", "2005-01-01"), (1, 2, "2005-01-01", None)])
+    target = KnowledgeGraph()
+    target.add_nodes(pd.DataFrame({"id": [1, 2], "title": ["F", "C"]}), "Field", "id", "title")
+    # The target holds the type undeclared, so the source's periods merge
+    # into its edge unless the declaration travels with them.
+    target.cypher("MATCH (a:Field {id: 1}), (b:Field {id: 2}) CREATE (a)-[:HOLDS {vf: date('1990-01-01')}]->(b)")
+    report = target.extend(source)
+    assert report["edges_created"] == 2
+    assert "errors" not in report
+    assert _periods(target) == ["1990-01-01", "2000-01-01", "2005-01-01"]
+    assert _all(target, _DECLARATIONS) == [
+        {
+            "kind": "relationship",
+            "name": "HOLDS",
+            "source_type": None,
+            "from": "vf",
+            "to": "vt",
+            "convention": "half_open",
+        }
+    ]
+
+
+def test_extend_keeps_the_targets_own_conflicting_declaration():
+    source = _licensed([(1, 2, "2000-01-01", "2005-01-01")])
+    target = _licensed([(1, 2, "1990-01-01", "1995-01-01")])
+    target.cypher("CALL db.temporal.undeclare({relationship: 'HOLDS'})")
+    target.cypher("CALL db.temporal.declare({relationship: 'HOLDS', from: 'vf', to: 'vt', convention: 'closed'})")
+    report = target.extend(source)
+    assert report["has_errors"]
+    assert "was not copied" in report["errors"][0]
+    assert [r["convention"] for r in _all(target, _DECLARATIONS)] == ["closed"]
+
+
+def test_extend_copies_spatial_configs():
+    source = KnowledgeGraph()
+    source.add_nodes(
+        pd.DataFrame({"id": [1], "title": ["Oslo"], "lat": [59.9], "lon": [10.7]}),
+        "City",
+        "id",
+        "title",
+        column_types={"lat": "location.lat", "lon": "location.lon"},
+    )
+    target = KnowledgeGraph()
+    target.extend(source)
+    assert target.spatial("City") == source.spatial("City")
+    assert target.spatial("City") is not None

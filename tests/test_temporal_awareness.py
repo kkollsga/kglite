@@ -419,7 +419,14 @@ class TestFluentBoundKinds:
     def test_unreadable_bound_raises(self):
         g = kglite.KnowledgeGraph()
         g.cypher("CREATE (:T {id: 'bad', title: 'bad', vf: 'someday', vt: date('2016-12-31')})")
+        # set_temporal validates the stored bounds...
+        with pytest.raises(kglite.ArgumentError, match="node 'bad'.*someday"):
+            g.set_temporal("T", "vf", "vt")
+        # ...but a write onto a declared type is not validated, so the fluent
+        # filters report a bound written afterwards.
+        g.cypher("MATCH (n:T) SET n.vf = date('2015-01-01')")
         g.set_temporal("T", "vf", "vt")
+        g.cypher("MATCH (n:T) SET n.vf = 'someday'")
         with pytest.raises(ValueError, match="someday"):
             g.date("2015").select("T")
         with pytest.raises(ValueError, match="bad"):

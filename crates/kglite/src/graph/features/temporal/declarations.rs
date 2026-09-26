@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use super::eval::IntervalConvention;
 use super::validate::{self, Walk};
 use crate::graph::dir_graph::DirGraph;
-use crate::graph::schema::TemporalConfig;
+use crate::graph::schema::{InternedKey, TemporalConfig};
 
 /// What a declaration is about.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -109,7 +109,7 @@ pub(crate) struct TemporalDeclarations {
 }
 
 /// What a declaration does to the store once validated.
-enum Change {
+pub(super) enum Change {
     Unchanged,
     Insert,
 }
@@ -159,39 +159,69 @@ impl TemporalDeclarations {
         self.abutting.get(target).copied()
     }
 
-    /// Insert or replace a node config without validation — the loader and
-    /// `set_temporal` route. A config already naming the same properties is
-    /// kept as it is, so a repeated load or `set_temporal` never turns a
-    /// half-open declaration closed.
-    pub(crate) fn legacy_set_node(&mut self, label: String, config: TemporalConfig) {
-        if self
-            .nodes
-            .get(&label)
-            .is_some_and(|existing| same_properties(existing, &config))
-        {
-            return;
-        }
-        self.abutting.remove(&TemporalTarget::Node(label.clone()));
-        self.nodes.insert(label, config);
+    /// The config governing `rel_type` relationships that leave nodes of
+    /// `source_type`: the source's keyed declaration, else the first unkeyed
+    /// one.
+    pub(crate) fn covering(&self, rel_type: &str, source_type: &str) -> Option<&TemporalConfig> {
+        let configs = self.edges(rel_type);
+        configs
+            .iter()
+            .find(|c| c.source_type.as_deref() == Some(source_type))
+            .or_else(|| configs.iter().find(|c| c.source_type.is_none()))
     }
 
-    /// Append a relationship config without validation unless the same key
-    /// already holds one naming the same properties, whatever its convention —
-    /// so a repeated load adds nothing and never lists a closed twin beside a
-    /// half-open declaration.
-    pub(crate) fn legacy_push_edge(&mut self, rel_type: String, config: TemporalConfig) {
-        let configs = self.edges.entry(rel_type.clone()).or_default();
-        if configs
-            .iter()
-            .any(|c| c.source_type == config.source_type && same_properties(c, &config))
-        {
-            return;
-        }
-        self.abutting.remove(&TemporalTarget::Relationship {
+    /// The key a load of `target`'s rows declares under (see
+    /// `loader::declare_from_column_types`): a source-keyed relationship
+    /// target becomes unkeyed unless its source has a declaration of its own
+    /// or the unkeyed one names other properties.
+    pub(super) fn load_target(
+        &self,
+        target: TemporalTarget,
+        valid_from: &str,
+        valid_to: &str,
+    ) -> TemporalTarget {
+        let TemporalTarget::Relationship {
             rel_type,
-            source_type: config.source_type.clone(),
-        });
-        configs.push(config);
+            source_type: Some(source),
+        } = target
+        else {
+            return target;
+        };
+        let configs = self.edges(&rel_type);
+        let keyed = configs
+            .iter()
+            .any(|c| c.source_type.as_deref() == Some(source.as_str()));
+        let fallbacks = || configs.iter().filter(|c| c.source_type.is_none());
+        let other_fallback = fallbacks().next().is_some()
+            && !fallbacks().any(|c| c.valid_from == valid_from && c.valid_to == valid_to);
+        TemporalTarget::Relationship {
+            rel_type,
+            source_type: (keyed || other_fallback).then_some(source),
+        }
+    }
+
+    /// The convention a declaration of `valid_from`/`valid_to` for `target`
+    /// takes when its caller names none: that of a declaration of the same
+    /// key already naming the same properties, else closed.
+    pub(super) fn default_convention(
+        &self,
+        target: &TemporalTarget,
+        valid_from: &str,
+        valid_to: &str,
+    ) -> IntervalConvention {
+        let same = |c: &&TemporalConfig| c.valid_from == valid_from && c.valid_to == valid_to;
+        let existing = match target {
+            TemporalTarget::Node(label) => self.nodes.get(label).filter(same),
+            TemporalTarget::Relationship {
+                rel_type,
+                source_type,
+            } => self
+                .edges(rel_type)
+                .iter()
+                .filter(|c| c.source_type == *source_type)
+                .find(same),
+        };
+        existing.map_or(IntervalConvention::Closed, |c| c.convention)
     }
 
     /// Decide what declaring `config` for `target` does: nothing (an identical
@@ -199,7 +229,7 @@ impl TemporalDeclarations {
     /// key is the node label, or the relationship type plus its source type —
     /// an unkeyed relationship declaration is its own key, the fallback for
     /// sources without one, so it never conflicts with a keyed one.
-    fn change_for(
+    pub(super) fn change_for(
         &self,
         target: &TemporalTarget,
         config: &TemporalConfig,
@@ -240,7 +270,12 @@ impl TemporalDeclarations {
             .collect()
     }
 
-    fn insert(&mut self, target: &TemporalTarget, config: TemporalConfig, abutting: Option<usize>) {
+    pub(super) fn insert(
+        &mut self,
+        target: &TemporalTarget,
+        config: TemporalConfig,
+        abutting: Option<usize>,
+    ) {
         match target {
             TemporalTarget::Node(label) => {
                 self.nodes.insert(label.clone(), config);
@@ -255,7 +290,7 @@ impl TemporalDeclarations {
         };
     }
 
-    fn remove(&mut self, target: &TemporalTarget) -> bool {
+    pub(super) fn remove(&mut self, target: &TemporalTarget) -> bool {
         self.abutting.remove(target);
         match target {
             TemporalTarget::Node(label) => self.nodes.remove(label).is_some(),
@@ -408,19 +443,24 @@ pub fn edge_configs<'g>(graph: &'g DirGraph, rel_type: &str) -> &'g [TemporalCon
     graph.temporal.edges(rel_type)
 }
 
-/// Insert or replace `label`'s config without validating the column — the
-/// route `set_temporal` and the loaders' `validFrom`/`validTo` column types
-/// take. A config already naming the same properties is kept. Bumps nothing:
-/// those callers hold the graph through a handle that already bumps.
-#[doc(hidden)]
-pub fn legacy_set_node(graph: &mut DirGraph, label: String, config: TemporalConfig) {
-    graph.temporal.legacy_set_node(label, config);
-}
-
-/// Append a relationship config without validating the column, skipping it
-/// when the same key already lists a config naming the same properties. Same
-/// callers and version rule as [`legacy_set_node`].
-#[doc(hidden)]
-pub fn legacy_push_edge(graph: &mut DirGraph, rel_type: String, config: TemporalConfig) {
-    graph.temporal.legacy_push_edge(rel_type, config);
+/// The interned `from` property of the declaration covering `rel_type`
+/// relationships from `source_type` (see [`TemporalDeclarations::covering`];
+/// `None` as the source takes only an unkeyed declaration) — the property a
+/// bulk load adds to its merge key, so that a row starting a different period
+/// between the same endpoints becomes a parallel relationship instead of
+/// merging into the stored one. `None` when the type is not declared.
+pub(crate) fn merge_start_key(
+    graph: &DirGraph,
+    rel_type: &str,
+    source_type: Option<&str>,
+) -> Option<InternedKey> {
+    let store = &graph.temporal;
+    let config = match source_type {
+        Some(source) => store.covering(rel_type, source),
+        None => store
+            .edges(rel_type)
+            .iter()
+            .find(|c| c.source_type.is_none()),
+    }?;
+    Some(InternedKey::from_str(&config.valid_from))
 }

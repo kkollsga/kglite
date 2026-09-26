@@ -281,8 +281,8 @@ fn unsupported_rel_uniqueness_message(rel_type: &str, spelling: &str) -> String 
     format!(
         "CREATE CONSTRAINT ... {spelling} on a relationship pattern is not supported: KGLite has \
          no single answer for when two relationships of type '{rel_type}' are the same one — the \
-         bulk loader deduplicates (type, source, target) while Cypher CREATE freely makes \
-         parallel edges — so a uniqueness declaration would mean different things depending on \
+         bulk loader deduplicates (type, source, target), plus a declared temporal from bound, \
+         while Cypher CREATE freely makes parallel edges — so a uniqueness declaration would mean different things depending on \
          which write path produced the data. Relationship REQUIRE ... IS NOT NULL and \
          REQUIRE ... IS :: <TYPE> constraints are supported."
     )

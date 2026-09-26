@@ -50,12 +50,20 @@ before upgrading.
   a type with a half-open or per-source declaration is left out, so an older
   version treats it as undeclared rather than misreading it. `CALL db.temporal.declarations()`
   yields `ambiguous`, which is `true` for a relationship type holding several
-  configs without a `source_type` (two `set_temporal()` calls on one type,
-  including in an older file); `describe()` marks such a type
+  configs without a `source_type` (possible only in a file saved by an older
+  version); `describe()` marks such a type
   `temporal_ambiguous="true"`. Re-declare each with its `source_type` to
   resolve it.
 - Rust API: `kglite::api::temporal::DeclarationInfo::ambiguous`.
+- `set_temporal()`, `add_nodes()`, `add_relationships()` and
+  `replace_relationships()` (and their `connection`-named twins) take
+  `convention='closed' | 'half_open'` for the validity interval they declare;
+  `set_temporal()` also takes `source_type=`. Left out, the convention of a
+  declaration of the same properties is kept, and a new one is closed. A
+  closed declaration whose rows end on the day another begins emits a
+  `UserWarning` suggesting `'half_open'`.
 - Rust API: `kglite::api::temporal` (`declare`, `declare_loaded`,
+  `declare_defaulted`, `declare_from_column_types`, `LoadDeclaration`,
   `undeclare`, `list`, `node_config`, `edge_configs`, `TemporalTarget`,
   `IntervalConvention`), `TemporalConfig::convention` / `source_type`, and
   `GraphRead::get_edge_property`, which reads one relationship property
@@ -86,8 +94,29 @@ before upgrading.
   `r.p IS NULL` / `r.p IS NOT NULL` filters during expansion too. Answers are
   unchanged.
 
+- `set_temporal()` and `validFrom`/`validTo` column types declare their
+  interval the way `CALL db.temporal.declare` does: both properties must
+  exist, and a stored bound that is not a date, a datetime or an ISO string,
+  or a row whose interval is inverted, raises `ArgumentError` naming the
+  element (a loader checks this before writing, naming an inverted row of its
+  input by position). A different declaration for a type that already has one
+  is refused instead of added beside it. Rows written onto a declared type
+  later are not validated.
+- A bulk load (`add_relationships`, `replace_relationships`, the C ABI's edge
+  batch) onto a relationship type with a declared validity interval keys rows
+  on their `from` bound as well as the endpoints: a row starting a period no
+  stored relationship between the pair starts is a new relationship,
+  whatever `conflict_handling` says, where it used to merge into the stored
+  one and leave an inverted interval or drop a period. A row starting the
+  same period merges as before. Relationship constraints judge rows by the
+  same key. Undeclared types are unchanged.
+
 ### Fixed
 
+- `extend()` now copies the other graph's validity-interval declarations and
+  spatial configurations; it copied neither, so the other graph's periods
+  between the same endpoints collapsed into one relationship on merge and its
+  spatial types lost their configuration.
 - `describe()` repeated `temporal_from` / `temporal_to` on one `<conn>`
   element when a relationship type had several temporal configurations,
   which is malformed XML. It now prints them once each in one

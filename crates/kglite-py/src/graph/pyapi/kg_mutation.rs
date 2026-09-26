@@ -339,9 +339,11 @@ fn write_connections(
     git_sha: Option<String>,
     modified_by: Option<String>,
     on_invalid: &str,
+    convention: Option<&str>,
 ) -> PyResult<Py<PyAny>> {
     kg.check_durable_owner()?;
     let on_invalid = OnInvalid::parse(on_invalid)?;
+    let convention = crate::graph::parse_interval_convention(convention)?;
     let has_data = data.as_ref().map(|d| !d.is_none()).unwrap_or(false);
     validate_connection_input_mode(
         has_data,
@@ -354,6 +356,7 @@ fn write_connections(
 
     // ── Query path: run Cypher, convert to internal DataFrame ──
     if let Some(query_str) = query {
+        refuse_convention_without_interval(convention, None)?;
         // Execute read-only against a cloned Arc, so no mutable borrow is held
         // while the query runs.
         let inner_clone = kg.inner.clone();
@@ -450,7 +453,25 @@ fn write_connections(
     names.extend(frame_names.iter().map(String::as_str));
     validate_interner_names(&kg.inner, names)?;
 
+    refuse_convention_without_interval(convention, temporal_cfg.as_ref())?;
     let graph = get_graph_mut(&mut kg.inner);
+    let declaration = temporal_cfg
+        .map(|cfg| {
+            let target = kglite_core::api::temporal::TemporalTarget::Relationship {
+                rel_type: connection_type.clone(),
+                source_type: Some(source_type.clone()),
+            };
+            kglite_core::api::temporal::declare_from_column_types(
+                graph,
+                target,
+                &cfg.valid_from,
+                &cfg.valid_to,
+                convention,
+                &df_result,
+            )
+        })
+        .transpose()
+        .map_err(|e| crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e)))?;
 
     // The converted frame is pure Rust — apply the batch off-GIL.
     let result = detach_bulk_write(py, graph, |graph| {
@@ -483,12 +504,8 @@ fn write_connections(
                 )
             }
         })
-    })?;
-
-    // Merge temporal config into graph (auto-detected from validFrom/validTo column types)
-    if let Some(cfg) = temporal_cfg {
-        kglite_core::api::temporal::legacy_push_edge(graph, connection_type.clone(), cfg);
-    }
+    });
+    let (result, declared) = finish_declaration(py, graph, declaration, result)?;
 
     kg.cursor.selection.clear();
 
@@ -498,7 +515,8 @@ fn write_connections(
         .ensure_disk_edges_built()
         .map_err(pyo3::exceptions::PyOSError::new_err)?;
 
-    finish_connection_write(kg, &result, &connection_type, on_invalid)
+    let report = finish_connection_write(kg, &result, &connection_type, on_invalid)?;
+    declared.map(|()| report)
 }
 
 /// Shared tail of both `write_connections` paths: make the edges durable, file
@@ -515,6 +533,48 @@ fn finish_connection_write(
     kg.commit_wal()?;
     kg.add_report(OperationReport::ConnectionOperation(result.clone()));
     KnowledgeGraph::connection_report_to_py(result, connection_type, on_invalid)
+}
+
+/// `convention=` qualifies the validity interval `validFrom`/`validTo` column
+/// types declare; a call that declares none has nothing for it to apply to.
+fn refuse_convention_without_interval(
+    convention: Option<kglite_core::api::temporal::IntervalConvention>,
+    interval: Option<&kglite_core::api::TemporalConfig>,
+) -> PyResult<()> {
+    if convention.is_some() && interval.is_none() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "convention applies to the validity interval that validFrom/validTo column_types \
+             declare, and this call's column_types name none.",
+        ));
+    }
+    Ok(())
+}
+
+/// Close a load's declaration: withdraw it when the write failed, else
+/// validate it, raising its abutment advisory as a `UserWarning`. A refusal at
+/// that point comes back beside the write's result rather than in place of
+/// it, so the caller still commits what was written before raising it.
+fn finish_declaration<T>(
+    py: Python<'_>,
+    graph: &mut DirGraph,
+    declaration: Option<kglite_core::api::temporal::LoadDeclaration>,
+    written: PyResult<T>,
+) -> PyResult<(T, PyResult<()>)> {
+    let Some(declaration) = declaration else {
+        return written.map(|written| (written, Ok(())));
+    };
+    let written = match written {
+        Ok(written) => written,
+        Err(err) => {
+            declaration.abandon(graph);
+            return Err(err);
+        }
+    };
+    let declared = declaration
+        .finish(graph)
+        .map_err(|e| crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e)))
+        .and_then(|report| crate::graph::warn_declaration(py, &report));
+    Ok((written, declared))
 }
 
 /// Refuse a loader call whose input carries rows no id can be read from, when
@@ -730,20 +790,6 @@ fn apply_node_batch(
     // raises `kglite.ConstraintViolationError`, anything else keeps the
     // existing `ArgumentError`.
     outcome.map_err(|message| bulk_write_err(graph, message))
-}
-
-fn register_feature_configs(
-    graph: &mut DirGraph,
-    node_type: &str,
-    spatial_cfg: Option<kglite_core::api::SpatialConfig>,
-    temporal_cfg: Option<kglite_core::api::TemporalConfig>,
-) {
-    if let Some(cfg) = spatial_cfg {
-        graph.set_spatial_config(node_type, cfg);
-    }
-    if let Some(cfg) = temporal_cfg {
-        kglite_core::api::temporal::legacy_set_node(graph, node_type.to_string(), cfg);
-    }
 }
 
 fn store_extracted_embeddings(
@@ -1155,7 +1201,7 @@ impl KnowledgeGraph {
 #[pymethods]
 impl KnowledgeGraph {
     /// Add nodes from a pandas DataFrame.
-    #[pyo3(signature = (data, node_type, unique_id_field, node_title_field=None, columns=None, conflict_handling=None, skip_columns=None, column_types=None, timeseries=None, nullable_int_downcast=false, labels=None, managed_reload=false, git_sha=None, modified_by=None, on_invalid="warn"))]
+    #[pyo3(signature = (data, node_type, unique_id_field, node_title_field=None, columns=None, conflict_handling=None, skip_columns=None, column_types=None, timeseries=None, nullable_int_downcast=false, labels=None, managed_reload=false, git_sha=None, modified_by=None, on_invalid="warn", convention=None))]
     // The public Python loader exposes independently optional ingestion controls.
     #[allow(clippy::too_many_arguments)]
     fn add_nodes(
@@ -1175,10 +1221,12 @@ impl KnowledgeGraph {
         git_sha: Option<String>,
         modified_by: Option<String>,
         on_invalid: &str,
+        convention: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
         self.check_durable_owner()?;
         let py = data.py();
         let on_invalid = OnInvalid::parse(on_invalid)?;
+        let convention = crate::graph::parse_interval_convention(convention)?;
         // Managed-reload guard: a managed reload (research rebuilding from
         // source) must never write a `runtime`-layer type (agent-owned). Skip
         // it as a no-op + report, so disjoint ownership is enforced, not
@@ -1215,6 +1263,21 @@ impl KnowledgeGraph {
         validate_interner_names(&self.inner, names)?;
 
         let graph = get_graph_mut(&mut self.inner);
+        refuse_convention_without_interval(convention, converted.temporal_cfg.as_ref())?;
+        let declaration = converted
+            .temporal_cfg
+            .map(|cfg| {
+                kglite_core::api::temporal::declare_from_column_types(
+                    graph,
+                    kglite_core::api::temporal::TemporalTarget::Node(node_type.clone()),
+                    &cfg.valid_from,
+                    &cfg.valid_to,
+                    convention,
+                    &converted.df,
+                )
+            })
+            .transpose()
+            .map_err(|e| crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e)))?;
         let result = apply_node_batch(
             py,
             graph,
@@ -1226,13 +1289,11 @@ impl KnowledgeGraph {
                 conflict_handling,
             },
             (git_sha, modified_by),
-        )?;
-        register_feature_configs(
-            graph,
-            &node_type,
-            converted.spatial_cfg,
-            converted.temporal_cfg,
         );
+        let (result, declared) = finish_declaration(py, graph, declaration, result)?;
+        if let Some(cfg) = converted.spatial_cfg {
+            graph.set_spatial_config(&node_type, cfg);
+        }
         store_extracted_embeddings(graph, &node_type, &embedding_data);
         if let Some(ts_cfg) = parsed.ts_config {
             apply_timeseries(py, graph, &node_type, data, &unique_id_field, ts_cfg)?;
@@ -1246,81 +1307,12 @@ impl KnowledgeGraph {
         self.cursor.selection.clear();
         self.commit_wal()?;
         self.add_report(OperationReport::NodeOperation(result.clone()));
+        declared?;
 
         Python::attach(|py| build_node_report_dict(py, &result, on_invalid))
     }
 
-    /// Merge another KnowledgeGraph into this one, in place.
-    ///
-    /// A native alternative to round-tripping through CSV export/import
-    /// when building a graph incrementally from multiple sources (or
-    /// merging two ``.kgl`` files loaded into memory). The *other* graph
-    /// is read-only and never mutated.
-    ///
-    /// Semantics
-    /// ---------
-    /// - **Node identity** is ``(node_type, id)`` — the same key the id
-    ///   index uses. ``id`` is the canonical integer node id in every
-    ///   storage mode. When a node in ``other`` matches an existing node
-    ///   here, the conflict is resolved by ``conflict_handling`` (same
-    ///   vocabulary as ``add_nodes``):
-    ///
-    ///   - ``'update'`` (default) — merge properties, ``other`` wins on
-    ///     conflicts; title is overwritten.
-    ///   - ``'replace'`` — replace all properties and title with
-    ///     ``other``'s.
-    ///   - ``'skip'`` — leave the existing node untouched.
-    ///   - ``'preserve'`` — merge properties, existing values win;
-    ///     title kept unless currently null.
-    ///   - ``'sum'`` — adds numeric property values on **edges**; for
-    ///     **node** properties it acts as ``update`` (matches
-    ///     ``ConflictHandling::Sum`` in ``add_nodes`` / ``add_relationships``).
-    ///
-    /// - **Secondary labels** (multi-label) are *unioned*
-    ///   onto the matched/created node — never removed. Idempotent.
-    /// - **Property schemas** merge: a property present in ``other`` but
-    ///   not here extends this graph's type schema (same path
-    ///   ``add_nodes`` uses for new columns).
-    /// - **Stored values** are recursively materialised against ``other``
-    ///   before admission. Endpoint references become their source-view
-    ///   title; missing or cyclic title references become ``None``. This
-    ///   includes node titles and nested list/map properties. Structural
-    ///   node and edge IDs remain identity.
-    /// - **Edges** dedup on ``(connection_type, source, target)``: an
-    ///   edge that already exists here is **not** duplicated — its
-    ///   properties merge per ``conflict_handling``. Exact-duplicate
-    ///   edges present in both graphs are therefore created once, not
-    ///   twice. (This is stricter than petgraph's raw parallel-edge
-    ///   capability, mirroring ``add_relationships``' dedup so a merge
-    ///   never silently doubles shared edges.)
-    ///
-    /// Scope limits (v1)
-    /// -----------------
-    /// - **In-memory only.** Both graphs must use the default in-memory
-    ///   storage; ``storage='mapped'`` / ``'disk'`` graphs raise an
-    ///   error suggesting the export/import path.
-    /// - **Embeddings are NOT merged.** If ``other`` has any embedding
-    ///   stores a warning is emitted — re-run ``set_embeddings`` /
-    ///   ``add_embeddings`` after the merge to rebuild them here.
-    /// - **Self-extend** (``g.extend(g)``) is a deliberate no-op for
-    ///   creation: every node/edge already matches itself, so the result
-    ///   is property-merge-against-self (a no-op under every mode but
-    ///   ``replace``, which rewrites each node with its own values).
-    ///   Reported as 0 created, N updated.
-    /// - **Locks.** Like ``add_nodes`` / ``add_relationships``, this bulk
-    ///   path does not consult ``schema_locked`` / ``read_only`` (those
-    ///   gate the Cypher write path only).
-    ///
-    /// Args:
-    ///     other: KnowledgeGraph to merge into this one (read-only).
-    ///     conflict_handling: 'update' (default), 'replace', 'skip',
-    ///         'preserve', or 'sum'.
-    ///
-    /// Returns:
-    ///     dict with 'nodes_created', 'nodes_updated', 'nodes_skipped',
-    ///     'edges_created', 'edges_updated', 'edges_skipped', 'node_types_merged',
-    ///     'connection_types_merged', 'labels_unioned',
-    ///     'processing_time_ms', 'has_errors', and optionally 'errors'.
+    /// Merge another KnowledgeGraph into this one, in place, with its declarations.
     #[pyo3(signature = (other, conflict_handling=None))]
     fn extend(
         &mut self,
@@ -1372,7 +1364,7 @@ impl KnowledgeGraph {
     }
 
     /// Add relationships from a DataFrame or read-only Cypher query.
-    #[pyo3(signature = (data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None, query=None, extra_properties=None, git_sha=None, modified_by=None, on_invalid="warn"))]
+    #[pyo3(signature = (data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None, query=None, extra_properties=None, git_sha=None, modified_by=None, on_invalid="warn", convention=None))]
     // The public Python loader supports DataFrame and query modes with optional controls.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn add_relationships(
@@ -1395,6 +1387,7 @@ impl KnowledgeGraph {
         git_sha: Option<String>,
         modified_by: Option<String>,
         on_invalid: &str,
+        convention: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
         write_connections(
             py,
@@ -1417,11 +1410,12 @@ impl KnowledgeGraph {
             git_sha,
             modified_by,
             on_invalid,
+            convention,
         )
     }
 
     /// Replace each input source node's relationships of a type with the input's — an atomic edge upsert.
-    #[pyo3(signature = (data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None, query=None, extra_properties=None, git_sha=None, modified_by=None, on_invalid="warn"))]
+    #[pyo3(signature = (data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None, query=None, extra_properties=None, git_sha=None, modified_by=None, on_invalid="warn", convention=None))]
     // The same loader arguments add_relationships takes.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn replace_relationships(
@@ -1444,6 +1438,7 @@ impl KnowledgeGraph {
         git_sha: Option<String>,
         modified_by: Option<String>,
         on_invalid: &str,
+        convention: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
         write_connections(
             py,
@@ -1466,6 +1461,7 @@ impl KnowledgeGraph {
             git_sha,
             modified_by,
             on_invalid,
+            convention,
         )
     }
 

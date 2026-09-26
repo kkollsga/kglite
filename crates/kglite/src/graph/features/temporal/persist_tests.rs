@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
-use super::declarations::{declare, legacy_push_edge, list, TemporalTarget};
+use super::declarations::{declare, list, TemporalTarget};
 use super::eval::IntervalConvention::{Closed, HalfOpen};
 use super::persist::PersistedDeclaration;
 use crate::datatypes::Value;
@@ -40,6 +40,17 @@ fn config(from: &str, to: &str) -> TemporalConfig {
         valid_to: to.into(),
         ..TemporalConfig::default()
     }
+}
+
+/// Append an unkeyed closed config the way builds before declarations did,
+/// unvalidated — the state a file carrying only the legacy keys loads into.
+fn legacy_push_edge(graph: &mut DirGraph, rel_type: &str, config: TemporalConfig) {
+    graph
+        .temporal
+        .edges
+        .entry(rel_type.to_string())
+        .or_default()
+        .push(config);
 }
 
 fn encode(graph: DirGraph) -> Vec<u8> {
@@ -91,8 +102,8 @@ fn declared() -> DirGraph {
         declare(&mut g, &rel("OPERATES", source), "of", "ot", Closed).unwrap();
     }
     declare(&mut g, &rel("AUDITS", None), "af", "at", HalfOpen).unwrap();
-    legacy_push_edge(&mut g, "SUPPLIES".into(), config("sf", "st"));
-    legacy_push_edge(&mut g, "SUPPLIES".into(), config("pf", "pt"));
+    legacy_push_edge(&mut g, "SUPPLIES", config("sf", "st"));
+    legacy_push_edge(&mut g, "SUPPLIES", config("pf", "pt"));
     g
 }
 
@@ -259,7 +270,7 @@ fn a_legacy_list_of_different_unkeyed_configs_keeps_both_and_is_ambiguous() {
 #[test]
 fn a_keyed_declaration_beside_one_unkeyed_config_is_not_ambiguous() {
     let mut g = graph(LICENSEES);
-    legacy_push_edge(&mut g, "HAS_LICENSEE".into(), config("ff", "ft"));
+    legacy_push_edge(&mut g, "HAS_LICENSEE", config("ff", "ft"));
     let keyed = rel("HAS_LICENSEE", Some("Licence"));
     declare(&mut g, &keyed, "lf", "lt", Closed).unwrap();
     assert!(list(&g).iter().all(|info| !info.ambiguous));

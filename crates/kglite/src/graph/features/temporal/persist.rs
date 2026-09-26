@@ -195,9 +195,18 @@ impl TemporalDeclarations {
             nodes,
             ..TemporalDeclarations::default()
         };
-        for (rel_type, configs) in edges {
+        // A legacy list repeats a config once per load that wrote it; keep
+        // the first of each source type and property pair.
+        for (rel_type, configs) in edges.into_iter().filter(|(_, c)| !c.is_empty()) {
+            let kept = store.edges.entry(rel_type).or_default();
             for config in configs {
-                store.legacy_push_edge(rel_type.clone(), config);
+                if !kept.iter().any(|c| {
+                    c.source_type == config.source_type
+                        && c.valid_from == config.valid_from
+                        && c.valid_to == config.valid_to
+                }) {
+                    kept.push(config);
+                }
             }
         }
         store

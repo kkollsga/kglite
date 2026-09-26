@@ -1450,10 +1450,15 @@ CALL db.temporal.declarations()
   half-open or per-source declaration is left out of that record, so an older
   version reads it as undeclared rather than misreading it.
 - **`ambiguous`** is `true` for a relationship type holding several
-  declarations without a `source_type`, as two `set_temporal()` calls on one
-  type leave, including in a graph saved by an older version. Which one an
-  edge uses depends on the order they were added in; undeclare them and
-  re-declare each with its `source_type`.
+  declarations without a `source_type`, which only a graph saved by an older
+  version can hold. Which one an edge uses depends on the order they were
+  added in; undeclare them and re-declare each with its `source_type`.
+- **From Python.** `set_temporal()` and the loaders' `validFrom`/`validTo`
+  column types declare through the same rules, with an optional `convention`
+  that keeps an existing declaration of the same properties and is `closed`
+  otherwise. A bulk load onto a declared relationship type keys each row on
+  its `from` bound as well as its endpoints, so a new period between the same
+  pair is a parallel relationship rather than a merge.
 
 ### Duration semantics
 

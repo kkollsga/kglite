@@ -2014,6 +2014,7 @@ class KnowledgeGraph:
         git_sha: Optional[str] = None,
         modified_by: Optional[str] = None,
         on_invalid: Literal["warn", "error", "skip"] = "warn",
+        convention: Optional[Literal["closed", "half_open"]] = None,
     ) -> dict[str, Any]:
         """Add nodes from a DataFrame.
 
@@ -2099,6 +2100,18 @@ class KnowledgeGraph:
                 Also supports spatial types: ``'location.lat'``, ``'location.lon'``,
                 ``'geometry'``, ``'point.<name>.lat'``, ``'point.<name>.lon'``,
                 ``'shape.<name>'``.
+                ``'validFrom'`` and ``'validTo'`` (both or neither) load their
+                columns as dates and declare them the type's validity
+                interval, as :meth:`set_temporal` does. The declaration is
+                checked before anything is written: a declaration of the type
+                naming other properties or another ``convention``, a row of
+                this call whose interval is inverted (or empty under
+                ``'half_open'``), and a stored bound that is not a date, a
+                datetime or an ISO date string each raise
+                :class:`ArgumentError`. A later load onto the declared type
+                adds rows without validating them. A closed declaration whose
+                rows end on the day another begins emits a ``UserWarning``
+                suggesting ``'half_open'``.
             nullable_int_downcast: When ``True``, Float64 columns whose non-null
                 values are all integer-valued (e.g. ``pd.NA``-bearing ints that
                 pandas auto-promoted to float64) are silently downcast to Int64.
@@ -2161,6 +2174,12 @@ class KnowledgeGraph:
                 re-declaring a populated type's ``unique_id_field`` or
                 ``node_title_field`` — refuses under every setting, ``'warn'``
                 included.
+            convention: Whether the ``validTo`` day still belongs to the
+                interval (``'closed'``) or is the first day it no longer holds
+                (``'half_open'``). ``None`` keeps the convention of a
+                declaration the type already has for the same properties, and
+                is ``'closed'`` otherwise. Requires ``validFrom``/``validTo``
+                in ``column_types``; raises ``ValueError`` without them.
 
         Returns:
             Operation report dict with keys ``nodes_created``,
@@ -2202,6 +2221,7 @@ class KnowledgeGraph:
         git_sha: Optional[str] = None,
         modified_by: Optional[str] = None,
         on_invalid: Literal["warn", "error", "skip"] = "warn",
+        convention: Optional[Literal["closed", "half_open"]] = None,
     ) -> dict[str, Any]:
         """Add relationships (edges) between existing nodes.
 
@@ -2257,7 +2277,13 @@ class KnowledgeGraph:
                 ``'preserve'``, or ``'sum'``. ``'sum'`` adds numeric edge properties
                 (Int64+Int64, Float64+Float64; mixed promotes to Float64).
                 Non-numeric properties overwrite like ``'update'``.
-            column_types: Override column dtypes (data mode only).
+            column_types: Override column dtypes (data mode only), as in
+                :meth:`add_nodes`. ``'validFrom'``/``'validTo'`` declare the
+                relationship type's validity interval, checked before anything
+                is written as in :meth:`add_nodes`. The declaration covers the
+                type from every source type, unless this ``source_type``
+                already has its own or the type-wide one names other
+                properties; then it covers this source type only.
             query: Cypher query string (alternative to ``data``). Must be a
                 read-only query whose RETURN clause includes columns matching
                 ``source_id_field`` and ``target_id_field``.
@@ -2275,6 +2301,8 @@ class KnowledgeGraph:
                 written; ``'skip'`` is ``'warn'`` without the warning. A row
                 whose endpoint is *missing* rather than null is vivified as a
                 stub node, not skipped, and is unaffected by this setting.
+            convention: ``'closed'`` or ``'half_open'`` for the validity
+                interval ``column_types`` declares; see :meth:`add_nodes`.
 
         Returns:
             Operation report dict with ``connections_created``,
@@ -2282,7 +2310,14 @@ class KnowledgeGraph:
             ``processing_time_ms``, ``has_errors``, and optionally ``errors``.
             A row whose ``(connection_type, source, target)`` already has a
             relationship merges into it per ``conflict_handling`` and counts
-            in ``connections_updated``, not ``connections_created``.
+            in ``connections_updated``, not ``connections_created``. On a
+            relationship type with a declared validity interval the ``from``
+            bound joins that key: a row starting a period no stored
+            relationship between the pair starts is a new, parallel
+            relationship (every ``conflict_handling`` mode), and one starting
+            the same period merges as above — closing an open period, or
+            re-loading it. Correcting a stored ``from`` bound is therefore a
+            delete of the old relationship plus a load of the new one.
         """
         ...
 
@@ -2305,6 +2340,7 @@ class KnowledgeGraph:
         git_sha: Optional[str] = None,
         modified_by: Optional[str] = None,
         on_invalid: Literal["warn", "error", "skip"] = "warn",
+        convention: Optional[Literal["closed", "half_open"]] = None,
     ) -> dict[str, Any]:
         """Pointer to :meth:`add_relationships`, the primary spelling; a connection is a relationship."""
         ...
@@ -2328,6 +2364,7 @@ class KnowledgeGraph:
         git_sha: Optional[str] = None,
         modified_by: Optional[str] = None,
         on_invalid: Literal["warn", "error", "skip"] = "warn",
+        convention: Optional[Literal["closed", "half_open"]] = None,
     ) -> dict[str, Any]:
         """Replace a node's outgoing edges of a given type, then add new ones — an atomic edge upsert.
 
@@ -2365,7 +2402,9 @@ class KnowledgeGraph:
             skip_columns: Columns to exclude (data mode only).
             conflict_handling: ``'update'`` (default), ``'replace'``, ``'skip'``,
                 ``'preserve'``, or ``'sum'``.
-            column_types: Override column dtypes (data mode only).
+            column_types: Override column dtypes (data mode only), including
+                the ``validFrom``/``validTo`` declaration of
+                :meth:`add_relationships`.
             query: Cypher query string (alternative to ``data``). Must be read-only.
             extra_properties: Static properties stamped onto every edge (query mode only).
             git_sha: Commit SHA stamped when the edge type has
@@ -2381,9 +2420,14 @@ class KnowledgeGraph:
                 whose endpoint is *missing* rather than null is vivified as a
                 stub node, not skipped, and is unaffected by this setting.
 
+            convention: ``'closed'`` or ``'half_open'`` for the validity
+                interval ``column_types`` declares; see :meth:`add_nodes`.
+
         Returns:
             Operation report dict with ``connections_created``,
-            ``connections_updated``, ``connections_skipped``, etc.
+            ``connections_updated``, ``connections_skipped``, etc. Rows of a
+            type with a declared validity interval are keyed on their
+            ``from`` bound as in :meth:`add_relationships`.
         """
         ...
 
@@ -2406,6 +2450,7 @@ class KnowledgeGraph:
         git_sha: Optional[str] = None,
         modified_by: Optional[str] = None,
         on_invalid: Literal["warn", "error", "skip"] = "warn",
+        convention: Optional[Literal["closed", "half_open"]] = None,
     ) -> dict[str, Any]:
         """Pointer to :meth:`replace_relationships`, the primary spelling; a connection is a relationship."""
         ...
@@ -2457,11 +2502,19 @@ class KnowledgeGraph:
           missing or cyclic title references become ``None``. This includes
           node titles and nested list/map properties. Structural node and edge
           IDs remain identity.
-        - **Edges** dedup on ``(connection_type, source, target)``: an edge
+        - **Edges** dedup on ``(connection_type, source, target)`` — plus the
+          ``from`` bound on a type with a declared validity interval: an edge
           that already exists here is **not** duplicated — its properties merge
           per ``conflict_handling``. Exact-duplicate edges present in both
           graphs are created once, not twice (mirrors ``add_relationships``'
           dedup so a merge never silently doubles shared edges).
+        - **Declarations** travel with the data: *other*'s validity-interval
+          declarations (see :meth:`set_temporal`) are in place before its
+          edges merge and are validated once they have, and its spatial
+          configurations are copied to node types this graph has none for.
+          A declaration of the same key this graph already has wins; a
+          temporal one conflicting with it, or refused by the merged rows,
+          is not copied and is named in ``errors``.
 
         Scope limits (v1):
 
@@ -7411,29 +7464,50 @@ class KnowledgeGraph:
         type_name: str,
         valid_from: str,
         valid_to: str,
+        convention: Optional[Literal["closed", "half_open"]] = None,
+        source_type: Optional[str] = None,
     ) -> None:
-        """Configure temporal validity for a node type or connection type.
+        """Declare which two properties bound a node type's or relationship type's validity interval.
 
-        After configuration, ``select()`` auto-filters temporal nodes and
-        ``traverse()`` auto-filters temporal connections to "current" (today
-        or the ``date()`` context). The interval is closed unless the type
-        already carries a declaration for the same properties, which is kept
-        as it is. The column is not validated; ``CALL db.temporal.declare``
-        validates every stored bound and also takes a half-open convention and
-        a source type.
+        After the declaration, ``select()`` auto-filters temporal nodes and
+        ``traverse()`` auto-filters temporal relationships to "current" (today
+        or the ``date()`` context), and a bulk load onto a declared
+        relationship type keeps each period between the same endpoints as its
+        own relationship (see :meth:`add_relationships`). This is
+        ``CALL db.temporal.declare`` with a defaulted convention: both
+        properties must exist, every stored bound must read as a date, a
+        datetime or an ISO date string, and no row's interval may be inverted
+        (or empty under ``'half_open'``). Re-declaring the same interval is a
+        no-op; a different one for the same type (and source type) is
+        refused — undeclare it first.
 
-        Auto-detects whether *type_name* is a node type or connection type.
+        A *type_name* that is both a node type and a relationship type is the
+        node type unless *source_type* is given.
 
         Args:
-            type_name: Node type (e.g. ``'FieldStatus'``) or connection type
+            type_name: Node type (e.g. ``'FieldStatus'``) or relationship type
                 (e.g. ``'HAS_LICENSEE'``).
-            valid_from: Property name holding the start date. Bounds may be
-                stored as dates, datetimes or ISO date strings; NULL is open.
-            valid_to: Property name holding the end date.
+            valid_from: Property name holding the start date. NULL is open.
+            valid_to: Property name holding the end date. NULL is open.
+            convention: ``'closed'`` (the ``valid_to`` day is still valid) or
+                ``'half_open'`` (it is the first day no longer valid).
+                ``None`` keeps the convention of a declaration the type
+                already has for the same properties, and is ``'closed'``
+                otherwise.
+            source_type: For a relationship type, declare the interval only
+                for relationships leaving nodes of this type, for types whose
+                sources store their bounds under different properties.
 
         Raises:
-            ArgumentError: If *type_name* is not a known node or connection
-                type.
+            ArgumentError: If *type_name* is not a known node or relationship
+                type, *source_type* is given for a node type, a property does
+                not exist, a stored bound is unreadable or a row's interval is
+                inverted (the message names the element), or a different
+                declaration already covers the type.
+
+        Warns:
+            UserWarning: A closed declaration whose rows end on the day another
+                row of the same label (or from the same source node) begins.
         """
         ...
 
