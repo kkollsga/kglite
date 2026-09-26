@@ -804,6 +804,36 @@ fn create_edges_batch_second_source_type_keeps_its_rows() {
     unsafe { kglite_session_free(session) };
 }
 
+/// Ownership is decided once per (relationship type, source node type) for
+/// the whole batch, across target types: a second target type's group of an
+/// owned source keeps its repeated pair, as `extend()` keeps it.
+#[test]
+fn create_edges_batch_owned_source_keeps_rows_in_every_target_group() {
+    let session = seed_notes("CREATE (:Person {id: 1}), (:Doc {id: 1}), (:Tag {id: 1})");
+    let spec = |dst_type: &str| {
+        format!(
+            r#"{{"src_id":1,"src_type":"Person","dst_id":1,"dst_type":"{dst_type}","type":"E","props":{{}}}}"#
+        )
+    };
+    let (rc, report) = create_edges(
+        session,
+        &format!("[{},{},{}]", spec("Doc"), spec("Tag"), spec("Tag")),
+    );
+    assert_eq!(rc, KgliteStatusCode::Ok, "{report}");
+    let report: serde_json::Value = serde_json::from_str(&report).unwrap();
+    assert_eq!(report["connections_created"].as_u64(), Some(3), "{report}");
+    assert_eq!(report["connections_updated"].as_u64(), Some(0), "{report}");
+    assert_eq!(
+        query_rows(
+            session,
+            "MATCH (:Person)-[r:E]->(t) RETURN labels(t)[0] AS t, count(r) AS c ORDER BY t",
+            "{}"
+        ),
+        serde_json::json!([{"t": "Doc", "c": 1}, {"t": "Tag", "c": 2}])
+    );
+    unsafe { kglite_session_free(session) };
+}
+
 #[test]
 fn create_edges_batch_by_id() {
     let graph = kglite_graph_new();

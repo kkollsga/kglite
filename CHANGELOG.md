@@ -147,7 +147,12 @@ before upgrading.
   — repeated endpoint pairs included — when the relationship type has no
   relationship from that load's source node type yet; a later load from a
   source node type it already has relationships from merges as before. A
-  second node type's rows used to fold onto one relationship per pair once
+  load that writes no relationship (an empty frame, every id null) records
+  nothing, so it does not turn the next load into a merge. A relationship
+  type an N-Triples load or an older file registered without its endpoint
+  types learns them from its stored relationships before a load records
+  one; `rebuild_caches()` completes a set an earlier version recorded only
+  partly. A second node type's rows used to fold onto one relationship per pair once
   the type existed, and under `'update'` the survivor could carry an interval
   no row held (a later row's start with an earlier row's end). Graphs built
   before this change keep their folded relationships: rebuild from the
@@ -201,7 +206,8 @@ before upgrading.
   `ConstraintViolationError`, as `add_relationships` does; it raised
   `ArgumentError`.
 - `extend()` judges every node type and relationship group against this
-  graph's constraints before writing any of them. A refusal used to leave the
+  graph's constraints and abstract ontology classes before writing any of
+  them. A refusal used to leave the
   node types and relationship groups merged before the refused one in the
   graph — and, on a durable graph, outside the write-ahead log until the next
   committed write, which then persisted them.

@@ -173,9 +173,10 @@ impl ConstraintColumns {
 }
 /// Judge the frame `frame` builds as [`add_nodes`] would, writing nothing —
 /// for a caller that merges several node types and must refuse before the
-/// first of them lands (`extend_graph`). The same gate `add_nodes` runs, on the
-/// same pre-call state, so a frame this admits `add_nodes` admits too. The
-/// frame is built only for a type something gates.
+/// first of them lands (`extend_graph`). The same refusals `add_nodes` makes —
+/// the abstract-class refusal and the constraint gate — on the same pre-call
+/// state, so a frame this admits `add_nodes` admits too. The frame is built
+/// only for a type a constraint gates.
 pub(super) fn gate_node_rows(
     graph: &mut DirGraph,
     node_type: &str,
@@ -183,6 +184,7 @@ pub(super) fn gate_node_rows(
     title_field: &str,
     frame: impl FnOnce() -> Result<DataFrame, String>,
 ) -> Result<(), String> {
+    graph.reject_abstract_batch_type(node_type)?;
     let pk_enforced = graph.primary_key_for(node_type).is_some();
     let gated = pk_enforced
         || graph.has_unique_constraints()
@@ -1031,12 +1033,17 @@ impl InitialLoad {
 /// a `source_type` node yet. A load from a source type the relationship type
 /// has already seen merges into those edges.
 ///
-/// Exact, not a heuristic: every edge a load writes leaves a node of its own
-/// (primary) source type, so another source type's edges can never share a
-/// pair with it, and skipping the lookup loses no merge. A type registered
-/// with no recorded source types (an N-Triples load registers names only, and
-/// so did files that predate the field) says nothing about who wrote its
-/// edges, so it merges as it always did.
+/// Exact, not a heuristic, given a complete `source_types` set: every edge a
+/// load writes leaves a node of its own (primary) source type, so another
+/// source type's edges can never share a pair with it, and skipping the lookup
+/// loses no merge. Every writer records its source types, and a type
+/// registered by name only (a disk N-Triples build, a file older than the
+/// field) is backfilled from its stored edges before the first write records
+/// one (`DirGraph::upsert_connection_type_metadata`). Until then its empty set
+/// says nothing about who wrote its edges, so it merges. The one set this
+/// cannot see is one an earlier version recorded partially — a names-only type
+/// that a load then gave a single source type — which `rebuild_caches()`
+/// completes from the stored edges.
 pub(crate) fn source_owns_its_edges(
     graph: &DirGraph,
     connection_type: &str,
@@ -1278,13 +1285,7 @@ pub(crate) fn add_connections_with_initial_load(
         batch.get_schema_properties(),
     );
 
-    update_schema_node(
-        graph,
-        &connection_type,
-        &source_type,
-        &target_type,
-        batch.schema_property_types(graph),
-    )?;
+    update_schema_node(graph, &connection_type, &source_type, &target_type, &batch)?;
 
     let (stats, metrics) = batch.execute(graph, connection_type)?;
 
@@ -1931,12 +1932,19 @@ pub fn purge_provisional_nodes(graph: &mut DirGraph) -> (usize, usize) {
     detach_delete_nodes(graph, &to_delete)
 }
 
+/// Validate a load's endpoint types and record them, with the property types
+/// `batch` observed, on `connection_type`.
+///
+/// A batch that queued no row (an empty frame, every id null, every row
+/// skipped) records nothing: its source type would claim edges the
+/// relationship type does not have, and the next load from it would merge and
+/// fold its repeated pairs instead of owning them (`source_owns_its_edges`).
 pub(super) fn update_schema_node(
     graph: &mut DirGraph,
     connection_type: &str,
     source_type: &str,
     target_type: &str,
-    prop_types: HashMap<String, String>,
+    batch: &ConnectionBatchProcessor,
 ) -> Result<(), String> {
     if !graph.has_node_type(source_type) {
         return Err(format!(
@@ -1951,8 +1959,12 @@ pub(super) fn update_schema_node(
         ));
     }
 
-    // The caller supplies observed types (batch.schema_property_types), so
-    // "Unknown" survives only for properties never seen with a non-null value.
+    if batch.queued_rows() == 0 {
+        return Ok(());
+    }
+    // Observed types, so "Unknown" survives only for properties never seen
+    // with a non-null value.
+    let prop_types = batch.schema_property_types(graph);
     graph.upsert_connection_type_metadata(connection_type, source_type, target_type, prop_types);
     Ok(())
 }

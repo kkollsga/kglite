@@ -1431,6 +1431,9 @@ impl DirGraph {
             {
                 return;
             }
+            if existing.source_types.is_empty() {
+                crate::graph::introspection::connectivity::backfill_names_only_types(self);
+            }
         }
         let entry = self
             .connection_type_metadata_mut()

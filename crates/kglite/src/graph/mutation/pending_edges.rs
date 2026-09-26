@@ -87,13 +87,7 @@ impl PendingEdges {
                 }
             }
             if let Some((source, target)) = schema_types {
-                update_schema_node(
-                    graph,
-                    connection_type,
-                    source,
-                    target,
-                    batch.schema_property_types(graph),
-                )?;
+                update_schema_node(graph, connection_type, source, target, &batch)?;
             }
             let (stats, metrics) = batch.execute(graph, connection_type.to_string())?;
             written.stats.combine(&stats);

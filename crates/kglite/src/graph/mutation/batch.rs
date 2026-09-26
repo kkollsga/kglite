@@ -724,6 +724,8 @@ pub struct ConnectionBatchProcessor {
     /// Set for a declared temporal relationship type: the `from` properties
     /// whose start joins the endpoint pair in the merge key (see [`MergeKey`]).
     start_key: Option<StartKey>,
+    /// Rows queued over the batch's life — `connections` is drained per flush.
+    queued_rows: usize,
 }
 
 impl ConnectionBatchProcessor {
@@ -745,7 +747,13 @@ impl ConnectionBatchProcessor {
             accumulated_stats: ConnectionBatchStats::default(),
             skip_existence_check: false,
             start_key: None,
+            queued_rows: 0,
         }
+    }
+
+    /// Rows this batch queued to write — each creates or merges into an edge.
+    pub(crate) fn queued_rows(&self) -> usize {
+        self.queued_rows
     }
 
     /// Set how rows fold into relationships.
@@ -834,6 +842,7 @@ impl ConnectionBatchProcessor {
             target_idx,
             properties,
         });
+        self.queued_rows += 1;
 
         if let BatchType::Large = self.batch_type {
             if self.connections.len() >= self.capacity {

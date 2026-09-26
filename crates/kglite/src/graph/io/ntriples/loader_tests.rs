@@ -8,6 +8,7 @@
 
 use super::super::parser::{XSD_BOOLEAN, XSD_DECIMAL, XSD_DOUBLE};
 use super::*;
+use crate::datatypes::DataFrame;
 use crate::graph::storage::mode::{new_dir_graph_in_mode, StorageMode};
 
 #[test]
@@ -887,5 +888,107 @@ fn a_streaming_build_drops_ids_that_are_not_parseable_q_codes() {
             stats.entities_created, 2,
             "{mode:?} kept the unparseable id"
         );
+    }
+}
+
+// ── shared relationship types after an N-Triples load ─────────────────
+//
+// Q1 (Alpha) and Q2 (Beta) both carry an `R` edge to Q3 (Target), so the
+// relationship type has edges from two source types before any frame load.
+
+const TWO_SOURCE_FIXTURE: &str = "\
+<http://www.wikidata.org/entity/Q1> <http://www.wikidata.org/prop/direct/P31> <http://www.wikidata.org/entity/Q5> .\n\
+<http://www.wikidata.org/entity/Q1> <http://www.wikidata.org/prop/direct/P2> <http://www.wikidata.org/entity/Q3> .\n\
+<http://www.wikidata.org/entity/Q2> <http://www.wikidata.org/prop/direct/P31> <http://www.wikidata.org/entity/Q6> .\n\
+<http://www.wikidata.org/entity/Q2> <http://www.wikidata.org/prop/direct/P2> <http://www.wikidata.org/entity/Q3> .\n\
+<http://www.wikidata.org/entity/Q3> <http://www.wikidata.org/prop/direct/P31> <http://www.wikidata.org/entity/Q7> .\n";
+
+fn two_source_config() -> NTriplesConfig {
+    let mut config = test_config();
+    for (qid, name) in [("Q5", "Alpha"), ("Q6", "Beta"), ("Q7", "Target")] {
+        config.node_types.insert(qid.to_string(), name.to_string());
+    }
+    config
+        .predicate_labels
+        .insert("P2".to_string(), "R".to_string());
+    config
+}
+
+fn load_r_from(graph: &mut DirGraph, source_type: &str, source_id: i64) -> (usize, usize) {
+    let rows = DataFrame::from_cypher_rows(
+        vec!["src".to_string(), "tgt".to_string()],
+        vec![vec![Value::Int64(source_id), Value::Int64(3)]],
+    )
+    .unwrap();
+    let report = crate::graph::mutation::maintain::add_connections(
+        graph,
+        rows,
+        "R".to_string(),
+        source_type.to_string(),
+        "src".to_string(),
+        "Target".to_string(),
+        "tgt".to_string(),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    (report.connections_created, report.connections_updated)
+}
+
+/// Red proof: the loader registered `R` by name only, so the first frame
+/// load from `Alpha` recorded `{Alpha}` alone and a load from `Beta` then
+/// "owned" its rows, writing a parallel `Q2 → Q3` beside the N-Triples one.
+#[test]
+fn a_load_after_an_ntriples_build_merges_into_every_source_types_edges() {
+    use std::io::Write as _;
+    let mut fixture = tempfile::NamedTempFile::new().unwrap();
+    fixture.write_all(TWO_SOURCE_FIXTURE.as_bytes()).unwrap();
+    for mode in [StorageMode::Memory, StorageMode::Mapped, StorageMode::Disk] {
+        let root = tempfile::tempdir().unwrap();
+        let mut graph = graph_for_mode(mode, root.path());
+        let stats = load_ntriples(
+            &mut graph,
+            fixture.path().to_str().unwrap(),
+            &two_source_config(),
+        )
+        .unwrap();
+        assert_eq!(stats.edges_created, 2, "mode={mode:?}");
+
+        assert_eq!(load_r_from(&mut graph, "Alpha", 1), (0, 1), "mode={mode:?}");
+        assert_eq!(load_r_from(&mut graph, "Beta", 2), (0, 1), "mode={mode:?}");
+        assert_eq!(graph.graph.edge_count(), 2, "mode={mode:?}");
+        let mut sources: Vec<String> = graph.connection_type_metadata["R"]
+            .source_types
+            .iter()
+            .cloned()
+            .collect();
+        sources.sort();
+        assert_eq!(sources, ["Alpha", "Beta"], "mode={mode:?}");
+    }
+}
+
+/// The in-memory and mapped builds record each relationship type's endpoint
+/// types from the edges they write, as every other loader does.
+#[test]
+fn an_ntriples_build_records_its_endpoint_types() {
+    use std::io::Write as _;
+    let mut fixture = tempfile::NamedTempFile::new().unwrap();
+    fixture.write_all(TWO_SOURCE_FIXTURE.as_bytes()).unwrap();
+    for mode in [StorageMode::Memory, StorageMode::Mapped] {
+        let root = tempfile::tempdir().unwrap();
+        let mut graph = graph_for_mode(mode, root.path());
+        load_ntriples(
+            &mut graph,
+            fixture.path().to_str().unwrap(),
+            &two_source_config(),
+        )
+        .unwrap();
+        let info = &graph.connection_type_metadata["R"];
+        let mut sources: Vec<&str> = info.source_types.iter().map(String::as_str).collect();
+        sources.sort();
+        assert_eq!(sources, ["Alpha", "Beta"], "mode={mode:?}");
+        let targets: Vec<&str> = info.target_types.iter().map(String::as_str).collect();
+        assert_eq!(targets, ["Target"], "mode={mode:?}");
     }
 }

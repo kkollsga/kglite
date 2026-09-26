@@ -656,3 +656,28 @@ class TestSharedRelationshipTypeOwnership:
         g.replace_relationships(frame, "HAS_LICENSEE", "Licence", "src", "Company", "tgt")
         assert self._periods(g, "Licence") == self.LICENCE
         assert self._periods(g, "Field") == self.FIELD
+
+    # ── a load that writes nothing claims nothing ───────────────────────
+
+    @staticmethod
+    def _typed_frame(src, tgt):
+        return pd.DataFrame({"src": pd.array(src, dtype="Int64"), "tgt": pd.array(tgt, dtype="Int64")})
+
+    @pytest.mark.filterwarnings("ignore:.*rows skipped")
+    @pytest.mark.parametrize(
+        "nothing",
+        [([], []), ([None], [1]), ([10], [None])],
+        ids=["zero-rows", "null-source-id", "null-target-id"],
+    )
+    def test_a_load_that_writes_nothing_leaves_the_first_real_load_its_rows(self, nothing):
+        """Red proof: a zero-row (or all-null-id) load recorded Field as a
+        source type, so the next Field load merged and folded its repeated
+        (10, 1) pair onto one relationship."""
+        g = self._graph()
+        empty = g.add_relationships(self._typed_frame(*nothing), "HAS_LICENSEE", "Field", "src", "Company", "tgt")
+        assert empty["connections_created"] == 0
+        report = g.add_relationships(
+            self._typed_frame([10, 10], [1, 1]), "HAS_LICENSEE", "Field", "src", "Company", "tgt"
+        )
+        assert (report["connections_created"], report["connections_updated"]) == (2, 0)
+        assert g.cypher("MATCH (:Field)-[r:HAS_LICENSEE]->(:Company) RETURN count(r) AS n").scalar() == 2

@@ -359,3 +359,51 @@ fn edge_specs_a_second_source_type_owns_its_rows_in_every_storage_mode() {
         assert_eq!(graph.graph.edge_count(), 6, "mode={mode:?}");
     }
 }
+
+fn tagged(target_type: &str, target_id: i64) -> EdgeSpec {
+    EdgeSpec {
+        source_type: "Person".to_string(),
+        source_id: Value::Int64(1),
+        target_type: target_type.to_string(),
+        target_id: Value::Int64(target_id),
+        edge_type: "E".to_string(),
+        properties: HashMap::new(),
+    }
+}
+
+/// Ownership is decided once per (edge type, source type) for the whole call,
+/// across target types, as `extend()` decides it. Red proof: the `Tag` group
+/// sorted after the `Doc` group of the same pair, re-detected, merged, and
+/// folded its repeated pair onto one edge (2 created, 1 updated).
+#[test]
+fn edge_specs_every_target_group_of_an_owned_source_keeps_its_rows() {
+    for mode in [StorageMode::Memory, StorageMode::Mapped, StorageMode::Disk] {
+        let tmp = TempDir::new().unwrap();
+        let path = (mode == StorageMode::Disk).then_some(tmp.path());
+        let mut graph = new_dir_graph_in_mode(mode, path).unwrap();
+        add_typed(&mut graph, "Person", 1);
+        add_typed(&mut graph, "Doc", 1);
+        add_typed(&mut graph, "Tag", 1);
+
+        let report = add_edges_from_specs(
+            &mut graph,
+            vec![tagged("Doc", 1), tagged("Tag", 1), tagged("Tag", 1)],
+        )
+        .unwrap();
+        assert_eq!(
+            (report.connections_created, report.connections_updated),
+            (3, 0),
+            "mode={mode:?}"
+        );
+        assert_eq!(graph.graph.edge_count(), 3, "mode={mode:?}");
+
+        // A later call from the same source type merges, in every group.
+        let reload =
+            add_edges_from_specs(&mut graph, vec![tagged("Doc", 1), tagged("Tag", 1)]).unwrap();
+        assert_eq!(
+            (reload.connections_created, reload.connections_updated),
+            (0, 2),
+            "mode={mode:?}"
+        );
+    }
+}

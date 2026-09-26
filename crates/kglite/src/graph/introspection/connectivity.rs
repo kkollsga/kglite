@@ -46,6 +46,38 @@ pub fn compute_type_connectivity(graph: &DirGraph) -> Vec<ConnectivityTriple> {
     triples
 }
 
+/// Record the endpoint types of every relationship type registered by name
+/// only, from one sweep of the stored edges.
+///
+/// A disk N-Triples build registers its types that way, and so did files
+/// older than the endpoint fields. Recording one write's source type into such
+/// a type would leave a partial set, which the shared-relationship ownership
+/// rule (`maintain::source_owns_its_edges`) reads as "no edge from the other
+/// source types" — so a load from one of them would duplicate the pairs it
+/// shares with stored edges. `DirGraph::upsert_connection_type_metadata` calls
+/// this before recording into a names-only type, so it runs at most once per
+/// such type: afterwards its set is non-empty, or the type has no edges and
+/// its first write's endpoint types are the whole truth.
+pub(crate) fn backfill_names_only_types(graph: &mut DirGraph) {
+    let names_only: HashSet<String> = graph
+        .connection_type_metadata
+        .iter()
+        .filter(|(_, info)| info.source_types.is_empty())
+        .map(|(name, _)| name.clone())
+        .collect();
+    let triples = compute_type_connectivity(graph);
+    let metadata = graph.connection_type_metadata_mut();
+    for triple in triples {
+        if let Some(info) = metadata
+            .get_mut(&triple.conn)
+            .filter(|_| names_only.contains(&triple.conn))
+        {
+            info.source_types.insert(triple.src);
+            info.target_types.insert(triple.tgt);
+        }
+    }
+}
+
 /// Impose the canonical persisted order on connectivity triples.
 ///
 /// Every writer of the cache — the `.kgl` metadata field and the disk-mode

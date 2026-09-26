@@ -262,17 +262,18 @@ impl KnowledgeGraph {
             Some(std::sync::Arc::new(derived.counts));
 
         let graph = get_graph_mut(&mut self.inner);
+        // A union, not a fill-if-empty: a set an earlier version recorded
+        // partially (a names-only type one load then gave a single source
+        // type) must learn every source type its stored edges leave, or the
+        // shared-relationship ownership rule lets another source type's load
+        // duplicate the pairs it shares with them.
         for (conn_type, (src_types, tgt_types)) in derived.endpoints {
             let info = graph
                 .connection_type_metadata_mut()
                 .entry(conn_type)
                 .or_default();
-            if info.source_types.is_empty() {
-                info.source_types = src_types;
-            }
-            if info.target_types.is_empty() {
-                info.target_types = tgt_types;
-            }
+            info.source_types.extend(src_types);
+            info.target_types.extend(tgt_types);
         }
 
         self.inner.set_type_connectivity(triples);

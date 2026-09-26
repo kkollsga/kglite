@@ -127,3 +127,58 @@ fn a_type_with_no_recorded_source_types_still_merges() {
     );
     assert_eq!(graph.graph.edge_count(), 1);
 }
+
+/// A names-only type whose stored edges leave two source types (a graph an
+/// N-Triples disk build or an older file left behind): the first load from
+/// one source type must not record that type alone, or a load from the other
+/// then owns its rows and duplicates the pair it shares with a stored edge.
+/// Red proof: the `Tag` load wrote a parallel `t1 → d1` edge (1 created).
+#[test]
+fn a_names_only_type_learns_every_source_type_before_recording_one() {
+    let mut graph = DirGraph::new();
+    docs(&mut graph);
+    let tags =
+        DataFrame::from_cypher_rows(vec!["id".to_string()], vec![vec![Value::Int64(7)]]).unwrap();
+    add_nodes(
+        &mut graph,
+        tags,
+        "Tag".to_string(),
+        "id".to_string(),
+        None,
+        None,
+    )
+    .unwrap();
+    let load = |graph: &mut DirGraph, source_type: &str, source_id: i64| {
+        let df = DataFrame::from_cypher_rows(
+            vec!["src".to_string(), "tgt".to_string()],
+            vec![vec![Value::Int64(source_id), Value::Int64(2)]],
+        )
+        .unwrap();
+        let report = add_connections(
+            graph,
+            df,
+            "LINKS".to_string(),
+            source_type.to_string(),
+            "src".to_string(),
+            "Doc".to_string(),
+            "tgt".to_string(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        (report.connections_created, report.connections_updated)
+    };
+    assert_eq!(load(&mut graph, "Doc", 1), (1, 0));
+    assert_eq!(load(&mut graph, "Tag", 7), (1, 0));
+    let info = graph
+        .connection_type_metadata_mut()
+        .get_mut("LINKS")
+        .unwrap();
+    info.source_types.clear();
+    info.target_types.clear();
+
+    assert_eq!(load(&mut graph, "Doc", 1), (0, 1));
+    assert_eq!(load(&mut graph, "Tag", 7), (0, 1));
+    assert_eq!(graph.graph.edge_count(), 2);
+}

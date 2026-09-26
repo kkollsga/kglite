@@ -2564,7 +2564,8 @@ class KnowledgeGraph:
                 group is judged before the first write, so nothing is merged
                 and no declaration is copied.
             ArgumentError: Either graph is mapped/disk-backed, a name in
-                *other* collides with this graph's interner, or
+                *other* collides with this graph's interner, *other* holds
+                nodes of a class this graph's ontology declares abstract, or
                 ``conflict_handling`` is not one of the modes above. Raised
                 before anything is written.
         """
@@ -4444,7 +4445,9 @@ class KnowledgeGraph:
         Call once after bulk mutations to warm the cache before
         ``save()`` or ``describe()``. The cache is persisted by
         ``save()`` and restored by ``load()``, so this only needs
-        to be called once after building or mutating a graph.
+        to be called once after building or mutating a graph. It also
+        completes each relationship type's recorded source and target node
+        types from its stored relationships.
 
         Example::
 

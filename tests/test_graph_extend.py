@@ -575,3 +575,36 @@ def test_a_refused_node_group_leaves_the_target_untouched():
     with pytest.raises(kglite.ConstraintViolationError, match="B.x"):
         target.extend(source)
     assert _all(target, "MATCH (n) RETURN count(n) AS n") == [{"n": 0}]
+
+
+def _abstract_target(g):
+    g.define_ontology({"classes": {"Z": {"abstract": True}}})
+    return g
+
+
+def _abstract_source():
+    source = KnowledgeGraph()
+    source.cypher("CREATE (:A {id: 1, title: 'a'}), (:Z {id: 2, title: 'z'})")
+    return source
+
+
+def test_a_refused_abstract_node_group_leaves_the_target_untouched():
+    """Red proof: the pre-gate skipped the abstract-class refusal ``add_nodes``
+    makes, so the ``A`` group (sorting before ``Z``) was written before
+    ``add_nodes(Z)`` refused."""
+    target = _abstract_target(KnowledgeGraph())
+    with pytest.raises(kglite.ArgumentError, match="abstract ontology class"):
+        target.extend(_abstract_source())
+    assert _all(target, "MATCH (n) RETURN count(n) AS n") == [{"n": 0}]
+
+
+def test_a_refused_abstract_node_group_reaches_no_durable_commit(tmp_path):
+    path = str(tmp_path / "g.kgl")
+    target = _abstract_target(kglite.open(path, durable=True))
+    with pytest.raises(kglite.ArgumentError, match="abstract ontology class"):
+        target.extend(_abstract_source())
+    target.cypher("CREATE (:Marker {id: 1})")
+    del target
+    reopened = kglite.open(path, durable=True)
+    rows = _all(reopened, "MATCH (n) RETURN labels(n)[0] AS label ORDER BY label")
+    assert rows == [{"label": "Marker"}]

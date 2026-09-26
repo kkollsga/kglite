@@ -142,14 +142,14 @@ pub fn add_edges_from_specs(
             }
         }
         // Same initial-load fast path and merge key as `add_connections`,
-        // under the same ownership rule (`maintain::source_owns_its_edges`).
-        // The first group of an (edge type, source type) registers that
-        // source, so a later group of the pair merges — decided here, before
-        // anything is written.
-        let is_initial_load = source_owns_its_edges(graph, &edge_type, &source_type)
-            && !prepared
-                .iter()
-                .any(|group| group.edge_type == edge_type && group.source_type == source_type);
+        // under the same ownership rule (`maintain::source_owns_its_edges`),
+        // decided once per (edge type, source type) for the whole call, as
+        // `extend()` decides it: nothing is written until every group is
+        // prepared, so each group of the pair — whatever its target type —
+        // sees the graph the call started from. Groups of one pair never
+        // share an endpoint pair (the target type differs), so an owning
+        // group loses no merge to another.
+        let is_initial_load = source_owns_its_edges(graph, &edge_type, &source_type);
         let start_key = merge_start_key(graph, &edge_type, Some(&source_type));
         prepared.push(PreparedSpecGroup {
             source_type,
@@ -183,7 +183,7 @@ pub fn add_edges_from_specs(
             &group.edge_type,
             &group.source_type,
             &group.target_type,
-            batch.schema_property_types(graph),
+            &batch,
         )?;
 
         let (stats, _metrics) = batch.execute(graph, group.edge_type)?;

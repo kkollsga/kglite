@@ -93,16 +93,44 @@ pub(super) fn create_edges_with_qnum_map(
         }
     }
 
-    // Register connection type names (no O(types²) metadata loop).
-    for conn_key in &conn_types_seen {
+    register_edge_types(graph, &conn_types_seen, &HashSet::new());
+    graph.invalidate_edge_type_counts_cache();
+    Ok(())
+}
+
+/// Register the relationship types a build wrote: `typed` with the
+/// (predicate, source type, target type) triples its edges carried, as every
+/// other loader records them, and `names_only` by name alone.
+///
+/// Names-only is the disk builds' deliberate choice — their edge loop does no
+/// random I/O per edge, and a node-type read per endpoint would be one. Such
+/// a type records no source types, which
+/// `DirGraph::upsert_connection_type_metadata` backfills from the stored
+/// edges before any write records one, so the shared-relationship ownership
+/// rule (`maintain::source_owns_its_edges`) never sees a partial set.
+fn register_edge_types(
+    graph: &mut DirGraph,
+    names_only: &HashSet<InternedKey>,
+    typed: &HashSet<(InternedKey, InternedKey, InternedKey)>,
+) {
+    for conn_key in names_only {
         let conn_name = graph.interner.resolve(*conn_key).to_string();
         graph
             .connection_type_metadata_mut()
             .entry(conn_name)
             .or_default();
     }
-    graph.invalidate_edge_type_counts_cache();
-    Ok(())
+    for &(conn_key, source_key, target_key) in typed {
+        let conn_name = graph.interner.resolve(conn_key).to_string();
+        let source_name = graph.interner.resolve(source_key).to_string();
+        let target_name = graph.interner.resolve(target_key).to_string();
+        graph.upsert_connection_type_metadata(
+            &conn_name,
+            &source_name,
+            &target_name,
+            HashMap::new(),
+        );
+    }
 }
 
 pub(super) fn create_edges_from_buffer(
@@ -177,8 +205,10 @@ pub(super) fn create_edges_compact(
         }
     }
 
-    // Track unique connection types (for metadata, computed once — not per edge)
+    // Relationship types for the metadata: by name on the disk path, with
+    // their endpoint types on the heap path (see `register_edge_types`).
     let mut conn_types_seen: HashSet<InternedKey> = HashSet::new();
+    let mut endpoint_types: HashSet<(InternedKey, InternedKey, InternedKey)> = HashSet::new();
 
     // Stream edges — use direct pending_edges push for disk mode (bypass add_edge overhead)
     let buf_len = buf.len();
@@ -230,18 +260,29 @@ pub(super) fn create_edges_compact(
         }
     } else {
         // Standard path for petgraph: per-edge add_edge
+        let mut last_triple = None;
         for i in 0..buf_len {
             let edge = buf.get(i);
             let (src_num, tgt_num, pred_key) = (edge.source_qnum, edge.target_qnum, edge.predicate);
             if let (Some(src_idx), Some(tgt_idx)) = (lookup(src_num), lookup(tgt_num)) {
                 let src = petgraph::graph::NodeIndex::new(src_idx as usize);
                 let tgt = petgraph::graph::NodeIndex::new(tgt_idx as usize);
+                if let (Some(src_type), Some(tgt_type)) =
+                    (graph.graph.node_type_of(src), graph.graph.node_type_of(tgt))
+                {
+                    let triple = (pred_key, src_type, tgt_type);
+                    // Consecutive edges mostly repeat a triple (a subject's
+                    // edges arrive together), so skip the hash for those.
+                    if last_triple != Some(triple) {
+                        endpoint_types.insert(triple);
+                        last_triple = Some(triple);
+                    }
+                }
                 let edge_data = EdgeData {
                     connection_type: pred_key,
                     properties: Vec::new(),
                 };
                 GraphWrite::add_edge(&mut graph.graph, src, tgt, edge_data);
-                conn_types_seen.insert(pred_key);
                 stats.edges_created += 1;
             } else {
                 stats.edges_skipped += 1;
@@ -257,14 +298,7 @@ pub(super) fn create_edges_compact(
         }
     }
 
-    // Register connection type names (no O(types²) metadata loop).
-    for conn_key in &conn_types_seen {
-        let conn_name = graph.interner.resolve(*conn_key).to_string();
-        graph
-            .connection_type_metadata_mut()
-            .entry(conn_name)
-            .or_default();
-    }
+    register_edge_types(graph, &conn_types_seen, &endpoint_types);
 
     graph.invalidate_edge_type_counts_cache();
 
