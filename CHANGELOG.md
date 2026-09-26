@@ -23,7 +23,9 @@ before upgrading.
   A Cartesian or 3D map is refused, since KGLite points are 2D WGS-84.
 - Cypher: pattern comprehensions — `[(p)-[:KNOWS]->(f) WHERE f.age > 30 | f.name]`
   gives one element per match of the pattern, correlated with the current
-  row. A named path inside one is not supported.
+  row. A named path inside one is not supported. In the Rust API,
+  `kglite::api::cypher::Expression` gains a `PatternComprehension` variant, so
+  an exhaustive match over it needs a new arm.
 
 ### Fixed
 
