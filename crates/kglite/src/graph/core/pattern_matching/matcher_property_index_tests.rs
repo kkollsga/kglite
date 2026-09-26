@@ -330,3 +330,101 @@ fn a_stored_name_global_bundle_never_answers_a_title_lookup() {
         "same through the typed cross-type arm"
     );
 }
+
+/// `vt`: 100, 200, absent, NULL; `vf`: 0, 100, 50, 150.
+fn open_ended(index: &[&str]) -> DirGraph {
+    let mut graph = DirGraph::new();
+    run(
+        &mut graph,
+        "CREATE (:S {id: 1, vf: 0, vt: 100}), (:S {id: 2, vf: 100, vt: 200}), \
+         (:S {id: 3, vf: 50}), (:S {id: 4, vf: 150, vt: null})",
+    );
+    for prop in index {
+        graph.create_range_index("S", prop);
+    }
+    graph
+}
+
+fn null_or_ge(bound: i64) -> PropertyMatcher {
+    PropertyMatcher::NullOr(Box::new(PropertyMatcher::GreaterOrEqual(Value::Int64(
+        bound,
+    ))))
+}
+
+/// The `vf` of each hit, sorted: `vf` is unique per node in `open_ended`.
+fn vfs(graph: &DirGraph, hits: Vec<NodeIndex>) -> Vec<i64> {
+    use crate::graph::storage::GraphRead;
+    let key = crate::graph::schema::InternedKey::from_str("vf");
+    let mut vfs: Vec<i64> = hits
+        .into_iter()
+        .map(|idx| match graph.graph.get_node_property(idx, key) {
+            Some(Value::Int64(v)) => v,
+            other => panic!("vf {other:?}"),
+        })
+        .collect();
+    vfs.sort_unstable();
+    vfs
+}
+
+#[test]
+fn null_or_matcher_declines_range_index_service() {
+    // The range index on `vt` holds no NULL row, so answering from it would
+    // lose nodes 3 and 4; `None` sends the caller to the type scan.
+    let graph = open_ended(&["vt"]);
+    let props = HashMap::from([("vt".to_string(), null_or_ge(150))]);
+    assert!(lookup(&graph, "S", &props).is_none());
+    assert_eq!(
+        rows(
+            &graph,
+            "MATCH (n:S) WHERE n.vt IS NULL OR n.vt >= 150 RETURN n"
+        ),
+        3
+    );
+}
+
+#[test]
+fn null_or_matcher_filters_a_co_conjunct_index_answer() {
+    let graph = open_ended(&["vf", "vt"]);
+    let props = HashMap::from([
+        ("vt".to_string(), null_or_ge(150)),
+        (
+            "vf".to_string(),
+            PropertyMatcher::LessOrEqual(Value::Int64(100)),
+        ),
+    ]);
+    let hits = lookup(&graph, "S", &props).expect("the `vf` range index answers");
+    // vt 200 (vf 100) and absent vt (vf 50); vt 100 fails, vf 150 is out.
+    assert_eq!(vfs(&graph, hits), vec![50, 100]);
+}
+
+#[test]
+fn null_or_value_matching_accepts_null_and_applies_its_comparison() {
+    let params = HashMap::new();
+    let matcher = null_or_ge(150);
+    for (value, expected) in [
+        (Value::Null, true),
+        (Value::Int64(200), true),
+        (Value::Int64(150), true),
+        (Value::Int64(100), false),
+        (Value::String("open".into()), false),
+        (Value::Float64(f64::NAN), false),
+    ] {
+        assert_eq!(
+            super::value_matches(&params, &value, &matcher),
+            expected,
+            "{value:?}"
+        );
+    }
+    assert!(matcher.accepts_absent());
+    assert!(!PropertyMatcher::GreaterOrEqual(Value::Int64(1)).accepts_absent());
+}
+
+#[test]
+fn null_or_has_no_range_index_bounds() {
+    let inner = PropertyMatcher::GreaterThan(Value::Int64(150));
+    assert!(
+        super::range_index_bounds(&inner).is_some(),
+        "control: the bare comparison is served"
+    );
+    assert!(super::range_index_bounds(&PropertyMatcher::NullOr(Box::new(inner))).is_none());
+}

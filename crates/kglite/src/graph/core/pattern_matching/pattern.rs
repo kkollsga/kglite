@@ -301,6 +301,11 @@ pub enum RelEdgePredicate {
         op: PropOp,
         value: Value,
     },
+    /// `r.<prop> IS NULL`: the property is missing or stored as NULL. Never
+    /// unknown, so `IS NOT NULL` is `Not` of this leaf.
+    PropertyIsNull {
+        prop: String,
+    },
     /// `startNode(r) = <peer endpoint>` / `endNode(r) = <peer
     /// endpoint>`. Encoded as a direction equality in the matcher's
     /// frame of reference: `StartNodeIsPeer` is true iff the edge's
@@ -435,6 +440,9 @@ impl RelEdgePredicate {
                     ),
                 }),
             },
+            RelEdgePredicate::PropertyIsNull { prop } => {
+                Some(matches!(get_prop(prop), None | Some(Value::Null)))
+            }
             RelEdgePredicate::StartNodeIsPeer => Some(edge_source == edge_target || peer_is_start),
             RelEdgePredicate::EndNodeIsPeer => Some(edge_source == edge_target || !peer_is_start),
             RelEdgePredicate::StartNodeIs(idx) => Some(edge_source == *idx),
@@ -552,6 +560,20 @@ pub enum PropertyMatcher {
     Contains(String),
     /// String suffix matcher — evaluated while discovering node candidates.
     EndsWith(String),
+    /// `n.prop IS NULL OR <inner>`: a missing or NULL property matches, any
+    /// other value must satisfy `inner` (always one of the four ordering
+    /// comparisons). Pushed only from a conjunctive WHERE, where a NULL
+    /// comparison and a false one both drop the row. Never index-served: the
+    /// range index holds no NULL rows, and deriving them costs a type scan.
+    NullOr(Box<PropertyMatcher>),
+}
+
+impl PropertyMatcher {
+    /// Whether a node without this property (or with it NULL) matches.
+    #[inline]
+    pub(crate) fn accepts_absent(&self) -> bool {
+        matches!(self, PropertyMatcher::NullOr(_))
+    }
 }
 
 /// A single pattern match with variable bindings.
@@ -633,6 +655,45 @@ mod tests {
             NodeIndex::new(1),
             get_prop,
         )
+    }
+
+    #[test]
+    fn relationship_is_null_is_never_unknown() {
+        let is_null = RelEdgePredicate::PropertyIsNull { prop: "vt".into() };
+        let is_not_null = RelEdgePredicate::Not(Box::new(is_null.clone()));
+        for (read, null) in [
+            (None, true),
+            (Some(Value::Null), true),
+            (Some(Value::String("open".into())), false),
+            (Some(Value::Int64(0)), false),
+        ] {
+            let get = |_: &str| read.clone();
+            assert_eq!(eval_with(&is_null, &get), null, "{read:?}");
+            assert_eq!(eval_with(&is_not_null, &get), !null, "{read:?}");
+        }
+    }
+
+    #[test]
+    fn relationship_null_or_comparison_negates_as_where_does() {
+        // NOT (vt IS NULL OR vt >= 150): NULL -> false, 'foo' -> NULL (dropped),
+        // 200 -> false, 100 -> true.
+        let predicate = RelEdgePredicate::Not(Box::new(RelEdgePredicate::Or(vec![
+            RelEdgePredicate::PropertyIsNull { prop: "vt".into() },
+            RelEdgePredicate::Property {
+                prop: "vt".into(),
+                op: PropOp::Ge,
+                value: Value::Int64(150),
+            },
+        ])));
+        for (read, kept) in [
+            (None, false),
+            (Some(Value::Null), false),
+            (Some(Value::String("foo".into())), false),
+            (Some(Value::Int64(200)), false),
+            (Some(Value::Int64(100)), true),
+        ] {
+            assert_eq!(eval_with(&predicate, &|_| read.clone()), kept, "{read:?}");
+        }
     }
 
     #[test]

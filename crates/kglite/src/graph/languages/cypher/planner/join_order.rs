@@ -333,6 +333,9 @@ pub(super) fn estimate_node_selectivity(
                         let scan_cost_floor = type_count.div_ceil(10);
                         est = reduced.max(scan_cost_floor).max(1);
                     }
+                    // Keeps every NULL row besides its comparison's matches;
+                    // no evidence it narrows the type at all.
+                    PropertyMatcher::NullOr(_) => {}
                     _ => est /= 10,
                 }
             }

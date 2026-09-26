@@ -74,7 +74,11 @@ pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<St
             occupied_properties,
         );
 
-        if !pushables.is_empty() {
+        // A WHERE that follows an OPTIONAL MATCH filters the null-extended
+        // rows too; a matcher that accepts NULL cannot stand in for it there.
+        let null_or_misplaced =
+            matches!(query.clauses[i], Clause::OptionalMatch(_)) && !pushables.null_or.is_empty();
+        if !pushables.is_empty() && !null_or_misplaced {
             let patterns = match &mut query.clauses[i] {
                 Clause::Match(ref mut m) => &mut m.patterns,
                 Clause::OptionalMatch(ref mut m) => &mut m.patterns,
@@ -164,6 +168,9 @@ pub(super) struct Pushables {
     pub node_props: Vec<(String, String, String, String)>,
     /// Positive STARTS/CONTAINS/ENDS predicates.
     pub text: Vec<(String, String, PropertyMatcher)>,
+    /// `NullOr` matchers from `x.p IS NULL OR x.p <op> c` and the true fold
+    /// of `coalesce(x.p, c0) <op> c`.
+    pub null_or: Vec<(String, String, PropertyMatcher)>,
 }
 
 impl Pushables {
@@ -174,6 +181,7 @@ impl Pushables {
             && self.scalar_vars.is_empty()
             && self.node_props.is_empty()
             && self.text.is_empty()
+            && self.null_or.is_empty()
     }
 
     /// Apply every term to `patterns`; `false` when any term found no home
@@ -196,8 +204,8 @@ impl Pushables {
             all_applied &=
                 apply_nodeprop_to_patterns(patterns, &var_name, &property, ref_var, ref_prop);
         }
-        for (var_name, property, matcher) in self.text {
-            all_applied &= apply_text_matcher_to_patterns(patterns, &var_name, &property, matcher);
+        for (var_name, property, matcher) in self.text.into_iter().chain(self.null_or) {
+            all_applied &= apply_matcher_to_patterns(patterns, &var_name, &property, matcher);
         }
         all_applied
     }
@@ -314,6 +322,10 @@ struct ExtractScope<'a> {
 /// - `variable.property = literal_value` / `= $param` (equality)
 /// - `variable.property IN [literal, ...]` (IN list)
 /// - `variable.property > literal_value` (and >=, <, <=)
+/// - `variable.property IS NULL OR variable.property > value` (either order,
+///   any ordering operator)  →  NullOr
+/// - `coalesce(variable.property, default) > value`, folded on `default > value`
+///   into NullOr (true) or the plain comparison (false or NULL)
 /// - `variable.property STARTS WITH/CONTAINS/ENDS WITH <string>`
 /// - `variable.property = other_variable` when `other_variable` is a scalar
 ///   from a prior WITH/UNWIND  →  EqualsVar
@@ -474,19 +486,29 @@ fn extract_from_predicate(
                 | ComparisonOp::LessThanEq),
             right,
         } => {
-            if let Some((var, prop, op, val)) =
-                try_extract_comparison(left, right, *op, match_vars, params)
-            {
-                if reserve_comparison(reservations, &var, &prop, op) {
-                    out.comparisons.push((var, prop, op, val));
-                    None
-                } else {
-                    Some(pred.clone())
+            let extracted = match try_extract_comparison(left, right, *op, match_vars, params) {
+                Some((var, prop, op, val)) => Some(CmpTerm::Plain(var, prop, op, val)),
+                None => try_extract_coalesce_comparison(left, right, *op, match_vars, params),
+            };
+            match extracted {
+                Some(CmpTerm::Plain(var, prop, op, val)) => {
+                    if reserve_comparison(reservations, &var, &prop, op) {
+                        out.comparisons.push((var, prop, op, val));
+                        None
+                    } else {
+                        Some(pred.clone())
+                    }
                 }
-            } else {
-                Some(pred.clone())
+                Some(CmpTerm::NullOr(var, prop, matcher)) => {
+                    push_null_or(out, reservations, var, prop, matcher, pred)
+                }
+                None => Some(pred.clone()),
             }
         }
+        Predicate::Or(left, right) => match try_extract_null_or(left, right, match_vars, params) {
+            Some((var, prop, matcher)) => push_null_or(out, reservations, var, prop, matcher, pred),
+            None => Some(pred.clone()),
+        },
         Predicate::In { expr, list } => {
             if let Expression::PropertyAccess { variable, property } = expr {
                 if match_vars.iter().any(|(v, _)| v == variable) {
@@ -577,6 +599,169 @@ fn extract_from_predicate(
         }
         // Other predicate types can't be pushed
         _ => Some(pred.clone()),
+    }
+}
+
+/// One ordering comparison the extractor can push: a plain bound, or a
+/// `NullOr` that also accepts the rows where the property is NULL.
+enum CmpTerm {
+    Plain(String, String, ComparisonOp, Value),
+    NullOr(String, String, PropertyMatcher),
+}
+
+/// Reserve `(var, prop)` for a `NullOr` and queue it; a property some other
+/// term already claimed keeps `pred` in WHERE instead of merging with it.
+fn push_null_or(
+    out: &mut Pushables,
+    reservations: &mut HashMap<(String, String), PropertyReservation>,
+    var: String,
+    prop: String,
+    matcher: PropertyMatcher,
+    pred: &Predicate,
+) -> Option<Predicate> {
+    if reserve_exclusive(reservations, &var, &prop) {
+        out.null_or.push((var, prop, matcher));
+        None
+    } else {
+        Some(pred.clone())
+    }
+}
+
+fn flip_comparison(op: ComparisonOp) -> ComparisonOp {
+    match op {
+        ComparisonOp::GreaterThan => ComparisonOp::LessThan,
+        ComparisonOp::GreaterThanEq => ComparisonOp::LessThanEq,
+        ComparisonOp::LessThan => ComparisonOp::GreaterThan,
+        ComparisonOp::LessThanEq => ComparisonOp::GreaterThanEq,
+        other => other,
+    }
+}
+
+/// The matcher for `prop <op> value`; `None` for a non-ordering operator.
+fn comparison_matcher(op: ComparisonOp, value: Value) -> Option<PropertyMatcher> {
+    Some(match op {
+        ComparisonOp::GreaterThan => PropertyMatcher::GreaterThan(value),
+        ComparisonOp::GreaterThanEq => PropertyMatcher::GreaterOrEqual(value),
+        ComparisonOp::LessThan => PropertyMatcher::LessThan(value),
+        ComparisonOp::LessThanEq => PropertyMatcher::LessOrEqual(value),
+        _ => return None,
+    })
+}
+
+/// `x.p IS NULL OR x.p <op> c`, either operand order, `<op>` an ordering
+/// comparison and `c` a non-NULL literal or bound parameter.
+fn try_extract_null_or(
+    left: &Predicate,
+    right: &Predicate,
+    match_vars: &[(String, Option<String>)],
+    params: &HashMap<String, Value>,
+) -> Option<(String, String, PropertyMatcher)> {
+    let ((Predicate::IsNull(Expression::PropertyAccess { variable, property }), cmp)
+    | (cmp, Predicate::IsNull(Expression::PropertyAccess { variable, property }))) = (left, right)
+    else {
+        return None;
+    };
+    let Predicate::Comparison {
+        left: cmp_left,
+        operator:
+            operator @ (ComparisonOp::GreaterThan
+            | ComparisonOp::GreaterThanEq
+            | ComparisonOp::LessThan
+            | ComparisonOp::LessThanEq),
+        right: cmp_right,
+    } = cmp
+    else {
+        return None;
+    };
+    let (var, prop, op, value) =
+        try_extract_comparison(cmp_left, cmp_right, *operator, match_vars, params)?;
+    if var != *variable || prop != *property {
+        return None;
+    }
+    Some((
+        var,
+        prop,
+        PropertyMatcher::NullOr(Box::new(comparison_matcher(op, value)?)),
+    ))
+}
+
+/// `coalesce(x.p, c0) <op> c` (or `c <op> coalesce(x.p, c0)`) with `c0`
+/// and `c` known at plan time. For a NULL `x.p` the comparison is `c0 <op>
+/// c`, folded here with WHERE's own three-valued rule: `true` accepts the
+/// NULL rows (`NullOr`); `false` or NULL drops them, exactly as the plain
+/// comparison on `x.p` does.
+fn try_extract_coalesce_comparison(
+    left: &Expression,
+    right: &Expression,
+    op: ComparisonOp,
+    match_vars: &[(String, Option<String>)],
+    params: &HashMap<String, Value>,
+) -> Option<CmpTerm> {
+    let (coalesced, op, bound) = match (
+        coalesce_property_default(left),
+        coalesce_property_default(right),
+    ) {
+        (Some(c), None) => (c, op, right),
+        (None, Some(c)) => (c, flip_comparison(op), left),
+        _ => return None,
+    };
+    let (variable, property, default) = coalesced;
+    if !match_vars.iter().any(|(v, _)| v == variable) {
+        return None;
+    }
+    let value = plan_time_value(bound, params).filter(|v| !matches!(v, Value::Null))?;
+    let null_matches = coalesce_default_matches(default, op, &value, params)? == Some(true);
+    let (var, prop) = (variable.to_string(), property.to_string());
+    Some(if null_matches {
+        CmpTerm::NullOr(
+            var,
+            prop,
+            PropertyMatcher::NullOr(Box::new(comparison_matcher(op, value)?)),
+        )
+    } else {
+        CmpTerm::Plain(var, prop, op, value)
+    })
+}
+
+/// Split `coalesce(v.p, default)` into `(v, p, default)`.
+pub(super) fn coalesce_property_default(expr: &Expression) -> Option<(&str, &str, &Expression)> {
+    let Expression::FunctionCall {
+        name,
+        args,
+        distinct: false,
+    } = expr
+    else {
+        return None;
+    };
+    match args.as_slice() {
+        [Expression::PropertyAccess { variable, property }, default]
+            if name.eq_ignore_ascii_case("coalesce") =>
+        {
+            Some((variable, property, default))
+        }
+        _ => None,
+    }
+}
+
+/// `default <op> value` in three-valued logic: what `coalesce(x.p, default)
+/// <op> value` answers for a NULL `x.p` (`Some(None)` is NULL). `None` when
+/// `default` is not known at plan time. Goes through WHERE's comparison,
+/// never `compare_values`, which ranks NULL below every value.
+pub(super) fn coalesce_default_matches(
+    default: &Expression,
+    op: ComparisonOp,
+    value: &Value,
+    params: &HashMap<String, Value>,
+) -> Option<Option<bool>> {
+    let default = plan_time_value(default, params)?;
+    super::super::executor::helpers::evaluate_comparison_tristate(&default, &op, value).ok()
+}
+
+fn plan_time_value(expr: &Expression, params: &HashMap<String, Value>) -> Option<Value> {
+    match expr {
+        Expression::Literal(value) => Some(value.clone()),
+        Expression::Parameter(name) => params.get(name.as_str()).cloned(),
+        _ => None,
     }
 }
 
@@ -817,14 +1002,12 @@ fn comparison_operands(
         (left, right)
     {
         if match_vars.iter().any(|(v, _)| v == variable) {
-            let reversed = match op {
-                ComparisonOp::GreaterThan => ComparisonOp::LessThan,
-                ComparisonOp::GreaterThanEq => ComparisonOp::LessThanEq,
-                ComparisonOp::LessThan => ComparisonOp::GreaterThan,
-                ComparisonOp::LessThanEq => ComparisonOp::GreaterThanEq,
-                other => other,
-            };
-            return Some((variable.clone(), property.clone(), reversed, val.clone()));
+            return Some((
+                variable.clone(),
+                property.clone(),
+                flip_comparison(op),
+                val.clone(),
+            ));
         }
     }
 
@@ -843,14 +1026,12 @@ fn comparison_operands(
     {
         if let Some(val) = params.get(name.as_str()) {
             if match_vars.iter().any(|(v, _)| v == variable) {
-                let reversed = match op {
-                    ComparisonOp::GreaterThan => ComparisonOp::LessThan,
-                    ComparisonOp::GreaterThanEq => ComparisonOp::LessThanEq,
-                    ComparisonOp::LessThan => ComparisonOp::GreaterThan,
-                    ComparisonOp::LessThanEq => ComparisonOp::GreaterThanEq,
-                    other => other,
-                };
-                return Some((variable.clone(), property.clone(), reversed, val.clone()));
+                return Some((
+                    variable.clone(),
+                    property.clone(),
+                    flip_comparison(op),
+                    val.clone(),
+                ));
             }
         }
     }
@@ -880,12 +1061,8 @@ pub(super) fn apply_comparison_to_patterns(
                         }
                         return false;
                     }
-                    let matcher = match op {
-                        ComparisonOp::GreaterThan => PropertyMatcher::GreaterThan(value),
-                        ComparisonOp::GreaterThanEq => PropertyMatcher::GreaterOrEqual(value),
-                        ComparisonOp::LessThan => PropertyMatcher::LessThan(value),
-                        ComparisonOp::LessThanEq => PropertyMatcher::LessOrEqual(value),
-                        _ => return false,
+                    let Some(matcher) = comparison_matcher(op, value) else {
+                        return false;
                     };
                     props.insert(property.to_string(), matcher);
                     return true;
@@ -965,10 +1142,9 @@ pub(super) fn apply_property_to_patterns(
     false
 }
 
-/// Apply a positive string matcher to the matching node pattern. STARTS WITH
-/// can use a persistent prefix index; CONTAINS and ENDS WITH linearly filter
-/// the node candidates before any relationship expansion.
-pub(super) fn apply_text_matcher_to_patterns(
+/// Apply a ready-built matcher (a positive string matcher or a `NullOr`) to
+/// the matching node pattern; `false` when the property already has one.
+fn apply_matcher_to_patterns(
     patterns: &mut [crate::graph::core::pattern_matching::Pattern],
     var_name: &str,
     property: &str,
@@ -1191,6 +1367,7 @@ fn matchers_equivalent(a: &PropertyMatcher, b: &PropertyMatcher) -> bool {
                 upper_inclusive: bui,
             },
         ) => al == bl && ali == bli && au == bu && aui == bui,
+        (PropertyMatcher::NullOr(x), PropertyMatcher::NullOr(y)) => matchers_equivalent(x, y),
         _ => false,
     }
 }
@@ -1308,6 +1485,23 @@ mod subsumption_tests {
         );
     }
 
+    #[test]
+    fn null_or_comparison_where_is_dropped() {
+        assert_eq!(
+            fused_filter(
+                "MATCH (n:Person) WHERE n.age > 30 AND (n.email IS NULL OR n.email >= 'p') \
+                 RETURN n.city, count(n)"
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            fused_filter(
+                "MATCH (n:Person) WHERE coalesce(n.email, 'zz') >= 'p' RETURN n.city, count(n)"
+            ),
+            Some(false)
+        );
+    }
+
     // ── PRESENT: the net stays ──────────────────────────────────────────
 
     #[test]
@@ -1317,6 +1511,17 @@ mod subsumption_tests {
         assert_eq!(
             fused_filter(
                 "MATCH (n:Person) WHERE n.age > 30 AND n.name =~ '.*a.*' \
+                 RETURN n.city, count(n)"
+            ),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn is_not_null_or_comparison_keeps_its_predicate() {
+        assert_eq!(
+            fused_filter(
+                "MATCH (n:Person) WHERE n.age > 30 AND (n.email IS NOT NULL OR n.email >= 'p') \
                  RETURN n.city, count(n)"
             ),
             Some(true)

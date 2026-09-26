@@ -251,7 +251,7 @@ impl<'a> PatternExecutor<'a> {
                 edge_data
                     .get_property(key)
                     .map(|v| self.value_matches(v, matcher))
-                    .unwrap_or(false)
+                    .unwrap_or_else(|| matcher.accepts_absent())
             });
             if !matches {
                 return None;

@@ -42,6 +42,12 @@ before upgrading.
 - Rust API: `kglite::api::fluent::node_is_temporally_valid`,
   `node_overlaps_range` and `node_passes_context` return
   `Result<bool, String>`; the error names the node and the unreadable bound.
+- Cypher filters of the form `x.p IS NULL OR x.p >= $v` (either order, any of
+  `<`, `<=`, `>`, `>=`) and `coalesce(x.p, default) >= $v` with a literal or
+  parameter default now filter nodes and relationships while the pattern is
+  matched, as a plain `x.p >= $v` does, instead of after. A relationship's
+  `r.p IS NULL` / `r.p IS NOT NULL` filters during expansion too. Answers are
+  unchanged.
 
 ### Fixed
 

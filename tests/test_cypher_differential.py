@@ -3066,6 +3066,64 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) WHERE p.age >= null RETURN p.city AS city, count(p) AS n ORDER BY city",
         None,
     ),
+    # ── `x IS NULL OR x <op> c` pushdown, node matcher and relationship filter ──
+    #
+    # `email` is NULL on odd persons and `tag` on every fourth KNOWS edge. The
+    # grouped aggregate reaches the fused node scan, which drops its safety-net
+    # WHERE when the pattern subsumes it.
+    (
+        "null_or_cmp_node_pushdown",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.age >= 25 AND (p.email IS NULL OR p.email >= $cut) "
+        "RETURN p.city AS city, count(p) AS n ORDER BY city",
+        {"cut": "person14@test.com"},
+    ),
+    (
+        "null_or_cmp_relationship_pushdown",
+        "social_graph",
+        "MATCH (a:Person)-[r:KNOWS]->(b:Person) WHERE a.age < 30 AND ('knows_20' <= r.tag OR r.tag IS NULL) "
+        "RETURN a.name AS a, b.name AS b ORDER BY a, b",
+        None,
+    ),
+    (
+        "relationship_is_null_pushdown",
+        "social_graph",
+        "MATCH (a:Person)-[r:KNOWS]->(b:Person) WHERE r.tag IS NULL RETURN a.name AS a, b.name AS b ORDER BY a, b",
+        None,
+    ),
+    (
+        "relationship_is_not_null_pushdown",
+        "social_graph",
+        "MATCH (a:Person)-[r:KNOWS]->(b:Person) WHERE r.tag IS NOT NULL AND a.age > 35 "
+        "RETURN a.name AS a, b.name AS b ORDER BY a, b",
+        None,
+    ),
+    (
+        "coalesce_cmp_relationship_false_fold_negated",
+        "social_graph",
+        "MATCH (a:Person)-[r:KNOWS]->(b:Person) WHERE NOT (coalesce(r.tag, 'a') >= 'knows_3') RETURN count(*) AS n",
+        None,
+    ),
+    # Incomparable and absent cells: 'hello' >= 5 is null, so only the int and
+    # the missing `v` rows may survive; the coalesce spellings fold at plan time.
+    (
+        "null_or_cmp_mixed_types",
+        "mixed_type_props_graph",
+        "MATCH (n:Sample) WHERE n.v IS NULL OR n.v >= 5 RETURN n.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "coalesce_cmp_true_fold",
+        "mixed_type_props_graph",
+        "MATCH (n:Sample) WHERE coalesce(n.v, 100) >= 5 RETURN n.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "coalesce_cmp_null_default",
+        "mixed_type_props_graph",
+        "MATCH (n:Sample) WHERE coalesce(n.v, null) <= 5 RETURN n.id AS id ORDER BY id",
+        None,
+    ),
     (
         "kleene_or_null_lhs",
         "social_graph",

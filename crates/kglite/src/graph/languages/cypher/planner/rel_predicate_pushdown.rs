@@ -14,6 +14,8 @@
 //! - `type(r) = 'X'`, `type(r) IN [...]`
 //! - `r.<prop> OP <literal>` for `=`, `<>`, `<`, `<=`, `>`, `>=`
 //! - `r.<prop> STARTS WITH/CONTAINS/ENDS WITH <string>`
+//! - `r.<prop> IS NULL`, `r.<prop> IS NOT NULL`
+//! - `coalesce(r.<prop>, <literal>) OP <literal>` for `<`, `<=`, `>`, `>=`
 //! - `startNode(r) = <peer>`, `endNode(r) = <peer>` where `<peer>` is
 //!   the structural peer of `r` in the same pattern
 //! - `AND` / `OR` / `NOT` compositions of the above
@@ -22,6 +24,7 @@
 //! materialized predicate evaluator unchanged.
 
 use super::super::ast::*;
+use super::index_selection::{coalesce_default_matches, coalesce_property_default};
 use crate::datatypes::values::Value;
 use crate::graph::core::pattern_matching::pattern::{
     AnchorSide, PatternElement, PropOp, RelEdgeFilter, RelEdgePredicate,
@@ -258,7 +261,15 @@ fn try_compile_full(
             let p = try_compile_full(inner, edge_var, peer_var, params)?;
             Some(RelEdgePredicate::Not(Box::new(p)))
         }
-        Predicate::Xor(_, _) | Predicate::IsNull(_) | Predicate::IsNotNull(_) => None,
+        Predicate::IsNull(expr) => Some(RelEdgePredicate::PropertyIsNull {
+            prop: is_edge_property(expr, edge_var)?,
+        }),
+        Predicate::IsNotNull(expr) => Some(RelEdgePredicate::Not(Box::new(
+            RelEdgePredicate::PropertyIsNull {
+                prop: is_edge_property(expr, edge_var)?,
+            },
+        ))),
+        Predicate::Xor(_, _) => None,
         Predicate::Comparison {
             left,
             operator,
@@ -355,6 +366,13 @@ fn compile_lhs_rhs(
             value: val,
         })
     }
+    // coalesce(r.<prop>, <default>) OP <literal>
+    else if let Some((variable, prop, default)) = coalesce_property_default(lhs) {
+        if variable != edge_var {
+            return None;
+        }
+        compile_coalesce_comparison(prop, default, op, rhs, params)
+    }
     // startNode(r) = <peer> / endNode(r) = <peer>
     else if let Some(side) = is_endpoint_call_on(lhs, edge_var) {
         // Equality only — !=/<>/etc. are not meaningful for endpoint identity.
@@ -371,6 +389,42 @@ fn compile_lhs_rhs(
     } else {
         None
     }
+}
+
+/// `coalesce(r.<prop>, default) OP value` for an ordering `OP`, with the
+/// NULL-row answer `default OP value` folded at plan time: true accepts a
+/// NULL property, false rejects it, and NULL leaves it unknown — which is
+/// the plain comparison's own answer for a NULL property.
+fn compile_coalesce_comparison(
+    prop: &str,
+    default: &Expression,
+    op: ComparisonOp,
+    rhs: &Expression,
+    params: &HashMap<String, Value>,
+) -> Option<RelEdgePredicate> {
+    let op_kind = match op {
+        ComparisonOp::GreaterThan => PropOp::Gt,
+        ComparisonOp::GreaterThanEq => PropOp::Ge,
+        ComparisonOp::LessThan => PropOp::Lt,
+        ComparisonOp::LessThanEq => PropOp::Le,
+        _ => return None,
+    };
+    let value = literal_or_param(rhs, params).filter(|v| !matches!(v, Value::Null))?;
+    let null_answer = coalesce_default_matches(default, op, &value, params)?;
+    let prop = prop.to_string();
+    let is_null = RelEdgePredicate::PropertyIsNull { prop: prop.clone() };
+    let compared = RelEdgePredicate::Property {
+        prop,
+        op: op_kind,
+        value,
+    };
+    Some(match null_answer {
+        Some(true) => RelEdgePredicate::Or(vec![is_null, compared]),
+        Some(false) => {
+            RelEdgePredicate::And(vec![RelEdgePredicate::Not(Box::new(is_null)), compared])
+        }
+        None => compared,
+    })
 }
 
 fn compile_text_predicate(

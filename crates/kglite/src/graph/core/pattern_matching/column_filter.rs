@@ -265,8 +265,9 @@ impl<'a> ColumnFilter<'a> {
     /// Whether the node at `row` satisfies every predicate.
     ///
     /// `None` means "this row is not mine": the node carries an inline
-    /// `id`/`title` that outranks the sidecar column, so only the row route can
-    /// answer. The caller falls back for that node alone.
+    /// `id`/`title` that outranks the sidecar column, or its row is outside
+    /// the store while a predicate accepts an absent property, so only the
+    /// row route can answer. The caller falls back for that node alone.
     #[inline]
     pub(super) fn matches(
         &self,
@@ -288,6 +289,11 @@ impl<'a> ColumnFilter<'a> {
         let dead = row >= self.store.row_count() || self.store.is_tombstoned(row);
         for pred in &self.preds {
             let matched = if pred.source == Source::Property && dead {
+                // A matcher that accepts an absent property cannot read
+                // "dead" as "absent"; the row route decides that node.
+                if pred.matcher.accepts_absent() {
+                    return None;
+                }
                 false
             } else {
                 match pred.kind {
@@ -306,7 +312,7 @@ impl<'a> ColumnFilter<'a> {
                     }
                     Kind::Value => match pred.column.value(row) {
                         Some(value) => value_matches(params, &value, pred.matcher),
-                        None => false,
+                        None => pred.matcher.accepts_absent(),
                     },
                 }
             };
@@ -551,6 +557,12 @@ mod differential_tests {
         "MATCH (n:Item) WHERE n.sparse STARTS WITH 's' RETURN count(n) AS c",
         "MATCH (n:Item) WHERE n.sparse IS NULL RETURN count(n) AS c",
         "MATCH (n:Item) WHERE n.sparse IS NOT NULL RETURN count(n) AS c",
+        // ── `IS NULL OR <cmp>`: absent rows match, NaN rows do not ────────
+        "MATCH (n:Item) WHERE n.sparse IS NULL OR n.sparse >= 's2' RETURN count(n) AS c",
+        "MATCH (n:Item) WHERE n.count > 30 AND (n.sparse IS NULL OR n.sparse < 's2') \
+         RETURN n.key ORDER BY n.key",
+        "MATCH (n:Item) WHERE n.ratio IS NULL OR n.ratio > 5.0 RETURN count(n) AS c",
+        "MATCH (n:Item) WHERE coalesce(n.sparse, 'zz') >= 's2' RETURN count(n) AS c",
         // ── a Mixed (list) column ─────────────────────────────────────────
         "MATCH (n:Item) WHERE n.tags[0] = 1 RETURN count(n) AS c",
         // ── a key no node carries (the inline form is refused by the

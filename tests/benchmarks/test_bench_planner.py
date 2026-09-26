@@ -110,3 +110,123 @@ def test_bench_label_pair_counts_warm_read(benchmark, skewed_graph):
     Arc<RwLock<Option<...>>> read path."""
     g = skewed_graph
     benchmark(lambda: g.label_pair_counts())
+
+
+# ---------------------------------------------------------------------------
+# `x IS NULL OR x >= t` filters during matching
+# ---------------------------------------------------------------------------
+#
+# The open-ended form must filter inside the pattern as its closed twin does.
+# Each open cell ships its closed twin as the unchanged-path control; at
+# NULL_OR_T the two return the same count, so their ratio isolates the NULL
+# handling. NULL is an absent property (a second batch without `vt`).
+
+NULL_OR_ENTITIES = 20_000
+NULL_OR_VERSIONS = 5
+NULL_OR_EDGES = 500_000
+NULL_OR_T = 250
+NULL_OR_ANCHORS = [(i * 97 + 3) % NULL_OR_ENTITIES for i in range(200)]
+
+
+def _build_null_or_graph(entities: int, edges: int) -> KnowledgeGraph:
+    """`entities * NULL_OR_VERSIONS` versioned nodes and `edges` versioned
+    edges; the last version of each has no `vt`."""
+    graph = KnowledgeGraph()
+    n = entities * NULL_OR_VERSIONS
+    rows = pd.DataFrame(
+        {
+            "nid": list(range(n)),
+            "name": [f"E_{i}" for i in range(n)],
+            "eid": [i // NULL_OR_VERSIONS for i in range(n)],
+            "vf": [(i % NULL_OR_VERSIONS) * 100 for i in range(n)],
+            "vt": [(i % NULL_OR_VERSIONS) * 100 + 99 for i in range(n)],
+            "score": [float((i * 37) % 1000) for i in range(n)],
+        }
+    )
+    is_open = rows["vf"] == (NULL_OR_VERSIONS - 1) * 100
+    graph.add_nodes(rows[~is_open], "E", "nid", "name")
+    graph.add_nodes(rows[is_open].drop(columns=["vt"]), "E", "nid", "name")
+    graph.create_index("E", "eid")
+
+    version = [i % NULL_OR_VERSIONS for i in range(edges)]
+    links = pd.DataFrame(
+        {
+            "s": [i % n for i in range(edges)],
+            # A fresh target per lap over the sources: repeated (s, t) pairs
+            # would merge into one relationship.
+            "t": [((i % n) * 7919 + 13 + (i // n) * 104_729) % n for i in range(edges)],
+            "vf": [v * 100 for v in version],
+            "vt": [v * 100 + 99 for v in version],
+        }
+    )
+    open_links = links["vf"] == (NULL_OR_VERSIONS - 1) * 100
+    graph.add_connections(links[~open_links], "R", "E", "s", "E", "t", columns=["vf", "vt"])
+    graph.add_connections(links[open_links].drop(columns=["vt"]), "R", "E", "s", "E", "t", columns=["vf"])
+    return graph
+
+
+@pytest.fixture(scope="module")
+def null_or_graph():
+    return _build_null_or_graph(NULL_OR_ENTITIES, NULL_OR_EDGES)
+
+
+_NULL_OR_NODE = "MATCH (a:E) WHERE {f} RETURN avg(a.score) AS s, count(*) AS c"
+_NULL_OR_EDGE = "MATCH (a:E)-[r:R]->(b:E) WHERE a.eid IN $ids AND {f} RETURN count(*) AS c"
+
+
+def _null_or_filter(var: str, open_ended: bool) -> str:
+    if open_ended:
+        return f"{var}.vf <= {NULL_OR_T} AND ({var}.vt IS NULL OR {var}.vt >= {NULL_OR_T})"
+    return f"{var}.vf <= {NULL_OR_T} AND {var}.vt >= {NULL_OR_T}"
+
+
+@pytest.mark.benchmark
+def test_bench_null_or_node_scan_open(benchmark, null_or_graph):
+    """Open-ended node filter over a 100k-node type."""
+    query = _NULL_OR_NODE.format(f=_null_or_filter("a", True))
+    result = benchmark(lambda: null_or_graph.cypher(query).to_list())
+    assert result[0]["c"] > 0
+
+
+@pytest.mark.benchmark
+def test_bench_null_or_node_scan_closed(benchmark, null_or_graph):
+    """Closed-form control for `null_or_node_scan_open`."""
+    query = _NULL_OR_NODE.format(f=_null_or_filter("a", False))
+    result = benchmark(lambda: null_or_graph.cypher(query).to_list())
+    assert result[0]["c"] > 0
+
+
+@pytest.mark.benchmark
+def test_bench_null_or_anchored_edge_open(benchmark, null_or_graph):
+    """Open-ended relationship filter behind a 200-entity anchor."""
+    query = _NULL_OR_EDGE.format(f=_null_or_filter("r", True))
+    result = benchmark(lambda: null_or_graph.cypher(query, params={"ids": NULL_OR_ANCHORS}).to_list())
+    assert result[0]["c"] > 0
+
+
+@pytest.mark.benchmark
+def test_bench_null_or_anchored_edge_closed(benchmark, null_or_graph):
+    """Closed-form control for `null_or_anchored_edge_open`."""
+    query = _NULL_OR_EDGE.format(f=_null_or_filter("r", False))
+    result = benchmark(lambda: null_or_graph.cypher(query, params={"ids": NULL_OR_ANCHORS}).to_list())
+    assert result[0]["c"] > 0
+
+
+def test_null_or_pairs_agree():
+    """The open/closed pairs above compute one answer, and the NULL rows are
+    real. Unmarked, so it runs in the default suite at a reduced scale."""
+    entities = 2_000
+    graph = _build_null_or_graph(entities, 50_000)
+    anchors = [(i * 97 + 3) % entities for i in range(200)]
+    for template, var, params in (
+        (_NULL_OR_NODE, "a", None),
+        (_NULL_OR_EDGE, "r", {"ids": anchors}),
+    ):
+        open_rows = graph.cypher(template.format(f=_null_or_filter(var, True)), params=params).to_list()
+        closed_rows = graph.cypher(template.format(f=_null_or_filter(var, False)), params=params).to_list()
+        assert open_rows == closed_rows
+        assert open_rows[0]["c"] > 0
+    nulls = graph.cypher("MATCH (a:E) WHERE a.vt IS NULL RETURN count(*) AS c").to_list()
+    assert nulls == [{"c": entities}]
+    open_edges = graph.cypher("MATCH ()-[r:R]->() WHERE r.vt IS NULL RETURN count(*) AS c").to_list()
+    assert open_edges == [{"c": 50_000 // NULL_OR_VERSIONS}]

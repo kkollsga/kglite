@@ -347,7 +347,7 @@ pub(super) fn predicate_to_string(pred: &Predicate) -> String {
     }
 }
 
-pub(super) fn evaluate_comparison_tristate(
+pub(in crate::graph::languages::cypher) fn evaluate_comparison_tristate(
     left: &Value,
     op: &ComparisonOp,
     right: &Value,

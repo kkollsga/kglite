@@ -290,7 +290,7 @@ pub(super) fn value_matches(
     // evaluators disagreeing here would be a wrong answer rather than a
     // redundant filter.
     if matches!(value, Value::Null) {
-        return false;
+        return matcher.accepts_absent();
     }
     match matcher {
         PropertyMatcher::Equals(expected) => values_equal(value, expected),
@@ -359,6 +359,43 @@ pub(super) fn value_matches(
             Value::String(s) => str_ends_with(s, suffix),
             _ => false,
         },
+        PropertyMatcher::NullOr(inner) => value_matches(params, value, inner),
+    }
+}
+
+/// The range-index bounds that answer `matcher`, or `None` when the range
+/// index cannot serve it.
+pub(super) fn range_index_bounds(
+    matcher: &PropertyMatcher,
+) -> Option<(std::ops::Bound<&Value>, std::ops::Bound<&Value>)> {
+    use std::ops::Bound;
+    match matcher {
+        PropertyMatcher::GreaterThan(v) => Some((Bound::Excluded(v), Bound::Unbounded)),
+        PropertyMatcher::GreaterOrEqual(v) => Some((Bound::Included(v), Bound::Unbounded)),
+        PropertyMatcher::LessThan(v) => Some((Bound::Unbounded, Bound::Excluded(v))),
+        PropertyMatcher::LessOrEqual(v) => Some((Bound::Unbounded, Bound::Included(v))),
+        PropertyMatcher::Range {
+            lower,
+            lower_inclusive,
+            upper,
+            upper_inclusive,
+        } => {
+            let lo = if *lower_inclusive {
+                Bound::Included(lower)
+            } else {
+                Bound::Excluded(lower)
+            };
+            let hi = if *upper_inclusive {
+                Bound::Included(upper)
+            } else {
+                Bound::Excluded(upper)
+            };
+            Some((lo, hi))
+        }
+        // The range index holds no NULL rows, so it cannot produce the rows a
+        // `NullOr` accepts without a type scan.
+        PropertyMatcher::NullOr(_) => None,
+        _ => None,
     }
 }
 
@@ -1512,32 +1549,7 @@ impl<'a> PatternExecutor<'a> {
         }
 
         for (prop, matcher) in props {
-            use std::ops::Bound;
-            let bounds: Option<(Bound<&Value>, Bound<&Value>)> = match matcher {
-                PropertyMatcher::GreaterThan(v) => Some((Bound::Excluded(v), Bound::Unbounded)),
-                PropertyMatcher::GreaterOrEqual(v) => Some((Bound::Included(v), Bound::Unbounded)),
-                PropertyMatcher::LessThan(v) => Some((Bound::Unbounded, Bound::Excluded(v))),
-                PropertyMatcher::LessOrEqual(v) => Some((Bound::Unbounded, Bound::Included(v))),
-                PropertyMatcher::Range {
-                    lower,
-                    lower_inclusive,
-                    upper,
-                    upper_inclusive,
-                } => {
-                    let lo = if *lower_inclusive {
-                        Bound::Included(lower)
-                    } else {
-                        Bound::Excluded(lower)
-                    };
-                    let hi = if *upper_inclusive {
-                        Bound::Included(upper)
-                    } else {
-                        Bound::Excluded(upper)
-                    };
-                    Some((lo, hi))
-                }
-                _ => None,
-            };
+            let bounds = range_index_bounds(matcher);
             if let Some((lo, hi)) = bounds {
                 if let Some(results) = self.graph.lookup_range(node_type, prop, lo, hi) {
                     // Range candidates preserve the shared ordering policy;
@@ -1761,7 +1773,7 @@ impl<'a> PatternExecutor<'a> {
         // what a filter on `field` sees.
         match node.resolved_field(type_str, field, key) {
             Some(v) => self.value_matches(&v, matcher),
-            None => false,
+            None => matcher.accepts_absent(),
         }
     }
 
@@ -2092,7 +2104,7 @@ impl<'a> PatternExecutor<'a> {
                         edge_data
                             .get_property(key)
                             .map(|v| self.value_matches(v, matcher))
-                            .unwrap_or(false)
+                            .unwrap_or_else(|| matcher.accepts_absent())
                     });
                     if !matches {
                         continue;
