@@ -164,9 +164,20 @@ before upgrading.
 - `extend()` now copies the other graph's validity-interval declarations and
   spatial configurations; it copied neither, so the other graph's periods
   between the same endpoints collapsed into one relationship on merge and its
-  spatial types lost their configuration.
+  spatial types lost their configuration. An `extend()` whose relationships
+  are refused copies no declaration.
+- `extend()` refused by a relationship constraint raises
+  `ConstraintViolationError`, as `add_relationships` does; it raised
+  `ArgumentError`.
+- `create_relationships(properties=...)` copies properties from the nodes of
+  the intermediate traversal levels again (the `B` in
+  `select('A').traverse(...).traverse(...).create_relationships(..., properties={'B': [...]})`),
+  as documented; only the source and target levels were copied. Each path
+  from a source to a target is one row, so when several paths join the same
+  pair their values fold under `conflict_handling` (`'update'` keeps the last
+  path's, in node order).
 - `add_nodes(..., timeseries=...)` reads and validates the inline timeseries
-  before writing any node. A time cell it could not read (or a bad
+  before writing any node or validity-interval declaration. A time cell it could not read (or a bad
   `resolution`, or a non-numeric channel) raised after the nodes were written,
   leaving them in the graph — and, on a durable graph, outside the write-ahead
   log until the next committed write.

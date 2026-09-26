@@ -309,13 +309,6 @@
       "nesting": 3
     },
     {
-      "path": "crates/kglite/src/graph/mutation/maintain.rs",
-      "qualified_name": "crate::create_connections",
-      "lines": 237,
-      "branches": 39,
-      "nesting": 10
-    },
-    {
       "path": "crates/kglite/src/graph/mutation/subgraph_streaming.rs",
       "qualified_name": "crate::save_subset_streaming_disk",
       "lines": 472,

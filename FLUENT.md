@@ -782,9 +782,11 @@ graph.select('A').traverse('REL_AB').traverse('REL_BC') \
 graph.select('A').traverse('REL_AB').traverse('REL_BC') \
     .create_relationships('B_TO_C', source_type='B', target_type='C')
 
-# Conflict handling
+# Conflict handling. Each A → B → C path is one row, so when several B nodes
+# join the same A and C their copied values fold under it in node order
+# ('update', the default, keeps the last path's values; 'skip' the first's)
 graph.select('A').traverse('REL_AB').traverse('REL_BC') \
-    .create_relationships('A_TO_C', conflict_handling='skip')
+    .create_relationships('A_TO_C', conflict_handling='skip', properties={'B': ['score']})
 ```
 
 ---

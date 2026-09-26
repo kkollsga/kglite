@@ -19,6 +19,7 @@ use crate::graph::mutation::endpoints::{
 };
 use crate::graph::mutation::pending_edges::PendingEdges;
 use crate::graph::mutation::rel_constraint_gate::{ConnectionBatchGate, RowFolding};
+use crate::graph::mutation::traversal_paths::{copy_path_properties, node_type_name, LevelPaths};
 use crate::graph::schema::{
     CompositeValue, CurrentSelection, DirGraph, InternedKey, TypeSchema, PROVISIONAL_KEY,
     RESERVED_PROVENANCE_KEYS,
@@ -1957,9 +1958,9 @@ pub fn create_connections(
     }
 
     // Each group at the target level has (parent, children). For each target node,
-    // walk up through group parents to find the source node at source_level.
-    // A child can appear in multiple groups (different parents), producing one edge
-    // per distinct (source, target) pair.
+    // walk up through group parents to every path from the source level. A node
+    // can appear in multiple groups (different parents), and each path is one
+    // row: rows joining the same (source, target) pair fold under the conflict mode.
     let target_level_data = match selection.get_level(target_level) {
         Some(level) if !level.is_empty() => level,
         _ => {
@@ -1978,114 +1979,39 @@ pub fn create_connections(
     let mut detected_target_type = None;
     let mut pending: Vec<(usize, NodeIndex, NodeIndex)> = Vec::new();
     let mut pending_props: Vec<Vec<(InternedKey, Value)>> = Vec::new();
+    let level_paths = LevelPaths::new(selection, source_level, target_level);
+    // A level stores its groups in a hash map; node order makes the rows, and
+    // so how shared pairs fold, the same on every run.
+    let mut target_groups: Vec<_> = target_level_data.iter_groups().collect();
+    target_groups.sort_unstable_by_key(|(parent, _)| **parent);
 
-    // For the common 2-level case (source_level=0, target_level=1), each group's
-    // parent IS the source node, so we don't need parent maps at all.
-    // For multi-level cases, build reverse parent maps: child → parents (plural).
-    let parent_maps: Vec<HashMap<NodeIndex, Vec<NodeIndex>>> = if target_level - source_level > 1 {
-        let mut maps: Vec<HashMap<NodeIndex, Vec<NodeIndex>>> = vec![HashMap::new(); level_count];
-        for (lvl_idx, pmap) in maps.iter_mut().enumerate().skip(1) {
-            if let Some(level) = selection.get_level(lvl_idx) {
-                for (parent_opt, children) in level.iter_groups() {
-                    if let Some(parent) = parent_opt {
-                        for &child in children {
-                            pmap.entry(child).or_default().push(*parent);
-                        }
-                    }
-                }
-            }
-        }
-        maps
-    } else {
-        Vec::new()
-    };
-
-    let walk_to_sources = |start_node: NodeIndex, start_level: usize| -> Vec<NodeIndex> {
-        if start_level == source_level {
-            return vec![start_node];
-        }
-        let mut current_nodes = vec![start_node];
-        for lvl in (source_level + 1..=start_level).rev() {
-            let mut next_nodes = Vec::new();
-            for node in &current_nodes {
-                if let Some(parents) = parent_maps[lvl].get(node) {
-                    next_nodes.extend(parents);
-                }
-            }
-            if next_nodes.is_empty() {
-                return Vec::new(); // Orphan — no path to source
-            }
-            current_nodes = next_nodes;
-        }
-        current_nodes
-    };
-
-    for (parent_opt, targets) in target_level_data.iter_groups() {
+    for (parent_opt, targets) in target_groups {
         let Some(parent_idx) = parent_opt else {
             skipped += targets.len();
             continue;
         };
-
-        let source_nodes = if target_level - source_level == 1 {
-            // Direct parent IS the source
-            vec![*parent_idx]
-        } else {
-            walk_to_sources(*parent_idx, target_level - 1)
-        };
-
-        if source_nodes.is_empty() {
+        let paths = level_paths.paths_to(*parent_idx, target_level - 1);
+        if paths.is_empty() {
             skipped += targets.len();
             continue;
         }
 
         for &target_idx in targets {
             if detected_target_type.is_none() {
-                // Arena guard: get_node -> node_weight materializes on the
-                // disk backend (protocol in disk/graph.rs); scoped so the
-                // borrow ends before the batch's &mut graph calls.
-                let _arena_guard = graph.graph.begin_query();
-                if let Some(node) = graph.node_view(target_idx) {
-                    detected_target_type = Some(node.node_type_str(&graph.interner).to_string());
-                }
+                detected_target_type = node_type_name(graph, target_idx);
             }
-
-            for &source_idx in &source_nodes {
+            for path in &paths {
+                let source_idx = path[0];
                 if detected_source_type.is_none() {
-                    // Arena guard: scoped read (see above).
-                    let _arena_guard = graph.graph.begin_query();
-                    if let Some(node) = graph.node_view(source_idx) {
-                        detected_source_type =
-                            Some(node.node_type_str(&graph.interner).to_string());
-                    }
+                    detected_source_type = node_type_name(graph, source_idx);
                 }
-
-                let edge_props = if let Some(ref prop_spec) = copy_properties {
-                    // Arena guard: node_weight materializes on the disk
-                    // backend; scoped so the borrow ends before
-                    // batch.add_connection's &mut graph below.
-                    let _arena_guard = graph.graph.begin_query();
-                    let mut props = HashMap::new();
-                    for &node_idx in &[source_idx, target_idx] {
-                        if let Some(node) = graph.graph.node_view(node_idx) {
-                            let nt = node.node_type_str(&graph.interner);
-                            if let Some(requested_props) = prop_spec.get(nt) {
-                                if requested_props.is_empty() {
-                                    for (k, v) in node.property_pairs_named(&graph.interner) {
-                                        props.insert(k, v);
-                                    }
-                                } else {
-                                    for prop_name in requested_props {
-                                        if let Some(val) = node.get_property(prop_name) {
-                                            props.insert(prop_name.clone(), val.into_owned());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    props
-                } else {
-                    HashMap::new()
+                let edge_props = match copy_properties {
+                    Some(ref spec) => copy_path_properties(
+                        graph,
+                        spec,
+                        path.iter().copied().chain(std::iter::once(target_idx)),
+                    ),
+                    None => HashMap::new(),
                 };
                 let edge_props = intern_edge_props(edge_props, &mut graph.interner);
                 pending.push((pending.len(), source_idx, target_idx));

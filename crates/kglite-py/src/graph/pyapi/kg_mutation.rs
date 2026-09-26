@@ -1310,6 +1310,20 @@ impl KnowledgeGraph {
 
         let graph = get_graph_mut(&mut self.inner);
         refuse_convention_without_interval(convention, converted.temporal_cfg.as_ref())?;
+        // Every refusal comes before the declaration: once declared, only
+        // `finish_declaration` may end the call. Everything after the write is
+        // infallible, or a raise would leave the rows in memory but out of the
+        // write-ahead log.
+        let timeseries = parsed
+            .ts_config
+            .map(|cfg| prepare_timeseries(py, data, &unique_id_field, cfg))
+            .transpose()?
+            .flatten();
+        let labels = labels
+            .as_ref()
+            .filter(|list| !list.is_empty())
+            .map(|list| prepare_batch_labels(graph, data, &unique_id_field, list))
+            .transpose()?;
         let declaration = converted
             .temporal_cfg
             .map(|cfg| {
@@ -1324,18 +1338,6 @@ impl KnowledgeGraph {
             })
             .transpose()
             .map_err(|e| crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e)))?;
-        // Everything after the write below must be infallible, or a raise
-        // would leave the rows in memory but out of the write-ahead log.
-        let timeseries = parsed
-            .ts_config
-            .map(|cfg| prepare_timeseries(py, data, &unique_id_field, cfg))
-            .transpose()?
-            .flatten();
-        let labels = labels
-            .as_ref()
-            .filter(|list| !list.is_empty())
-            .map(|list| prepare_batch_labels(graph, data, &unique_id_field, list))
-            .transpose()?;
         let result = apply_node_batch(
             py,
             graph,
@@ -1410,9 +1412,7 @@ impl KnowledgeGraph {
         let graph = get_graph_mut(&mut self.inner);
         let result =
             kglite_core::api::mutation::extend_graph(graph, &source_arc, conflict_handling)
-                .map_err(|e: String| -> PyErr {
-                    crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-                })?;
+                .map_err(|message| bulk_write_err(graph, message))?;
 
         self.cursor.selection.clear();
         self.commit_wal()?;

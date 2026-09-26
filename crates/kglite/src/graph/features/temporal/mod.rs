@@ -25,7 +25,7 @@ pub use declarations::{
     DeclareReport, TemporalTarget, DISK_NODE_ABUTMENT_CAP,
 };
 pub use eval::IntervalConvention;
-pub(crate) use loader::{adopt_declarations, settle_adopted};
+pub(crate) use loader::{adopt_declarations, settle_adopted, withdraw_adopted};
 pub use loader::{declare_defaulted, declare_from_column_types, LoadDeclaration};
 pub(crate) use merge_key::{Start, StartKey};
 

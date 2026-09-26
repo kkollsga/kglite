@@ -20,5 +20,6 @@ pub mod set_ops;
 pub mod subgraph;
 pub mod subgraph_streaming;
 pub mod subgraph_streaming_writer;
+mod traversal_paths;
 pub mod validation;
 pub mod wal_replay;

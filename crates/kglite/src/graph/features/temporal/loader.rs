@@ -191,6 +191,15 @@ pub(crate) fn adopt_declarations(
     adopted
 }
 
+/// Remove what [`adopt_declarations`] installed, for a merge that failed
+/// before its rows could validate them: an unvalidated adoption never outlives
+/// the call.
+pub(crate) fn withdraw_adopted(graph: &mut DirGraph, adopted: Vec<DeclarationInfo>) {
+    for info in adopted {
+        record_remove(graph, &info.target);
+    }
+}
+
 /// Validate what [`adopt_declarations`] installed, now that the rows are in:
 /// each is declared afresh, counting its abutting rows, and one the rows
 /// refuse is removed, saying so in `errors`.

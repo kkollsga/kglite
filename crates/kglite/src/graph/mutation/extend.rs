@@ -378,7 +378,7 @@ pub fn extend_graph(
 /// Copy the source's declarations, then merge its edges. The temporal
 /// declarations go in before the edges, so the merge keys declared
 /// relationship types on their `from` bound, and are validated once the edges
-/// have landed.
+/// have landed — or withdrawn when the merge fails before then.
 fn merge_edges_and_declarations(
     target: &mut DirGraph,
     source: &DirGraph,
@@ -388,7 +388,10 @@ fn merge_edges_and_declarations(
 ) -> Result<(), String> {
     copy_spatial_configs(target, source);
     let adopted = temporal::adopt_declarations(target, temporal::list(source), &mut report.errors);
-    merge_edge_groups(target, edge_groups, conflict_handling, report)?;
+    if let Err(e) = merge_edge_groups(target, edge_groups, conflict_handling, report) {
+        temporal::withdraw_adopted(target, adopted);
+        return Err(e);
+    }
     temporal::settle_adopted(target, adopted, &mut report.errors);
     Ok(())
 }

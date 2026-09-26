@@ -721,8 +721,8 @@ pub struct ConnectionBatchProcessor {
     conflict_mode: ConflictHandling,
     accumulated_stats: ConnectionBatchStats,
     skip_existence_check: bool,
-    /// Set for a declared temporal relationship type: the `from` property that
-    /// joins the endpoint pair in the merge key (see [`MergeKey`]).
+    /// Set for a declared temporal relationship type: the `from` properties
+    /// whose start joins the endpoint pair in the merge key (see [`MergeKey`]).
     start_key: Option<StartKey>,
 }
 
@@ -757,9 +757,9 @@ impl ConnectionBatchProcessor {
     /// owns all of them. Otherwise a row merges per `mode` into the stored or
     /// earlier-queued edge with the same key: the endpoint pair, plus — when
     /// `start_key` names a declared temporal relationship type's `from`
-    /// property (`features::temporal::merge_start_key`) — the start that
-    /// property holds, so a row starting a different period is a new, parallel
-    /// edge.
+    /// properties (`features::temporal::merge_start_key`) — the first of them
+    /// the row carries and its parsed start, so a row starting a different
+    /// period is a new, parallel edge.
     pub(crate) fn configure(
         &mut self,
         mode: ConflictHandling,
@@ -1031,10 +1031,10 @@ impl MergeKey for Endpoints {
     }
 }
 
-/// The endpoint pair plus the start a declared temporal type's `from`
-/// property holds ([`Start`]: absent or NULL is `None`, and one instant is one
-/// start however it is spelled), so each period between a pair is its own
-/// relationship.
+/// The endpoint pair plus the start held by the first of a declared temporal
+/// type's `from` properties the row carries ([`Start`]: none carried or NULL is
+/// `None`, and one instant is one start however it is spelled), so each period
+/// between a pair is its own relationship.
 struct EndpointsAndStart(StartKey);
 
 impl MergeKey for EndpointsAndStart {

@@ -438,6 +438,27 @@ class TestLoaderDeclarations:
             warnings.simplefilter("error")
             _link(g, [(1, 2, "2000-01-01", "2005-01-01"), (1, 1, "2005-01-01", None)], convention="half_open")
 
+    def test_add_nodes_refused_by_its_timeseries_declares_nothing(self):
+        """Red proof: the timeseries cells were read after the declaration was
+        installed, so the refused call left a declaration over a type with no
+        rows, and a later ``set_temporal`` was refused as "already declared"."""
+        g = kglite.KnowledgeGraph()
+        frame = pd.DataFrame(
+            {
+                "id": [1, 1],
+                "vf": ["2000-01-01", "2000-01-01"],
+                "vt": [None, None],
+                "t": ["2020-01", "garbage"],
+                "v": [1.0, 2.0],
+            }
+        )
+        with pytest.raises(kglite.ArgumentError):
+            g.add_nodes(frame, "P", "id", column_types=PERIOD_TYPES, timeseries={"time": "t", "channels": ["v"]})
+        assert _declarations(g) == []
+        g.add_nodes(pd.DataFrame({"id": [1], "a": ["2000-01-01"], "b": [None]}), "P", "id")
+        g.set_temporal("P", "a", "b")
+        assert [r["from"] for r in _declarations(g)] == ["a"]
+
     def test_add_nodes_declares_and_warns(self):
         g = kglite.KnowledgeGraph()
         frame = pd.DataFrame({"id": [1, 2], "vf": ["2000-01-01", "2005-01-01"], "vt": ["2005-01-01", None]})

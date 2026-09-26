@@ -3918,10 +3918,16 @@ class KnowledgeGraph:
             keep_selection: Preserve selection. Default ``False``.
             conflict_handling: ``'update'`` (default), ``'replace'``, ``'skip'``,
                 ``'preserve'``, or ``'sum'``.
-            properties: Copy properties from intermediate nodes onto the new
-                edges. Dict mapping node type to property names:
-                ``{'TypeB': ['score', 'weight']}``.
-                An empty list copies all properties from that type.
+            properties: Copy node properties onto the new edges. Dict mapping
+                node type to property names: ``{'TypeB': ['score', 'weight']}``.
+                An empty list copies all properties from that type. Every node
+                on the path from source to target is read — the source, the
+                intermediate levels and the target; a key several of them
+                carry takes the value nearest the target. Each path is one
+                row, so when several paths join the same source and target
+                their values fold under ``conflict_handling``, taken in node
+                order (``'update'`` keeps the last path's, ``'skip'`` the
+                first's).
             source_type: Node type to use as source (default: first level).
             target_type: Node type to use as target (default: last level).
 

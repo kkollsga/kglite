@@ -16,6 +16,7 @@ import warnings
 import pandas as pd
 import pytest
 
+import kglite
 from kglite import KnowledgeGraph
 
 
@@ -447,6 +448,20 @@ def test_extend_keeps_the_targets_own_conflicting_declaration():
     assert report["has_errors"]
     assert "was not copied" in report["errors"][0]
     assert [r["convention"] for r in _all(target, _DECLARATIONS)] == ["closed"]
+
+
+def test_a_failed_extend_leaves_no_adopted_declaration():
+    """Red proof: the edge merge returned its error before the adopted
+    declarations were settled, so the source's HOLDS declaration stayed on the
+    target, unvalidated; and the violation surfaced as a plain
+    ``ArgumentError``."""
+    source = _licensed([(1, 2, "2000-01-01", "2005-01-01")])
+    target = KnowledgeGraph()
+    target.add_nodes(pd.DataFrame({"id": [1, 2], "title": ["F", "C"]}), "Field", "id", "title")
+    target.cypher("CREATE CONSTRAINT FOR ()-[r:HOLDS]-() REQUIRE r.x IS NOT NULL")
+    with pytest.raises(kglite.ConstraintViolationError, match="NOT NULL constraint on HOLDS.x"):
+        target.extend(source)
+    assert _all(target, _DECLARATIONS) == []
 
 
 def test_extend_copies_spatial_configs():
