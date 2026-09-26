@@ -146,6 +146,22 @@ impl DirGraph {
         });
     }
 
+    /// Record a change to one validity-interval declaration: `target`
+    /// declared with `config` and its declare-time count, or withdrawn when
+    /// `config` is `None`. A record that will not serialize logs nothing, as
+    /// [`Self::note_ontology_declaration`] explains.
+    pub(crate) fn note_temporal_declaration(
+        &mut self,
+        target: &crate::graph::features::temporal::TemporalTarget,
+        config: Option<(&crate::graph::schema::TemporalConfig, Option<usize>)>,
+    ) {
+        let change =
+            crate::graph::features::temporal::persist::JournaledDeclaration::new(target, config);
+        if let Ok(declaration_json) = serde_json::to_string(&change) {
+            self.note_declaration(MutationOp::SetTemporalDeclaration { declaration_json });
+        }
+    }
+
     /// Hand a declaration to the write-capture wrapper, if one is installed.
     /// A no-op on a graph that is neither durable nor capturing.
     pub(crate) fn note_declaration(&mut self, op: MutationOp) {

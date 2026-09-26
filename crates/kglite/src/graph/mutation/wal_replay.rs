@@ -458,6 +458,7 @@ fn mutation_op_has_legacy_reference(op: &MutationOp) -> bool {
         | MutationOp::SetEmbeddings { .. }
         | MutationOp::SetVectorIndex { .. }
         | MutationOp::SetEdgeVectorIndex { .. }
+        | MutationOp::SetTemporalDeclaration { .. }
         | MutationOp::SetEdgeEmbeddingStore { .. }
         | MutationOp::ReplaceEdgeGroupEmbeddings { .. }
         | MutationOp::PatchEdgeGroupEmbeddings { .. } => false,
@@ -479,6 +480,9 @@ fn declared_type_name<'a>(values: impl Iterator<Item = &'a Value>) -> String {
 #[cfg(test)]
 #[path = "wal_replay/regression_tests.rs"]
 mod regression_tests;
+#[cfg(test)]
+#[path = "wal_replay/temporal_tests.rs"]
+mod temporal_tests;
 #[cfg(test)]
 #[path = "wal_replay/tests.rs"]
 mod tests;

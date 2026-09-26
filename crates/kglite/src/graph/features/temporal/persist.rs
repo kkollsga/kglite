@@ -20,6 +20,10 @@
 //! reads as that config once; one holding several different configs reads as
 //! all of them, in order, and the type is ambiguous (see
 //! [`TemporalDeclarations::is_ambiguous`]).
+//!
+//! The write-ahead log carries each change to one declaration as a
+//! [`JournaledDeclaration`], which names its key the way a file entry does
+//! and nests the interval under `config` so that a withdrawal is `null`.
 
 use std::collections::HashMap;
 
@@ -210,5 +214,91 @@ impl TemporalDeclarations {
             }
         }
         store
+    }
+}
+
+/// One declaration change as the write-ahead log carries it:
+/// `{"kind", "name", "source_type"?, "config": {"from", "to", "convention",
+/// "abutting_rows"?} | null}`, a `null` config withdrawing the key. It holds
+/// the key's whole state, so replay keeps the last one per key; a field added
+/// later must be optional with a default, like a file entry's.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct JournaledDeclaration {
+    kind: Kind,
+    name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_type: Option<String>,
+    config: Option<JournaledConfig>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct JournaledConfig {
+    from: String,
+    to: String,
+    convention: IntervalConvention,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    abutting_rows: Option<usize>,
+}
+
+impl JournaledDeclaration {
+    /// `target` declared with `config` and its declare-time count, or
+    /// withdrawn when `config` is `None`.
+    pub(crate) fn new(
+        target: &TemporalTarget,
+        config: Option<(&TemporalConfig, Option<usize>)>,
+    ) -> Self {
+        let (kind, name, source_type) = match target {
+            TemporalTarget::Node(label) => (Kind::Node, label.clone(), None),
+            TemporalTarget::Relationship {
+                rel_type,
+                source_type,
+            } => (Kind::Relationship, rel_type.clone(), source_type.clone()),
+        };
+        JournaledDeclaration {
+            kind,
+            name,
+            source_type,
+            config: config.map(|(config, abutting_rows)| JournaledConfig {
+                from: config.valid_from.clone(),
+                to: config.valid_to.clone(),
+                convention: config.convention,
+                abutting_rows,
+            }),
+        }
+    }
+
+    /// The key this change replaces the state of. A node entry's
+    /// `source_type` is ignored, as a file entry's is.
+    pub(crate) fn target(&self) -> TemporalTarget {
+        match self.kind {
+            Kind::Node => TemporalTarget::Node(self.name.clone()),
+            Kind::Relationship => TemporalTarget::Relationship {
+                rel_type: self.name.clone(),
+                source_type: self.source_type.clone(),
+            },
+        }
+    }
+}
+
+impl TemporalDeclarations {
+    /// Set `change`'s key to the state it carries: its declaration replaces
+    /// whatever the key held, or a `null` config removes it. Replay's install;
+    /// nothing is validated, because replay meets the rows the declaration was
+    /// validated against.
+    pub(crate) fn apply_journaled(&mut self, change: JournaledDeclaration) {
+        let target = change.target();
+        self.remove(&target);
+        if let Some(journaled) = change.config {
+            let config = TemporalConfig {
+                valid_from: journaled.from,
+                valid_to: journaled.to,
+                convention: journaled.convention,
+                source_type: match &target {
+                    TemporalTarget::Node(_) => None,
+                    TemporalTarget::Relationship { source_type, .. } => source_type.clone(),
+                },
+            };
+            self.insert(&target, config, journaled.abutting_rows);
+        }
     }
 }

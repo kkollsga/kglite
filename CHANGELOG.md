@@ -71,6 +71,15 @@ before upgrading.
 
 ### Changed
 
+- Durable graphs journal validity-interval declarations in the write-ahead
+  log, whichever route made them — `CALL db.temporal.declare` / `undeclare`,
+  `set_temporal()`, a loader's `validFrom`/`validTo` column types, or
+  `extend()` — so a crash before the next `save()` no longer loses them. The
+  WAL format moves to version 10: logs written by earlier versions still
+  replay, and an earlier version refuses a version-10 log with the "unsupported
+  WAL format version" error rather than dropping part of it. Rebuild prebuilt
+  `kglite-mcp-server`, `kglite-bolt-server` and `kglite` CLI binaries that
+  open durable graphs written by this version.
 - Rust API: `DirGraph::temporal_node_configs` and `temporal_edge_configs` are
   no longer public fields; read declarations through
   `kglite::api::temporal::{node_config, edge_configs, list}`.

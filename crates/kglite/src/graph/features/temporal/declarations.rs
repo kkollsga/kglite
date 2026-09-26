@@ -404,7 +404,7 @@ pub fn declare_loaded(
         }
         _ => None,
     };
-    graph.temporal.insert(target, config, abutting);
+    record_insert(graph, target, config, abutting);
     graph.bump_version();
     Ok(DeclareReport {
         changed: true,
@@ -418,9 +418,32 @@ pub fn declare_loaded(
 /// was none. An unkeyed relationship target removes only the unkeyed
 /// declaration, never a source-keyed one.
 pub fn undeclare(graph: &mut DirGraph, target: &TemporalTarget) -> bool {
-    let removed = graph.temporal.remove(target);
+    let removed = record_remove(graph, target);
     if removed {
         graph.bump_version();
+    }
+    removed
+}
+
+/// Install `config` for `target`, journaling the change. Every route that
+/// writes the store goes through this or [`record_remove`], so a durable graph
+/// recovers what a crash before the next checkpoint would otherwise lose.
+pub(super) fn record_insert(
+    graph: &mut DirGraph,
+    target: &TemporalTarget,
+    config: TemporalConfig,
+    abutting: Option<usize>,
+) {
+    graph.note_temporal_declaration(target, Some((&config, abutting)));
+    graph.temporal.insert(target, config, abutting);
+}
+
+/// Remove `target`'s declaration, journaling the withdrawal when there was
+/// one to remove.
+pub(super) fn record_remove(graph: &mut DirGraph, target: &TemporalTarget) -> bool {
+    let removed = graph.temporal.remove(target);
+    if removed {
+        graph.note_temporal_declaration(target, None);
     }
     removed
 }

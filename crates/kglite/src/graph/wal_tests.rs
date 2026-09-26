@@ -196,7 +196,7 @@ fn empty_reader_is_error() {
 #[test]
 fn variant_tags_are_stable_on_disk_format() {
     let id = || Value::Int64(1);
-    let cases: [(u8, MutationOp); 22] = [
+    let cases: [(u8, MutationOp); 23] = [
         (
             0,
             MutationOp::UpsertNode {
@@ -417,6 +417,12 @@ fn variant_tags_are_stable_on_disk_format() {
                 present: true,
             },
         ),
+        (
+            22,
+            MutationOp::SetTemporalDeclaration {
+                declaration_json: r#"{"kind":"node","name":"A","config":null}"#.into(),
+            },
+        ),
     ];
     for (tag, op) in cases {
         let mut buf = Vec::new();
@@ -466,6 +472,45 @@ fn immediately_pre_index_headers_remain_readable() {
         assert_eq!(bytes[4], version);
         assert_eq!(read_frames_all(bytes).unwrap(), frames);
     }
+}
+
+/// The format just before the temporal-declaration op still reads, frames
+/// and all: tag 22 only extends the enum, so a v9 log is a strict subset.
+#[test]
+fn format_before_temporal_declarations_remains_readable() {
+    assert_eq!(WAL_FORMAT_VERSION, 10);
+    let frames = vec![
+        frame(1),
+        WalFrame {
+            lsn: 2,
+            ops: vec![MutationOp::SetEdgeVectorIndex {
+                conn_type: "C".into(),
+                text_column: "txt".into(),
+                metric: None,
+                m: None,
+                ef_construction: None,
+                ef_search: None,
+                auto_refresh_limit: None,
+                present: false,
+            }],
+        },
+    ];
+    let bytes = write_wal_version(&frames, 9);
+    assert_eq!(bytes[4], 9);
+    assert_eq!(read_frames_all(bytes).unwrap(), frames);
+}
+
+/// A temporal declaration survives the codec byte for byte, JSON included.
+#[test]
+fn temporal_declaration_op_round_trips() {
+    let op = MutationOp::SetTemporalDeclaration {
+        declaration_json: r#"{"kind":"relationship","name":"R","source_type":"S","config":{"from":"vf","to":"vt","convention":"half_open"}}"#.into(),
+    };
+    let frames = vec![WalFrame {
+        lsn: 7,
+        ops: vec![op],
+    }];
+    assert_eq!(read_frames_all(write_wal(&frames)).unwrap(), frames);
 }
 
 /// Opening a readable older WAL for append upgrades its header, so the

@@ -3,7 +3,9 @@
 //! convention out and are checked before the load writes, and `extend`, which
 //! carries another graph's declarations over with its rows.
 
-use super::declarations::{self, Change, DeclarationInfo, DeclareReport, TemporalTarget};
+use super::declarations::{
+    self, record_insert, record_remove, Change, DeclarationInfo, DeclareReport, TemporalTarget,
+};
 use super::eval::IntervalConvention;
 use super::validate;
 use crate::datatypes::values::DataFrame;
@@ -114,9 +116,7 @@ pub fn declare_from_column_types(
     if validate::check_target(graph, &load.target).is_ok() {
         load.stage = Stage::Declared(load.declare(graph)?);
     } else {
-        graph
-            .temporal
-            .insert(&load.target, load.config.clone(), None);
+        record_insert(graph, &load.target, load.config.clone(), None);
     }
     Ok(load)
 }
@@ -141,7 +141,7 @@ impl LoadDeclaration {
         match self.stage {
             Stage::Declared(report) => Ok(report),
             Stage::Installed => {
-                graph.temporal.remove(&self.target);
+                record_remove(graph, &self.target);
                 self.declare(graph)
             }
         }
@@ -156,7 +156,7 @@ impl LoadDeclaration {
             }
             Stage::Declared(_) => {}
             Stage::Installed => {
-                graph.temporal.remove(&self.target);
+                record_remove(graph, &self.target);
             }
         }
     }
@@ -179,9 +179,7 @@ pub(crate) fn adopt_declarations(
         match graph.temporal.change_for(&info.target, &info.config) {
             Ok(Change::Unchanged) => {}
             Ok(Change::Insert) => {
-                graph
-                    .temporal
-                    .insert(&info.target, info.config.clone(), None);
+                record_insert(graph, &info.target, info.config.clone(), None);
                 adopted.push(info);
             }
             Err(reason) => errors.push(format!(
@@ -202,7 +200,7 @@ pub(crate) fn settle_adopted(
     errors: &mut Vec<String>,
 ) {
     for info in adopted {
-        graph.temporal.remove(&info.target);
+        record_remove(graph, &info.target);
         let config = &info.config;
         let written = [config.valid_from.as_str(), config.valid_to.as_str()];
         if let Err(reason) = declarations::declare_loaded(

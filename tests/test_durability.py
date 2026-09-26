@@ -2378,6 +2378,169 @@ def test_replayed_constraint_does_not_revalidate_the_checkpoint(tmp_path, storag
     assert [c["name"] for c in g.cypher("SHOW CONSTRAINTS").to_list()] == ["u"]
 
 
+# ── validity-interval declarations ───────────────────────────────────
+#
+# Before WAL v10 these lived only in the checkpoint, on every route: the
+# procedures, `set_temporal`, a loader's validFrom/validTo column types and
+# `extend`. Each route journals through the same store writes, so each gets a
+# crash case of its own — dropping one route's journaling must turn its case red.
+
+_TEMPORAL_SEED = """
+        import kglite, pandas as pd
+        g = open_durable()
+        g.add_nodes(
+            pd.DataFrame({"id": [1, 2], "title": ["a", "b"],
+                          "vf": ["2020-01-01", "2021-01-01"], "vt": ["2020-12-31", None]}),
+            "A",
+            unique_id_field="id",
+        )
+        g.add_nodes(pd.DataFrame({"id": [1], "title": ["s"]}), "S", unique_id_field="id")
+        g.add_connections(
+            pd.DataFrame({"src": [1], "tgt": [1], "vf": ["2020-01-01"], "vt": ["2020-06-30"]}),
+            "R", "S", "src", "A", "tgt",
+        )
+"""
+
+_TEMPORAL_DECLARATIONS = (
+    "CALL db.temporal.declarations() "
+    "YIELD kind, name, source_type, from, to, convention, abutting_rows "
+    "RETURN kind, name, source_type, from, to, convention, abutting_rows"
+)
+
+
+def _temporal_declarations(g):
+    return g.cypher(_TEMPORAL_DECLARATIONS).to_list()
+
+
+def _temporal_case(tmp_path, storage, level, body):
+    return _declaration_case(tmp_path, storage, level, body, _temporal_declarations, _TEMPORAL_SEED)
+
+
+def _declared(rows):
+    return [(r["kind"], r["name"], r["source_type"], r["from"], r["to"], r["convention"]) for r in rows]
+
+
+_TEMPORAL_ROUTES = {
+    "procedure_node": (
+        "\n        g.cypher(\"CALL db.temporal.declare({node: 'A', from: 'vf', to: 'vt', convention: 'closed'})\")\n",
+        [("node", "A", None, "vf", "vt", "closed")],
+    ),
+    "procedure_keyed_relationship": (
+        "\n        g.cypher(\"CALL db.temporal.declare({relationship: 'R', source_type: 'S', "
+        "from: 'vf', to: 'vt', convention: 'half_open'})\")\n",
+        [("relationship", "R", "S", "vf", "vt", "half_open")],
+    ),
+    "set_temporal": (
+        '\n        g.set_temporal("A", "vf", "vt")\n',
+        [("node", "A", None, "vf", "vt", "closed")],
+    ),
+    "loader_new_type": (
+        """
+        g.add_nodes(
+            pd.DataFrame({"id": [1], "title": ["p"], "vf": ["2020-01-01"], "vt": ["2020-02-01"]}),
+            "P", unique_id_field="id", column_types={"vf": "validFrom", "vt": "validTo"},
+        )
+""",
+        [("node", "P", None, "vf", "vt", "closed")],
+    ),
+    "loader_existing_relationship": (
+        """
+        g.add_connections(
+            pd.DataFrame({"src": [1], "tgt": [2], "vf": ["2021-01-01"], "vt": [None]}),
+            "R", "S", "src", "A", "tgt", column_types={"vf": "validFrom", "vt": "validTo"},
+            convention="half_open",
+        )
+""",
+        [("relationship", "R", None, "vf", "vt", "half_open")],
+    ),
+    "extend": (
+        """
+        other = kglite.KnowledgeGraph()
+        other.add_nodes(
+            pd.DataFrame({"id": [7], "title": ["c"], "vf": ["2020-01-01"], "vt": ["2020-03-01"]}),
+            "C", unique_id_field="id",
+        )
+        other.cypher("CALL db.temporal.declare({node: 'C', from: 'vf', to: 'vt', convention: 'closed'})")
+        g.extend(other)
+""",
+        [("node", "C", None, "vf", "vt", "closed")],
+    ),
+}
+
+
+# `extend()` refuses a mapped target, so that route runs in memory only.
+_TEMPORAL_ROUTE_CASES = [
+    (route, storage)
+    for route in sorted(_TEMPORAL_ROUTES)
+    for storage in DURABLE_STORAGE_MODES
+    if route != "extend" or storage == "memory"
+]
+
+
+@pytest.mark.parametrize("level", LOGGING_LEVELS)
+@pytest.mark.parametrize(("route", "storage"), _TEMPORAL_ROUTE_CASES)
+def test_temporal_declaration_survives_hard_crash(tmp_path, storage, level, route):
+    body, expected = _TEMPORAL_ROUTES[route]
+    assert _declared(_temporal_case(tmp_path, storage, level, body)) == expected
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_temporal_declare_then_undeclare_replays_as_undeclared(tmp_path, storage):
+    got = _temporal_case(
+        tmp_path,
+        storage,
+        "normal",
+        "\n        g.cypher(\"CALL db.temporal.declare({node: 'A', from: 'vf', to: 'vt', convention: 'closed'})\")"
+        "\n        g.cypher(\"CALL db.temporal.undeclare({node: 'A'})\")\n",
+    )
+    assert got == []
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_temporal_abandoned_load_declaration_replays_as_undeclared(tmp_path, storage):
+    """A load that fails after its declaration was installed withdraws it; the
+    log has to carry the withdrawal, not only the install. The failed call
+    commits nothing itself, so a later write carries both to the log."""
+    got = _temporal_case(
+        tmp_path,
+        storage,
+        "normal",
+        """
+        try:
+            g.add_nodes(
+                pd.DataFrame({"id": [1], "title": ["p"], "vf": ["2020-01-01"], "vt": ["2020-02-01"]}),
+                "P", unique_id_field="id", column_types={"vf": "validFrom", "vt": "validTo"},
+                conflict_handling="bogus",
+            )
+        except Exception:
+            pass
+        else:
+            raise AssertionError("the load was meant to fail")
+        g.cypher("CREATE (:S {id: 5, title: 't'})")
+""",
+    )
+    assert got == []
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_temporal_undeclare_after_the_checkpoint_replays_over_it(tmp_path, storage):
+    """The checkpoint holds the declaration; only the log knows it was
+    withdrawn afterwards, and replay has to let the log win."""
+    _crash_child(
+        tmp_path,
+        _TEMPORAL_SEED
+        + "\n        g.cypher(\"CALL db.temporal.declare({node: 'A', from: 'vf', to: 'vt', convention: 'closed'})\")"
+        "\n        g.save()"
+        "\n        g.cypher(\"CALL db.temporal.undeclare({node: 'A'})\")\n",
+        storage,
+    )
+    assert (tmp_path / "app.kgl").exists()
+    saved = kglite.load(str(tmp_path / "app.kgl"))
+    assert _declared(_temporal_declarations(saved)) == [("node", "A", None, "vf", "vt", "closed")]
+    del saved
+    assert _temporal_declarations(_open(tmp_path / "app.kgl", storage)) == []
+
+
 # ── timeseries and embedding payloads ────────────────────────────────
 #
 # The two remaining checkpoint-only classes after WAL v6. Unlike the

@@ -10,8 +10,9 @@
 //! Two install points, and the split is load-bearing:
 //!
 //! - [`Declarations::install_metadata`] runs inside the row install. Parent
-//!   types, the ontology, the schema stamp and spatial configs are pure
-//!   metadata: nothing validates them and nothing reads a row to apply them.
+//!   types, the ontology, the schema stamp, spatial configs and
+//!   validity-interval declarations are pure metadata: nothing validates them
+//!   on replay and nothing reads a row to apply them.
 //! - [`Declarations::install_schema`] runs *after* replay's constraint
 //!   comparison and reindex. Indexes are rebuilt from the recovered rows, so
 //!   they need the rows finished; constraints scan the rows they constrain, so
@@ -26,6 +27,8 @@ use crate::graph::constraints::{
     normalize_properties, ConstraintDeclaration, ConstraintKind, EntityKind,
 };
 use crate::graph::dir_graph::rel_constraints::RelDeclarationError;
+use crate::graph::features::temporal::persist::JournaledDeclaration;
+use crate::graph::features::temporal::TemporalTarget;
 use crate::graph::features::timeseries::NodeTimeseries;
 use crate::graph::property_types::DeclaredType;
 use crate::graph::schema::DirGraph;
@@ -108,6 +111,10 @@ enum DeclKey {
     TimeseriesConfig(String),
     VectorIndex(String, String),
     EdgeVectorIndex(String, String),
+    Temporal(TemporalTarget),
+    /// A temporal record that does not parse keeps a slot of its own, so the
+    /// op is still accounted a declaration; install skips it.
+    TemporalRaw(String),
 }
 
 #[derive(Default)]
@@ -244,6 +251,15 @@ impl Declarations {
             MutationOp::SetOntology { .. } => DeclKey::Ontology,
             MutationOp::SetSchemaVersion { .. } => DeclKey::SchemaVersion,
             MutationOp::SetSpatialConfig { node_type, .. } => DeclKey::Spatial(node_type.clone()),
+            // Keyed exactly as the store is — label, or relationship type plus
+            // source type — so a declare and an undeclare of one key fold into
+            // one slot. Sound because an undeclare removes only its own key.
+            MutationOp::SetTemporalDeclaration { declaration_json } => {
+                match serde_json::from_str::<JournaledDeclaration>(declaration_json) {
+                    Ok(change) => DeclKey::Temporal(change.target()),
+                    Err(_) => DeclKey::TemporalRaw(declaration_json.clone()),
+                }
+            }
             MutationOp::SetPropertyIndex {
                 node_type,
                 properties,
@@ -342,6 +358,14 @@ impl Declarations {
                 MutationOp::SetTimeseriesConfig { node_type, config } => {
                     if let Ok(config) = serde_json::from_str(config) {
                         graph.install_timeseries_config(node_type, config);
+                    }
+                }
+                // Straight into the store, as a `.kgl` load does: no
+                // validation, no version bump, and no re-journaling into the
+                // buffer being recovered.
+                MutationOp::SetTemporalDeclaration { declaration_json } => {
+                    if let Ok(change) = serde_json::from_str(declaration_json) {
+                        graph.temporal.apply_journaled(change);
                     }
                 }
                 _ => {}

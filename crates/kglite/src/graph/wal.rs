@@ -142,7 +142,12 @@ pub const WAL_MAGIC: [u8; 4] = *b"KWAL";
 /// **v8 → v9** appends the relationship HNSW declaration as tag 21. Without
 /// the header bump a v8 reader could mistake the unknown trailing tag for a
 /// torn tail and silently discard a committed declaration.
-pub const WAL_FORMAT_VERSION: u8 = 9;
+///
+/// **v9 → v10** appends [`MutationOp::SetTemporalDeclaration`] as tag 22.
+/// Tags 0–21 are unchanged, so every older WAL stays a strict subset read
+/// exactly; the header moves so a v9 reader refuses a v10 log instead of
+/// treating tag 22 as a torn tail.
+pub const WAL_FORMAT_VERSION: u8 = 10;
 
 /// Oldest WAL format this build can replay. Frames from any version in
 /// `MIN_READABLE_WAL_FORMAT_VERSION..=WAL_FORMAT_VERSION` decode with the
@@ -449,6 +454,13 @@ pub enum MutationOp {
         auto_refresh_limit: Option<usize>,
         present: bool,
     },
+    /// Declare or withdraw one validity-interval declaration: which two
+    /// properties bound a node label's or relationship type's interval, and
+    /// under which convention. The JSON carries the whole declaration of one
+    /// key — `{"kind", "name", "source_type"?, "config": {...} | null}`, a
+    /// `null` config withdrawing it — so a field added later is a JSON
+    /// default, never a new tag.
+    SetTemporalDeclaration { declaration_json: String },
 }
 
 /// How a [`MutationOp::SetEmbeddings`] relates to the vectors the log already

@@ -43,6 +43,7 @@ impl KnowledgeGraph {
         let argument = |message: String| {
             crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(message))
         };
+        self.check_durable_owner()?;
         let graph = get_graph_mut(&mut self.inner);
         let is_node = graph.type_indices.contains_key(&type_name);
         let is_relationship = graph.connection_type_metadata.contains_key(&type_name);
@@ -72,6 +73,7 @@ impl KnowledgeGraph {
         let report =
             temporal::declare_defaulted(graph, &target, &valid_from, &valid_to, convention)
                 .map_err(argument)?;
+        self.commit_wal()?;
         crate::graph::warn_declaration(py, &report)
     }
 

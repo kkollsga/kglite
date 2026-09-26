@@ -484,7 +484,8 @@ impl KnowledgeGraph {
     /// Not every `&mut self` method needs it. Ops exist for nodes, edges,
     /// labels, the declarations captured at their own choke points — identity-
     /// field spellings, parent types, the ontology, the schema stamp, spatial
-    /// configs, user indexes and constraints — and the bulk payloads:
+    /// configs, validity-interval declarations, user indexes and constraints —
+    /// and the bulk payloads:
     /// timeseries channels and embedding stores with their vector-index
     /// declaration. What is left checkpoint-only is derived state a load
     /// rebuilds anyway (text indexes, cached norms), for which calling this is

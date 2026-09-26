@@ -379,7 +379,9 @@ model.
   (`unique_id_field` / `node_title_field`), `set_parent_type`,
   `define_ontology` / `clear_ontology`, `create_index` / `drop_index` and
   their range and composite siblings, `CREATE CONSTRAINT` / `DROP
-  CONSTRAINT`, `set_spatial`, `set_schema_version`; and the two bulk payloads
+  CONSTRAINT`, `set_spatial`, `set_schema_version`, and validity-interval
+  declarations (`CALL db.temporal.declare` / `undeclare`, `set_temporal`, and
+  the ones `validFrom`/`validTo` column types make); and the two bulk payloads
   — **timeseries channels** (`set_timeseries`, `set_time_index`,
   `add_ts_channel`, `add_timeseries`, `add_nodes(timeseries=…)`) and
   **embeddings** (`set_embeddings`, `add_embeddings`, `embed_texts`,

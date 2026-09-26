@@ -190,6 +190,7 @@ impl ReplayPlan {
             | MutationOp::SetEmbeddings { .. }
             | MutationOp::SetVectorIndex { .. }
             | MutationOp::SetEdgeVectorIndex { .. }
+            | MutationOp::SetTemporalDeclaration { .. }
             | MutationOp::SetEdgeEmbeddingStore { .. }
             | MutationOp::ReplaceEdgeGroupEmbeddings { .. }
             | MutationOp::PatchEdgeGroupEmbeddings { .. } => {}
