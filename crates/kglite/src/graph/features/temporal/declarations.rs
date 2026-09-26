@@ -5,8 +5,7 @@
 //! Relationship configs are kept as an ordered list per type because the
 //! fluent `traverse()` picks the first config whose properties an edge carries
 //! (see [`super::is_temporally_valid_multi`]); insertion order is therefore
-//! part of the answer, and the list is also the shape the `.kgl` metadata
-//! block has always written.
+//! part of the answer. How the store is saved and loaded is `persist.rs`.
 
 use std::collections::HashMap;
 
@@ -80,9 +79,17 @@ pub struct DeclareReport {
 pub struct DeclarationInfo {
     pub target: TemporalTarget,
     pub config: TemporalConfig,
-    /// The declare-time count [`DeclareReport::abutting_rows`] reported;
-    /// `None` for a config a loader or `set_temporal` wrote, and after a load.
+    /// The declare-time count [`DeclareReport::abutting_rows`] reported,
+    /// kept across save and load; `None` for a config a loader or
+    /// `set_temporal` wrote, and for one read from a file written before
+    /// declarations were saved.
     pub abutting_rows: Option<usize>,
+    /// The relationship type holds several different configs none of which
+    /// names a source type — possible only for configs written before source
+    /// types existed, or by `set_temporal` — so which one applies to an edge
+    /// depends on the order they were added in. Re-declare them per
+    /// `source_type` to resolve it. Always `false` for a node label.
+    pub ambiguous: bool,
 }
 
 /// The largest disk-mode node label whose abutting rows are counted. Counting
@@ -93,11 +100,12 @@ pub const DISK_NODE_ABUTMENT_CAP: usize = 250_000;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct TemporalDeclarations {
-    nodes: HashMap<String, TemporalConfig>,
-    edges: HashMap<String, Vec<TemporalConfig>>,
-    /// Declare-time counts; never persisted, so a loaded graph reports none.
+    pub(super) nodes: HashMap<String, TemporalConfig>,
+    pub(super) edges: HashMap<String, Vec<TemporalConfig>>,
+    /// Declare-time counts. Saved with the declarations by `persist.rs`, not
+    /// through this derive.
     #[serde(skip)]
-    abutting: HashMap<TemporalTarget, usize>,
+    pub(super) abutting: HashMap<TemporalTarget, usize>,
 }
 
 /// What a declaration does to the store once validated.
@@ -123,26 +131,6 @@ fn same_interval(a: &TemporalConfig, b: &TemporalConfig) -> bool {
     a.valid_from == b.valid_from && a.valid_to == b.valid_to && a.convention == b.convention
 }
 
-impl
-    From<(
-        HashMap<String, TemporalConfig>,
-        HashMap<String, Vec<TemporalConfig>>,
-    )> for TemporalDeclarations
-{
-    fn from(
-        (nodes, edges): (
-            HashMap<String, TemporalConfig>,
-            HashMap<String, Vec<TemporalConfig>>,
-        ),
-    ) -> Self {
-        TemporalDeclarations {
-            nodes,
-            edges,
-            abutting: HashMap::new(),
-        }
-    }
-}
-
 impl TemporalDeclarations {
     pub(crate) fn node(&self, label: &str) -> Option<&TemporalConfig> {
         self.nodes.get(label)
@@ -153,12 +141,14 @@ impl TemporalDeclarations {
         self.edges.get(rel_type).map_or(&[], Vec::as_slice)
     }
 
-    pub(crate) fn node_map(&self) -> &HashMap<String, TemporalConfig> {
-        &self.nodes
-    }
-
-    pub(crate) fn edge_map(&self) -> &HashMap<String, Vec<TemporalConfig>> {
-        &self.edges
+    /// Whether `rel_type` holds more than one unkeyed config (see
+    /// [`DeclarationInfo::ambiguous`]).
+    pub(crate) fn is_ambiguous(&self, rel_type: &str) -> bool {
+        self.edges(rel_type)
+            .iter()
+            .filter(|c| c.source_type.is_none())
+            .nth(1)
+            .is_some()
     }
 
     pub(crate) fn abutting(&self, target: &TemporalTarget) -> Option<usize> {
@@ -269,7 +259,7 @@ impl TemporalDeclarations {
         }
     }
 
-    fn entries(&self) -> Vec<DeclarationInfo> {
+    pub(super) fn entries(&self) -> Vec<DeclarationInfo> {
         let nodes = self
             .nodes
             .iter()
@@ -289,6 +279,13 @@ impl TemporalDeclarations {
             .chain(edges)
             .map(|(target, config)| DeclarationInfo {
                 abutting_rows: self.abutting(&target),
+                ambiguous: match &target {
+                    TemporalTarget::Relationship {
+                        rel_type,
+                        source_type: None,
+                    } => self.is_ambiguous(rel_type),
+                    _ => false,
+                },
                 target,
                 config: config.clone(),
             })

@@ -146,6 +146,7 @@ pub(super) fn declarations(
                         Value::String(info.config.convention.as_str().into()),
                     ),
                     ("abutting_rows", count(info.abutting_rows)),
+                    ("ambiguous", Value::Boolean(info.ambiguous)),
                 ]),
                 yields,
             )

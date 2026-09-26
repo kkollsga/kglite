@@ -41,6 +41,19 @@ before upgrading.
   `CALL db.temporal.declarations()` lists them. The fluent `select()`,
   `valid_at()`, `valid_during()` and `traverse()` filters follow a
   declaration's convention, and `describe()` shows it.
+- Validity-interval declarations are saved in `.kgl` files and disk graphs,
+  with their convention, source type and declare-time `abutting_rows`, and
+  files from earlier versions load with their temporal configs. For older
+  versions a saved file also records closed node declarations and each
+  relationship type whose configs are all closed and have no `source_type`;
+  a type with a half-open or per-source declaration is left out, so an older
+  version treats it as undeclared rather than misreading it. `CALL db.temporal.declarations()`
+  yields `ambiguous`, which is `true` for a relationship type holding several
+  configs without a `source_type` (two `set_temporal()` calls on one type,
+  including in an older file); `describe()` marks such a type
+  `temporal_ambiguous="true"`. Re-declare each with its `source_type` to
+  resolve it.
+- Rust API: `kglite::api::temporal::DeclarationInfo::ambiguous`.
 - Rust API: `kglite::api::temporal` (`declare`, `declare_loaded`,
   `undeclare`, `list`, `node_config`, `edge_configs`, `TemporalTarget`,
   `IntervalConvention`), `TemporalConfig::convention` / `source_type`, and

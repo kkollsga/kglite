@@ -8,6 +8,9 @@ pub(crate) mod declarations;
 #[cfg(test)]
 mod declarations_tests;
 pub(crate) mod eval;
+pub(crate) mod persist;
+#[cfg(test)]
+mod persist_tests;
 mod validate;
 
 pub use declarations::{

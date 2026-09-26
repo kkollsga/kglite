@@ -92,6 +92,9 @@ rust-core-coverage.lcov
 # so an ignore rule that swallowed them would delete the evidence.
 !tests/fixtures/kgl_v5/**/*.kgl
 !tests/fixtures/kgl_v5/**/*.kgl-wal
+# …and the legacy temporal-config fixtures a published 0.18.1 wheel wrote
+# (tests/fixtures/build_temporal_legacy_fixtures.py needs that wheel).
+!tests/fixtures/temporal_legacy/*.kgl
 
 # Sphinx docs build output
 docs/_build/

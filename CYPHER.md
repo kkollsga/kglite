@@ -1423,7 +1423,7 @@ CALL db.temporal.declare({relationship: 'HAS_LICENSEE', source_type: 'Field',
   YIELD declared, rows, abutting_rows
 CALL db.temporal.undeclare({relationship: 'HAS_LICENSEE', source_type: 'Field'}) YIELD undeclared
 CALL db.temporal.declarations()
-  YIELD kind, name, source_type, from, to, convention, abutting_rows
+  YIELD kind, name, source_type, from, to, convention, abutting_rows, ambiguous
 ```
 
 - **Target.** Exactly one of `node` (a primary type or a secondary label) or
@@ -1442,6 +1442,17 @@ CALL db.temporal.declarations()
   time. Under `closed` both such rows are valid on that day, so a non-zero
   count adds a query warning suggesting `half_open`. On a disk-mode graph the
   count is skipped (NULL) for a node label above 250,000 rows.
+- **Saved with the graph.** Declarations, conventions and declare-time
+  counts persist in a `.kgl` file. For older KGLite versions the file also
+  records closed node declarations and each relationship type whose
+  declarations are all closed and have no `source_type`; a type with a
+  half-open or per-source declaration is left out of that record, so an older
+  version reads it as undeclared rather than misreading it.
+- **`ambiguous`** is `true` for a relationship type holding several
+  declarations without a `source_type`, as two `set_temporal()` calls on one
+  type leave, including in a graph saved by an older version. Which one an
+  edge uses depends on the order they were added in; undeclare them and
+  re-declare each with its `source_type`.
 
 ### Duration semantics
 

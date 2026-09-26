@@ -33,6 +33,7 @@
 
 use crate::datatypes::values::Value;
 use crate::graph::constraints::{NamedConstraint, UniqueConstraintKey};
+use crate::graph::features::temporal::declarations::TemporalDeclarations;
 use crate::graph::features::timeseries::{NodeTimeseries, TimeseriesConfig};
 use crate::graph::property_types::DeclaredType;
 use crate::graph::schema::{
@@ -359,12 +360,23 @@ pub(crate) struct FileMetadata {
     spatial_configs: HashMap<String, SpatialConfig>,
     #[serde(default)]
     timeseries_configs: HashMap<String, TimeseriesConfig>,
-    /// Temporal configuration per node type (valid_from/valid_to on nodes).
+    /// The validity-interval configs an older build reads: a mirror of the
+    /// declarations it would apply correctly, and the only record in a file
+    /// written before `temporal_declarations` existed (see
+    /// `features/temporal/persist.rs`). Always written, even empty, so a
+    /// graph without declarations keeps its bytes.
     #[serde(default)]
     temporal_node_configs: HashMap<String, TemporalConfig>,
-    /// Temporal configuration per connection type (valid_from/valid_to on edges).
     #[serde(default)]
     temporal_edge_configs: HashMap<String, Vec<TemporalConfig>>,
+    /// Every validity-interval declaration; read in place of the two legacy
+    /// keys when present. Skipped when empty, for the same bytes.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::graph::features::temporal::persist::lenient_entries"
+    )]
+    temporal_declarations: Vec<crate::graph::features::temporal::persist::PersistedDeclaration>,
     /// Timeseries data version: 1 = Vec<Vec<i64>> keys (legacy), 2 = NaiveDate keys.
     #[serde(default = "default_ts_data_version")]
     timeseries_data_version: u32,
@@ -456,6 +468,7 @@ impl FileMetadata {
     }
 
     fn from_graph_version(graph: &DirGraph, core_data_version: u32) -> Self {
+        let (legacy_nodes, legacy_edges) = graph.temporal.legacy_mirror();
         FileMetadata {
             core_data_version,
             library_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -499,8 +512,9 @@ impl FileMetadata {
                 .or(graph.cdc_handoff),
             spatial_configs: graph.spatial_configs.clone(),
             timeseries_configs: graph.timeseries_configs.clone(),
-            temporal_node_configs: graph.temporal.node_map().clone(),
-            temporal_edge_configs: graph.temporal.edge_map().clone(),
+            temporal_node_configs: legacy_nodes,
+            temporal_edge_configs: legacy_edges,
+            temporal_declarations: graph.temporal.to_persisted(),
             timeseries_data_version: 2,
             topology_compressed_size: 0,
             column_sections: Vec::new(),
@@ -578,7 +592,10 @@ impl FileMetadata {
         graph.cdc_handoff = self.cdc_handoff;
         graph.spatial_configs = self.spatial_configs;
         graph.timeseries_configs = self.timeseries_configs;
-        graph.temporal = (self.temporal_node_configs, self.temporal_edge_configs).into();
+        graph.temporal = TemporalDeclarations::from_file(
+            self.temporal_declarations,
+            (self.temporal_node_configs, self.temporal_edge_configs),
+        );
         // `format_version` is not persisted, so the load side has to re-derive
         // it: the constant this build writes, not a literal pinned to whatever
         // container was current when this line was written.
@@ -2037,98 +2054,6 @@ fn decode_metadata_json(metadata_bytes: &[u8], format_name: &str) -> io::Result<
     Ok(metadata)
 }
 
-/// Length of a portable container's fixed header, and the offset its metadata
-/// JSON starts at.
-const PORTABLE_HEADER_BYTES: usize = 13;
-
-/// Read a portable container's metadata block out of `buf` without touching a
-/// single section — the whole of what an estimate needs.
-///
-/// `buf` may stop immediately after the metadata block; nothing here indexes
-/// past `13 + metadata_len`, which is what lets the file variant read a few
-/// kilobytes instead of the whole graph.
-pub(crate) fn read_metadata_head(buf: &[u8], origin: &str) -> io::Result<FileMetadata> {
-    if buf.len() < 4 {
-        return Err(invalid_data(format!(
-            "{origin} is too small to be a valid kglite graph."
-        )));
-    }
-    let format_name = portable_container_format(buf, origin)?;
-    if buf.len() < PORTABLE_HEADER_BYTES {
-        return Err(invalid_data(format!(
-            "{format_name} file is truncated — header incomplete"
-        )));
-    }
-    let metadata_len = u32::from_le_bytes([buf[9], buf[10], buf[11], buf[12]]) as usize;
-    if metadata_len > MAX_METADATA_BYTES {
-        return Err(invalid_data(format!(
-            "{format_name} metadata is {metadata_len} bytes; limit is {MAX_METADATA_BYTES}"
-        )));
-    }
-    let metadata_bytes = buf
-        .get(PORTABLE_HEADER_BYTES..PORTABLE_HEADER_BYTES + metadata_len)
-        .ok_or_else(|| {
-            invalid_data(format!(
-                "{format_name} file is truncated — metadata incomplete"
-            ))
-        })?;
-    decode_metadata_json(metadata_bytes, format_name)
-}
-
-/// [`read_metadata_head`] against a file, reading only the header and the
-/// metadata block it declares — two short reads, no matter how large the graph.
-pub(crate) fn read_metadata_head_from_file(path: impl AsRef<Path>) -> io::Result<FileMetadata> {
-    let p = path.as_ref();
-    let mut file = File::open(p).map_err(|e| io_context("opening", p, e))?;
-    // `read` rather than `read_exact`: a file too short for the header is a
-    // format refusal with the wording every other reader gives it, not an
-    // `UnexpectedEof` a binding would classify as an I/O fault. Every refusal
-    // below is raised by the single `read_metadata_head` call at the end, so
-    // this function decides only how many bytes to fetch.
-    let mut buf = vec![0u8; PORTABLE_HEADER_BYTES];
-    let header_len =
-        read_up_to(&mut file, &mut buf).map_err(|e| io_context("reading the header of", p, e))?;
-    buf.truncate(header_len);
-    if header_len == PORTABLE_HEADER_BYTES {
-        let metadata_len = u32::from_le_bytes([buf[9], buf[10], buf[11], buf[12]]) as usize;
-        // An over-large declared length is not read: the shared reader refuses
-        // it by the same limit, and allocating it first would be the resource
-        // exhaustion the limit exists to prevent.
-        if metadata_len <= MAX_METADATA_BYTES {
-            buf.resize(PORTABLE_HEADER_BYTES + metadata_len, 0);
-            let read = read_up_to(&mut file, &mut buf[PORTABLE_HEADER_BYTES..])
-                .map_err(|e| io_context("reading the metadata of", p, e))?;
-            buf.truncate(PORTABLE_HEADER_BYTES + read);
-        }
-    }
-    read_metadata_head(&buf, &format!("'{}'", p.display()))
-}
-
-pub(crate) fn checkpoint_lsn_from_file(path: &Path) -> io::Result<u64> {
-    if path.is_dir() {
-        let bytes = std::fs::read(path.join("metadata.json"))?;
-        let metadata: FileMetadata = serde_json::from_slice(&bytes)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        Ok(metadata.checkpoint_lsn)
-    } else {
-        Ok(read_metadata_head_from_file(path)?.checkpoint_lsn)
-    }
-}
-
-/// Fill as much of `buf` as the reader has, returning how many bytes landed.
-/// A short read here means a truncated file, which the caller turns into the
-/// format refusal rather than into an EOF error.
-fn read_up_to(reader: &mut impl std::io::Read, buf: &mut [u8]) -> io::Result<usize> {
-    let mut filled = 0;
-    while filled < buf.len() {
-        match reader.read(&mut buf[filled..])? {
-            0 => break,
-            n => filled += n,
-        }
-    }
-    Ok(filled)
-}
-
 fn load_portable_column_section(
     codec: serde_codec::CodecVersion,
     dir_graph: &mut DirGraph,
@@ -2438,6 +2363,10 @@ mod columns;
 use columns::{attach_portable_column_stores, load_column_sidecars};
 
 mod legacy_references;
+mod metadata_head;
+pub(crate) use metadata_head::{
+    checkpoint_lsn_from_file, read_metadata_head, read_metadata_head_from_file,
+};
 
 mod load_estimate;
 pub use load_estimate::{estimate_load_memory, estimate_load_memory_bytes, LoadMemoryEstimate};

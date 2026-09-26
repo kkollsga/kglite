@@ -3254,6 +3254,7 @@ pub fn kglite::api::temporal::TemporalTarget::hash<__H: core::hash::Hasher>(&sel
 impl core::marker::StructuralPartialEq for kglite::api::temporal::TemporalTarget
 pub struct kglite::api::temporal::DeclarationInfo
 pub kglite::api::temporal::DeclarationInfo::abutting_rows: core::option::Option<usize>
+pub kglite::api::temporal::DeclarationInfo::ambiguous: bool
 pub kglite::api::temporal::DeclarationInfo::config: kglite::api::TemporalConfig
 pub kglite::api::temporal::DeclarationInfo::target: kglite::api::temporal::TemporalTarget
 impl core::clone::Clone for kglite::api::temporal::DeclarationInfo

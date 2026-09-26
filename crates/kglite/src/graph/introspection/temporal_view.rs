@@ -9,7 +9,9 @@
 //! type with several declarations prints them once each in one `temporal`
 //! attribute, since an element cannot repeat an attribute, in lookup order:
 //! the source-keyed ones, then the unkeyed one as `other sources`, which is
-//! what a relationship whose source has no keyed declaration uses.
+//! what a relationship whose source has no keyed declaration uses. A type
+//! with several unkeyed ones also prints `temporal_ambiguous="true"`: which
+//! of them an edge uses depends on the order they were added in.
 
 use super::describe::xml_escape;
 use crate::graph::dir_graph::DirGraph;
@@ -82,7 +84,12 @@ pub(super) fn conn_attrs(graph: &DirGraph, rel_type: &str) -> String {
                 .map(|config| compact(config, counted(config)))
                 .collect::<Vec<_>>()
                 .join("; ");
-            format!(" temporal=\"{}\"", xml_escape(&listed))
+            let ambiguous = if graph.temporal.is_ambiguous(rel_type) {
+                " temporal_ambiguous=\"true\""
+            } else {
+                ""
+            };
+            format!(" temporal=\"{}\"{ambiguous}", xml_escape(&listed))
         }
     }
 }
