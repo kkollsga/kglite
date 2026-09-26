@@ -155,7 +155,8 @@ volume, or above a 40 GB metered size — `du` undercounts APFS clone-shared
 cargo artifacts ~2×, so free space is the meter and `du` only a diagnostic);
 regenerable artifacts and tool caches
 (`.bench-current.json`, `docs/_build`, `.mypy_cache`, `.ruff_cache`,
-`.pytest_cache`, `.uv-cache`, stale ABI-variant extensions, `.DS_Store`) →
+`.pytest_cache`, `.uv-cache`, stale ABI-variant extensions, `.DS_Store`, the
+`kglite/_bin` staging that `make bundle-bin` writes for wheel builds) →
 `make prune-dev` (wired into the release skill); sccache → its 30 GiB config
 cap; `dev-docs/` and `inbox/` → their skills; `../KGLite-worktrees/` → the
 release flow (next paragraph). Never add a new file-writing step (bench
