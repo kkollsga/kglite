@@ -533,7 +533,7 @@ graph.cypher("""
 | `properties(n)` / `properties(r)` | Full property map of a node or relationship (as JSON map); a relationship's map also carries its `type` |
 | `start_node(r)` | Source node of a bound relationship; supports dotted access: `start_node(r).name` |
 | `end_node(r)` | Target node of a bound relationship; supports dotted access: `end_node(r).name` |
-| `date(str)` / `datetime(str)` | Parse a date / ISO-8601 datetime string (`date('2020-01-15')`, `datetime('2020-01-15T10:30:00Z')`) |
+| `date(str)` / `datetime(str)` | Parse a date / ISO-8601 datetime string (`date('2020-01-15')`, `datetime('2020-01-15T10:30:00Z')`), or build one from a map (`date({year: 2020, month: 1, day: 15})`) |
 | `date_diff(d1, d2)` | Days between two dates (`d1 - d2`); also supports `date - date` arithmetic |
 | `coalesce(a, b, ...)` | First non-null argument |
 | `range(start, end [, step])` | Generate a checked inclusive integer list; default step = 1. Cardinality, the `max_work_units` budget, and a 256 MiB materialization ceiling are validated before allocation |
@@ -1335,6 +1335,8 @@ Date-range filtering on nodes and relationships with explicit field names.
 | Function | Description |
 |----------|-------------|
 | `date(str)` | Parse a date string to a DateTime (date-only) value: `'YYYY'`, `'YYYY-MM'`, `'YYYY-MM-DD'`, or ISO 8601 basic `'YYYYMMDD'`; anything else is null |
+| `date({year, month, day})` | Build a date from integers (openCypher's map form): `date({year: y, month: 1, day: 1})`. `month` and `day` default to 1; an impossible date, an unknown key or a non-integer component raises; a null component gives null |
+| `datetime({year, month, day, hour, minute, second, millisecond, microsecond, nanosecond})` | Build a zoneless datetime the same way; missing time fields are 0. A `timezone` key is refused |
 | `datetime(str)` | Parse an ISO-8601 stamp to a Timestamp (date + time, second precision). Accepts `YYYY-MM-DD`, `…THH:MM`, `…THH:MM:SS[.fff]`, and a zoned `…Z` / `…±HH:MM`. **A zone is normalised to UTC**, since `Value::Timestamp` carries no zone; sub-second digits truncate. Unparseable input is NULL |
 | `datetime()` | Current local datetime (no-arg form) |
 | `localdatetime()` | Local wall-clock datetime; 1-arg form parses/normalises a string (NULL on bad input). Unlike `datetime(str)` it keeps the wall-clock reading of a zoned input and drops only the zone label |

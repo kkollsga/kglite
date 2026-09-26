@@ -651,6 +651,24 @@ fn reject_identity_redeclaration(
     Ok(())
 }
 
+/// The report line for a write whose values disagree with the property's
+/// recorded type — `None` when they agree, when the record already says
+/// `"mixed"`, or when either side carries no concrete type. It is a diagnostic, not a refusal: a column may
+/// hold several types, so the values are written, and the recorded type
+/// becomes the observed one (node metadata is last-write-wins; `describe()`
+/// derives `mixed` from the stored values). The line says both, because a
+/// report entry under `errors` otherwise reads as a skipped row.
+fn type_mismatch_message(property: &str, recorded: &str, observed: &str) -> Option<String> {
+    (crate::graph::schema::merged_property_type(recorded, observed).as_deref() == Some("mixed"))
+        .then(|| {
+            format!(
+                "Type mismatch for property '{property}': existing schema has '{recorded}', but \
+             data has '{observed}'. The values were written, and the property's recorded type \
+             is now '{observed}'"
+            )
+        })
+}
+
 /// Merge this call's column types into the node type's metadata and register
 /// the id/title field aliases, appending one message to `errors` for every
 /// column whose type disagrees with the stored schema. Cold once-per-call
@@ -670,11 +688,8 @@ fn install_node_type_metadata(
     if let Some(existing_meta) = graph.get_node_type_metadata(node_type) {
         for (col_name, col_type) in &df_column_types {
             if let Some(existing_type) = existing_meta.get(col_name) {
-                if existing_type != col_type {
-                    errors.push(format!(
-                        "Type mismatch for property '{}': existing schema has '{}', but data has '{}'",
-                        col_name, existing_type, col_type
-                    ));
+                if let Some(message) = type_mismatch_message(col_name, existing_type, col_type) {
+                    errors.push(message);
                 }
             }
         }
@@ -2216,11 +2231,10 @@ pub fn update_node_properties(
     for node_type in node_types.keys() {
         if let Some(existing_meta) = graph.get_node_type_metadata(node_type) {
             if let Some(existing_type) = existing_meta.get(&property_string) {
-                if existing_type != &type_string {
-                    errors.push(format!(
-                        "Type mismatch for property '{}': existing schema has '{}', but data has '{}'",
-                        property_string, existing_type, type_string
-                    ));
+                if let Some(message) =
+                    type_mismatch_message(&property_string, existing_type, &type_string)
+                {
+                    errors.push(message);
                 }
             }
         }

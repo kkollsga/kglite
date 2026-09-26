@@ -1,5 +1,5 @@
 //! Cypher scalar functions — temporal category. Split out of the monolithic
-//! `evaluate_scalar_function` dispatcher; arms are verbatim. Routed from
+//! `evaluate_scalar_function` dispatcher. Routed from
 //! `super::evaluate_scalar_function`; returns `Ok(None)` when `name` is not
 //! one of this category's functions so the dispatcher tries the next.
 use super::super::*;
@@ -14,57 +14,8 @@ impl<'a> CypherExecutor<'a> {
         row: &ResultRow,
     ) -> Result<Option<Value>, String> {
         let result: Result<Value, String> = match name {
-            "date" => {
-                if args.len() != 1 {
-                    return Err("date() requires 1 argument: date('2020-01-15')".into());
-                }
-                let val = self.evaluate_expression(&args[0], row)?;
-                match val {
-                    Value::String(s) => {
-                        // Return Null on invalid input instead of crashing (BUG-09)
-                        match crate::graph::features::timeseries::parse_date_query(&s) {
-                            Ok((d, _)) => Ok(Value::DateTime(d)),
-                            Err(_) => Ok(Value::Null),
-                        }
-                    }
-                    Value::DateTime(_) => Ok(val),
-                    Value::Null => Ok(Value::Null),
-                    _ => Err(format!("date() argument must be a string, got {:?}", val)),
-                }
-            }
-            "datetime" => {
-                // The no-argument form keeps local wall time; offset-bearing
-                // input below is normalised to UTC. Both retain fractions.
-                if args.is_empty() {
-                    let now = chrono::Local::now().naive_local();
-                    return Ok(Some(Value::Timestamp(now)));
-                }
-                if args.len() != 1 {
-                    return Err(
-                        "datetime() requires 0 or 1 argument: datetime() or datetime('2024-03-15T10:30:00')".into(),
-                    );
-                }
-                let val = self.evaluate_expression(&args[0], row)?;
-                match val {
-                    Value::String(s) => {
-                        // Full ISO datetime (zoned or not), else a bare date at
-                        // midnight. A zone is normalised to UTC because
-                        // `Value::Timestamp` has no zone field to carry it —
-                        // the offset is applied, never discarded.
-                        Ok(parse_iso_datetime(&s)
-                            .map_or(Value::Null, |parsed| Value::Timestamp(parsed.utc())))
-                    }
-                    Value::Timestamp(_) => Ok(val),
-                    Value::DateTime(d) => {
-                        Ok(Value::Timestamp(d.and_hms_opt(0, 0, 0).unwrap_or_default()))
-                    }
-                    Value::Null => Ok(Value::Null),
-                    _ => Err(format!(
-                        "datetime() argument must be a string, got {:?}",
-                        val
-                    )),
-                }
-            }
+            "date" => self.eval_date(args, row),
+            "datetime" => self.eval_datetime(args, row),
             "date_diff" | "datediff" => {
                 if args.len() != 2 {
                     return Err("date_diff() requires 2 date arguments".into());
@@ -299,5 +250,154 @@ fn checked_shift_months(date: chrono::NaiveDate, delta: i64) -> Option<chrono::N
     } else {
         let magnitude = u32::try_from(delta.unsigned_abs()).ok()?;
         date.checked_sub_months(chrono::Months::new(magnitude))
+    }
+}
+
+impl CypherExecutor<'_> {
+    /// `date(string | map | date)`.
+    fn eval_date(&self, args: &[Expression], row: &ResultRow) -> Result<Value, String> {
+        if args.len() != 1 {
+            return Err("date() requires 1 argument: date('2020-01-15')".into());
+        }
+        let val = self.evaluate_expression(&args[0], row)?;
+        match val {
+            Value::String(s) => {
+                // Return Null on invalid input instead of crashing (BUG-09)
+                match crate::graph::features::timeseries::parse_date_query(&s) {
+                    Ok((d, _)) => Ok(Value::DateTime(d)),
+                    Err(_) => Ok(Value::Null),
+                }
+            }
+            Value::DateTime(_) => Ok(val),
+            Value::Map(map) => temporal_from_map("date", &map),
+            Value::Null => Ok(Value::Null),
+            _ => Err(format!(
+                "date() argument must be a string or a map, got {:?}",
+                val
+            )),
+        }
+    }
+
+    /// `datetime()`, `datetime(string | map | date | datetime)`.
+    fn eval_datetime(&self, args: &[Expression], row: &ResultRow) -> Result<Value, String> {
+        // The no-argument form keeps local wall time; offset-bearing
+        // input below is normalised to UTC. Both retain fractions.
+        if args.is_empty() {
+            let now = chrono::Local::now().naive_local();
+            return Ok(Value::Timestamp(now));
+        }
+        if args.len() != 1 {
+            return Err(
+                "datetime() requires 0 or 1 argument: datetime() or datetime('2024-03-15T10:30:00')".into(),
+            );
+        }
+        let val = self.evaluate_expression(&args[0], row)?;
+        match val {
+            Value::String(s) => {
+                // Full ISO datetime (zoned or not), else a bare date at
+                // midnight. A zone is normalised to UTC because
+                // `Value::Timestamp` has no zone field to carry it —
+                // the offset is applied, never discarded.
+                Ok(parse_iso_datetime(&s)
+                    .map_or(Value::Null, |parsed| Value::Timestamp(parsed.utc())))
+            }
+            Value::Timestamp(_) => Ok(val),
+            Value::DateTime(d) => Ok(Value::Timestamp(d.and_hms_opt(0, 0, 0).unwrap_or_default())),
+            Value::Map(map) => temporal_from_map("datetime", &map),
+            Value::Null => Ok(Value::Null),
+            _ => Err(format!(
+                "datetime() argument must be a string or a map, got {:?}",
+                val
+            )),
+        }
+    }
+}
+
+/// `date({year, month, day})` and `datetime({year, month, day, hour, minute,
+/// second, millisecond, microsecond, nanosecond})` — openCypher's map form.
+/// `year` is required; a missing month or day is 1 and a missing time field 0.
+/// A null component gives null, as `point({...})` does; any other non-integer
+/// component, an unknown key or an impossible date is an error. Datetimes are
+/// zoneless here, so a `timezone` key is refused rather than ignored.
+fn temporal_from_map(function: &str, map: &crate::datatypes::PropMap) -> Result<Value, String> {
+    const DATE_KEYS: &[&str] = &["year", "month", "day"];
+    const TIME_KEYS: &[&str] = &[
+        "hour",
+        "minute",
+        "second",
+        "millisecond",
+        "microsecond",
+        "nanosecond",
+    ];
+    let with_time = function == "datetime";
+    if let Some((key, _)) = map
+        .iter()
+        .find(|(key, _)| !DATE_KEYS.contains(key) && !(with_time && TIME_KEYS.contains(key)))
+    {
+        let accepted = if with_time {
+            "year, month, day, hour, minute, second, millisecond, microsecond, nanosecond"
+        } else {
+            "year, month, day"
+        };
+        return Err(format!(
+            "{function}(): unknown key '{key}'; accepted keys are {accepted}"
+        ));
+    }
+    let mut null = false;
+    let mut field = |key: &str, default: Option<i64>| -> Result<i64, String> {
+        match map.get(key) {
+            None => default.ok_or_else(|| format!("{function}(): missing '{key}'")),
+            Some(Value::Null) => {
+                null = true;
+                Ok(0)
+            }
+            Some(Value::Int64(n)) => Ok(*n),
+            Some(other) => Err(format!(
+                "{function}(): {key} must be an integer, got {}",
+                other.type_name()
+            )),
+        }
+    };
+    let year = field("year", None)?;
+    let month = field("month", Some(1))?;
+    let day = field("day", Some(1))?;
+    let time = if with_time {
+        let hour = field("hour", Some(0))?;
+        let minute = field("minute", Some(0))?;
+        let second = field("second", Some(0))?;
+        let nanos = field("millisecond", Some(0))? * 1_000_000
+            + field("microsecond", Some(0))? * 1_000
+            + field("nanosecond", Some(0))?;
+        Some((hour, minute, second, nanos))
+    } else {
+        None
+    };
+    if null {
+        return Ok(Value::Null);
+    }
+    let impossible = || {
+        let clock = time.map_or(String::new(), |(h, m, s, n)| {
+            format!(" {h:02}:{m:02}:{s:02}.{n:09}")
+        });
+        format!("{function}(): {year}-{month:02}-{day:02}{clock} is not a valid {function}")
+    };
+    let date = i32::try_from(year)
+        .ok()
+        .zip(u32::try_from(month).ok())
+        .zip(u32::try_from(day).ok())
+        .and_then(|((y, m), d)| chrono::NaiveDate::from_ymd_opt(y, m, d))
+        .ok_or_else(impossible)?;
+    match time {
+        None => Ok(Value::DateTime(date)),
+        Some((hour, minute, second, nanos)) => {
+            let part = |n: i64| u32::try_from(n).ok();
+            part(hour)
+                .zip(part(minute))
+                .zip(part(second))
+                .zip(part(nanos))
+                .and_then(|(((h, m), s), n)| date.and_hms_nano_opt(h, m, s, n))
+                .map(Value::Timestamp)
+                .ok_or_else(impossible)
+        }
     }
 }

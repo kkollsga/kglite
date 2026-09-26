@@ -1202,7 +1202,15 @@ impl KnowledgeGraph {
     #[new]
     #[pyo3(signature = (*, storage=None, path=None))]
     fn new(storage: Option<&str>, path: Option<&str>) -> PyResult<Self> {
-        Self::construct(storage, path)
+        use kglite_core::api::GraphRead;
+        let mut graph = Self::construct(storage, path)?;
+        // A disk graph lives in `path`: that directory is its origin exactly as
+        // it is for `kglite.load(path)`, so a bare `save()` writes back there
+        // instead of refusing for want of a path.
+        if graph.inner.graph.is_disk() {
+            graph.lifecycle.source_path = path.map(std::path::PathBuf::from);
+        }
+        Ok(graph)
     }
 }
 

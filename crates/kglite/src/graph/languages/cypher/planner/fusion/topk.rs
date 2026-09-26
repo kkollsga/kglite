@@ -537,26 +537,14 @@ fn take_fused_shape(query: &mut CypherQuery, i: usize) -> ReturnClause {
     }
 }
 
-/// Column name for a return item (mirrors executor's return_item_column_name).
-pub(crate) fn return_item_column_name(item: &ReturnItem) -> String {
-    if let Some(ref alias) = item.alias {
-        alias.clone()
-    } else {
-        expression_to_column_name(&item.expression)
-    }
-}
+/// Column name for a return item — the executor's own, so a fused clause
+/// names its columns exactly as the unfused pipeline does. A planner-local
+/// copy rendered `count(*)` as `count(Star)` on the count short-circuits.
+pub(crate) use crate::graph::languages::cypher::executor::return_item_column_name;
 
-/// Simple expression-to-string for column name matching in the planner.
+/// The column name an expression projects to, as the executor renders it.
 pub(crate) fn expression_to_column_name(expr: &Expression) -> String {
-    match expr {
-        Expression::Variable(name) => name.clone(),
-        Expression::PropertyAccess { variable, property } => format!("{}.{}", variable, property),
-        Expression::FunctionCall { name, args, .. } => {
-            let args_str: Vec<String> = args.iter().map(expression_to_column_name).collect();
-            format!("{}({})", name, args_str.join(", "))
-        }
-        _ => format!("{:?}", expr),
-    }
+    crate::graph::languages::cypher::executor::helpers::expression_to_string(expr)
 }
 
 // ============================================================================

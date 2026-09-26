@@ -40,6 +40,9 @@ fractional seconds, omitting the fractional suffix for whole-second values.
 Bolt LocalDateTime preserves epoch seconds and nanoseconds; Chrono leap-second
 values outside its 0–999,999,999 nanosecond field are rejected with a typed error. Python's native
 `datetime` supports microseconds; its conversion cannot represent finer digits.
+In Python a `Timestamp` arrives as a naive `datetime.datetime` (`datetime64` in
+`to_df()`), while a `DateTime` (a date) arrives as its ISO string,
+`'2024-03-09'` (a string column in `to_df()`).
 `datetime()` normalises offset-bearing input to UTC; `localdatetime()` keeps
 its local wall time. Neither parsed constructor drops fractional seconds.
 

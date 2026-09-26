@@ -407,6 +407,37 @@ impl CypherExecutor<'_> {
                     })
                     .collect();
                 self.execute_return_retaining(&expanded, result_set, &retain)
+            } else if result_set.rows.is_empty()
+                && r.items
+                    .iter()
+                    .any(|item| matches!(item.expression, Expression::Star) && item.alias.is_none())
+            {
+                // No row to read the names `*` stands for out of: name the
+                // columns from the query's static scope instead, so a
+                // zero-row `RETURN *` reports `['n']` rather than `['*']`.
+                let columns = super::call_subquery::subquery_arm_output_columns(
+                    &query.clauses[..=index],
+                    &[],
+                    &[],
+                )?;
+                let mut expanded = r.clone();
+                expanded.items = columns
+                    .into_iter()
+                    .map(|name| {
+                        r.items
+                            .iter()
+                            .find(|item| {
+                                !matches!(item.expression, Expression::Star)
+                                    && return_item_column_name(item) == name
+                            })
+                            .cloned()
+                            .unwrap_or(ReturnItem {
+                                expression: Expression::Variable(name.clone()),
+                                alias: Some(name),
+                            })
+                    })
+                    .collect();
+                self.execute_return_retaining(&expanded, result_set, &retain)
             } else {
                 self.execute_return_retaining(r, result_set, &retain)
             }

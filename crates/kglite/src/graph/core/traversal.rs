@@ -221,14 +221,10 @@ pub fn make_traversal(
 
     let create_new_level = new_level.unwrap_or(true);
 
-    // Get source level
-    let source_level = selection
-        .get_level(source_level_index)
-        .ok_or_else(|| "No valid source level found for traversal".to_string())?;
-
-    // Early empty check
-    if source_level.is_empty() {
-        return Err("No source nodes available for traversal".to_string());
+    // An empty source level is not an error: it traverses to an empty level,
+    // so a chain over a selection that matched nothing keeps chaining.
+    if selection.get_level(source_level_index).is_none() {
+        return Err("No valid source level found for traversal".to_string());
     }
 
     // Set up traversal directions
@@ -817,24 +813,25 @@ fn value_to_f64(v: &Value) -> Option<f64> {
     }
 }
 
-/// Collect source nodes and determine source type from the current selection.
+/// Collect source nodes and determine source type from the current selection;
+/// `None` for an empty selection, which compares to an empty level.
 fn get_source_info(
     graph: &DirGraph,
     selection: &CurrentSelection,
-) -> Result<(Vec<NodeIndex>, String), String> {
+) -> Result<Option<(Vec<NodeIndex>, String)>, String> {
     let level_idx = selection.get_level_count().saturating_sub(1);
     let level = selection
         .get_level(level_idx)
         .ok_or("No source level for comparison traversal")?;
     let source_nodes: Vec<NodeIndex> = level.iter_node_indices().collect();
     if source_nodes.is_empty() {
-        return Err("No source nodes for comparison traversal".into());
+        return Ok(None);
     }
     let source_type = graph
         .node_view(source_nodes[0])
         .map(|n| n.node_type_str(&graph.interner).to_string())
         .ok_or("Cannot determine source node type")?;
-    Ok((source_nodes, source_type))
+    Ok(Some((source_nodes, source_type)))
 }
 
 /// Get all candidate target nodes from type_indices.
@@ -898,7 +895,18 @@ fn spatial_contains_traversal(
     sort_target: Option<&Vec<(String, bool)>>,
     max_nodes: Option<usize>,
 ) -> Result<(), String> {
-    let (source_nodes, source_type) = get_source_info(graph, selection)?;
+    let Some((source_nodes, source_type)) = get_source_info(graph, selection)? else {
+        insert_matches_into_selection(
+            graph,
+            selection,
+            HashMap::new(),
+            "contains",
+            filter_target,
+            sort_target,
+            max_nodes,
+        );
+        return Ok(());
+    };
     let target_candidates = get_target_candidates(graph, target_type)?;
 
     let source_spatial = graph.get_spatial_config(&source_type);
@@ -1002,7 +1010,18 @@ fn spatial_intersects_traversal(
     sort_target: Option<&Vec<(String, bool)>>,
     max_nodes: Option<usize>,
 ) -> Result<(), String> {
-    let (source_nodes, source_type) = get_source_info(graph, selection)?;
+    let Some((source_nodes, source_type)) = get_source_info(graph, selection)? else {
+        insert_matches_into_selection(
+            graph,
+            selection,
+            HashMap::new(),
+            "intersects",
+            filter_target,
+            sort_target,
+            max_nodes,
+        );
+        return Ok(());
+    };
     let target_candidates = get_target_candidates(graph, target_type)?;
 
     let source_spatial = graph.get_spatial_config(&source_type);
@@ -1082,7 +1101,18 @@ fn spatial_distance_traversal(
     sort_target: Option<&Vec<(String, bool)>>,
     max_nodes: Option<usize>,
 ) -> Result<(), String> {
-    let (source_nodes, source_type) = get_source_info(graph, selection)?;
+    let Some((source_nodes, source_type)) = get_source_info(graph, selection)? else {
+        insert_matches_into_selection(
+            graph,
+            selection,
+            HashMap::new(),
+            "distance",
+            filter_target,
+            sort_target,
+            max_nodes,
+        );
+        return Ok(());
+    };
     let target_candidates = get_target_candidates(graph, target_type)?;
 
     let source_spatial = graph.get_spatial_config(&source_type);
@@ -1345,7 +1375,18 @@ fn semantic_score_traversal(
     sort_target: Option<&Vec<(String, bool)>>,
     max_nodes: Option<usize>,
 ) -> Result<(), String> {
-    let (source_nodes, source_type) = get_source_info(graph, selection)?;
+    let Some((source_nodes, source_type)) = get_source_info(graph, selection)? else {
+        insert_matches_into_selection(
+            graph,
+            selection,
+            HashMap::new(),
+            "text_score",
+            filter_target,
+            sort_target,
+            max_nodes,
+        );
+        return Ok(());
+    };
     let target_candidates = get_target_candidates(graph, target_type)?;
 
     // Get embedding stores for source and target types
@@ -1437,7 +1478,22 @@ fn cluster_traversal(
         .ok_or("No source level for cluster traversal")?;
     let source_nodes: Vec<NodeIndex> = level.iter_node_indices().collect();
     if source_nodes.is_empty() {
-        return Err("No source nodes for cluster traversal".into());
+        // Nothing to cluster: an empty level, as every other comparison
+        // answers an empty selection — once the arguments are known good.
+        if !matches!(algorithm, "kmeans" | "dbscan") {
+            return Err(format!(
+                "Unknown clustering algorithm: '{}'. Valid: 'kmeans', 'dbscan'",
+                algorithm
+            ));
+        }
+        selection.add_level();
+        let target_level_idx = selection.get_level_count() - 1;
+        let level = selection.get_level_mut(target_level_idx).unwrap();
+        level.operations = vec![SelectionOperation::Custom(format!(
+            "compare(method='cluster', algorithm='{}')",
+            algorithm
+        ))];
+        return Ok(());
     }
 
     // Optionally filter by target_type

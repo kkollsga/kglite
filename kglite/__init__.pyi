@@ -585,7 +585,15 @@ class ResultView:
         ...
 
     def to_list(self) -> list[dict[str, Any]]:
-        """Convert all rows to a Python list of dicts (full materialization)."""
+        """Convert all rows to a Python list of dicts (full materialization).
+
+        Temporal values come back in two shapes. A **date** is an ISO string,
+        ``'2010-01-02'`` — not a ``datetime.date``. A **datetime** is a naive
+        ``datetime.datetime``. A date string can be passed straight back into
+        a query: ``WHERE n.d = $d`` compares a stored date with the text it
+        parses to, as ``<`` and ``>`` do. Wrap it in ``date($d)`` where a
+        function needs a date value.
+        """
         ...
 
     def to_dicts(self) -> list[dict[str, Any]]:
@@ -641,7 +649,9 @@ class ResultView:
         Integer columns containing NULL use pandas nullable ``Int64``. Mixed
         columns containing integers use ``object`` to preserve values and types.
         Other columns follow pandas inference; float NULLs can become NaN.
-        Column order and nested values are preserved.
+        Column order and nested values are preserved. A date column holds ISO
+        strings (a string column, not ``datetime64``) — convert it with
+        ``pd.to_datetime(df[col])``; a datetime column is ``datetime64``.
 
         Example::
 
@@ -2190,7 +2200,11 @@ class KnowledgeGraph:
         Returns:
             Operation report dict with keys ``nodes_created``,
             ``nodes_updated``, ``nodes_skipped``, ``processing_time_ms``,
-            ``has_errors``, and optionally ``errors`` with skip reasons.
+            ``has_errors``, and optionally ``errors``: the reasons rows were
+            skipped, and any column whose values disagree with the type
+            already recorded for the property. A type mismatch is not a
+            refusal — the values are written, and the recorded type becomes
+            the new one — so ``has_errors`` can be true with nothing skipped.
 
         Raises:
             ArgumentError: The type already has nodes and this call names a
@@ -4835,7 +4849,9 @@ class KnowledgeGraph:
         Args:
             path: Output file path (typically ``*.kgl``). May be omitted if the
                 graph was opened via :func:`kglite.open` or :func:`kglite.load`,
-                in which case it defaults to that origin file. Passing a path
+                in which case it defaults to that origin file, or built with
+                ``KnowledgeGraph(storage='disk', path=...)``, in which case it
+                defaults to that directory. Passing a path
                 updates the remembered target after success ("save as"). Raises ``ValueError``
                 if omitted and there is no remembered path.
             fsync: When ``True`` (default), flush the file and its parent

@@ -1003,7 +1003,7 @@ impl ConnectionTypeInfo {
 
 /// What a recorded property type becomes when a write observes `observed` —
 /// `None` when `prior` already says it.
-fn merged_property_type(prior: &str, observed: &str) -> Option<String> {
+pub(crate) fn merged_property_type(prior: &str, observed: &str) -> Option<String> {
     let no_evidence = |t: &str| t == "Unknown" || t == "Null";
     if no_evidence(observed) || prior.eq_ignore_ascii_case(observed) || prior == "mixed" {
         None

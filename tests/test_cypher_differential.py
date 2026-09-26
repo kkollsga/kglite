@@ -281,6 +281,18 @@ def date_text_graph():
 
 
 DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
+    # An unaliased `count(*)` is `count(*)` on every plan, and a zero-row
+    # `RETURN *` names the variables it stands for, not `*`.
+    ("count_star_column_all_nodes", "social_graph", "MATCH (n) RETURN count(*)", None),
+    ("count_star_column_typed", "social_graph", "MATCH (n:Person) RETURN count(*)", None),
+    ("count_star_column_by_edge_type", "social_graph", "MATCH ()-[r]->() RETURN type(r), count(*)", None),
+    ("count_star_column_all_edges", "social_graph", "MATCH ()-[r]->() RETURN count(*)", None),
+    (
+        "return_star_zero_rows",
+        "social_graph",
+        "MATCH (p:Person)-[k:KNOWS]->(q) WHERE p.name = 'nobody' RETURN *",
+        None,
+    ),
     # A date equals the text it parses from, for `=` / `<>` / `IN` / an
     # inline map exactly as for `<` — on the scan, the pushed matcher, the
     # equality index and the fused count alike.
@@ -6704,8 +6716,15 @@ def test_optimized_matches_naive(
     kwargs = {"params": params} if params else {}
 
     order = "ordered" if name in ORDERED_CASES else "bag"
-    naive = _normalize(g.cypher(query, disable_optimizer=True, **kwargs).to_list(), order=order)
-    optimized = _normalize(g.cypher(query, **kwargs).to_list(), order=order)
+    naive_result = g.cypher(query, disable_optimizer=True, **kwargs)
+    optimized_result = g.cypher(query, **kwargs)
+    # The column names are part of the answer: a fused plan once named an
+    # unaliased `count(*)` `count(Star)`, which no row comparison can see.
+    assert list(optimized_result.columns) == list(naive_result.columns), (
+        f"Optimizer column divergence on `{name}`: {optimized_result.columns} vs {naive_result.columns}"
+    )
+    naive = _normalize(naive_result.to_list(), order=order)
+    optimized = _normalize(optimized_result.to_list(), order=order)
 
     assert optimized == naive, (
         f"Optimizer divergence on `{name}`:\n"

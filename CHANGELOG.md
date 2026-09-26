@@ -11,6 +11,11 @@ before upgrading.
 
 ### Added
 
+- Cypher: `date({year, month, day})` and `datetime({year, month, day, hour,
+  minute, second, millisecond, microsecond, nanosecond})`, openCypher's map
+  form, build a date or datetime from integers — `date({year: y, month: 1,
+  day: 1})`. Missing fields default to the start of the period; an impossible
+  date, an unknown key or a non-integer component raises.
 - Rust API: `kglite::api::blueprint::TemporalSpec`, the `temporal` field's type on
   `NodeSpec`, `FkEdge` and `JunctionEdge`.
 - Rust API: `SchemaDefinition::reject_reserved_provenance_constraints` and
@@ -174,6 +179,20 @@ before upgrading.
 
 ### Fixed
 
+- Fluent `traverse()` and `compare()` on an empty selection return an empty
+  selection instead of raising `No source nodes available for traversal`, so
+  a per-group loop no longer fails on a group with no members.
+- `KnowledgeGraph(storage='disk', path=p).save()` saves into `p`; it refused
+  with "needs a path" although the graph lives there.
+- Cypher: an unaliased `count(*)` is named `count(*)` on every plan — the
+  count short-circuits named it `count(Star)` (`MATCH (n) RETURN count(*)`,
+  `RETURN type(r), count(*)`) — and `RETURN *` over zero rows reports the
+  variables it stands for instead of the single column `*`.
+- `add_nodes` and the fluent `update()` say, in the type-mismatch entry under
+  `errors`, that the values were written and what the recorded type became,
+  and no longer report a mismatch against a property recorded as `mixed` or
+  with no concrete type. The `add_nodes` docstring now says `errors` also
+  lists type mismatches, which are not refusals.
 - Cypher `valid_at()` / `valid_during()` refuse a bound property that no element
   of the type has — a misspelled `'validfrom'` — instead of reading it as an
   open bound on every row and answering with a plausible but wrong count. The
