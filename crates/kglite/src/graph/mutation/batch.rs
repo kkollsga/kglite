@@ -1,4 +1,5 @@
 use crate::datatypes::Value;
+use crate::graph::features::temporal::{Start, StartKey};
 use crate::graph::schema::{
     DirGraph, EdgeData, InternedKey, NodeData, PropertyStorage, PROVISIONAL_KEY,
 };
@@ -696,7 +697,7 @@ pub struct ConnectionBatchStats {
 }
 
 impl ConnectionBatchStats {
-    fn combine(&mut self, other: &ConnectionBatchStats) {
+    pub(crate) fn combine(&mut self, other: &ConnectionBatchStats) {
         self.connections_created += other.connections_created;
         self.connections_updated += other.connections_updated;
         self.properties_tracked = self.properties_tracked.max(other.properties_tracked);
@@ -722,7 +723,7 @@ pub struct ConnectionBatchProcessor {
     skip_existence_check: bool,
     /// Set for a declared temporal relationship type: the `from` property that
     /// joins the endpoint pair in the merge key (see [`MergeKey`]).
-    start_key: Option<InternedKey>,
+    start_key: Option<StartKey>,
 }
 
 impl ConnectionBatchProcessor {
@@ -756,13 +757,14 @@ impl ConnectionBatchProcessor {
     /// owns all of them. Otherwise a row merges per `mode` into the stored or
     /// earlier-queued edge with the same key: the endpoint pair, plus — when
     /// `start_key` names a declared temporal relationship type's `from`
-    /// property (`features::temporal::merge_start_key`) — that property's
-    /// value, so a row starting a different period is a new, parallel edge.
-    pub fn configure(
+    /// property (`features::temporal::merge_start_key`) — the start that
+    /// property holds, so a row starting a different period is a new, parallel
+    /// edge.
+    pub(crate) fn configure(
         &mut self,
         mode: ConflictHandling,
         skip_existence_check: bool,
-        start_key: Option<InternedKey>,
+        start_key: Option<StartKey>,
     ) {
         self.conflict_mode = mode;
         self.skip_existence_check = skip_existence_check;
@@ -785,16 +787,16 @@ impl ConnectionBatchProcessor {
         // (single chokepoint for every `add_connections` route; registered into
         // `schema_properties` below so the columnar edge store gets a slot).
         graph.inject_edge_provenance_interned(connection_type, &mut properties);
-        if let (false, Some(start)) = (self.skip_existence_check, self.start_key) {
+        if let (false, Some(start)) = (self.skip_existence_check, &self.start_key) {
             if self.conflict_mode == ConflictHandling::Skip {
                 let conn_type_key = graph.interner.get_or_intern(connection_type);
-                let row = row_start(&properties, start);
+                let row = start.of_properties(&properties);
                 if graph
                     .graph
                     .edges_connecting(source_idx, target_idx)
                     .any(|e| {
                         e.connection_type() == conn_type_key
-                            && graph.graph.get_edge_property(e.id(), start) == row
+                            && stored_start(graph, start, e.id()) == row
                     })
                 {
                     return Ok(());
@@ -849,7 +851,7 @@ impl ConnectionBatchProcessor {
     ) -> Result<ConnectionBatchStats, String> {
         // Chosen once per flush, so the undeclared path runs the endpoint-pair
         // loop with no per-row branch on the start key.
-        match self.start_key {
+        match self.start_key.clone() {
             None => Ok(self.flush_keyed(graph, connection_type, Endpoints)),
             Some(key) => Ok(self.flush_keyed(graph, connection_type, EndpointsAndStart(key))),
         }
@@ -1029,15 +1031,14 @@ impl MergeKey for Endpoints {
     }
 }
 
-/// The endpoint pair plus the value of a declared temporal type's `from`
-/// property (absent or NULL is `None`), so each period between a pair is its
-/// own relationship. The stored value is read without materialising the edge,
-/// which keeps a disk graph's query arena flat. Values compare structurally:
-/// a date and a datetime on the same day are different starts.
-struct EndpointsAndStart(InternedKey);
+/// The endpoint pair plus the start a declared temporal type's `from`
+/// property holds ([`Start`]: absent or NULL is `None`, and one instant is one
+/// start however it is spelled), so each period between a pair is its own
+/// relationship.
+struct EndpointsAndStart(StartKey);
 
 impl MergeKey for EndpointsAndStart {
-    type Key = (NodeIndex, NodeIndex, Option<Value>);
+    type Key = (NodeIndex, NodeIndex, Start);
 
     fn stored(
         &self,
@@ -1046,25 +1047,22 @@ impl MergeKey for EndpointsAndStart {
         source: NodeIndex,
         target: NodeIndex,
     ) -> Self::Key {
-        (source, target, graph.graph.get_edge_property(edge, self.0))
+        (source, target, stored_start(graph, &self.0, edge))
     }
 
     fn row(&self, conn: &ConnectionCreation) -> Self::Key {
         (
             conn.source_idx,
             conn.target_idx,
-            row_start(&conn.properties, self.0),
+            self.0.of_properties(&conn.properties),
         )
     }
 }
 
-/// A queued row's value for `key`; NULL reads as absent, as a stored edge's
-/// does through `GraphRead::get_edge_property`.
-fn row_start(properties: &[(InternedKey, Value)], key: InternedKey) -> Option<Value> {
-    properties
-        .iter()
-        .find(|(k, v)| *k == key && !matches!(v, Value::Null))
-        .map(|(_, v)| v.clone())
+/// A stored edge's start, read without materialising the edge, which keeps a
+/// disk graph's query arena flat.
+fn stored_start(graph: &DirGraph, key: &StartKey, edge: EdgeIndex) -> Start {
+    key.read(|property| graph.graph.get_edge_property(edge, property))
 }
 
 /// Merge `conn` into the stored edge `edge_idx` per `mode` (never `Skip`).

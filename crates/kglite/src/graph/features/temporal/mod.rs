@@ -11,6 +11,7 @@ pub(crate) mod eval;
 mod loader;
 #[cfg(test)]
 mod loader_tests;
+mod merge_key;
 #[cfg(test)]
 mod merge_key_tests;
 pub(crate) mod persist;
@@ -26,6 +27,7 @@ pub use declarations::{
 pub use eval::IntervalConvention;
 pub(crate) use loader::{adopt_declarations, settle_adopted};
 pub use loader::{declare_defaulted, declare_from_column_types, LoadDeclaration};
+pub(crate) use merge_key::{Start, StartKey};
 
 use crate::datatypes::values::Value;
 use crate::graph::schema::{InternedKey, TemporalConfig};

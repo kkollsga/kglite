@@ -44,7 +44,8 @@
 //! | `create_connections` | off | lookup on, so every row merges | [`RowFolding::Merging`] with `read_stored` |
 //!
 //! Under `Merging` a row folds on the batch's key: the endpoint pair, plus the
-//! `from` value for a declared temporal type ([`ConnectionBatchGate::start_key`]).
+//! start the `from` bound names for a declared temporal type
+//! ([`ConnectionBatchGate::start_key`]), read exactly as the batch reads it.
 
 use std::collections::{HashMap, HashSet};
 
@@ -53,6 +54,7 @@ use petgraph::Direction;
 use crate::datatypes::values::Value;
 use crate::datatypes::DataFrame;
 use crate::graph::dir_graph::DirGraph;
+use crate::graph::features::temporal::{Start, StartKey};
 use crate::graph::storage::interner::InternedKey;
 use crate::graph::storage::GraphRead;
 
@@ -103,7 +105,7 @@ pub(crate) fn gate_property_rows(
     properties: &[Vec<(InternedKey, Value)>],
     conflict_mode: ConflictHandling,
     folding: RowFolding,
-    start_key: Option<InternedKey>,
+    start_key: Option<&StartKey>,
 ) -> Result<(), String> {
     // The gate's own fast-out, taken before the column list is built.
     if !graph.has_rel_constraints() || !graph.type_has_rel_constraints(connection_type) {
@@ -163,8 +165,8 @@ pub(crate) struct ConnectionBatchGate<'a> {
     pub folding: RowFolding,
     /// The batch's start key (`ConnectionBatchProcessor::configure`): for a
     /// declared temporal type a row folds only into a relationship between the
-    /// same endpoints with the same `from` value, so pairs are keyed on it too.
-    pub start_key: Option<InternedKey>,
+    /// same endpoints with the same start, so pairs are keyed on it too.
+    pub start_key: Option<&'a StartKey>,
 }
 
 /// How a frame's rows become relationships — the distinction the gate's
@@ -215,10 +217,6 @@ impl RowFolding {
 /// own (`extract_props` drops nulls).
 type PairState = Vec<Option<Value>>;
 
-/// A row's or stored relationship's value for the start key; always `None`
-/// without one, which reduces every key to the endpoint pair.
-type Start = Option<Value>;
-
 impl ConnectionBatchGate<'_> {
     /// Refuse the frame if any row would leave a relationship violating a
     /// declared constraint. The violation is parked before it is returned, so
@@ -259,18 +257,28 @@ impl ConnectionBatchGate<'_> {
         let stored = self.stored_state(graph, &names);
         let mut matched_state: HashMap<(usize, usize, Start), PairState> = HashMap::new();
         let mut deferred_state: HashMap<(Value, Value, Start), PairState> = HashMap::new();
-        let start_column = self.start_key.and_then(|start| {
-            self.property_columns
-                .iter()
-                .find(|(_, key, _)| *key == start)
-                .map(|(_, _, index)| *index)
-        });
+        // Where each of the start key's properties lives in this frame.
+        let start_columns: Vec<(InternedKey, usize)> = self
+            .start_key
+            .map(|start| {
+                start
+                    .keys()
+                    .iter()
+                    .filter_map(|key| {
+                        self.property_columns
+                            .iter()
+                            .find(|(_, column_key, _)| column_key == key)
+                            .map(|(_, _, index)| (*key, *index))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
         for (row_idx, source, target) in self.matched {
             let key = (
                 source.index(),
                 target.index(),
-                self.row_start(*row_idx, start_column),
+                self.row_start(*row_idx, &start_columns),
             );
             let existing = stored.get(&key);
             let state = match matched_state.get(&key) {
@@ -287,7 +295,7 @@ impl ConnectionBatchGate<'_> {
             let key = (
                 source_id.clone(),
                 target_id.clone(),
-                self.row_start(*row_idx, start_column),
+                self.row_start(*row_idx, &start_columns),
             );
             let state = deferred_state
                 .get(&key)
@@ -342,15 +350,9 @@ impl ConnectionBatchGate<'_> {
                             .filter(|value| !matches!(value, Value::Null))
                     })
                     .collect();
-                let start = self.start_key.and_then(|start| {
-                    weight
-                        .properties
-                        .iter()
-                        .find(|(stored_key, value)| {
-                            *stored_key == start && !matches!(value, Value::Null)
-                        })
-                        .map(|(_, value)| value.clone())
-                });
+                let start = self
+                    .start_key
+                    .and_then(|start| start.of_properties(&weight.properties));
                 stored.insert((source.index(), edge.target().index(), start), values);
             }
         }
@@ -410,12 +412,15 @@ impl ConnectionBatchGate<'_> {
         }
     }
 
-    /// The row's value in the start-key column; `None` when the type has no
-    /// start key, or the cell is missing or NULL.
-    fn row_start(&self, row_idx: usize, start_column: Option<usize>) -> Start {
-        start_column
-            .and_then(|index| self.rows.cell(row_idx, index))
-            .filter(|value| !matches!(value, Value::Null))
+    /// The row's start; `None` when the type has no start key, or the row
+    /// carries none of its properties (a missing or NULL cell).
+    fn row_start(&self, row_idx: usize, start_columns: &[(InternedKey, usize)]) -> Start {
+        self.start_key.and_then(|start| {
+            start.read(|key| {
+                let (_, index) = start_columns.iter().find(|(k, _)| *k == key)?;
+                self.rows.cell(row_idx, *index)
+            })
+        })
     }
 
     /// The constrained properties `row_idx` supplies. A missing column and a

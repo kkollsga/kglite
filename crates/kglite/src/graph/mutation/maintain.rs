@@ -17,9 +17,8 @@ use crate::graph::mutation::edge_props::{
 use crate::graph::mutation::endpoints::{
     report_null_id_skips, resolve_endpoints, resolve_pairs, ResolvedEndpoints,
 };
-use crate::graph::mutation::rel_constraint_gate::{
-    gate_property_rows, ConnectionBatchGate, RowFolding,
-};
+use crate::graph::mutation::pending_edges::PendingEdges;
+use crate::graph::mutation::rel_constraint_gate::{ConnectionBatchGate, RowFolding};
 use crate::graph::schema::{
     CompositeValue, CurrentSelection, DirGraph, InternedKey, TypeSchema, PROVISIONAL_KEY,
     RESERVED_PROVENANCE_KEYS,
@@ -1086,7 +1085,7 @@ pub(crate) fn add_connections_with_initial_load(
     let is_initial_load = initial_load.owns_every_edge(graph, &connection_type);
     let start_key = merge_start_key(graph, &connection_type, Some(&source_type));
     let mut batch = ConnectionBatchProcessor::new(df_data.row_count());
-    batch.configure(conflict_mode, is_initial_load, start_key);
+    batch.configure(conflict_mode, is_initial_load, start_key.clone());
 
     let mut skipped_count = skipped_null_source + skipped_null_target;
 
@@ -1123,7 +1122,7 @@ pub(crate) fn add_connections_with_initial_load(
         deferred: &deferred,
         conflict_mode,
         folding: RowFolding::for_load(is_initial_load),
-        start_key,
+        start_key: start_key.as_ref(),
     }
     .run(graph)?;
 
@@ -1770,7 +1769,7 @@ pub fn replace_connections(
         conflict_mode,
         // Why this regime and not the loader's: `RowFolding::for_replace`.
         folding: RowFolding::for_replace(graph, &connection_type),
-        start_key: merge_start_key(graph, &connection_type, Some(&source_type)),
+        start_key: merge_start_key(graph, &connection_type, Some(&source_type)).as_ref(),
     }
     .run(graph)?;
 
@@ -1974,10 +1973,6 @@ pub fn create_connections(
         }
     };
 
-    let mut batch = ConnectionBatchProcessor::new(target_level_data.node_count());
-    let start_key = merge_start_key(graph, &connection_type, source_type_filter.as_deref());
-    batch.configure(conflict_mode, false, start_key);
-
     let mut skipped = 0;
     let mut detected_source_type = None;
     let mut detected_target_type = None;
@@ -2099,79 +2094,33 @@ pub fn create_connections(
         }
     }
 
-    let pending = PendingEdges {
+    let written = PendingEdges {
         endpoints: pending,
         properties: pending_props,
-        conflict_mode,
-        start_key,
-    };
-    let (failed, errors) = pending.gate_and_add(graph, &mut batch, &connection_type)?;
-
-    if let (Some(source), Some(target)) = (detected_source_type, detected_target_type) {
-        update_schema_node(
-            graph,
-            &connection_type,
-            &source,
-            &target,
-            batch.schema_property_types(graph),
-        )?;
     }
+    .write(
+        graph,
+        &connection_type,
+        conflict_mode,
+        source_type_filter.as_deref(),
+        detected_source_type
+            .as_deref()
+            .zip(detected_target_type.as_deref()),
+    )?;
 
-    let (stats, metrics) = batch.execute(graph, connection_type)?;
+    let mut report = batch_report(
+        "create_connections",
+        &written.stats,
+        skipped + written.failed,
+        &written.metrics,
+    );
 
-    let mut report = batch_report("create_connections", &stats, skipped + failed, &metrics);
-
-    if !errors.is_empty() {
-        report = report.with_errors(errors);
+    if !written.errors.is_empty() {
+        report = report.with_errors(written.errors);
     }
 
     graph.bump_version();
     Ok(report)
-}
-
-/// The edges a [`create_connections`] call resolved, not yet written.
-struct PendingEdges {
-    /// `(row, source, target)` — the row indexes `properties`.
-    endpoints: Vec<(usize, NodeIndex, NodeIndex)>,
-    properties: Vec<Vec<(InternedKey, Value)>>,
-    conflict_mode: ConflictHandling,
-    start_key: Option<InternedKey>,
-}
-
-impl PendingEdges {
-    /// Judge every edge against the declared relationship constraints, then
-    /// add them to `batch`. Every edge is resolved before any is added, so a
-    /// constraint refuses the whole call rather than the rows after the first
-    /// violation. Returns the rows the batch rejected and their messages.
-    fn gate_and_add(
-        self,
-        graph: &mut DirGraph,
-        batch: &mut ConnectionBatchProcessor,
-        connection_type: &str,
-    ) -> Result<(usize, Vec<String>), String> {
-        gate_property_rows(
-            graph,
-            connection_type,
-            &self.endpoints,
-            &self.properties,
-            self.conflict_mode,
-            RowFolding::for_load(false),
-            self.start_key,
-        )?;
-        let mut failed = 0;
-        let mut errors = Vec::new();
-        for ((_, source_idx, target_idx), edge_props) in
-            self.endpoints.into_iter().zip(self.properties)
-        {
-            if let Err(e) =
-                batch.add_connection(source_idx, target_idx, edge_props, graph, connection_type)
-            {
-                failed += 1;
-                errors.push(format!("Failed to add connection: {}", e));
-            }
-        }
-        Ok((failed, errors))
-    }
 }
 
 /// The observed type string `update_node_properties` records for a batch,

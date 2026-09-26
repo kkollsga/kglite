@@ -311,8 +311,8 @@
     {
       "path": "crates/kglite/src/graph/mutation/maintain.rs",
       "qualified_name": "crate::create_connections",
-      "lines": 242,
-      "branches": 42,
+      "lines": 237,
+      "branches": 39,
       "nesting": 10
     },
     {

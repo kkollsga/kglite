@@ -12,7 +12,7 @@ use std::cmp::Ordering;
 use std::fmt;
 
 /// A point on the time line, at the grain it was written in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Instant {
     Date(NaiveDate),
     /// Naive UTC: an offset the source carried has already been applied.

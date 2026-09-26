@@ -2317,7 +2317,12 @@ class KnowledgeGraph:
             relationship (every ``conflict_handling`` mode), and one starting
             the same period merges as above — closing an open period, or
             re-loading it. Correcting a stored ``from`` bound is therefore a
-            delete of the old relationship plus a load of the new one.
+            delete of the old relationship plus a load of the new one. Starts
+            compare as the instant they name: a date, a midnight datetime and
+            an ISO string of the same day are one start, while a datetime later
+            in the day is its own. A legacy type with several unkeyed
+            declarations keys each row on the first declared ``from`` property
+            it carries.
         """
         ...
 
@@ -2507,7 +2512,11 @@ class KnowledgeGraph:
           that already exists here is **not** duplicated — its properties merge
           per ``conflict_handling``. Exact-duplicate edges present in both
           graphs are created once, not twice (mirrors ``add_relationships``'
-          dedup so a merge never silently doubles shared edges).
+          dedup so a merge never silently doubles shared edges). Parallel
+          edges *other* carries between one pair are all copied when this
+          graph holds no relationship of that type yet, and fold onto one edge
+          per key when it does, as a re-load through ``add_relationships``
+          would.
         - **Declarations** travel with the data: *other*'s validity-interval
           declarations (see :meth:`set_temporal`) are in place before its
           edges merge and are validated once they have, and its spatial

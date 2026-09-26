@@ -279,3 +279,32 @@ fn every_endpoint_policy_enforces_relationship_constraints() {
         assert_eq!(legal.graph.edge_count(), 1, "policy={policy}");
     }
 }
+
+/// A refusal is scoped as the CHANGELOG states it: under `vivify` and `drop`
+/// each connection spec is gated and written in turn, so a violation in the
+/// second leaves the nodes and the first spec's relationships; `error` loads
+/// on a transaction fork and writes nothing.
+#[test]
+fn a_constraint_refuses_from_its_connection_spec_unless_the_policy_is_error() {
+    let interrupt = crate::graph::algorithms::Interrupt::default();
+    for (policy, edges_left) in [("vivify", 1), ("drop", 1), ("error", 0)] {
+        let mut spec = endpoint_spec(policy);
+        spec["connections"][0]["records"] = json!([{"source": 1, "target": 2, "weight": 3}]);
+        let mut second = spec["connections"][0].clone();
+        second["type"] = json!("CITES");
+        spec["connections"].as_array_mut().unwrap().push(second);
+
+        let mut graph = DirGraph::new();
+        graph
+            .create_rel_not_null_constraint("CITES", "since", &interrupt)
+            .unwrap();
+        let error = from_records(&mut graph, &spec).expect_err("a CITES without `since`");
+        assert!(
+            error.contains("connections[1]") && error.contains("CITES.since"),
+            "policy={policy}: {error}"
+        );
+        assert_eq!(graph.graph.edge_count(), edges_left, "policy={policy}");
+        let nodes_left = if policy == "error" { 0 } else { 2 };
+        assert_eq!(graph.graph.node_count(), nodes_left, "policy={policy}");
+    }
+}

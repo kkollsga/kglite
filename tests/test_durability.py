@@ -596,6 +596,40 @@ def test_add_nodes_survives_crash(tmp_path, storage):
 
 
 @pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_add_nodes_refused_by_its_timeseries_writes_nothing(tmp_path, storage):
+    """An inline timeseries cell the loader cannot read refuses the whole call.
+
+    Red proof: the timeseries was read after the nodes were written, so the call
+    raised with the nodes in memory but not in the log — a crash before the next
+    commit lost rows the handle still showed, and a later commit logged a load
+    the caller had been told failed."""
+    _crash_child(
+        tmp_path,
+        """
+        import pandas as pd
+        g = open_durable()
+        frame = pd.DataFrame(
+            {"id": [1, 1, 2], "name": ["a", "a", "b"], "t": ["2020-01", "garbage", "2020-02"], "v": [1.0, 2.0, 3.0]}
+        )
+        try:
+            g.add_nodes(frame, "T", "id", "name", timeseries={"time": "t", "channels": ["v"]})
+        except kglite.ArgumentError:
+            pass
+        else:
+            raise AssertionError("the unreadable time cell was accepted")
+        assert g.cypher("MATCH (n:T) RETURN count(n) AS n").to_list() == [{"n": 0}]
+        g.add_nodes(
+            frame.iloc[[0, 2]], "T", "id", "name", timeseries={"time": "t", "channels": ["v"]}, labels=["Series"]
+        )
+        """,
+        storage,
+    )
+    g = _open(tmp_path / "app.kgl", storage)
+    rows = g.cypher("MATCH (n:T:Series) RETURN n.id AS id ORDER BY id").to_list()
+    assert [r["id"] for r in rows] == [1, 2]
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
 def test_add_connections_survives_crash(tmp_path, storage):
     _crash_child(
         tmp_path,

@@ -40,11 +40,11 @@
 //!   target is *not* duplicated; its properties merge per
 //!   `conflict_handling`. This is the defensible choice over petgraph's
 //!   raw parallel-edge capability — a merge that silently doubled every
-//!   shared edge would be surprising. Genuinely parallel edges that the
-//!   *source* itself carries between the same pair are preserved only up
-//!   to one per `(type, src, tgt)` — one per `from` bound for a declared
-//!   temporal type — after the merge, matching
-//!   `add_connections`' within-batch consolidation.
+//!   shared edge would be surprising. Parallel edges the *source* itself
+//!   carries between one pair follow `add_connections`' initial-load rule:
+//!   for a connection type the target does not hold yet, every one is
+//!   copied; for a type it holds, they fold onto one edge per key, as a
+//!   re-load would.
 //! - **Property schemas** merge through the same `upsert_node_type_metadata`
 //!   / `type_schemas` extension path `add_nodes` uses.
 //! - **Declarations**: the source's temporal declarations and spatial
@@ -65,10 +65,10 @@
 use crate::datatypes::{DataFrame, Value};
 use crate::graph::features::temporal;
 use crate::graph::introspection::reporting::{ConnectionOperationReport, NodeOperationReport};
-use crate::graph::mutation::maintain::{add_connections, add_nodes};
+use crate::graph::mutation::maintain::{add_connections_with_initial_load, add_nodes, InitialLoad};
 use crate::graph::schema::DirGraph;
 use crate::graph::storage::GraphRead;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Combined report for an `extend` merge.
 #[derive(Debug, Clone)]
@@ -394,16 +394,26 @@ fn merge_edges_and_declarations(
 }
 
 /// Route each source edge group through `add_connections`, tallying the
-/// outcome into `report`.
+/// outcome into `report`. Whether a connection type is new to the target is
+/// decided before any group lands: the first group of a type registers it, so
+/// re-detecting per group would keep the parallel edges of whichever group the
+/// map yields first and fold every later group's.
 fn merge_edge_groups(
     target: &mut DirGraph,
     edge_groups: HashMap<(String, String, String), EdgeGroup>,
     conflict_handling: &Option<String>,
     report: &mut ExtendReport,
 ) -> Result<(), String> {
+    let new_types: HashSet<String> = edge_groups
+        .keys()
+        .map(|(conn_type, _, _)| conn_type)
+        .filter(|conn_type| !target.connection_type_metadata.contains_key(*conn_type))
+        .cloned()
+        .collect();
     for ((conn_type, _, _), group) in edge_groups {
         let df = build_edge_dataframe(&group)?;
-        let r: ConnectionOperationReport = add_connections(
+        let initial_load = InitialLoad::Preset(new_types.contains(&conn_type));
+        let r: ConnectionOperationReport = add_connections_with_initial_load(
             target,
             df,
             conn_type,
@@ -414,6 +424,7 @@ fn merge_edge_groups(
             None,
             None,
             conflict_handling.clone(),
+            initial_load,
         )?;
         report.edges_created += r.connections_created;
         report.edges_updated += r.connections_updated;

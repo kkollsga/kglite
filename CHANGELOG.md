@@ -111,14 +111,22 @@ before upgrading.
   input by position). A different declaration for a type that already has one
   is refused instead of added beside it. Rows written onto a declared type
   later are not validated.
-- A bulk load (`add_relationships`, `replace_relationships`, the C ABI's edge
-  batch) onto a relationship type with a declared validity interval keys rows
-  on their `from` bound as well as the endpoints: a row starting a period no
-  stored relationship between the pair starts is a new relationship,
-  whatever `conflict_handling` says, where it used to merge into the stored
-  one and leave an inverted interval or drop a period. A row starting the
-  same period merges as before. Relationship constraints judge rows by the
-  same key. Undeclared types are unchanged.
+- A bulk load (`add_relationships`, `replace_relationships`,
+  `create_relationships()`, `extend()`, the C ABI's edge batch) onto a
+  relationship type with a declared validity interval keys rows on their
+  `from` bound as well as the endpoints: a row starting a period no stored
+  relationship between the pair starts is a new relationship, whatever
+  `conflict_handling` says, where it used to merge into the stored one and
+  leave an inverted interval or drop a period. A row starting the same period
+  merges as before. Starts compare as the instant they name, so a date, a
+  midnight datetime and an ISO string of the same day are one start (a pandas
+  column holding one time of day loads as datetimes, and re-loading it as
+  dates merges); a datetime later in the day is its own start. The
+  declaration consulted is the one covering each row's source type, also when
+  `create_relationships()` is called without `source_type=`. A legacy type
+  with several unkeyed declarations keys each row on the first declared
+  `from` property it carries. Relationship constraints judge rows by the same
+  key. Undeclared types are unchanged.
 
 ### Fixed
 
@@ -127,10 +135,13 @@ before upgrading.
   `create_relationships()`, or by the Rust `kglite::api::blueprint::from_records`
   loading into a graph that declares them with `on_missing_endpoint` set to
   `"drop"` or `"error"`. These paths could store relationships the
-  constraint forbids. They now use the same check as `add_relationships`.
-  The whole call is refused before anything is written, and it raises
-  `ConstraintViolationError`. The C ABI returns
-  `KgliteStatusCode::ConstraintViolation`.
+  constraint forbids. They now use the same check as `add_relationships`,
+  and a violation raises `ConstraintViolationError` (the C ABI returns
+  `KgliteStatusCode::ConstraintViolation`). The C ABI batch and
+  `create_relationships()` are refused before any relationship is written.
+  `from_records` judges one connection spec at a time: a refused spec leaves
+  the nodes and the earlier specs' relationships written, except under
+  `"error"`, which writes nothing unless the whole load succeeds.
 - A constraint on a provenance key (`updated_at`, `git_sha`, `modified_by`) is
   refused when declared: `CREATE CONSTRAINT` on a node or relationship
   raises `CypherExecutionError`, and `define_schema` raises `ValueError` for
@@ -151,6 +162,19 @@ before upgrading.
   spatial configurations; it copied neither, so the other graph's periods
   between the same endpoints collapsed into one relationship on merge and its
   spatial types lost their configuration.
+- `add_nodes(..., timeseries=...)` reads and validates the inline timeseries
+  before writing any node. A time cell it could not read (or a bad
+  `resolution`, or a non-numeric channel) raised after the nodes were written,
+  leaving them in the graph — and, on a durable graph, outside the write-ahead
+  log until the next committed write.
+- `add_nodes` with `labels=`, or with an `embedding` column type, reads the
+  frame by position. A frame whose index was not `0..n` (a filtered or sliced
+  DataFrame) raised `KeyError`.
+- `extend()` copies every parallel relationship the other graph holds between
+  one pair for a relationship type this graph does not have yet. When that
+  type connected more than one pair of node types, only the first pair merged
+  kept its parallel relationships; which pair that was changed from run to
+  run.
 - `describe()` repeated `temporal_from` / `temporal_to` on one `<conn>`
   element when a relationship type had several temporal configurations,
   which is malformed XML. It now prints them once each in one

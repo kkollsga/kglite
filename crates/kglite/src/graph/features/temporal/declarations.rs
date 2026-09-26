@@ -12,9 +12,10 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use super::eval::IntervalConvention;
+use super::merge_key::StartKey;
 use super::validate::{self, Walk};
 use crate::graph::dir_graph::DirGraph;
-use crate::graph::schema::{InternedKey, TemporalConfig};
+use crate::graph::schema::TemporalConfig;
 
 /// What a declaration is about.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -157,17 +158,6 @@ impl TemporalDeclarations {
 
     pub(crate) fn abutting(&self, target: &TemporalTarget) -> Option<usize> {
         self.abutting.get(target).copied()
-    }
-
-    /// The config governing `rel_type` relationships that leave nodes of
-    /// `source_type`: the source's keyed declaration, else the first unkeyed
-    /// one.
-    pub(crate) fn covering(&self, rel_type: &str, source_type: &str) -> Option<&TemporalConfig> {
-        let configs = self.edges(rel_type);
-        configs
-            .iter()
-            .find(|c| c.source_type.as_deref() == Some(source_type))
-            .or_else(|| configs.iter().find(|c| c.source_type.is_none()))
     }
 
     /// The key a load of `target`'s rows declares under (see
@@ -466,24 +456,26 @@ pub fn edge_configs<'g>(graph: &'g DirGraph, rel_type: &str) -> &'g [TemporalCon
     graph.temporal.edges(rel_type)
 }
 
-/// The interned `from` property of the declaration covering `rel_type`
-/// relationships from `source_type` (see [`TemporalDeclarations::covering`];
-/// `None` as the source takes only an unkeyed declaration) — the property a
-/// bulk load adds to its merge key, so that a row starting a different period
-/// between the same endpoints becomes a parallel relationship instead of
-/// merging into the stored one. `None` when the type is not declared.
+/// The `from` properties a bulk load of `rel_type` relationships from
+/// `source_type` adds to its merge key, so that a row starting a different
+/// period between the same endpoints becomes a parallel relationship instead
+/// of merging into the stored one: the source's keyed declaration's, else
+/// every unkeyed declaration's in declaration order (a legacy type can hold
+/// several; each row keys on the first it carries). `None` as the source takes
+/// only the unkeyed declarations, and `None` is returned when none applies.
 pub(crate) fn merge_start_key(
     graph: &DirGraph,
     rel_type: &str,
     source_type: Option<&str>,
-) -> Option<InternedKey> {
-    let store = &graph.temporal;
-    let config = match source_type {
-        Some(source) => store.covering(rel_type, source),
-        None => store
-            .edges(rel_type)
+) -> Option<StartKey> {
+    let configs = graph.temporal.edges(rel_type);
+    let keyed = source_type.and_then(|source| {
+        configs
             .iter()
-            .find(|c| c.source_type.is_none()),
-    }?;
-    Some(InternedKey::from_str(&config.valid_from))
+            .find(|c| c.source_type.as_deref() == Some(source))
+    });
+    match keyed {
+        Some(config) => StartKey::of([config]),
+        None => StartKey::of(configs.iter().filter(|c| c.source_type.is_none())),
+    }
 }

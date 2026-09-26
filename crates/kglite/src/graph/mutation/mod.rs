@@ -14,6 +14,7 @@ pub mod edge_specs;
 mod endpoints;
 pub mod extend;
 pub mod maintain;
+mod pending_edges;
 mod rel_constraint_gate;
 pub mod set_ops;
 pub mod subgraph;

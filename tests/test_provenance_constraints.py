@@ -249,13 +249,13 @@ def test_a_disk_graph_holding_a_reserved_key_constraint_loads_without_it(tmp_pat
     g.cypher("CREATE CONSTRAINT task_name FOR (n:Task) REQUIRE n.name IS NOT NULL")
     g.save(str(path))
     del g
-    current = (path / "CURRENT").read_text().strip()
+    current = (path / "CURRENT").read_text(encoding="utf-8").strip()
     meta_path = path / "generations" / current / "metadata.json"
-    meta = json.loads(meta_path.read_text())
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
     meta["ddl_not_null_constraints"].append(["Task", "updated_at"])
     meta["schema_definition"]["node_schemas"]["Task"]["required_fields"].append("updated_at")
     meta.setdefault("rel_ddl_property_type_constraints", {})["LINKS"] = {"git_sha": "Integer"}
-    meta_path.write_text(json.dumps(meta))
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
     capfd.readouterr()
 
     loaded = kglite.load(str(path))

@@ -667,12 +667,14 @@ fn extract_embedding_pairs<'py>(
     if embedding_columns.is_empty() {
         return Ok(Vec::new());
     }
-    let id_series = data.get_item(unique_id_field)?;
+    // `.iloc`: positional. `Series[i]` reads the index *label* `i`, which is
+    // absent from a frame whose index is not 0..n.
+    let id_series = data.get_item(unique_id_field)?.getattr("iloc")?;
     let nrows: usize = data.getattr("shape")?.get_item(0)?.extract()?;
     let mut result = Vec::with_capacity(embedding_columns.len());
 
     for emb_col in embedding_columns {
-        let series = data.get_item(emb_col)?;
+        let series = data.get_item(emb_col)?.getattr("iloc")?;
         let mut pairs = Vec::with_capacity(nrows);
         let mut rows = py_in::F32Rows::default();
         for i in 0..nrows {
@@ -831,20 +833,21 @@ fn store_extracted_embeddings(
     }
 }
 
-/// Apply a uniform set of secondary labels to every row in the batch.
-/// Reads the unique_id_field column from the original DataFrame and
-/// looks each id up in the graph, applying every label in `labels`.
-/// Idempotent — if a label is already present (or equals the primary
-/// type), `DirGraph::add_node_label` no-ops.
-fn apply_batch_labels<'py>(
+/// A uniform set of secondary labels for every row of an `add_nodes` batch,
+/// with the batch's ids, read before any row is written so that applying them
+/// afterwards cannot fail.
+struct PreparedLabels {
+    ids: Vec<Value>,
+    labels: Vec<kglite_core::api::InternedKey>,
+}
+
+fn prepare_batch_labels<'py>(
     graph: &mut DirGraph,
-    node_type: &str,
     data: &Bound<'py, PyAny>,
     unique_id_field: &str,
     labels: &[String],
-) -> PyResult<()> {
-    graph.build_id_index(node_type);
-    let label_keys: Vec<kglite_core::api::InternedKey> = labels
+) -> PyResult<PreparedLabels> {
+    let labels = labels
         .iter()
         .map(|l| {
             graph
@@ -853,35 +856,56 @@ fn apply_batch_labels<'py>(
                 .map_err(|e| crate::error_py::kg_to_pyerr(crate::error::KgError::from(e)))
         })
         .collect::<PyResult<_>>()?;
-    let id_series = data.get_item(unique_id_field)?;
-    let nrows: usize = data.getattr("shape")?.get_item(0)?.extract()?;
+    // Positional, through `tolist()`: `Series[i]` looks up the index *label*,
+    // which raised `KeyError` on a frame whose index is not 0..n.
+    let ids = data
+        .get_item(unique_id_field)?
+        .call_method0("tolist")?
+        .try_iter()?
+        .map(|id| py_in::py_value_to_value(&id?))
+        .collect::<PyResult<_>>()?;
+    Ok(PreparedLabels { ids, labels })
+}
+
+/// Stamp every label on each batch node, found by id. Idempotent — a label
+/// already present (or equal to the primary type) is a no-op.
+fn apply_batch_labels(graph: &mut DirGraph, node_type: &str, prepared: &PreparedLabels) {
+    graph.build_id_index(node_type);
     // One id-resolution pass, then one bulk stamp per label — the nested
     // per-row × per-label add_node_label loop this replaces was quadratic
     // in the batch size.
-    let mut indices = Vec::with_capacity(nrows);
-    for i in 0..nrows {
-        let id_val = py_in::py_value_to_value(&id_series.get_item(i)?)?;
-        if let Some(node_idx) = graph.lookup_by_id(node_type, &id_val) {
-            indices.push(node_idx);
-        }
-    }
-    for &key in &label_keys {
+    let indices: Vec<_> = prepared
+        .ids
+        .iter()
+        .filter_map(|id| graph.lookup_by_id(node_type, id))
+        .collect();
+    for &key in &prepared.labels {
         graph.add_node_labels_bulk(&indices, key);
     }
-    Ok(())
 }
 
-fn apply_timeseries<'py>(
+/// An `add_nodes` call's inline timeseries, read and validated in full before
+/// any row is written, so a cell it cannot read refuses the whole call instead
+/// of raising after the nodes have landed.
+struct PreparedTimeseries {
+    cfg: InlineTimeseriesConfig,
+    resolution: String,
+    time_keys: Vec<chrono::NaiveDate>,
+    value_cols: Vec<(String, Vec<f64>)>,
+    /// Row indexes by the row's foreign-key text.
+    groups: HashMap<String, Vec<usize>>,
+}
+
+/// `None` for an empty frame, which loads no timeseries.
+fn prepare_timeseries<'py>(
     py: Python<'py>,
-    graph: &mut DirGraph,
-    node_type: &str,
     data: &Bound<'py, PyAny>,
     fk_field: &str,
     ts_cfg: InlineTimeseriesConfig,
-) -> PyResult<()> {
+) -> PyResult<Option<PreparedTimeseries>> {
     let n_rows: usize = data.getattr("shape")?.get_item(0)?.extract()?;
     if n_rows == 0 {
-        return Ok(());
+        return Ok(None);
     }
 
     let fk_col: Vec<Py<PyAny>> = data.get_item(fk_field)?.call_method0("tolist")?.extract()?;
@@ -956,6 +980,30 @@ fn apply_timeseries<'py>(
         groups.entry(key).or_default().push(i);
     }
 
+    Ok(Some(PreparedTimeseries {
+        cfg: ts_cfg,
+        resolution: resolved_resolution,
+        time_keys,
+        value_cols,
+        groups,
+    }))
+}
+
+/// Attach a [`PreparedTimeseries`] to the nodes the load wrote. Nothing here
+/// can fail: every read of the input happened in [`prepare_timeseries`].
+fn apply_timeseries(
+    py: Python<'_>,
+    graph: &mut DirGraph,
+    node_type: &str,
+    prepared: PreparedTimeseries,
+) {
+    let PreparedTimeseries {
+        cfg: ts_cfg,
+        resolution: resolved_resolution,
+        time_keys,
+        value_cols,
+        groups,
+    } = prepared;
     graph.build_id_index(node_type);
 
     let mut ts_nodes_loaded = 0usize;
@@ -1028,8 +1076,6 @@ fn apply_timeseries<'py>(
             1,
         );
     }
-
-    Ok(())
 }
 
 /// Marshal an `add_nodes` report, warning about skipped rows unless
@@ -1278,6 +1324,18 @@ impl KnowledgeGraph {
             })
             .transpose()
             .map_err(|e| crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e)))?;
+        // Everything after the write below must be infallible, or a raise
+        // would leave the rows in memory but out of the write-ahead log.
+        let timeseries = parsed
+            .ts_config
+            .map(|cfg| prepare_timeseries(py, data, &unique_id_field, cfg))
+            .transpose()?
+            .flatten();
+        let labels = labels
+            .as_ref()
+            .filter(|list| !list.is_empty())
+            .map(|list| prepare_batch_labels(graph, data, &unique_id_field, list))
+            .transpose()?;
         let result = apply_node_batch(
             py,
             graph,
@@ -1295,13 +1353,11 @@ impl KnowledgeGraph {
             graph.set_spatial_config(&node_type, cfg);
         }
         store_extracted_embeddings(graph, &node_type, &embedding_data);
-        if let Some(ts_cfg) = parsed.ts_config {
-            apply_timeseries(py, graph, &node_type, data, &unique_id_field, ts_cfg)?;
+        if let Some(prepared) = timeseries {
+            apply_timeseries(py, graph, &node_type, prepared);
         }
-        if let Some(label_list) = labels.as_ref() {
-            if !label_list.is_empty() {
-                apply_batch_labels(graph, &node_type, data, &unique_id_field, label_list)?;
-            }
+        if let Some(prepared) = &labels {
+            apply_batch_labels(graph, &node_type, prepared);
         }
 
         self.cursor.selection.clear();

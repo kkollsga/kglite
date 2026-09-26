@@ -462,3 +462,37 @@ def test_extend_copies_spatial_configs():
     target.extend(source)
     assert target.spatial("City") == source.spatial("City")
     assert target.spatial("City") is not None
+
+
+def _parallel_source():
+    """R holds two parallel edges between each of two node-type pairs."""
+    source = KnowledgeGraph()
+    source.cypher(
+        "CREATE (a:A {id: 1, title: 'a'}), (b:B {id: 2, title: 'b'}), "
+        "(c:C {id: 3, title: 'c'}), (d:D {id: 4, title: 'd'}), "
+        "(a)-[:R {w: 1}]->(b), (a)-[:R {w: 2}]->(b), (c)-[:R {w: 3}]->(d), (c)-[:R {w: 4}]->(d)"
+    )
+    return source
+
+
+def _r_per_source(g):
+    rows = g.cypher("MATCH (x)-[r:R]->() RETURN x.title AS s, count(r) AS n ORDER BY s").to_list()
+    return [(r["s"], r["n"]) for r in rows]
+
+
+def test_extend_copies_every_parallel_edge_of_a_type_new_to_the_target():
+    """Red proof: each (source type, target type) group re-detected whether the
+    type was new, so the first group merged (in hash order) kept its parallel
+    edges and every later one collapsed them — which pair lost an edge changed
+    from run to run."""
+    target = KnowledgeGraph()
+    target.extend(_parallel_source())
+    assert _r_per_source(target) == [("a", 2), ("c", 2)]
+
+
+def test_extend_merges_source_parallels_into_a_type_the_target_holds():
+    target = KnowledgeGraph()
+    target.cypher("CREATE (:A {id: 9, title: 'z'})-[:R]->(:B {id: 8, title: 'y'})")
+    report = target.extend(_parallel_source())
+    assert _r_per_source(target) == [("a", 1), ("c", 1), ("z", 1)]
+    assert (report["edges_created"], report["edges_updated"]) == (2, 2)

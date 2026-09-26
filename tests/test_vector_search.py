@@ -665,6 +665,24 @@ class TestAddNodesEmbeddings:
         assert len(results) == 2
         assert results[0]["id"] == 1  # Most similar to [1, 0]
 
+    def test_a_frame_whose_index_is_not_positional(self):
+        """Red proof: the id and vector cells were read by index label, so a
+        filtered frame raised ``KeyError``."""
+        df = pd.DataFrame(
+            {
+                "id": [1, 2, 3],
+                "title": ["A", "B", "C"],
+                "text_emb": [[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]],
+            }
+        ).iloc[[0, 2]]
+        graph = kglite.KnowledgeGraph()
+        graph.add_nodes(df, "Doc", "id", "title", column_types={"text_emb": "embedding"}, labels=["Paper"])
+        assert graph.list_embeddings()[0]["count"] == 2
+        results = graph.select("Doc").vector_search("text", [0.5, 0.5], top_k=1)
+        assert results[0]["id"] == 3
+        rows = graph.cypher("MATCH (d:Doc:Paper) RETURN d.id AS id ORDER BY id").to_list()
+        assert [r["id"] for r in rows] == [1, 3]
+
 
 # ── Cypher vector_score() function ────────────────────────────────────────
 

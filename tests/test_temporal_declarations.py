@@ -6,6 +6,8 @@ Red proof: before the procedures existed every call here failed as an unknown
 procedure.
 """
 
+from pathlib import Path
+import shutil
 import warnings
 
 import pandas as pd
@@ -541,3 +543,173 @@ class TestDeclaredMergeKey:
         assert _periods(g) == [("2000-01-01", "2005-01-01")]
         report = _link(g, [(1, 2, "2000-01-01", "2006-01-01")])
         assert _counts(report) == (0, 1)
+
+
+class TestTheMergeKeyReadsTheStart:
+    """One start written as a date, a midnight datetime or an ISO string is
+    one period: re-loading it in another spelling merges into the stored
+    relationship instead of adding a parallel one.
+
+    Red proof: the key compared raw values, so each case below created a
+    second relationship for the same period."""
+
+    @staticmethod
+    def _cypher_period(start):
+        g = _docs()
+        g.cypher(
+            f"MATCH (a:Doc {{id: 1}}), (b:Doc {{id: 2}}) CREATE (a)-[:IN {{vf: {start}, vt: date('2005-01-01')}}]->(b)"
+        )
+        g.set_temporal("IN", "vf", "vt")
+        return g
+
+    def test_a_datetime64_column_reloaded_as_dates_merges(self):
+        g = _docs()
+        g.add_nodes(pd.DataFrame({"id": [3], "title": ["D3"]}), "Doc", "id", "title")
+        # One row with a time of day types the whole column as datetimes, so
+        # 1 -> 2 stores a midnight datetime.
+        first = pd.DataFrame(
+            {
+                "src": [1, 2],
+                "tgt": [2, 3],
+                "vf": pd.to_datetime(["2009-01-01 00:00", "2010-05-05 12:30"]),
+                "vt": pd.to_datetime([None, "2011-01-01"]),
+            }
+        )
+        g.add_connections(first, "IN", "Doc", "src", "Doc", "tgt")
+        g.set_temporal("IN", "vf", "vt")
+        # Midnight-only: typed as dates.
+        closing = pd.DataFrame(
+            {"src": [1], "tgt": [2], "vf": pd.to_datetime(["2009-01-01"]), "vt": pd.to_datetime(["2012-01-01"])}
+        )
+        report = g.add_connections(closing, "IN", "Doc", "src", "Doc", "tgt")
+        assert _counts(report) == (0, 1)
+        rows = g.cypher("MATCH (:Doc {id: 1})-[r:IN]->(:Doc {id: 2}) RETURN r.vt AS vt").to_list()
+        assert [str(r["vt"])[:10] for r in rows] == ["2012-01-01"]
+
+    @pytest.mark.parametrize(
+        "stored", ["date('2000-01-01')", "datetime('2000-01-01T00:00:00')", "'2000-01-01'", "'2000-01-01T00:00:00Z'"]
+    )
+    @pytest.mark.parametrize("mode", MODES)
+    def test_every_spelling_of_one_start_merges(self, stored, mode):
+        g = self._cypher_period(stored)
+        report = _link(g, [(1, 2, "2000-01-01", "2006-01-01")], mode=mode)
+        assert _counts(report) == ((0, 0) if mode == "skip" else (0, 1))
+        assert len(_periods(g)) == 1
+
+    def test_a_datetime_within_the_day_is_its_own_start(self):
+        g = self._cypher_period("datetime('2000-01-01T12:30:00')")
+        report = _link(g, [(1, 2, "2000-01-01", "2006-01-01")])
+        assert _counts(report) == (1, 0)
+        assert len(_periods(g)) == 2
+
+    def test_the_constraint_gate_reads_the_start_as_the_loader_does(self):
+        g = _docs()
+        g.cypher(
+            "MATCH (a:Doc {id: 1}), (b:Doc {id: 2}) "
+            "CREATE (a)-[:IN {vf: datetime('2000-01-01T00:00:00'), vt: date('2005-01-01'), x: 7}]->(b)"
+        )
+        g.set_temporal("IN", "vf", "vt")
+        g.cypher("CREATE CONSTRAINT FOR ()-[r:IN]-() REQUIRE r.x IS NOT NULL")
+        report = _link(g, [(1, 2, "2000-01-01", "2006-01-01")])
+        assert _counts(report) == (0, 1)
+        with pytest.raises(kglite.ConstraintViolationError, match=r"IN\.x"):
+            _link(g, [(1, 2, "2000-01-02", None)])
+        assert len(_periods(g)) == 1
+
+    def test_extend_merges_a_period_spelled_differently_in_each_graph(self):
+        target = self._cypher_period("datetime('2000-01-01T00:00:00')")
+        source = self._cypher_period("date('2000-01-01')")
+        report = target.extend(source)
+        assert (report["edges_created"], report["edges_updated"]) == (0, 1)
+        assert len(_periods(target)) == 1
+
+
+class TestCreateRelationshipsKeysBySource:
+    """``create_relationships()`` without ``source_type=`` keys each edge on
+    the declaration covering its own source type.
+
+    Red proof: without ``source_type=`` only an unkeyed declaration was
+    consulted, so a second period between the same pair merged into the
+    first."""
+
+    @staticmethod
+    def _graph():
+        g = kglite.KnowledgeGraph()
+        g.cypher(
+            """
+            CREATE (a:A {id: 1, title: 'A1'}), (b:B {id: 10, title: 'B10'}),
+                   (c:C {id: 100, title: 'C100', vf: date('2010-01-01')}),
+                   (a)-[:AB]->(b), (b)-[:BC]->(c),
+                   (a)-[:R {vf: date('2000-01-01'), vt: date('2005-01-01')}]->(c)
+            """
+        )
+        g.set_temporal("R", "vf", "vt", source_type="A")
+        return g
+
+    @pytest.mark.parametrize("source_type", [None, "A"])
+    def test_a_new_period_is_a_new_relationship(self, source_type):
+        g = (
+            self._graph()
+            .select("A")
+            .traverse("AB")
+            .traverse("BC")
+            .create_relationships("R", properties={"C": ["vf"]}, source_type=source_type)
+        )
+        rows = g.cypher("MATCH (:A)-[r:R]->(:C) RETURN r.vf AS vf ORDER BY vf").to_list()
+        assert [str(r["vf"])[:10] for r in rows] == ["2000-01-01", "2010-01-01"]
+
+    def test_mixed_sources_each_key_on_their_own_declaration(self):
+        """A source level holding two node types keys each edge on its own
+        type's declaration: both edges restate their stored period, so both
+        merge. Keying either on the other type's ``from`` reads it as absent
+        and adds a parallel relationship."""
+
+        def build():
+            g = kglite.KnowledgeGraph()
+            g.cypher(
+                """
+                CREATE (a:A {id: 1, title: 'A1'}), (x:X:A {id: 2, title: 'X2'}),
+                       (b:B {id: 10, title: 'B10'}),
+                       (c:C {id: 100, title: 'C100', vf: date('2000-01-01'), xf: date('2000-01-01')}),
+                       (a)-[:AB]->(b), (x)-[:AB]->(b), (b)-[:BC]->(c),
+                       (a)-[:R {vf: date('2000-01-01'), vt: date('2005-01-01')}]->(c),
+                       (x)-[:R {xf: date('2000-01-01'), xt: date('2005-01-01')}]->(c)
+                """
+            )
+            g.set_temporal("R", "vf", "vt", source_type="A")
+            g.set_temporal("R", "xf", "xt", source_type="X")
+            return g
+
+        g = (
+            build()
+            .select("A", include_secondary=True)
+            .traverse("AB")
+            .traverse("BC")
+            .create_relationships("R", properties={"C": ["vf", "xf"]})
+        )
+        rows = g.cypher("MATCH (s)-[r:R]->(:C) RETURN s.title AS s, count(r) AS n ORDER BY s").to_list()
+        assert rows == [{"s": "A1", "n": 1}, {"s": "X2", "n": 1}]
+
+
+class TestAnAmbiguousTypeKeysOnTheDeclarationARowCarries:
+    """A legacy type holding two unkeyed declarations keys each row on the
+    first declaration whose ``from`` it carries.
+
+    Red proof: every row keyed on the first declaration's ``from``, so rows
+    bounded by the second declaration keyed on nothing and collapsed."""
+
+    def test_second_declaration_periods_stay_apart(self, tmp_path):
+        fixture = Path(__file__).parent / "fixtures" / "temporal_legacy" / "distinct_duplicates.kgl"
+        copy = tmp_path / "distinct_duplicates.kgl"
+        shutil.copy(fixture, copy)
+        g = kglite.load(str(copy))
+
+        def other(start):
+            frame = pd.DataFrame({"field": [1], "company": [10], "other_from": pd.to_datetime([start])})
+            return g.add_connections(frame, "HAS_LICENSEE", "Field", "field", "Company", "company")
+
+        assert _counts(other("2015-01-01")) == (1, 0)
+        assert _counts(other("2020-01-01")) == (1, 0)
+        assert _counts(other("2020-01-01")) == (0, 1)
+        rows = g.cypher("MATCH (:Field {id: 1})-[r:HAS_LICENSEE]->(:Company {id: 10}) RETURN count(r) AS n").to_list()
+        assert rows == [{"n": 3}]

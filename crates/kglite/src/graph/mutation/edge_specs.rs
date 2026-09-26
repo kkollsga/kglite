@@ -2,7 +2,7 @@
 //! type — the DataFrame-free edge-ingest path ([`add_edges_from_specs`]).
 
 use crate::datatypes::Value;
-use crate::graph::features::temporal::merge_start_key;
+use crate::graph::features::temporal::{merge_start_key, StartKey};
 use crate::graph::mutation::batch::{ConflictHandling, ConnectionBatchProcessor};
 use crate::graph::mutation::maintain::{preflight_interner_names, update_schema_node};
 use crate::graph::mutation::rel_constraint_gate::{gate_property_rows, RowFolding};
@@ -165,7 +165,7 @@ pub fn add_edges_from_specs(
         batch.configure(
             ConflictHandling::Update,
             group.is_initial_load,
-            group.start_key,
+            group.start_key.clone(),
         );
         for ((_, src_idx, tgt_idx), props) in group.endpoints.into_iter().zip(group.properties) {
             batch.add_connection(src_idx, tgt_idx, props, graph, &group.edge_type)?;
@@ -198,7 +198,7 @@ struct PreparedSpecGroup {
     endpoints: Vec<(usize, NodeIndex, NodeIndex)>,
     properties: Vec<Vec<(InternedKey, Value)>>,
     is_initial_load: bool,
-    start_key: Option<InternedKey>,
+    start_key: Option<StartKey>,
 }
 
 impl PreparedSpecGroup {
@@ -212,7 +212,7 @@ impl PreparedSpecGroup {
             &self.properties,
             ConflictHandling::Update,
             RowFolding::for_load(self.is_initial_load),
-            self.start_key,
+            self.start_key.as_ref(),
         )
     }
 }
