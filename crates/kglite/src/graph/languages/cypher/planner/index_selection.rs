@@ -63,12 +63,7 @@ pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<St
         let prior_scalar_vars = collect_prior_scalar_vars(&query.clauses[..i]);
 
         let PushableResult {
-            pushable,
-            pushable_in,
-            pushable_cmp,
-            pushable_var,
-            pushable_nodeprop,
-            pushable_text,
+            pushables,
             remaining,
         } = extract_pushable_equalities(
             &where_pred,
@@ -79,14 +74,7 @@ pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<St
             occupied_properties,
         );
 
-        if has_pushable(
-            &pushable,
-            &pushable_in,
-            &pushable_cmp,
-            &pushable_var,
-            &pushable_nodeprop,
-            &pushable_text,
-        ) {
+        if !pushables.is_empty() {
             let patterns = match &mut query.clauses[i] {
                 Clause::Match(ref mut m) => &mut m.patterns,
                 Clause::OptionalMatch(ref mut m) => &mut m.patterns,
@@ -95,15 +83,7 @@ pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<St
                     continue;
                 }
             };
-            let all_applied = apply_pushables(
-                patterns,
-                pushable,
-                pushable_in,
-                pushable_cmp,
-                pushable_var,
-                pushable_nodeprop,
-                pushable_text,
-            );
+            let all_applied = pushables.apply(patterns);
 
             // A fully-pushed WHERE stays in place as a safety net: consumers of
             // the rewritten clause list either ignore pattern properties or key
@@ -143,12 +123,7 @@ fn push_scoped_where(query: &mut CypherQuery, i: usize, params: &HashMap<String,
     let prior_scalar_vars = collect_prior_scalar_vars(&query.clauses[..i]);
 
     let PushableResult {
-        pushable,
-        pushable_in,
-        pushable_cmp,
-        pushable_var,
-        pushable_nodeprop,
-        pushable_text,
+        pushables,
         remaining,
     } = extract_pushable_equalities(
         &where_pred,
@@ -159,29 +134,14 @@ fn push_scoped_where(query: &mut CypherQuery, i: usize, params: &HashMap<String,
         occupied_properties,
     );
 
-    if !has_pushable(
-        &pushable,
-        &pushable_in,
-        &pushable_cmp,
-        &pushable_var,
-        &pushable_nodeprop,
-        &pushable_text,
-    ) {
+    if pushables.is_empty() {
         return;
     }
 
     let Clause::OptionalMatch(ref mut m) = query.clauses[i] else {
         return;
     };
-    let all_applied = apply_pushables(
-        &mut m.patterns,
-        pushable,
-        pushable_in,
-        pushable_cmp,
-        pushable_var,
-        pushable_nodeprop,
-        pushable_text,
-    );
+    let all_applied = pushables.apply(&mut m.patterns);
     // A partially-applied push leaves the original predicate untouched; a
     // fully-consumed one keeps it as the safety net (no `else` branch).
     if all_applied {
@@ -191,54 +151,56 @@ fn push_scoped_where(query: &mut CypherQuery, i: usize, params: &HashMap<String,
     }
 }
 
-fn has_pushable(
-    pushable: &[(String, String, Value)],
-    pushable_in: &[(String, String, Vec<Value>)],
-    pushable_cmp: &[(String, String, ComparisonOp, Value)],
-    pushable_var: &[(String, String, String)],
-    pushable_nodeprop: &[(String, String, String, String)],
-    pushable_text: &[(String, String, PropertyMatcher)],
-) -> bool {
-    !pushable.is_empty()
-        || !pushable_in.is_empty()
-        || !pushable_cmp.is_empty()
-        || !pushable_var.is_empty()
-        || !pushable_nodeprop.is_empty()
-        || !pushable_text.is_empty()
+/// The terms a WHERE predicate yields for pushdown into MATCH, one list per
+/// matcher kind, each entry keyed `(variable, property, …)`.
+#[derive(Default)]
+pub(super) struct Pushables {
+    pub equals: Vec<(String, String, Value)>,
+    pub in_lists: Vec<(String, String, Vec<Value>)>,
+    pub comparisons: Vec<(String, String, ComparisonOp, Value)>,
+    /// `cur.prop = scalar` against a prior WITH/UNWIND/LOAD CSV binding.
+    pub scalar_vars: Vec<(String, String, String)>,
+    /// `cur.prop = prior.other_prop` against a prior-MATCH node.
+    pub node_props: Vec<(String, String, String, String)>,
+    /// Positive STARTS/CONTAINS/ENDS predicates.
+    pub text: Vec<(String, String, PropertyMatcher)>,
 }
 
-/// Apply every extracted term to `patterns`; `false` when any term found no
-/// home (the caller then keeps the whole original predicate).
-fn apply_pushables(
-    patterns: &mut [crate::graph::core::pattern_matching::Pattern],
-    pushable: Vec<(String, String, Value)>,
-    pushable_in: Vec<(String, String, Vec<Value>)>,
-    pushable_cmp: Vec<(String, String, ComparisonOp, Value)>,
-    pushable_var: Vec<(String, String, String)>,
-    pushable_nodeprop: Vec<(String, String, String, String)>,
-    pushable_text: Vec<(String, String, PropertyMatcher)>,
-) -> bool {
-    let mut all_applied = true;
-    for (var_name, property, value) in pushable {
-        all_applied &= apply_property_to_patterns(patterns, &var_name, &property, value);
+impl Pushables {
+    fn is_empty(&self) -> bool {
+        self.equals.is_empty()
+            && self.in_lists.is_empty()
+            && self.comparisons.is_empty()
+            && self.scalar_vars.is_empty()
+            && self.node_props.is_empty()
+            && self.text.is_empty()
     }
-    for (var_name, property, values) in pushable_in {
-        all_applied &= apply_in_property_to_patterns(patterns, &var_name, &property, values);
+
+    /// Apply every term to `patterns`; `false` when any term found no home
+    /// (the caller then keeps the whole original predicate).
+    fn apply(self, patterns: &mut [crate::graph::core::pattern_matching::Pattern]) -> bool {
+        let mut all_applied = true;
+        for (var_name, property, value) in self.equals {
+            all_applied &= apply_property_to_patterns(patterns, &var_name, &property, value);
+        }
+        for (var_name, property, values) in self.in_lists {
+            all_applied &= apply_in_property_to_patterns(patterns, &var_name, &property, values);
+        }
+        for (var_name, property, op, value) in self.comparisons {
+            all_applied &= apply_comparison_to_patterns(patterns, &var_name, &property, op, value);
+        }
+        for (var_name, property, ref_name) in self.scalar_vars {
+            all_applied &= apply_var_property_to_patterns(patterns, &var_name, &property, ref_name);
+        }
+        for (var_name, property, ref_var, ref_prop) in self.node_props {
+            all_applied &=
+                apply_nodeprop_to_patterns(patterns, &var_name, &property, ref_var, ref_prop);
+        }
+        for (var_name, property, matcher) in self.text {
+            all_applied &= apply_text_matcher_to_patterns(patterns, &var_name, &property, matcher);
+        }
+        all_applied
     }
-    for (var_name, property, op, value) in pushable_cmp {
-        all_applied &= apply_comparison_to_patterns(patterns, &var_name, &property, op, value);
-    }
-    for (var_name, property, ref_name) in pushable_var {
-        all_applied &= apply_var_property_to_patterns(patterns, &var_name, &property, ref_name);
-    }
-    for (var_name, property, ref_var, ref_prop) in pushable_nodeprop {
-        all_applied &=
-            apply_nodeprop_to_patterns(patterns, &var_name, &property, ref_var, ref_prop);
-    }
-    for (var_name, property, matcher) in pushable_text {
-        all_applied &= apply_text_matcher_to_patterns(patterns, &var_name, &property, matcher);
-    }
-    all_applied
 }
 
 /// Collect node variable names bound by earlier MATCH/OPTIONAL MATCH clauses,
@@ -334,14 +296,16 @@ pub(super) fn collect_pattern_variables(
 /// Result of splitting a WHERE predicate into MATCH-pushable components
 /// plus whatever could not be pushed.
 pub(super) struct PushableResult {
-    pub pushable: Vec<(String, String, Value)>,
-    pub pushable_in: Vec<(String, String, Vec<Value>)>,
-    pub pushable_cmp: Vec<(String, String, ComparisonOp, Value)>,
-    pub pushable_var: Vec<(String, String, String)>,
-    pub pushable_nodeprop: Vec<(String, String, String, String)>,
-    /// `(var, property, matcher)` for positive STARTS/CONTAINS/ENDS predicates.
-    pub pushable_text: Vec<(String, String, PropertyMatcher)>,
+    pub pushables: Pushables,
     pub remaining: Option<Predicate>,
+}
+
+/// What the extractor resolves a predicate's operands against.
+struct ExtractScope<'a> {
+    match_vars: &'a [(String, Option<String>)],
+    prior_node_vars: &'a HashSet<String>,
+    prior_scalar_vars: &'a HashSet<String>,
+    params: &'a HashMap<String, Value>,
 }
 
 /// Extract pushable predicates from a WHERE clause into MATCH patterns.
@@ -365,37 +329,20 @@ pub(super) fn extract_pushable_equalities(
     params: &HashMap<String, Value>,
     occupied_properties: HashSet<(String, String)>,
 ) -> PushableResult {
-    let mut pushable = Vec::new();
-    let mut pushable_in = Vec::new();
-    let mut pushable_cmp = Vec::new();
-    let mut pushable_var = Vec::new();
-    let mut pushable_nodeprop = Vec::new();
-    let mut pushable_text = Vec::new();
-    let mut reservations: HashMap<(String, String), PropertyReservation> = occupied_properties
-        .into_iter()
-        .map(|key| (key, PropertyReservation::Exclusive))
-        .collect();
-    let remaining = extract_from_predicate(
-        pred,
+    let scope = ExtractScope {
         match_vars,
         prior_node_vars,
         prior_scalar_vars,
         params,
-        &mut pushable,
-        &mut pushable_in,
-        &mut pushable_cmp,
-        &mut pushable_var,
-        &mut pushable_nodeprop,
-        &mut pushable_text,
-        &mut reservations,
-    );
+    };
+    let mut pushables = Pushables::default();
+    let mut reservations: HashMap<(String, String), PropertyReservation> = occupied_properties
+        .into_iter()
+        .map(|key| (key, PropertyReservation::Exclusive))
+        .collect();
+    let remaining = extract_from_predicate(pred, &scope, &mut pushables, &mut reservations);
     PushableResult {
-        pushable,
-        pushable_in,
-        pushable_cmp,
-        pushable_var,
-        pushable_nodeprop,
-        pushable_text,
+        pushables,
         remaining,
     }
 }
@@ -473,21 +420,18 @@ fn reserve_comparison(
 
 /// Recursively extract pushable predicates from a predicate tree.
 /// Returns the remaining predicate (None if fully consumed).
-#[allow(clippy::too_many_arguments)]
 fn extract_from_predicate(
     pred: &Predicate,
-    match_vars: &[(String, Option<String>)],
-    prior_node_vars: &HashSet<String>,
-    prior_scalar_vars: &HashSet<String>,
-    params: &HashMap<String, Value>,
-    pushable: &mut Vec<(String, String, Value)>,
-    pushable_in: &mut Vec<(String, String, Vec<Value>)>,
-    pushable_cmp: &mut Vec<(String, String, ComparisonOp, Value)>,
-    pushable_var: &mut Vec<(String, String, String)>,
-    pushable_nodeprop: &mut Vec<(String, String, String, String)>,
-    pushable_text: &mut Vec<(String, String, PropertyMatcher)>,
+    scope: &ExtractScope<'_>,
+    out: &mut Pushables,
     reservations: &mut HashMap<(String, String), PropertyReservation>,
 ) -> Option<Predicate> {
+    let ExtractScope {
+        match_vars,
+        prior_node_vars,
+        prior_scalar_vars,
+        params,
+    } = *scope;
     match pred {
         Predicate::Comparison {
             left,
@@ -496,7 +440,7 @@ fn extract_from_predicate(
         } => {
             if let Some((var, prop, val)) = try_extract_equality(left, right, match_vars, params) {
                 if reserve_exclusive(reservations, &var, &prop) {
-                    pushable.push((var, prop, val));
+                    out.equals.push((var, prop, val));
                     return None;
                 }
                 return Some(pred.clone());
@@ -505,7 +449,7 @@ fn extract_from_predicate(
                 try_extract_correlated_nodeprop(left, right, match_vars, prior_node_vars)
             {
                 if reserve_exclusive(reservations, &var, &prop) {
-                    pushable_nodeprop.push((var, prop, ref_var, ref_prop));
+                    out.node_props.push((var, prop, ref_var, ref_prop));
                     return None;
                 }
                 return Some(pred.clone());
@@ -514,7 +458,7 @@ fn extract_from_predicate(
                 try_extract_scalar_var(left, right, match_vars, prior_scalar_vars)
             {
                 if reserve_exclusive(reservations, &var, &prop) {
-                    pushable_var.push((var, prop, ref_name));
+                    out.scalar_vars.push((var, prop, ref_name));
                     return None;
                 }
                 return Some(pred.clone());
@@ -534,7 +478,7 @@ fn extract_from_predicate(
                 try_extract_comparison(left, right, *op, match_vars, params)
             {
                 if reserve_comparison(reservations, &var, &prop, op) {
-                    pushable_cmp.push((var, prop, op, val));
+                    out.comparisons.push((var, prop, op, val));
                     None
                 } else {
                     Some(pred.clone())
@@ -558,7 +502,8 @@ fn extract_from_predicate(
                         .collect();
                     if let Some(values) = all_literals {
                         if reserve_exclusive(reservations, variable, property) {
-                            pushable_in.push((variable.clone(), property.clone(), values));
+                            out.in_lists
+                                .push((variable.clone(), property.clone(), values));
                             return None;
                         }
                         return Some(pred.clone());
@@ -579,7 +524,8 @@ fn extract_from_predicate(
                         if !reserve_exclusive(reservations, variable, property) {
                             return Some(pred.clone());
                         }
-                        pushable_in.push((variable.clone(), property.clone(), values.clone()));
+                        out.in_lists
+                            .push((variable.clone(), property.clone(), values.clone()));
                         // Replace the surviving WHERE with the O(1) HashSet form
                         // so the safety-net re-filter doesn't re-parse the list
                         // per row — matching the speed of a literal `IN [...]`.
@@ -605,7 +551,7 @@ fn extract_from_predicate(
                 if match_vars.iter().any(|(v, _)| v == variable) {
                     if let Some(needle) = resolve_non_empty_string(pattern, params) {
                         if reserve_exclusive(reservations, variable, property) {
-                            pushable_text.push((
+                            out.text.push((
                                 variable.clone(),
                                 property.clone(),
                                 kind.into_matcher(needle),
@@ -619,34 +565,8 @@ fn extract_from_predicate(
             Some(pred.clone())
         }
         Predicate::And(left, right) => {
-            let left_remaining = extract_from_predicate(
-                left,
-                match_vars,
-                prior_node_vars,
-                prior_scalar_vars,
-                params,
-                pushable,
-                pushable_in,
-                pushable_cmp,
-                pushable_var,
-                pushable_nodeprop,
-                pushable_text,
-                reservations,
-            );
-            let right_remaining = extract_from_predicate(
-                right,
-                match_vars,
-                prior_node_vars,
-                prior_scalar_vars,
-                params,
-                pushable,
-                pushable_in,
-                pushable_cmp,
-                pushable_var,
-                pushable_nodeprop,
-                pushable_text,
-                reservations,
-            );
+            let left_remaining = extract_from_predicate(left, scope, out, reservations);
+            let right_remaining = extract_from_predicate(right, scope, out, reservations);
 
             match (left_remaining, right_remaining) {
                 (None, None) => None,
@@ -1184,12 +1104,7 @@ pub(super) fn where_subsumed_by_pattern(
     let match_vars = collect_pattern_variables(patterns);
     let empty = HashSet::new();
     let PushableResult {
-        pushable,
-        pushable_in,
-        pushable_cmp,
-        pushable_var,
-        pushable_nodeprop,
-        pushable_text,
+        pushables,
         remaining,
     } = extract_pushable_equalities(pred, &match_vars, &empty, &empty, params, HashSet::new());
 
@@ -1199,12 +1114,15 @@ pub(super) fn where_subsumed_by_pattern(
     }
     // The never-equivalent kinds (see the doc above). `extract_from_predicate`
     // never consumes a text predicate, so the last check is belt-and-braces.
-    if !pushable_var.is_empty() || !pushable_nodeprop.is_empty() || !pushable_text.is_empty() {
+    if !pushables.scalar_vars.is_empty()
+        || !pushables.node_props.is_empty()
+        || !pushables.text.is_empty()
+    {
         return false;
     }
 
     // Replay the push against a property-free copy and compare. Going through
-    // `apply_pushables` rather than re-deriving the expected matcher by hand is
+    // `Pushables::apply` rather than re-deriving the expected matcher by hand is
     // what makes the two agree about range folding, application order, and the
     // "no home for this term" bail.
     let mut probe: Vec<crate::graph::core::pattern_matching::Pattern> = patterns.to_vec();
@@ -1215,15 +1133,7 @@ pub(super) fn where_subsumed_by_pattern(
             }
         }
     }
-    if !apply_pushables(
-        &mut probe,
-        pushable,
-        pushable_in,
-        pushable_cmp,
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-    ) {
+    if !pushables.apply(&mut probe) {
         return false;
     }
 

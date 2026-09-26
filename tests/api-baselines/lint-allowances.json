@@ -465,10 +465,6 @@
       "classification": "api-shape"
     },
     {
-      "identity": "crates/kglite/src/graph/languages/cypher/planner/index_selection.rs::fn:extract_from_predicate:fn extract_from_predicate( pred: &Predicate, match_vars: &[(String, Option<String>)], prior_node_vars: &HashSet<String>, prior_scalar_vars: &HashSet<String>, params: &HashMap<String, Value>, pushable: &mut Vec<(String, String, Value)>, pushable_in: &mut Vec<(String, String, Vec<Value>)>, pushable_cm::clippy::too_many_arguments",
-      "classification": "transitional"
-    },
-    {
       "identity": "crates/kglite/src/graph/languages/cypher/result.rs::fn:materialise_lazy:pub fn materialise_lazy( descriptor: &LazyResultDescriptor, graph: &crate::graph::dir_graph::DirGraph, ) -> Result<Vec<Vec<Value>>, crate::error::KgError>::clippy::result_large_err",
       "classification": "api-shape"
     },
