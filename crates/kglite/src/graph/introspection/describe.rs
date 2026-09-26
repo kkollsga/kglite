@@ -841,7 +841,7 @@ fn write_extensions(xml: &mut String, graph: &DirGraph, surface: DescribeSurface
             surface.call("connections=['TYPE']", "--connection-types TYPE"),
         ));
     }
-    xml.push_str("    <temporal hint=\"On a type with temporal_from/temporal_to: valid_at(entity, date), valid_during(entity, start, end) read the declared bounds and follow temporal_convention (half_open: the to day is no longer valid). Otherwise name the bounds: valid_at(entity, date, 'from', 'to') — closed unless a declaration names the same pair. NULL = open-ended. CALL db.temporal.declare/declarations() record and list a type's bounds.\"/>\n");
+    xml.push_str("    <temporal hint=\"On a type with a declared validity interval (shown on the type with its convention): valid_at(entity, date), valid_during(entity, start, end) read the declared bounds and follow the convention (half_open: the to day is no longer valid). Otherwise name the bounds: valid_at(entity, date, 'from', 'to') — closed unless a declaration names the same pair. NULL = open-ended. CALL db.temporal.declare/declarations() record and list a type's bounds.\"/>\n");
     xml.push_str("    <bug_report hint=\"bug_report(query, result, expected, description) — file a Cypher bug report to reported_bugs.md.\"/>\n");
     xml.push_str(INDEXING_HINT);
     xml.push_str("  </extensions>\n");
