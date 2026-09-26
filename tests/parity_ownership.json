@@ -359,5 +359,14 @@
   },
   "tests/test_storage_parity.py::test_soft_alias_index_parity": {
     "owner": "storage-parity"
+  },
+  "tests/test_temporal_persistence.py::test_temporal_declarations_round_trip[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_persistence.py::test_temporal_declarations_round_trip[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_persistence.py::test_temporal_declarations_round_trip[disk]": {
+    "owner": "storage-parity"
   }
 }
