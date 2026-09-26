@@ -863,7 +863,22 @@ pub(super) fn try_extract_scalar_var(
 /// Try to extract a comparison: variable.property OP literal_or_param
 /// When the literal is on the left (e.g. `30 < n.age`), reverse the operator
 /// so it becomes `n.age > 30`.
+///
+/// A NULL comparison value is refused: `x > null` is null for every row, but
+/// the ordering matchers rank NULL below every value, so a pushed
+/// `GreaterThan(Null)` would admit every non-null row.
 pub(super) fn try_extract_comparison(
+    left: &Expression,
+    right: &Expression,
+    op: ComparisonOp,
+    match_vars: &[(String, Option<String>)],
+    params: &HashMap<String, Value>,
+) -> Option<(String, String, ComparisonOp, Value)> {
+    comparison_operands(left, right, op, match_vars, params)
+        .filter(|(_, _, _, value)| !matches!(value, Value::Null))
+}
+
+fn comparison_operands(
     left: &Expression,
     right: &Expression,
     op: ComparisonOp,

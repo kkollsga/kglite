@@ -55,6 +55,10 @@ before upgrading.
 - `datetime('2009-06-30T01:00+02:00')` — an offset-bearing stamp written to the
   minute — returned null; it now parses, with the offset applied.
 
+- A node comparison against a NULL value (`WHERE n.age > $x` with `x` null,
+  or `n.age >= null`) matched every row with a non-null `age` when the
+  comparison was pushed into the pattern; it now matches no row, as the
+  unoptimised `WHERE` always did.
 - A pattern predicate as the last element of a list literal
   (`RETURN [(n)-->()]`, `[1, (n)-[:R]->(:M)]`) was a syntax error; it now
   closes at the list's `]`.

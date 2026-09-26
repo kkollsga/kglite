@@ -1858,3 +1858,48 @@ fn test_fuse_optional_match_aggregate_bails_on_multi_pattern() {
         "multi-pattern OPTIONAL MATCH must not fuse into FusedOptionalMatchAggregate"
     );
 }
+
+fn first_node_props(query: &CypherQuery) -> Option<&HashMap<String, PropertyMatcher>> {
+    query.clauses.iter().find_map(|clause| match clause {
+        Clause::Match(m) => match &m.patterns[0].elements[0] {
+            PatternElement::Node(np) => np.properties.as_ref(),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+#[test]
+fn test_null_comparison_value_is_not_pushed() {
+    let params = HashMap::from([("x".to_string(), Value::Null)]);
+    for cypher in [
+        "MATCH (n:P) WHERE n.age > $x AND toString(n.id) =~ '.*' RETURN n",
+        "MATCH (n:P) WHERE $x <= n.age RETURN n",
+        "MATCH (n:P) WHERE n.age >= null RETURN n",
+        "MATCH (n:P) WHERE n.age > 10 AND n.age < null RETURN n",
+    ] {
+        let mut query = parse_cypher(cypher).unwrap();
+        optimize(&mut query, &DirGraph::new(), &params);
+        let pushed = first_node_props(&query).and_then(|props| props.get("age"));
+        assert!(
+            !matches!(
+                pushed,
+                Some(
+                    PropertyMatcher::GreaterThan(Value::Null)
+                        | PropertyMatcher::GreaterOrEqual(Value::Null)
+                        | PropertyMatcher::LessThan(Value::Null)
+                        | PropertyMatcher::LessOrEqual(Value::Null)
+                        | PropertyMatcher::Range { .. }
+                )
+            ),
+            "{cypher}: pushed {pushed:?}"
+        );
+        assert!(
+            query
+                .clauses
+                .iter()
+                .any(|clause| matches!(clause, Clause::Where(_))),
+            "{cypher}: the NULL comparison must stay in WHERE"
+        );
+    }
+}

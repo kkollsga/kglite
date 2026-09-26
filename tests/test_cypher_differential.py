@@ -3051,6 +3051,21 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) WHERE NOT (p.email ENDS WITH 'test.com') RETURN count(p) AS n",
         None,
     ),
+    # A NULL comparison value: `age > null` is null for every row, and the
+    # unpushable regex conjunct leaves the pushed node matcher as its only
+    # enforcement.
+    (
+        "null_comparison_value_pushdown",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.age > $x AND toString(p.id) =~ '.*' RETURN count(*) AS n",
+        {"x": None},
+    ),
+    (
+        "null_comparison_literal_fused_aggregate",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.age >= null RETURN p.city AS city, count(p) AS n ORDER BY city",
+        None,
+    ),
     (
         "kleene_or_null_lhs",
         "social_graph",
