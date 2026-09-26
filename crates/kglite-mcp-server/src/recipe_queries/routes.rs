@@ -1039,10 +1039,17 @@ mod tests {
                 .await
                 .expect("fixed route answers");
             assert_eq!(through_named.is_error, through_fixed.is_error);
-            assert_eq!(
-                structured_json(&through_named),
-                structured_json(&through_fixed)
-            );
+            // Two separate executions: wall time is the one field allowed to
+            // differ, and its presence is checked rather than its value.
+            let mut named = structured_json(&through_named);
+            let mut fixed = structured_json(&through_fixed);
+            for envelope in [&mut named, &mut fixed] {
+                if let Some(diagnostics) = envelope["result"].get_mut("diagnostics") {
+                    assert!(diagnostics["elapsed_ms"].is_number());
+                    diagnostics["elapsed_ms"] = Value::Null;
+                }
+            }
+            assert_eq!(named, fixed);
             match expected_error {
                 Some(code) => assert_eq!(structured_json(&through_named)["code"], code),
                 None => assert_eq!(structured_json(&through_named)["result"]["row_count"], 0),
