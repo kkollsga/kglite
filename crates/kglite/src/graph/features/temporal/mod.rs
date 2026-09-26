@@ -17,6 +17,7 @@ mod merge_key_tests;
 pub(crate) mod persist;
 #[cfg(test)]
 mod persist_tests;
+mod request;
 mod validate;
 
 pub(crate) use declarations::merge_start_key;
@@ -28,6 +29,10 @@ pub use eval::IntervalConvention;
 pub(crate) use loader::{adopt_declarations, settle_adopted, withdraw_adopted};
 pub use loader::{declare_defaulted, declare_from_column_types, LoadDeclaration};
 pub(crate) use merge_key::{Start, StartKey};
+pub use request::{
+    node_request_config, node_type_has_property, relationship_request_configs,
+    relationship_type_has_property, unknown_bound_message, NodeValidityRequest, ValidityTest,
+};
 
 use crate::datatypes::values::Value;
 use crate::graph::schema::{InternedKey, TemporalConfig};

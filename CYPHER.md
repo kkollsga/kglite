@@ -70,7 +70,9 @@ on `id` uses the storage mode's identity index; an arbitrary property (`mid`, `k
 count). Two semantics to keep in mind:
 
 - **Uniqueness is opt-in**: with no constraint declared, `CREATE` does not reject
-  a duplicate `id` — two `CREATE (:T {id: 'k'})` make two nodes. Either declare
+  a duplicate `id` — two `CREATE (:T {id: 'k'})` make two nodes, and a
+  duplicate-id warning goes to stderr (at the write when the type's id index
+  is built, as after `add_nodes`; otherwise at the next id lookup). Either declare
   the node type's primary key
   (`define_schema({'nodes': {'T': {'primary_key': 'id'}}})`, after which the
   second `CREATE` is rejected), or use **`MERGE`, not `CREATE`** —
@@ -1357,7 +1359,12 @@ Date-range filtering on nodes and relationships with explicit field names.
 | `valid_at(entity, date, 'from_field', 'to_field')` | True if entity is active at a point in time — closed, unless the type's declaration names the same two properties, whose convention then applies |
 | `valid_during(entity, start, end, 'from_field', 'to_field')` | True if entity's range overlaps the given interval, under the same rule |
 
+The entity may be a matched variable or a value — an item of `collect()`, `UNWIND`, `nodes(p)`,
+`relationships(p)` or a variable-length relationship list — and its type's declaration is read the same
+way either way.
+
 **NULL semantics:** NULL `from` = valid since beginning. NULL `to` = still valid. Both NULL = always valid.
+A null entity — an unmatched `OPTIONAL MATCH` — gives null in every form, so `WHERE` drops the row.
 A property name that no element of the type has at all — a misspelling such as `'validfrom'` — raises
 `CypherExecutionError` rather than reading as an open bound on every row. A property the type has but a
 row leaves null is open, as above; a relationship type's declared bound counts as known even before any

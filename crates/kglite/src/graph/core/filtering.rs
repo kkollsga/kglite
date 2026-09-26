@@ -160,16 +160,17 @@ pub(crate) fn parses_as_temporal(s: &str) -> bool {
 }
 
 /// A few byte tests that every string [`parses_as_temporal`] passes: it starts
-/// with a digit and has a `-` or `/` among its first five bytes. The string
-/// fast paths (`str_prop_eq`, the column filter's string tests) answer `=`
-/// against a stored date with `false`, so a target passing this must take the
-/// value route instead — decided per row, so it has to be this cheap.
+/// with a digit and has a `-` or `/` among its first five bytes, or it is
+/// eight digits (`20240315`). The string fast paths (`str_prop_eq`, the column
+/// filter's string tests) answer `=` against a stored date with `false`, so a
+/// target passing this must take the value route instead — decided per row,
+/// so it has to be this cheap.
 #[inline]
 pub(crate) fn may_parse_as_temporal(s: &str) -> bool {
     let bytes = s.as_bytes();
     bytes.len() >= 8
         && bytes[0].is_ascii_digit()
-        && bytes[1..5].iter().any(|b| matches!(b, b'-' | b'/'))
+        && (bytes[1..5].iter().any(|b| matches!(b, b'-' | b'/')) || is_basic_iso_date(bytes))
 }
 
 /// Cypher predicate equality is recursive and nullable; Value's structural
@@ -633,13 +634,24 @@ fn parse_datetime_string(s: &str) -> Option<chrono::NaiveDateTime> {
         .or_else(|| parse_date_string(s).and_then(|d| d.and_hms_opt(0, 0, 0)))
 }
 
-fn parse_date_string(s: &str) -> Option<chrono::NaiveDate> {
+/// The date text compares as: ISO `2024-03-15`, `2024/03/15`, `15-03-2024`,
+/// `03/15/2024`, and the ISO basic form `20240315` (exactly eight digits —
+/// the spelling `date()`, `valid_at` and the loaders already read).
+pub(crate) fn parse_date_string(s: &str) -> Option<chrono::NaiveDate> {
     use chrono::NaiveDate;
+    if is_basic_iso_date(s.as_bytes()) {
+        return crate::graph::blueprint::typing::scalar::parse_basic_date(s);
+    }
     NaiveDate::parse_from_str(s, "%Y-%m-%d")
         .or_else(|_| NaiveDate::parse_from_str(s, "%Y/%m/%d"))
         .or_else(|_| NaiveDate::parse_from_str(s, "%d-%m-%Y"))
         .or_else(|_| NaiveDate::parse_from_str(s, "%m/%d/%Y"))
         .ok()
+}
+
+#[inline]
+fn is_basic_iso_date(bytes: &[u8]) -> bool {
+    bytes.len() == 8 && bytes.iter().all(u8::is_ascii_digit)
 }
 
 /// The nodes of `nodes` that hold `property == target_value`, taken from the
@@ -1996,6 +2008,32 @@ mod tests {
     fn test_parse_date_string_invalid() {
         assert_eq!(parse_date_string("not-a-date"), None);
         assert_eq!(parse_date_string(""), None);
+        // Eight digits that are no calendar day, or padded ones, are not dates.
+        assert_eq!(parse_date_string("20090230"), None);
+        assert_eq!(parse_date_string(" 20090201"), None);
+        assert_eq!(parse_date_string("2009020"), None);
+    }
+
+    #[test]
+    fn test_parse_date_string_basic_iso() {
+        assert_eq!(
+            parse_date_string("19910201"),
+            NaiveDate::from_ymd_opt(1991, 2, 1)
+        );
+        assert!(may_parse_as_temporal("19910201"));
+        assert!(parses_as_temporal("19910201"));
+        assert!(!may_parse_as_temporal("1991020"));
+        let date = Value::DateTime(NaiveDate::from_ymd_opt(1991, 2, 1).unwrap());
+        let text = Value::String("19910201".into());
+        assert_eq!(
+            compare_values(&date, &text),
+            Some(std::cmp::Ordering::Equal)
+        );
+        assert!(values_equal(&date, &text));
+        assert_eq!(
+            compare_values(&date, &Value::String("19900101".into())),
+            Some(std::cmp::Ordering::Greater)
+        );
     }
 }
 

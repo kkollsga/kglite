@@ -826,7 +826,7 @@ pub(super) fn write_topic_temporal(xml: &mut String) {
         "      <fn name=\"date - date\">Difference between two dates (returns Duration).</fn>\n",
     );
     xml.push_str("      <fn name=\"d.year / d.month / d.day\">Extract year, month, or day from a DateTime value.</fn>\n");
-    xml.push_str("      <fn name=\"valid_at(entity, date)\">On a declared type (db.temporal.declare, a loader's validFrom/validTo): true if the entity is valid at date under the declared bounds and convention — half_open treats the to day as no longer valid. Raises on an undeclared type.</fn>\n");
+    xml.push_str("      <fn name=\"valid_at(entity, date)\">On a declared type (db.temporal.declare, a loader's validFrom/validTo): true if the entity is valid at date under the declared bounds and convention — half_open treats the to day as no longer valid. Raises on an undeclared type. A null entity gives null.</fn>\n");
     xml.push_str("      <fn name=\"valid_at(entity, date, 'from_field', 'to_field')\">True if entity.from_field &lt;= date &lt;= entity.to_field (closed); when the type's declaration names the same two properties, its convention applies instead. NULL from_field = valid since beginning. NULL to_field = still valid.</fn>\n");
     xml.push_str("      <fn name=\"valid_during(entity, start, end[, 'from_field', 'to_field'])\">True if entity's validity period overlaps [start, end], under the same bounds and convention rule as valid_at. NULL = open-ended.</fn>\n");
     xml.push_str("    </functions>\n");

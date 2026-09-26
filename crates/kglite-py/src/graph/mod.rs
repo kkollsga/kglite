@@ -809,10 +809,6 @@ impl KnowledgeGraph {
         })
     }
 
-    pub(crate) fn infer_selection_node_type(&self) -> Option<String> {
-        kglite_core::api::infer_selection_node_type(&self.cursor.selection, &self.inner)
-    }
-
     /// Keep the nodes of the current selection level that `keep` accepts. A
     /// `keep` error (an unreadable temporal bound) raises `ValueError`.
     pub(crate) fn retain_current_level(

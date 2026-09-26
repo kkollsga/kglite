@@ -876,6 +876,18 @@ impl KnowledgeGraph {
             let configs = kglite_core::api::temporal::edge_configs(&self.inner, &connection_type);
             (!configs.is_empty()).then(|| configs.to_vec())
         };
+        // An explicit `at=` / `during=` is a request: on an undeclared
+        // relationship type the traversal raises rather than keeping every edge.
+        let requested = |argument: &str, filter: &dyn Fn(Vec<_>) -> _| {
+            match kglite_core::api::temporal::relationship_request_configs(
+                &self.inner,
+                &format!("traverse({argument}=...)"),
+                &connection_type,
+            ) {
+                Ok(configs) => filter(configs),
+                Err(message) => kglite_core::api::fluent::TemporalEdgeFilter::Undeclared(message),
+            }
+        };
         let temporal_filter = if temporal == Some(false) {
             None
         } else if let Some(at_str) = at {
@@ -884,8 +896,9 @@ impl KnowledgeGraph {
                     crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
                 },
             )?;
-            edge_configs()
-                .map(|configs| kglite_core::api::fluent::TemporalEdgeFilter::At(configs, date))
+            Some(requested("at", &|configs| {
+                kglite_core::api::fluent::TemporalEdgeFilter::At(configs, date)
+            }))
         } else if let Some((start_str, end_str)) = &during {
             let (start, _) = kglite_core::api::timeseries::parse_date_query(start_str).map_err(
                 |e: String| -> PyErr {
@@ -897,9 +910,9 @@ impl KnowledgeGraph {
                     crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
                 },
             )?;
-            edge_configs().map(|configs| {
+            Some(requested("during", &|configs| {
                 kglite_core::api::fluent::TemporalEdgeFilter::During(configs, start, end)
-            })
+            }))
         } else {
             match &self.cursor.temporal_context {
                 TemporalContext::All => None,

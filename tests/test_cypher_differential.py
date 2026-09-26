@@ -294,7 +294,68 @@ def declared_interval_graph():
     return graph
 
 
+@pytest.fixture
+def declared_lineage_graph():
+    """Declared half-open nodes and relationships reached as list items —
+    `collect()`, `nodes(p)`, `relationships(p)`, a variable-length list — and
+    through an unmatched `OPTIONAL MATCH`."""
+    graph = kglite.KnowledgeGraph()
+    graph.cypher(
+        "CREATE (o:M {name: 'old', vf: date('2000-01-01'), vt: date('2005-01-01')}),"
+        " (n:M {name: 'new', vf: date('2005-01-01')}), (o)-[:SUCC]->(n),"
+        " (a:A {name: 'a'}), (b:B {name: 'b'}), (c:B {name: 'c'}),"
+        " (a)-[:R {vf: date('2000-01-01'), vt: date('2005-01-01')}]->(b),"
+        " (a)-[:R {vf: date('2010-01-01')}]->(c), (b)-[:R {vf: date('2000-01-01')}]->(c)"
+    ).to_list()
+    graph.cypher("CALL db.temporal.declare({node: 'M', from: 'vf', to: 'vt', convention: 'half_open'})").to_list()
+    graph.cypher(
+        "CALL db.temporal.declare({relationship: 'R', from: 'vf', to: 'vt', convention: 'half_open'})"
+    ).to_list()
+    return graph
+
+
 DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
+    # The declared forms on list items read the item's own declaration, and
+    # a null element is null, through every plan.
+    (
+        "valid_at_declared_collected_nodes",
+        "declared_lineage_graph",
+        "MATCH (m:M) WITH collect(m) AS ms UNWIND ms AS n RETURN n.name AS n, valid_at(n, '2010') AS v ORDER BY n",
+        None,
+    ),
+    (
+        "valid_at_declared_path_relationships_all",
+        "declared_lineage_graph",
+        "MATCH p = (:A)-[:R]->(x) WHERE ALL(r IN relationships(p) WHERE valid_at(r, '2003')) RETURN x.name AS x",
+        None,
+    ),
+    (
+        "valid_during_declared_path_nodes_count",
+        "declared_lineage_graph",
+        "MATCH p = (:M)-[:SUCC]->(:M) UNWIND nodes(p) AS n "
+        "WITH n WHERE valid_during(n, '2010', '2011') RETURN count(*) AS c",
+        None,
+    ),
+    (
+        "valid_at_declared_var_length_list",
+        "declared_lineage_graph",
+        "MATCH (:A)-[rs:R*1..2]->(x) RETURN x.name AS x, [r IN rs | valid_at(r, '2003')] AS v ORDER BY x, size(rs)",
+        None,
+    ),
+    (
+        "valid_at_null_element_filtered",
+        "declared_lineage_graph",
+        "MATCH (a:A) OPTIONAL MATCH (a)-[r:R]->(:B {name: 'zzz'}) "
+        "WITH a, r WHERE valid_at(r, '2003') RETURN count(*) AS c",
+        None,
+    ),
+    (
+        "valid_at_null_element_projected",
+        "declared_lineage_graph",
+        "MATCH (a:A) OPTIONAL MATCH (a)-[r:R]->(:B {name: 'zzz'}) "
+        "RETURN a.name AS a, valid_at(r, '2003') AS v2, valid_at(r, '2003', 'vf', 'vt') AS v4",
+        None,
+    ),
     # `valid_at` / `valid_during` follow the declared (half-open) convention,
     # in the two-argument form and in the named form on the declared pair,
     # through the fused count, grouped aggregate and top-K scans.
@@ -339,6 +400,16 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     # inline map exactly as for `<` — on the scan, the pushed matcher, the
     # equality index and the fused count alike.
     ("date_eq_text", "date_text_graph", "MATCH (m:M) WHERE m.vt = '1990-01-01' RETURN m.id AS id", None),
+    # The ISO basic form `YYYYMMDD` compares as the extended form.
+    ("date_eq_basic_text", "date_text_graph", "MATCH (m:M) WHERE m.vt = '19900101' RETURN m.id AS id", None),
+    ("date_lt_basic_text", "date_text_graph", "MATCH (m:M) WHERE m.vt < '19950101' RETURN m.id AS id", None),
+    ("date_inline_basic_text", "date_text_graph", "MATCH (m:M {vt: '19900101'}) RETURN m.id AS id", None),
+    (
+        "date_in_basic_text_count",
+        "date_text_graph",
+        "MATCH (m:M) WHERE m.vt IN ['19900101', '20200601'] RETURN count(*) AS c",
+        None,
+    ),
     (
         "date_eq_text_param",
         "date_text_graph",

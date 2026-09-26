@@ -411,6 +411,35 @@ pub fn discover_property_keys_from_data(
     discover_property_keys_excluding(nodes, interner, &CANONICAL_NODE_COLUMNS)
 }
 
+/// The property columns a row exporter emits for nodes all of `node_type`,
+/// read from the type's schema instead of scanning every node — `None` when
+/// the type has no schema, for the caller to scan instead.
+///
+/// Excludes `excluded` and the type's id/title alias names. A schema rebuilt
+/// on load comes from the type's metadata, which records the loader's id and
+/// title column names (`add_nodes(df, 'T', 'code', 'name')`); no node stores
+/// them — they read back as `id` / `title` — so listing them emitted all-null
+/// `code` / `name` columns after a save and load.
+pub fn schema_property_keys(
+    dir: &DirGraph,
+    node_type: &str,
+    excluded: &[&str],
+) -> Option<Vec<String>> {
+    let schema = dir.type_schemas.get(node_type)?;
+    let id_alias = dir.id_field_aliases.get(node_type).map(String::as_str);
+    let title_alias = dir.title_field_aliases.get(node_type).map(String::as_str);
+    let mut keys: Vec<String> = schema
+        .iter()
+        .filter_map(|(_, key)| dir.interner.try_resolve(key))
+        .filter(|name| {
+            !excluded.contains(name) && Some(*name) != id_alias && Some(*name) != title_alias
+        })
+        .map(str::to_string)
+        .collect();
+    keys.sort();
+    Some(keys)
+}
+
 /// [`discover_property_keys_from_data`] with an explicit exclusion set.
 ///
 /// For an exporter that emits only *some* canonical columns — the fluent

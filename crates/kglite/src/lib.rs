@@ -91,7 +91,7 @@ pub mod api {
     pub use crate::graph::dir_graph::ontology_apply::MaterializedLabel;
     pub use crate::graph::handle::{
         discover_property_keys_excluding, discover_property_keys_from_data,
-        infer_selection_node_type, is_canonical_node_column, KnowledgeGraph,
+        infer_selection_node_type, is_canonical_node_column, schema_property_keys, KnowledgeGraph,
         CANONICAL_NODE_COLUMNS,
     };
     pub use crate::graph::ontology::{
@@ -464,8 +464,9 @@ pub mod api {
     pub mod temporal {
         pub use crate::graph::features::temporal::{
             declare, declare_defaulted, declare_from_column_types, declare_loaded, edge_configs,
-            list, node_config, undeclare, DeclarationInfo, DeclareReport, IntervalConvention,
-            LoadDeclaration, TemporalTarget, DISK_NODE_ABUTMENT_CAP,
+            list, node_config, node_request_config, relationship_request_configs, undeclare,
+            DeclarationInfo, DeclareReport, IntervalConvention, LoadDeclaration,
+            NodeValidityRequest, TemporalTarget, ValidityTest, DISK_NODE_ABUTMENT_CAP,
         };
     }
 

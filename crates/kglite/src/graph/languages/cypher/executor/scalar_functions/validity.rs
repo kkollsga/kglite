@@ -63,7 +63,20 @@ struct Element {
 
 enum ElementKind {
     Node(petgraph::graph::NodeIndex),
-    Edge,
+    /// A relationship, by its endpoints (its errors name them).
+    Edge {
+        source: petgraph::graph::NodeIndex,
+        target: petgraph::graph::NodeIndex,
+    },
+}
+
+/// What a validity call's first argument holds on one row.
+enum Subject {
+    Element(Element),
+    /// Null — an unmatched `OPTIONAL MATCH`, a null list item: the call is null.
+    Null,
+    /// Some other value (a map, a path): only the named form reads it.
+    Other,
 }
 
 impl CypherExecutor<'_> {
@@ -81,11 +94,17 @@ impl CypherExecutor<'_> {
             );
         }
         let var_name = validity_variable("valid_at", &args[0])?;
+        let subject = self.validity_subject(var_name, row);
+        if let Subject::Null = subject {
+            return Ok(Value::Null);
+        }
         let date_val = self.evaluate_expression(&args[1], row)?;
-        let Some(resolved) = self.resolve_validity("valid_at", var_name, &args[2..], row)? else {
+        let Some(resolved) =
+            self.resolve_validity("valid_at", var_name, &subject, &args[2..], row)?
+        else {
             return Ok(Value::Boolean(true));
         };
-        let bounds = self.validity_bounds("valid_at", var_name, &resolved, row)?;
+        let bounds = self.validity_bounds("valid_at", var_name, &subject, &resolved, row)?;
         let instant = bounds.instant(&date_val, "date")?;
         temporal_eval::interval_contains(
             &bounds.from_val,
@@ -94,7 +113,7 @@ impl CypherExecutor<'_> {
             resolved.convention,
         )
         .map(Value::Boolean)
-        .map_err(|e| self.validity_bound_error(&bounds, e, row))
+        .map_err(|e| self.validity_bound_error(&bounds, &subject, e))
     }
 
     /// `valid_during(entity, start, end)` or
@@ -113,13 +132,18 @@ impl CypherExecutor<'_> {
             );
         }
         let var_name = validity_variable("valid_during", &args[0])?;
+        let subject = self.validity_subject(var_name, row);
+        if let Subject::Null = subject {
+            return Ok(Value::Null);
+        }
         let start_val = self.evaluate_expression(&args[1], row)?;
         let end_val = self.evaluate_expression(&args[2], row)?;
-        let Some(resolved) = self.resolve_validity("valid_during", var_name, &args[3..], row)?
+        let Some(resolved) =
+            self.resolve_validity("valid_during", var_name, &subject, &args[3..], row)?
         else {
             return Ok(Value::Boolean(true));
         };
-        let bounds = self.validity_bounds("valid_during", var_name, &resolved, row)?;
+        let bounds = self.validity_bounds("valid_during", var_name, &subject, &resolved, row)?;
         let start = bounds.instant(&start_val, "start")?;
         let end = bounds.instant(&end_val, "end")?;
         temporal_eval::interval_overlaps(
@@ -130,7 +154,7 @@ impl CypherExecutor<'_> {
             resolved.convention,
         )
         .map(Value::Boolean)
-        .map_err(|e| self.validity_bound_error(&bounds, e, row))
+        .map_err(|e| self.validity_bound_error(&bounds, &subject, e))
     }
 
     /// The bounds and convention one row evaluates under. `named` is empty for
@@ -143,6 +167,7 @@ impl CypherExecutor<'_> {
         &self,
         function: &'static str,
         var_name: &str,
+        subject: &Subject,
         named: &[Expression],
         row: &ResultRow,
     ) -> Result<Option<ResolvedBounds>, String> {
@@ -154,17 +179,20 @@ impl CypherExecutor<'_> {
             )),
             _ => unreachable!("arity checked by the caller"),
         };
-        let Some(element) = self.validity_element(var_name, row) else {
-            // Not a node or relationship binding (an unmatched OPTIONAL MATCH):
-            // the bounds read null, open on both sides, as they always have.
-            return Ok(Some(match named {
-                Some((from, to)) => ResolvedBounds {
+        let Subject::Element(element) = subject else {
+            // A value that is not a node or relationship (a map): the named
+            // form reads its two keys, closed; the declared form has no type.
+            return match named {
+                Some((from, to)) => Ok(Some(ResolvedBounds {
                     from,
                     to,
                     convention: IntervalConvention::Closed,
-                },
-                None => return Ok(None),
-            }));
+                })),
+                None => Err(format!(
+                    "{function}(): first argument must be a node or relationship; \
+                     {var_name} is neither"
+                )),
+            };
         };
         let key = ValidityKey {
             element: element.key,
@@ -179,11 +207,11 @@ impl CypherExecutor<'_> {
                         to,
                         convention: IntervalConvention::Closed,
                     })),
-                    (None, None) => Err(undeclared_error(function, var_name, &element)),
+                    (None, None) => Err(undeclared_error(function, var_name, element)),
                 };
             }
         }
-        let candidates = self.declared_configs(&element);
+        let candidates = self.declared_configs(element);
         let (resolved, cacheable) = match &named {
             Some((from, to)) => (
                 candidates
@@ -192,7 +220,7 @@ impl CypherExecutor<'_> {
                     .map(|c| resolved_from(c)),
                 true,
             ),
-            None => self.declared_choice(var_name, &element, &candidates, row),
+            None => self.declared_choice(var_name, element, &candidates, row),
         };
         if cacheable {
             let _ = self.validity_cache.set(ValidityCache {
@@ -208,7 +236,7 @@ impl CypherExecutor<'_> {
                 convention: IntervalConvention::Closed,
             })),
             (None, None) if !cacheable => Ok(None),
-            (None, None) => Err(undeclared_error(function, var_name, &element)),
+            (None, None) => Err(undeclared_error(function, var_name, element)),
         }
     }
 
@@ -225,7 +253,7 @@ impl CypherExecutor<'_> {
         candidates: &[&TemporalConfig],
         row: &ResultRow,
     ) -> (Option<ResolvedBounds>, bool) {
-        let ElementKind::Edge = element.kind else {
+        let ElementKind::Edge { .. } = element.kind else {
             return (candidates.first().map(|c| resolved_from(c)), true);
         };
         if let Some(keyed) = candidates.iter().find(|c| c.source_type.is_some()) {
@@ -266,7 +294,7 @@ impl CypherExecutor<'_> {
                 );
                 out
             }
-            ElementKind::Edge => {
+            ElementKind::Edge { .. } => {
                 let configs = edge_configs(graph, &element.target);
                 let source = element.key.1.map(|key| graph.interner.resolve(key));
                 let keyed = configs
@@ -278,31 +306,85 @@ impl CypherExecutor<'_> {
         }
     }
 
-    /// The node or relationship `var_name` is bound to on this row.
-    fn validity_element(&self, var_name: &str, row: &ResultRow) -> Option<Element> {
-        let graph = self.graph;
+    /// What `var_name` holds on this row, resolved in `resolve_property`'s
+    /// order so the element whose declaration is read is the one whose bounds
+    /// are: a matched binding, else a projected node or relationship value — an
+    /// item of `collect()`, `UNWIND`, `nodes(p)`, `relationships(p)` or a
+    /// variable-length list carries its type as the bound variable does.
+    fn validity_subject(&self, var_name: &str, row: &ResultRow) -> Subject {
         if let Some(&idx) = row.node_bindings.get(var_name) {
-            let node_type = graph.graph.node_type_of(idx)?;
-            let target = graph.interner.resolve(node_type).to_string();
-            return Some(Element {
-                key: (node_type, None),
-                describe: format!("node type '{target}'"),
-                target,
-                kind: ElementKind::Node(idx),
-            });
+            return self.node_subject(idx, None);
         }
-        let edge = row.edge_bindings.get(var_name)?;
-        let weight = graph.graph.edge_weight(edge.edge_index)?;
-        let rel_type = weight.connection_type_str(&graph.interner).to_string();
-        let source = graph
-            .graph
-            .edge_endpoints(edge.edge_index)
-            .and_then(|(source, _)| graph.graph.node_type_of(source));
-        Some(Element {
-            key: (InternedKey::from_str(&rel_type), source),
+        if let Some(edge) = row.edge_bindings.get(var_name) {
+            let Some(weight) = self.graph.graph.edge_weight(edge.edge_index) else {
+                return Subject::Null;
+            };
+            let rel_type = weight.connection_type_str(&self.graph.interner).to_string();
+            let (source, target) = self
+                .graph
+                .graph
+                .edge_endpoints(edge.edge_index)
+                .unwrap_or((edge.source, edge.target));
+            return self.edge_subject(rel_type, source, target);
+        }
+        if row.path_bindings.contains_key(var_name) {
+            return Subject::Other;
+        }
+        match row.projected.get(var_name) {
+            None | Some(Value::Null) => Subject::Null,
+            Some(Value::NodeRef(idx)) => {
+                self.node_subject(petgraph::graph::NodeIndex::new(*idx as usize), None)
+            }
+            Some(Value::Node(node)) => self.node_subject(
+                petgraph::graph::NodeIndex::new(node.id as usize),
+                node.labels.first().map(String::as_str),
+            ),
+            Some(Value::Relationship(rel)) => self.edge_subject(
+                rel.rel_type.clone(),
+                petgraph::graph::NodeIndex::new(rel.start_id as usize),
+                petgraph::graph::NodeIndex::new(rel.end_id as usize),
+            ),
+            Some(_) => Subject::Other,
+        }
+    }
+
+    /// A node, typed from the graph — or from the value's own primary label
+    /// when the graph no longer holds it.
+    fn node_subject(&self, idx: petgraph::graph::NodeIndex, label: Option<&str>) -> Subject {
+        let graph = self.graph;
+        let node_type = match (graph.graph.node_type_of(idx), label) {
+            (Some(key), _) => key,
+            (None, Some(label)) => InternedKey::from_str(label),
+            (None, None) => return Subject::Null,
+        };
+        let target = graph
+            .interner
+            .try_resolve(node_type)
+            .or(label)
+            .unwrap_or("?")
+            .to_string();
+        Subject::Element(Element {
+            key: (node_type, None),
+            describe: format!("node type '{target}'"),
+            target,
+            kind: ElementKind::Node(idx),
+        })
+    }
+
+    fn edge_subject(
+        &self,
+        rel_type: String,
+        source: petgraph::graph::NodeIndex,
+        target: petgraph::graph::NodeIndex,
+    ) -> Subject {
+        Subject::Element(Element {
+            key: (
+                InternedKey::from_str(&rel_type),
+                self.graph.graph.node_type_of(source),
+            ),
             describe: format!("relationship type '{rel_type}'"),
             target: rel_type,
-            kind: ElementKind::Edge,
+            kind: ElementKind::Edge { source, target },
         })
     }
 
@@ -325,6 +407,7 @@ impl CypherExecutor<'_> {
         &self,
         function: &'static str,
         var_name: &'n str,
+        subject: &Subject,
         resolved: &'n ResolvedBounds,
         row: &ResultRow,
     ) -> Result<ValidityBounds<'n>, String> {
@@ -336,7 +419,9 @@ impl CypherExecutor<'_> {
             to_field: &resolved.to,
             to_val: self.resolve_property(var_name, &resolved.to, row)?,
         };
-        self.require_known_bounds(&bounds, row)?;
+        if let Subject::Element(element) = subject {
+            self.require_known_bounds(&bounds, element)?;
+        }
         Ok(bounds)
     }
 
@@ -348,83 +433,39 @@ impl CypherExecutor<'_> {
     fn require_known_bounds(
         &self,
         bounds: &ValidityBounds<'_>,
-        row: &ResultRow,
+        element: &Element,
     ) -> Result<(), String> {
         for (field, value) in [
             (bounds.from_field, &bounds.from_val),
             (bounds.to_field, &bounds.to_val),
         ] {
-            if !matches!(value, Value::Null) {
+            if !matches!(value, Value::Null) || self.element_has_property(element, field) {
                 continue;
             }
-            if let Some((kind, type_name)) =
-                self.unknown_property_owner(bounds.var_name, field, row)
-            {
-                return Err(format!(
-                    "{}(): property '{field}' does not exist on {kind} '{type_name}' — no \
-                     element of that type has it — so {}.{field} cannot bound an interval. \
-                     Check the property name",
-                    bounds.function, bounds.var_name
-                ));
-            }
+            let kind = match element.kind {
+                ElementKind::Node(_) => "node type",
+                ElementKind::Edge { .. } => "relationship type",
+            };
+            return Err(crate::graph::features::temporal::unknown_bound_message(
+                bounds.function,
+                kind,
+                &element.target,
+                field,
+            ));
         }
         Ok(())
     }
 
-    /// `Some((kind, type))` when `var`'s element type records no property
-    /// `field`; `None` when it does, or when the binding is not a node or
-    /// relationship (an unmatched `OPTIONAL MATCH` answers null on its own).
-    fn unknown_property_owner(
-        &self,
-        var: &str,
-        field: &str,
-        row: &ResultRow,
-    ) -> Option<(&'static str, String)> {
-        let graph = self.graph;
-        if let Some(&idx) = row.node_bindings.get(var) {
-            let node_type = graph
-                .graph
-                .node_view(idx)?
-                .node_type_str(&graph.interner)
-                .to_string();
-            let declared = crate::graph::features::temporal::node_config(graph, &node_type)
-                .is_some_and(|config| config.valid_from == field || config.valid_to == field);
-            let known = declared
-                || matches!(
-                    field,
-                    "id" | "title" | "name" | "label" | "type" | "node_type"
-                )
-                || graph
-                    .id_field_aliases
-                    .get(&node_type)
-                    .is_some_and(|a| a == field)
-                || graph
-                    .title_field_aliases
-                    .get(&node_type)
-                    .is_some_and(|a| a == field)
-                || graph
-                    .node_type_metadata
-                    .get(&node_type)
-                    .is_some_and(|props| props.contains_key(field));
-            return (!known).then_some(("node type", node_type));
+    fn element_has_property(&self, element: &Element, field: &str) -> bool {
+        use crate::graph::features::temporal::{
+            node_type_has_property, relationship_type_has_property,
+        };
+        match element.kind {
+            ElementKind::Node(_) => node_type_has_property(self.graph, &element.target, field),
+            ElementKind::Edge { .. } => {
+                relationship_type_has_property(self.graph, &element.target, field)
+            }
         }
-        let edge = row.edge_bindings.get(var)?;
-        let rel_type = graph
-            .graph
-            .edge_weight(edge.edge_index)?
-            .connection_type_str(&graph.interner)
-            .to_string();
-        // A relationship type's metadata lists only the properties some
-        // relationship holds a value for, so a declared bound nobody has set
-        // yet (no period has ended) is known through its declaration.
-        let known = crate::graph::features::temporal::edge_configs(graph, &rel_type)
-            .iter()
-            .any(|config| config.valid_from == field || config.valid_to == field)
-            || graph
-                .connection_type_metadata
-                .get(&rel_type)
-                .is_some_and(|info| info.property_types.contains_key(field));
-        (!known).then_some(("relationship type", rel_type))
     }
 
     /// The error for a stored bound the evaluator cannot read, naming the
@@ -432,8 +473,8 @@ impl CypherExecutor<'_> {
     fn validity_bound_error(
         &self,
         bounds: &ValidityBounds<'_>,
+        subject: &Subject,
         err: TemporalError,
-        row: &ResultRow,
     ) -> String {
         let field = match &err {
             TemporalError::Bound {
@@ -448,16 +489,16 @@ impl CypherExecutor<'_> {
                 .get_node_id(idx)
                 .map_or_else(|| "?".to_string(), |v| format_value_compact(&v))
         };
-        let element = if let Some(&idx) = row.node_bindings.get(bounds.var_name) {
-            format!("node '{}'", id(idx))
-        } else if let Some(edge) = row.edge_bindings.get(bounds.var_name) {
-            format!(
-                "relationship from '{}' to '{}'",
-                id(edge.source),
-                id(edge.target)
-            )
-        } else {
-            format!("'{}'", bounds.var_name)
+        let element = match subject {
+            Subject::Element(Element {
+                kind: ElementKind::Node(idx),
+                ..
+            }) => format!("node '{}'", id(*idx)),
+            Subject::Element(Element {
+                kind: ElementKind::Edge { source, target },
+                ..
+            }) => format!("relationship from '{}' to '{}'", id(*source), id(*target)),
+            _ => format!("'{}'", bounds.var_name),
         };
         format!(
             "{}(): {}.{field} on {element}: {err}. Store bounds as date() or datetime() values, \
@@ -488,7 +529,7 @@ fn validity_variable<'e>(function: &str, arg: &'e Expression) -> Result<&'e str,
 fn undeclared_error(function: &str, var_name: &str, element: &Element) -> String {
     let key = match element.kind {
         ElementKind::Node(_) => "node",
-        ElementKind::Edge => "relationship",
+        ElementKind::Edge { .. } => "relationship",
     };
     let rest = if function == "valid_during" {
         "start, end"

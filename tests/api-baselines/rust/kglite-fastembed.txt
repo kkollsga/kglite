@@ -1671,6 +1671,7 @@ pub fn kglite::api::fluent::MatchBinding::fmt(&self, f: &mut core::fmt::Formatte
 pub enum kglite::api::fluent::TemporalEdgeFilter
 pub kglite::api::fluent::TemporalEdgeFilter::At(alloc::vec::Vec<kglite::api::TemporalConfig>, chrono::naive::date::NaiveDate)
 pub kglite::api::fluent::TemporalEdgeFilter::During(alloc::vec::Vec<kglite::api::TemporalConfig>, chrono::naive::date::NaiveDate, chrono::naive::date::NaiveDate)
+pub kglite::api::fluent::TemporalEdgeFilter::Undeclared(alloc::string::String)
 pub struct kglite::api::fluent::GroupedPropertyStats
 pub kglite::api::fluent::GroupedPropertyStats::count: usize
 pub kglite::api::fluent::GroupedPropertyStats::max: core::option::Option<f64>
@@ -3248,6 +3249,14 @@ pub fn kglite::api::temporal::TemporalTarget::fmt(&self, f: &mut core::fmt::Form
 impl core::hash::Hash for kglite::api::temporal::TemporalTarget
 pub fn kglite::api::temporal::TemporalTarget::hash<__H: core::hash::Hasher>(&self, state: &mut __H)
 impl core::marker::StructuralPartialEq for kglite::api::temporal::TemporalTarget
+pub enum kglite::api::temporal::ValidityTest
+pub kglite::api::temporal::ValidityTest::At(chrono::naive::date::NaiveDate)
+pub kglite::api::temporal::ValidityTest::During(chrono::naive::date::NaiveDate, chrono::naive::date::NaiveDate)
+impl core::clone::Clone for kglite::api::temporal::ValidityTest
+pub fn kglite::api::temporal::ValidityTest::clone(&self) -> kglite::api::temporal::ValidityTest
+impl core::fmt::Debug for kglite::api::temporal::ValidityTest
+pub fn kglite::api::temporal::ValidityTest::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for kglite::api::temporal::ValidityTest
 pub struct kglite::api::temporal::DeclarationInfo
 pub kglite::api::temporal::DeclarationInfo::abutting_rows: core::option::Option<usize>
 pub kglite::api::temporal::DeclarationInfo::ambiguous: bool
@@ -3277,6 +3286,10 @@ pub struct kglite::api::temporal::LoadDeclaration
 impl kglite::api::temporal::LoadDeclaration
 pub fn kglite::api::temporal::LoadDeclaration::abandon(self, graph: &mut kglite::api::DirGraph)
 pub fn kglite::api::temporal::LoadDeclaration::finish(self, graph: &mut kglite::api::DirGraph) -> core::result::Result<kglite::api::temporal::DeclareReport, alloc::string::String>
+pub struct kglite::api::temporal::NodeValidityRequest<'g>
+impl<'g> kglite::api::temporal::NodeValidityRequest<'g>
+pub fn kglite::api::temporal::NodeValidityRequest<'g>::keep(&self, node: kglite::api::NodeView<'_>) -> core::result::Result<bool, alloc::string::String>
+pub fn kglite::api::temporal::NodeValidityRequest<'g>::new(graph: &'g kglite::api::DirGraph, function: &'static str, from: core::option::Option<&str>, to: core::option::Option<&str>, test: kglite::api::temporal::ValidityTest) -> Self
 pub const kglite::api::temporal::DISK_NODE_ABUTMENT_CAP: usize
 pub fn kglite::api::temporal::declare(graph: &mut kglite::api::DirGraph, target: &kglite::api::temporal::TemporalTarget, valid_from: &str, valid_to: &str, convention: kglite::api::temporal::IntervalConvention) -> core::result::Result<kglite::api::temporal::DeclareReport, alloc::string::String>
 pub fn kglite::api::temporal::declare_defaulted(graph: &mut kglite::api::DirGraph, target: &kglite::api::temporal::TemporalTarget, valid_from: &str, valid_to: &str, convention: core::option::Option<kglite::api::temporal::IntervalConvention>) -> core::result::Result<kglite::api::temporal::DeclareReport, alloc::string::String>
@@ -3285,6 +3298,8 @@ pub fn kglite::api::temporal::declare_loaded(graph: &mut kglite::api::DirGraph, 
 pub fn kglite::api::temporal::edge_configs<'g>(graph: &'g kglite::api::DirGraph, rel_type: &str) -> &'g [kglite::api::TemporalConfig]
 pub fn kglite::api::temporal::list(graph: &kglite::api::DirGraph) -> alloc::vec::Vec<kglite::api::temporal::DeclarationInfo>
 pub fn kglite::api::temporal::node_config<'g>(graph: &'g kglite::api::DirGraph, label: &str) -> core::option::Option<&'g kglite::api::TemporalConfig>
+pub fn kglite::api::temporal::node_request_config(graph: &kglite::api::DirGraph, function: &str, node_type: &str, from: core::option::Option<&str>, to: core::option::Option<&str>) -> core::result::Result<kglite::api::TemporalConfig, alloc::string::String>
+pub fn kglite::api::temporal::relationship_request_configs(graph: &kglite::api::DirGraph, function: &str, rel_type: &str) -> core::result::Result<alloc::vec::Vec<kglite::api::TemporalConfig>, alloc::string::String>
 pub fn kglite::api::temporal::undeclare(graph: &mut kglite::api::DirGraph, target: &kglite::api::temporal::TemporalTarget) -> bool
 pub mod kglite::api::text_indexes
 pub struct kglite::api::text_indexes::PreparedQuery
@@ -5025,6 +5040,7 @@ pub fn kglite::api::parse_spatial_column_types_from_pairs(pairs: alloc::vec::Vec
 pub fn kglite::api::parse_temporal_column_types_from_pairs(pairs: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>) -> core::result::Result<(core::option::Option<kglite::api::TemporalConfig>, alloc::vec::Vec<(alloc::string::String, alloc::string::String)>), alloc::string::String>
 pub fn kglite::api::schema_from_json(json: &str) -> core::result::Result<kglite::api::SchemaDefinition, kglite::api::SchemaParseError>
 pub fn kglite::api::schema_from_value(value: &kglite::datatypes::values::Value) -> core::result::Result<kglite::api::SchemaDefinition, kglite::api::SchemaParseError>
+pub fn kglite::api::schema_property_keys(dir: &kglite::api::DirGraph, node_type: &str, excluded: &[&str]) -> core::option::Option<alloc::vec::Vec<alloc::string::String>>
 pub fn kglite::api::table_meta_key(node_type: &str, property: &str) -> alloc::string::String
 pub mod kglite::datatypes
 pub mod kglite::datatypes::prop_map

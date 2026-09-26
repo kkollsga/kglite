@@ -20,6 +20,9 @@ pub enum TemporalEdgeFilter {
     At(Vec<TemporalConfig>, NaiveDate),
     /// Range overlap: valid_from <= end AND (valid_to IS NULL OR valid_to >= start)
     During(Vec<TemporalConfig>, NaiveDate, NaiveDate),
+    /// An explicit date on a relationship type nothing declares: the error,
+    /// raised on the first edge of the type the traversal visits.
+    Undeclared(String),
 }
 
 // ── Comparison-based traversal types ─────────────────────────────────────────
@@ -173,6 +176,7 @@ fn edge_passes_filters(
         Some(TemporalEdgeFilter::During(configs, start, end)) => {
             overlaps_range_multi(properties, configs, source(), start, end)
         }
+        Some(TemporalEdgeFilter::Undeclared(message)) => return Err(message.clone()),
     };
     passes.map_err(|reason| {
         let id = |idx| {

@@ -92,12 +92,10 @@ fn temporal_keys_of_text(s: &str) -> Vec<Value> {
 /// [`temporal_keys_of_text`] to confirm against `compare_values`.
 fn text_temporal_candidates(s: &str) -> Vec<Value> {
     let mut out = Vec::new();
-    for format in ["%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%m/%d/%Y"] {
-        if let Ok(date) = chrono::NaiveDate::parse_from_str(s, format) {
-            out.push(Value::DateTime(date));
-            if let Some(midnight) = date.and_hms_opt(0, 0, 0) {
-                out.push(Value::Timestamp(midnight));
-            }
+    if let Some(date) = crate::graph::core::filtering::parse_date_string(s) {
+        out.push(Value::DateTime(date));
+        if let Some(midnight) = date.and_hms_opt(0, 0, 0) {
+            out.push(Value::Timestamp(midnight));
         }
     }
     if let Ok(datetime) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {

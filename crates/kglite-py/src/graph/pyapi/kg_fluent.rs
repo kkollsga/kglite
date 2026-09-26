@@ -408,20 +408,6 @@ impl KnowledgeGraph {
         date_to_field: Option<&str>,
     ) -> PyResult<Self> {
         let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
-        let temporal_config = if date_from_field.is_none() || date_to_field.is_none() {
-            self.infer_selection_node_type()
-                .and_then(|nt| kglite_core::api::temporal::node_config(&self.inner, &nt).cloned())
-        } else {
-            None
-        };
-        let from_field = date_from_field
-            .map(|s| s.to_string())
-            .or_else(|| temporal_config.as_ref().map(|c| c.valid_from.clone()))
-            .unwrap_or_else(|| "date_from".to_string());
-        let to_field = date_to_field
-            .map(|s| s.to_string())
-            .or_else(|| temporal_config.as_ref().map(|c| c.valid_to.clone()))
-            .unwrap_or_else(|| "date_to".to_string());
         let ref_date = match date {
             Some(d) => {
                 let (parsed, _) = kglite_core::api::timeseries::parse_date_query(d).map_err(
@@ -436,14 +422,13 @@ impl KnowledgeGraph {
                 _ => chrono::Local::now().date_naive(),
             },
         };
-
-        // Use temporal helper for NULL-aware filtering (NULL date_to = still active)
-        let config = kglite_core::api::TemporalConfig {
-            valid_from: from_field,
-            valid_to: to_field,
-            convention: temporal_config.map(|c| c.convention).unwrap_or_default(),
-            source_type: None,
-        };
+        let request = kglite_core::api::temporal::NodeValidityRequest::new(
+            &self.inner,
+            "valid_at",
+            date_from_field,
+            date_to_field,
+            kglite_core::api::temporal::ValidityTest::At(ref_date),
+        );
 
         let mut new_kg = self.clone();
 
@@ -454,9 +439,7 @@ impl KnowledgeGraph {
             .map(|l| l.node_count())
             .unwrap_or(0);
 
-        new_kg.retain_current_level(|node| {
-            kglite_core::api::fluent::node_is_temporally_valid(node, &config, &ref_date)
-        })?;
+        new_kg.retain_current_level(|node| request.keep(node))?;
 
         let actual = new_kg
             .cursor
@@ -487,21 +470,6 @@ impl KnowledgeGraph {
         date_to_field: Option<&str>,
     ) -> PyResult<Self> {
         let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
-        let temporal_config = if date_from_field.is_none() || date_to_field.is_none() {
-            self.infer_selection_node_type()
-                .and_then(|nt| kglite_core::api::temporal::node_config(&self.inner, &nt).cloned())
-        } else {
-            None
-        };
-        let from_field = date_from_field
-            .map(|s| s.to_string())
-            .or_else(|| temporal_config.as_ref().map(|c| c.valid_from.clone()))
-            .unwrap_or_else(|| "date_from".to_string());
-        let to_field = date_to_field
-            .map(|s| s.to_string())
-            .or_else(|| temporal_config.as_ref().map(|c| c.valid_to.clone()))
-            .unwrap_or_else(|| "date_to".to_string());
-
         let (start_parsed, _) = kglite_core::api::timeseries::parse_date_query(start_date)
             .map_err(|e: String| -> PyErr {
                 crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
@@ -511,14 +479,13 @@ impl KnowledgeGraph {
                 crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
             },
         )?;
-
-        // Use temporal helper for NULL-aware overlap check
-        let config = kglite_core::api::TemporalConfig {
-            valid_from: from_field,
-            valid_to: to_field,
-            convention: temporal_config.map(|c| c.convention).unwrap_or_default(),
-            source_type: None,
-        };
+        let request = kglite_core::api::temporal::NodeValidityRequest::new(
+            &self.inner,
+            "valid_during",
+            date_from_field,
+            date_to_field,
+            kglite_core::api::temporal::ValidityTest::During(start_parsed, end_parsed),
+        );
 
         let mut new_kg = self.clone();
 
@@ -529,9 +496,7 @@ impl KnowledgeGraph {
             .map(|l| l.node_count())
             .unwrap_or(0);
 
-        new_kg.retain_current_level(|node| {
-            kglite_core::api::fluent::node_overlaps_range(node, &config, &start_parsed, &end_parsed)
-        })?;
+        new_kg.retain_current_level(|node| request.keep(node))?;
 
         let actual = new_kg
             .cursor
@@ -748,22 +713,8 @@ impl KnowledgeGraph {
             let first_type = nodes_data[0].0;
             let all_same = nodes_data.iter().all(|(nt, _)| *nt == first_type);
             if all_same {
-                if let Some(schema) = self.inner.type_schemas.get(first_type) {
-                    let mut keys: Vec<String> = schema
-                        .iter()
-                        .filter_map(|(_, ik)| {
-                            self.inner
-                                .interner
-                                .try_resolve(ik)
-                                .filter(|s| !emitted_identity.contains(s))
-                                .map(|s| s.to_string())
-                        })
-                        .collect();
-                    keys.sort();
-                    keys
-                } else {
-                    discover(&nodes_data)
-                }
+                kglite_core::api::schema_property_keys(&self.inner, first_type, &emitted_identity)
+                    .unwrap_or_else(|| discover(&nodes_data))
             } else {
                 discover(&nodes_data)
             }

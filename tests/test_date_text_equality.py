@@ -87,3 +87,53 @@ def test_fluent_where_and_a_round_tripped_value(storage, tmp_path) -> None:
     for value in (returned, returned.isoformat()):
         again = graph.cypher("MATCH (m:M) WHERE m.vt = $v RETURN m.id AS id", params={"v": value}).to_list()
         assert again == [{"id": "a"}]
+
+
+# The ISO basic form `YYYYMMDD` — the spelling `date()`, `valid_at` and the
+# loaders already read — compares as the extended form does, on every route.
+BASIC_CASES = [
+    ("MATCH (m:M) WHERE m.vt = '19900101' RETURN m.id AS id", None, ["a"]),
+    ("MATCH (m:M) WHERE m.vt = $s RETURN m.id AS id", {"s": "19900101"}, ["a"]),
+    ("MATCH (m:M) WHERE m.vt <> '19900101' RETURN m.id AS id", None, ["b"]),
+    ("MATCH (m:M {vt: '19900101'}) RETURN m.id AS id", None, ["a"]),
+    ("MATCH (m:M) WHERE m.vt IN ['19900101', '20200601'] RETURN m.id AS id", None, ["a", "b"]),
+    ("MATCH (m:M) WHERE m.vt < '19950101' RETURN m.id AS id", None, ["a"]),
+    ("MATCH (m:M) WHERE m.vt > '19900101' RETURN m.id AS id", None, ["b"]),
+    ("MATCH (m:M) WHERE m.ts >= '19900102' RETURN m.id AS id", None, ["b"]),
+    # Not a calendar day, or not eight digits: another type family.
+    ("MATCH (m:M) WHERE m.vt = '19900230' RETURN m.id AS id", None, []),
+    ("MATCH (m:M) WHERE m.vt = '1990010' RETURN m.id AS id", None, []),
+]
+
+
+@pytest.mark.parametrize("storage", [None, "mapped", "disk"], ids=["memory", "mapped", "disk"])
+@pytest.mark.parametrize("index", [False, True], ids=["scan", "indexed"])
+@pytest.mark.parametrize("disable_optimizer", [False, True], ids=["optimized", "naive"])
+def test_basic_iso_text_compares_as_a_date(storage, index, disable_optimizer, tmp_path) -> None:
+    graph = _graph(storage, index, tmp_path)
+    for query, params, expected in BASIC_CASES:
+        rows = graph.cypher(query, params=params, disable_optimizer=disable_optimizer).to_list()
+        assert sorted(r["id"] for r in rows) == expected, query
+    assert graph.select("M").where({"vt": "19900101"}).len() == 1
+    assert graph.select("M").where({"vt": {"in": ["19900101"]}}).len() == 1
+    assert graph.select("M").where({"vt": {"<": "19950101"}}).len() == 1
+
+
+@pytest.mark.parametrize("storage", [None, "mapped", "disk"], ids=["memory", "mapped", "disk"])
+@pytest.mark.parametrize("index", [False, True], ids=["scan", "indexed"])
+def test_stored_basic_iso_text_equals_a_date(storage, index, tmp_path) -> None:
+    if storage == "disk":
+        graph = kglite.KnowledgeGraph(storage="disk", path=str(tmp_path / "t"))
+    elif storage == "mapped":
+        graph = kglite.KnowledgeGraph(storage="mapped")
+    else:
+        graph = kglite.KnowledgeGraph()
+    graph.cypher("CREATE (:T {k: 'a', code: '19900101'}), (:T {k: 'b', code: '1990010'}), (:T {k: 'c', code: 'x'})")
+    if index:
+        graph.create_index("T", "code")
+    for query in (
+        "MATCH (t:T) WHERE t.code = date('1990-01-01') RETURN t.k AS k",
+        "MATCH (t:T {code: date('1990-01-01')}) RETURN t.k AS k",
+        "MATCH (t:T) WHERE t.code IN [date('1990-01-01')] RETURN t.k AS k",
+    ):
+        assert graph.cypher(query).to_list() == [{"k": "a"}], query

@@ -16,12 +16,22 @@ before upgrading.
   (`db.temporal.declare`, a loader's `validFrom`/`validTo`, `set_temporal`), as
   the fluent filters do. A relationship takes its source type's keyed
   declaration first. On a type with no declaration they raise, naming
-  `db.temporal.declare` and the four-argument form.
+  `db.temporal.declare` and the four-argument form. The entity may come from
+  a list — `collect()`, `UNWIND`, `nodes(p)`, `relationships(p)`, a
+  variable-length relationship list, `ALL(r IN relationships(p) WHERE …)` —
+  and reads its own type's declaration exactly as a matched variable does.
 - Cypher: `date({year, month, day})` and `datetime({year, month, day, hour,
   minute, second, millisecond, microsecond, nanosecond})`, openCypher's map
   form, build a date or datetime from integers — `date({year: y, month: 1,
   day: 1})`. Missing fields default to the start of the period; an impossible
   date, an unknown key or a non-integer component raises.
+- Rust API: `kglite::api::temporal::{NodeValidityRequest, ValidityTest,
+  node_request_config, relationship_request_configs}` resolve an explicit
+  validity request against a type — the rule the fluent filters and Cypher
+  share — and `kglite::api::schema_property_keys` gives a single-typed node
+  set's export columns from the type's schema. `kglite::api::fluent::
+  TemporalEdgeFilter` gains an `Undeclared` variant, so an exhaustive match
+  over it needs a new arm.
 - Rust API: `kglite::api::blueprint::TemporalSpec`, the `temporal` field's type on
   `NodeSpec`, `FkEdge` and `JunctionEdge`.
 - Rust API: `SchemaDefinition::reject_reserved_provenance_constraints` and
@@ -123,6 +133,9 @@ before upgrading.
   no row. A string that is not a date stays unequal, as before. The same
   holds on indexed properties, where a date probe over an index holding
   date-like text now scans. openCypher makes `=` across the two types false.
+  The ISO basic form `'19900101'` compares as `'1990-01-01'` does on every
+  operator (`=`, `<>`, `<`, `>`, `IN`, a fluent `where`), as `date()` and
+  `valid_at` already read it; it used to match nothing, even under `<`.
 - A blueprint `"date"` cell holding a number of fewer than nine digits is no
   longer read as epoch milliseconds: eight digits are `YYYYMMDD`, and a smaller
   number is not a date (NULL, reported). Every such value used to become
@@ -203,6 +216,25 @@ before upgrading.
 
 ### Fixed
 
+- Cypher `valid_at()` / `valid_during()` on a null entity — an unmatched
+  `OPTIONAL MATCH` — return null in every form, so `WHERE` drops the row. They
+  returned `true`, reporting a missing membership as valid.
+- Fluent `valid_at()` / `valid_during()` raise `ValueError` for a field name
+  the node type does not have, and for an undeclared type with neither
+  `date_from` nor `date_to`, and `traverse(at=…, during=…)` raises
+  `ArgumentError` on a relationship type with no declared interval. Each used
+  to read the missing property as an open bound and keep every element. Each
+  node is now filtered under its own type's declaration, and named fields that
+  match it follow its convention. The ambient `date()` context still filters
+  only declared types.
+- After a `.kgl` save and load, `to_df()` and `collect()` over more than 50
+  nodes of one type no longer add all-None columns named after the loader's
+  id and title columns (`add_nodes(df, 'T', 'code', 'name')`).
+- A Cypher `CREATE` that gives an existing node's id to a new node of the same
+  type prints the duplicate-id warning as it writes it when the type's id
+  index is built (as after `add_nodes`), instead of staying silent until the
+  index was next rebuilt — typically at a reload. Ids stay unique only by declaration (`define_schema`
+  `primary_key`, or a durable graph); use `MERGE` to upsert.
 - Fluent `traverse()` and `compare()` on an empty selection return an empty
   selection instead of raising `No source nodes available for traversal`, so
   a per-group loop no longer fails on a group with no members.

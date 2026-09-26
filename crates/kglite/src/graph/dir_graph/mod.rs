@@ -745,12 +745,13 @@ impl Default for DirGraph {
     }
 }
 
-/// Warn (rate-limited, stderr) when building a type's id-index collapses
-/// duplicate ids — `MATCH (n {id: …})` then returns only one node per id.
-/// Detected here (at index build) rather than per-mutation so bulk
+/// Warn (rate-limited, stderr) when a type's id index collapses duplicate
+/// ids — `MATCH (n {id: …})` then returns only one node per id. Detected
+/// where the index already probes the id (a build, a bulk fold, a `CREATE`
+/// into a cached index) rather than by a per-mutation scan, so bulk
 /// `UNWIND … CREATE` and `add_nodes` stay O(n), not O(n²). `id` is meant to
 /// be unique (like `add_nodes(unique_id_field=…)`); use MERGE or dedupe input.
-fn warn_on_duplicate_ids(node_type: &str, entry_count: usize, unique_count: usize) {
+pub(crate) fn warn_on_duplicate_ids(node_type: &str, entry_count: usize, unique_count: usize) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static WARN_COUNT: AtomicUsize = AtomicUsize::new(0);
     if unique_count >= entry_count {

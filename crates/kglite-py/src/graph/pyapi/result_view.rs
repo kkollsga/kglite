@@ -287,22 +287,12 @@ impl ResultView {
             let all_same_type = nodes_vec.iter().all(|n| n.node_type() == first_type);
             if all_same_type {
                 let first_type_str = graph.interner.resolve(first_type);
-                if let Some(schema) = graph.type_schemas.get(first_type_str) {
-                    let mut keys: Vec<String> = schema
-                        .iter()
-                        .filter_map(|(_, ik)| {
-                            graph
-                                .interner
-                                .try_resolve(ik)
-                                .filter(|s| !kglite_core::api::is_canonical_node_column(s))
-                                .map(|s| s.to_string())
-                        })
-                        .collect();
-                    keys.sort();
-                    keys
-                } else {
-                    Self::discover_property_keys(&nodes_vec, &graph.interner)
-                }
+                kglite_core::api::schema_property_keys(
+                    graph,
+                    first_type_str,
+                    &kglite_core::api::CANONICAL_NODE_COLUMNS,
+                )
+                .unwrap_or_else(|| Self::discover_property_keys(&nodes_vec, &graph.interner))
             } else {
                 Self::discover_property_keys(&nodes_vec, &graph.interner)
             }

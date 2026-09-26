@@ -2876,11 +2876,14 @@ class KnowledgeGraph:
 
         Keeps nodes where ``date_from <= date <= date_to``.
 
-        If field names are not specified, auto-detects from the type's temporal
-        config (``set_temporal()`` or ``CALL db.temporal.declare``), and then
-        follows its convention: under ``'half_open'`` the ``to`` day is excluded
-        (a datetime ``to`` excludes only from its own time, so a ``to`` after
-        midnight leaves its day valid).
+        Each node is filtered under its own type's bounds. A field name left
+        unspecified comes from the type's temporal config (``set_temporal()``
+        or ``CALL db.temporal.declare``), whose convention then applies: under
+        ``'half_open'`` the ``to`` day is excluded (a datetime ``to`` excludes
+        only from its own time, so a ``to`` after midnight leaves its day
+        valid). On an undeclared type it defaults to ``date_from`` /
+        ``date_to`` and the interval reads closed. Named fields that match the
+        declaration follow its convention too; any other pair reads closed.
         If *date* is not specified, uses the ``date()`` context or today.
 
         Args:
@@ -2892,8 +2895,12 @@ class KnowledgeGraph:
             A new KnowledgeGraph with the filtered selection.
 
         Raises:
-            ValueError: If a node's validity bound is not a date, a datetime
-                or an ISO date string.
+            ValueError: If a named or declared field is not a property of the
+                node's type; if the type is undeclared and has neither
+                ``date_from`` nor ``date_to`` (or lacks the default beside a
+                named field) — rather than reading the missing property as an
+                open bound and keeping every node; or if a node's validity
+                bound is not a date, a datetime or an ISO date string.
         """
         ...
 
@@ -2906,9 +2913,9 @@ class KnowledgeGraph:
     ) -> KnowledgeGraph:
         """Filter nodes whose validity period overlaps a date range.
 
-        If field names are not specified, auto-detects from the type's temporal
-        config (``set_temporal()`` or ``CALL db.temporal.declare``), and then
-        follows its convention.
+        Field names resolve as in :meth:`valid_at`: from the type's temporal
+        config (``set_temporal()`` or ``CALL db.temporal.declare``), whose
+        convention then applies, else ``date_from`` / ``date_to``.
 
         Args:
             start_date: Start of the query range.
@@ -2920,8 +2927,9 @@ class KnowledgeGraph:
             A new KnowledgeGraph with the filtered selection.
 
         Raises:
-            ValueError: If a node's validity bound is not a date, a datetime
-                or an ISO date string.
+            ValueError: As :meth:`valid_at` — a field the type does not have,
+                an undeclared type with no default fields, or a validity bound
+                that is not a date, a datetime or an ISO date string.
         """
         ...
 
@@ -3813,14 +3821,20 @@ class KnowledgeGraph:
             sort_target: Sort targets per source. Field name or
                 ``[(field, ascending)]`` list.
             limit: Max target nodes per source.
-            at: Temporal point-in-time filter (e.g. ``'2005'``).
-            during: Temporal range filter (e.g. ``('2000', '2010')``).
+            at: Temporal point-in-time filter (e.g. ``'2005'``) on the
+                relationships, under the relationship type's declared interval.
+            during: Temporal range filter (e.g. ``('2000', '2010')``), likewise.
             temporal: Override temporal filtering. ``False`` = disable.
             level_index: Source level in the hierarchy (advanced).
             new_level: Add targets as new hierarchy level. Default ``True``.
 
         Returns:
             A new KnowledgeGraph with traversal results selected.
+
+        Raises:
+            ArgumentError: If *at* or *during* is given for a relationship type
+                with no declared validity interval (raised when the traversal
+                reaches an edge of that type), rather than keeping every edge.
 
         Examples::
 

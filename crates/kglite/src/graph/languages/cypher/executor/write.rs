@@ -1194,13 +1194,16 @@ fn create_node(
     // gating maintenance on it dropped an undeclared type's whole cached id
     // index on every single CREATE. Nothing about duplicate ids is protected by
     // invalidating: a rebuild and an incremental insert collapse a duplicate
-    // identically.
+    // identically — and both warn, so the write that forks an id says so then,
+    // not at the next rebuild (a reload).
     match pk_id {
         Some(idv) if graph.id_indices.contains_key(&label) => {
-            graph
-                .id_indices
-                .entry_or_default(label.clone())
-                .insert(idv, node_idx);
+            let entry = graph.id_indices.entry_or_default(label.clone());
+            let duplicate = entry.get(&idv).is_some();
+            entry.insert(idv, node_idx);
+            if duplicate {
+                crate::graph::dir_graph::warn_on_duplicate_ids(&label, 1, 0);
+            }
         }
         _ => {
             graph.id_indices.remove(&label);
