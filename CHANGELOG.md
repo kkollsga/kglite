@@ -11,6 +11,8 @@ before upgrading.
 
 ### Added
 
+- Rust API: `kglite::api::blueprint::TemporalSpec`, the `temporal` field's type on
+  `NodeSpec`, `FkEdge` and `JunctionEdge`.
 - Rust API: `SchemaDefinition::reject_reserved_provenance_constraints` and
   `NodeSchemaDefinition` / `ConnectionSchemaDefinition::constrained_properties`,
   the check every constraint-declaring surface shares.

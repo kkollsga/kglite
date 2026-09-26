@@ -372,6 +372,7 @@ pub kglite::api::blueprint::FkEdge::properties: alloc::vec::Vec<alloc::string::S
 pub kglite::api::blueprint::FkEdge::property_types: indexmap::map::IndexMap<alloc::string::String, alloc::string::String>
 pub kglite::api::blueprint::FkEdge::rename: indexmap::map::IndexMap<alloc::string::String, alloc::string::String>
 pub kglite::api::blueprint::FkEdge::target: alloc::string::String
+pub kglite::api::blueprint::FkEdge::temporal: core::option::Option<kglite::api::blueprint::TemporalSpec>
 impl kglite::api::blueprint::FkEdge
 pub fn kglite::api::blueprint::FkEdge::plain(target: alloc::string::String, fk: alloc::string::String) -> Self
 impl core::clone::Clone for kglite::api::blueprint::FkEdge
@@ -397,6 +398,7 @@ pub kglite::api::blueprint::JunctionEdge::source_fk: alloc::string::String
 pub kglite::api::blueprint::JunctionEdge::target: alloc::vec::Vec<alloc::string::String>
 pub kglite::api::blueprint::JunctionEdge::target_fk: alloc::string::String
 pub kglite::api::blueprint::JunctionEdge::target_type_column: core::option::Option<alloc::string::String>
+pub kglite::api::blueprint::JunctionEdge::temporal: core::option::Option<kglite::api::blueprint::TemporalSpec>
 impl kglite::api::blueprint::JunctionEdge
 pub fn kglite::api::blueprint::JunctionEdge::computed(csv: alloc::string::String, source_fk: alloc::string::String, target: alloc::string::String, target_fk: alloc::string::String) -> Self
 impl kglite::api::blueprint::JunctionEdge
@@ -420,6 +422,7 @@ pub kglite::api::blueprint::NodeSpec::pk: core::option::Option<alloc::string::St
 pub kglite::api::blueprint::NodeSpec::properties: indexmap::map::IndexMap<alloc::string::String, alloc::string::String>
 pub kglite::api::blueprint::NodeSpec::skipped: alloc::vec::Vec<alloc::string::String>
 pub kglite::api::blueprint::NodeSpec::sub_nodes: indexmap::map::IndexMap<alloc::string::String, kglite::api::blueprint::NodeSpec>
+pub kglite::api::blueprint::NodeSpec::temporal: core::option::Option<kglite::api::blueprint::TemporalSpec>
 pub kglite::api::blueprint::NodeSpec::timeseries: core::option::Option<kglite::api::blueprint::TimeseriesSpec>
 pub kglite::api::blueprint::NodeSpec::title: core::option::Option<alloc::string::String>
 impl kglite::api::blueprint::NodeSpec
@@ -458,6 +461,16 @@ impl core::fmt::Debug for kglite::api::blueprint::Settings
 pub fn kglite::api::blueprint::Settings::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<'de> serde_core::de::Deserialize<'de> for kglite::api::blueprint::Settings
 pub fn kglite::api::blueprint::Settings::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+pub struct kglite::api::blueprint::TemporalSpec
+pub kglite::api::blueprint::TemporalSpec::convention: core::option::Option<alloc::string::String>
+pub kglite::api::blueprint::TemporalSpec::from: alloc::string::String
+pub kglite::api::blueprint::TemporalSpec::to: alloc::string::String
+impl core::clone::Clone for kglite::api::blueprint::TemporalSpec
+pub fn kglite::api::blueprint::TemporalSpec::clone(&self) -> kglite::api::blueprint::TemporalSpec
+impl core::fmt::Debug for kglite::api::blueprint::TemporalSpec
+pub fn kglite::api::blueprint::TemporalSpec::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'de> serde_core::de::Deserialize<'de> for kglite::api::blueprint::TemporalSpec
+pub fn kglite::api::blueprint::TemporalSpec::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 pub struct kglite::api::blueprint::TimeseriesSpec
 pub kglite::api::blueprint::TimeseriesSpec::channels: indexmap::map::IndexMap<alloc::string::String, alloc::string::String>
 pub kglite::api::blueprint::TimeseriesSpec::resolution: core::option::Option<alloc::string::String>

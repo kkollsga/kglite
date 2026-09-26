@@ -831,7 +831,8 @@ pub mod api {
         pub use crate::graph::blueprint::lifecycle::{declared_column_types, from_blueprint};
         pub use crate::graph::blueprint::schema::{
             load_blueprint_file, AggregateEdge, Blueprint, CalendarLink, ComputeOp, Connections,
-            FileSpec, FkEdge, JunctionEdge, NodeSpec, Settings, TimeKey, TimeseriesSpec,
+            FileSpec, FkEdge, JunctionEdge, NodeSpec, Settings, TemporalSpec, TimeKey,
+            TimeseriesSpec,
         };
         pub use crate::graph::blueprint::typing::scalar;
     }
