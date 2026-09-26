@@ -36,7 +36,8 @@ fn fully_populated_spec() -> NodeSpec {
             "channels": {"ph": "float"},
             "resolution": "monthly",
             "units": {"ph": "pH"}
-        }
+        },
+        "temporal": {"from": "collected", "to": "depth", "convention": "closed"}
     }))
     .expect("fixture spec parses")
 }

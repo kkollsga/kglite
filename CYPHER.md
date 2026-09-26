@@ -1458,7 +1458,8 @@ CALL db.temporal.declarations()
   that keeps an existing declaration of the same properties and is `closed`
   otherwise. A bulk load onto a declared relationship type keys each row on
   its `from` bound as well as its endpoints, so a new period between the same
-  pair is a parallel relationship rather than a merge.
+  pair is a parallel relationship rather than a merge. A blueprint declares
+  through a spec's `temporal` key, which must name its convention.
 
 ### Duration semantics
 

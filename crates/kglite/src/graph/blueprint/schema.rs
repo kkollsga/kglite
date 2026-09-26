@@ -4,6 +4,8 @@
 //! are lenient: missing fields default to empty where sensible, matching the
 //! behaviour of the old Python loader, and an unrecognised field never fails
 //! the parse — blueprints in the wild carry stray keys and must keep building.
+//! The one exception is inside a `temporal` key ([`TemporalSpec`]), which is
+//! new: a misspelled `convention` there would silently declare nothing.
 //!
 //! Leniency is not silence, though. Each spec that a user hand-writes captures
 //! its unrecognised keys in an `extra` map, and
@@ -11,7 +13,8 @@
 //! warnings with a near-miss hint. A dropped `"lables"` otherwise costs every
 //! label it carried and reports success. The `ACCEPTED_*_KEYS` lists below
 //! feed only that hint — `extra` already knows the key is unrecognised — and
-//! `accepted_key_lists_match_the_structs` keeps them in step with the fields.
+//! `accepted_key_lists_name_only_keys_the_specs_read` keeps them in step with
+//! the fields.
 
 use indexmap::IndexMap;
 use serde::Deserialize;
@@ -122,11 +125,18 @@ pub const ACCEPTED_NODE_KEYS: &[&str] = &[
     "connections",
     "sub_nodes",
     "timeseries",
+    "temporal",
 ];
 
 /// Keys an `fk_edges` entry reads.
-pub const ACCEPTED_FK_EDGE_KEYS: &[&str] =
-    &["target", "fk", "properties", "property_types", "rename"];
+pub const ACCEPTED_FK_EDGE_KEYS: &[&str] = &[
+    "target",
+    "fk",
+    "properties",
+    "property_types",
+    "rename",
+    "temporal",
+];
 
 /// Keys a `junction_edges` entry reads.
 pub const ACCEPTED_JUNCTION_EDGE_KEYS: &[&str] = &[
@@ -139,6 +149,7 @@ pub const ACCEPTED_JUNCTION_EDGE_KEYS: &[&str] = &[
     "properties",
     "property_types",
     "rename",
+    "temporal",
 ];
 
 /// `"Disease"` or `["Disease", "Phenotype"]` — both land as a list, so the
@@ -207,9 +218,25 @@ pub struct NodeSpec {
     pub sub_nodes: IndexMap<String, NodeSpec>,
     #[serde(default)]
     pub timeseries: Option<TimeseriesSpec>,
+    #[serde(default)]
+    pub temporal: Option<TemporalSpec>,
     /// Keys on this node spec that this struct does not read.
     #[serde(flatten)]
     pub extra: IndexMap<String, serde_json::Value>,
+}
+
+/// A spec's validity interval: the two properties bounding each row's
+/// period and whether the `to` day belongs to it (`closed`) or is the first
+/// day after it (`half_open`). `from` and `to` name the *stored* property —
+/// on an edge, the name after `rename`. Without `convention` nothing is
+/// declared and the build warns.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct TemporalSpec {
+    pub from: String,
+    pub to: String,
+    #[serde(default)]
+    pub convention: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -235,6 +262,8 @@ pub struct FkEdge {
     /// [`JunctionEdge::rename`].
     #[serde(default)]
     pub rename: IndexMap<String, String>,
+    #[serde(default)]
+    pub temporal: Option<TemporalSpec>,
     /// Keys on this fk_edge that this struct does not read.
     #[serde(flatten)]
     pub extra: IndexMap<String, serde_json::Value>,
@@ -278,6 +307,8 @@ pub struct JunctionEdge {
     /// unknown_property_type_warnings`.
     #[serde(default)]
     pub rename: IndexMap<String, String>,
+    #[serde(default)]
+    pub temporal: Option<TemporalSpec>,
     /// Keys on this junction_edge that this struct does not read.
     #[serde(flatten)]
     pub extra: IndexMap<String, serde_json::Value>,
@@ -313,6 +344,7 @@ impl FkEdge {
             properties: vec![],
             property_types: IndexMap::new(),
             rename: IndexMap::new(),
+            temporal: None,
             extra: IndexMap::new(),
         }
     }
@@ -331,6 +363,7 @@ impl JunctionEdge {
             properties: vec![],
             property_types: IndexMap::new(),
             rename: IndexMap::new(),
+            temporal: None,
             extra: IndexMap::new(),
         }
     }

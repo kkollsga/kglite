@@ -1271,6 +1271,7 @@ mod accepted_key_tests {
                 ("connections", json!({})),
                 ("sub_nodes", json!({})),
                 ("timeseries", json!(null)),
+                ("temporal", json!(null)),
             ],
             "fk_edge" => vec![
                 ("target", json!("Org")),
@@ -1278,6 +1279,7 @@ mod accepted_key_tests {
                 ("properties", json!([])),
                 ("property_types", json!({})),
                 ("rename", json!({})),
+                ("temporal", json!(null)),
             ],
             // Keys a `files` entry with `"format": "csv"` reads. A second
             // format adds a level of its own here rather than widening this
@@ -1324,6 +1326,7 @@ mod accepted_key_tests {
                 ("properties", json!([])),
                 ("property_types", json!({})),
                 ("rename", json!({})),
+                ("temporal", json!(null)),
             ],
             other => panic!("no fixture for level {other}"),
         }

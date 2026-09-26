@@ -80,7 +80,7 @@ Available types:
 | `"date"` / `"datetime"` | date | Accepts `YYYY-MM-DD`, timestamp text, or epoch milliseconds; stores the date |
 | `"list"` / `"array"` | list | Cell is a JSON array, e.g. `["a","b"]` — see below |
 | `"duration"` | duration | Cell is a `{"months", "days", "seconds"}` object (each field optional), e.g. `{"days": 1, "seconds": 7200}`; anything else is null |
-| `"validFrom"` / `"validTo"` | date | Date column plus temporal-role metadata |
+| `"validFrom"` / `"validTo"` | date | Same as `"date"`; declares nothing on its own — see [Temporal Properties](#temporal-properties) |
 | `"geometry"` | WKT string | Uses existing WKT or converts `_geometry` GeoJSON in Rust |
 | `"location.lat"` / `"location.lon"` | float | Coordinates; may receive GeoJSON centroids |
 
@@ -564,7 +564,9 @@ After loading, use spatial queries like `distance()`, `near_point_m()`, and `con
 
 ## Temporal Properties
 
-Use `"validFrom"` and `"validTo"` types to enable temporal filtering:
+A `temporal` key declares which two properties bound each row's validity
+interval. It goes on a node spec, an `fk_edges` entry or a `junction_edges`
+entry, and it must name the convention:
 
 ```json
 {
@@ -572,21 +574,62 @@ Use `"validFrom"` and `"validTo"` types to enable temporal filtering:
     "csv": "contracts.csv",
     "pk": "contract_id",
     "title": "name",
-    "properties": {
-      "start_date": "validFrom",
-      "end_date": "validTo",
-      "value": "float"
+    "properties": {"start_date": "date", "end_date": "date", "value": "float"},
+    "temporal": {"from": "start_date", "to": "end_date", "convention": "closed"}
+  }
+}
+```
+
+- `"closed"` — the `to` day is the last valid day (`[from, to]`).
+- `"half_open"` — the `to` day is the first day no longer valid
+  (`[from, to)`), the usual shape when one period's end is the next one's
+  start.
+
+An empty `to` is an open period, valid from `from` onwards. Once the rows are
+loaded, the build checks every bound; an unreadable bound or an inverted
+interval fails the build and names the row.
+
+After loading, the declared bounds apply without naming them:
+
+```python
+graph.select("Contract")                               # valid today
+graph.date("2024-06-15").select("Contract")            # valid on that date
+graph.select("Contract").valid_during("2024-01-01", "2024-12-31")
+graph.cypher("CALL db.temporal.declarations()")        # what is declared
+```
+
+On an edge, `from` and `to` name the **stored** property, after `rename`, and
+both must be listed in the edge's `properties`. The declaration is made for the
+spec's node type as the relationship's source type, so two node types writing
+one relationship type can keep their bounds under different names:
+
+```json
+{
+  "Licence": {
+    "csv": "licences.csv",
+    "pk": "licence_id",
+    "connections": {
+      "junction_edges": {
+        "HAS_LICENSEE": {
+          "csv": "licence_licensees.csv",
+          "source_fk": "licence_id",
+          "target": "Company",
+          "target_fk": "company_id",
+          "properties": ["date_from", "date_to"],
+          "property_types": {"date_from": "date", "date_to": "date"},
+          "rename": {"date_from": "licensed_from", "date_to": "licensed_to"},
+          "temporal": {"from": "licensed_from", "to": "licensed_to", "convention": "closed"}
+        }
+      }
     }
   }
 }
 ```
 
-After loading, query with temporal methods:
-
-```python
-graph.select("Contract").valid_at("2024-06-15")
-graph.select("Contract").valid_during("2024-01-01", "2024-12-31")
-```
+Nothing is declared from column types alone. `"validFrom"` / `"validTo"` in
+`properties` or `property_types` type the column as a date, and a `temporal`
+key without `convention` declares nothing; either way the build warns and says
+what to add, and `describe()` shows no validity interval for that type.
 
 ## Declaring Inputs
 

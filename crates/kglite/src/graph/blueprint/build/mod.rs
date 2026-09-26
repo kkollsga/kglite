@@ -10,7 +10,8 @@
 //!   5. Junction edges — many-to-many CSVs with two FK columns + optional
 //!      property columns.
 //!   6. Provisional purge — under `settings.auto_purge`, stub nodes that
-//!      no real row ever promoted are dropped with their edges.
+//!      no real row ever promoted are dropped with their edges. Then the
+//!      declared labels, and the validity intervals `temporal` keys name.
 //!
 //! Each phase lives in its own submodule; this file holds only the
 //! orchestration, the report type and the two whole-build passes
@@ -24,6 +25,7 @@ mod nodes;
 mod prepass;
 mod specs;
 mod table_ops;
+mod temporal;
 
 pub use specs::FlatSpec;
 
@@ -166,6 +168,7 @@ pub fn build(
     // source's stray keys, which would report the same typo under a type name
     // that appears in no file.
     let unknown_keys = super::validation::unknown_key_warnings(&blueprint);
+    let temporal_warnings = temporal::check_temporal_specs(&blueprint)?;
 
     let root = blueprint
         .settings
@@ -195,6 +198,7 @@ pub fn build(
         provisional_purged: 0,
     };
     report.warnings.extend(unknown_keys);
+    report.warnings.extend(temporal_warnings);
     report
         .warnings
         .extend(super::validation::unknown_property_type_warnings(
@@ -366,6 +370,10 @@ fn finish_build(
     if profile {
         eprintln!("  stamp_declared_labels: {} ms", t.elapsed().as_millis());
     }
+
+    // Phase 6c: validity intervals, declared over the rows the graph finally
+    // holds — after the streamed paths and the purge, before the ontology gate.
+    temporal::declare_blueprint_temporal(graph, all_specs, report)?;
 
     // Phase 7: ontology install + gate. Runs after every load phase and
     // before the caller can save, so an `enforcement: error` violation

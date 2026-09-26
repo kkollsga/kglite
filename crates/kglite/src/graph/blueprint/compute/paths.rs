@@ -230,6 +230,7 @@ impl ComputePaths {
             connections,
             sub_nodes,
             timeseries,
+            temporal,
             extra,
         } = spec;
         csv.as_deref()
@@ -250,6 +251,7 @@ impl ComputePaths {
             && connections.junction_edges.is_empty()
             && sub_nodes.is_empty()
             && timeseries.is_none()
+            && temporal.is_none()
             && extra.is_empty()
     }
 

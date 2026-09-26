@@ -65,6 +65,16 @@ before upgrading.
   declaration of the same properties is kept, and a new one is closed. A
   closed declaration whose rows end on the day another begins emits a
   `UserWarning` suggesting `'half_open'`.
+- Blueprints: a node spec, `fk_edges` entry or `junction_edges` entry takes
+  `"temporal": {"from": ..., "to": ..., "convention": "closed" | "half_open"}`
+  and `from_blueprint()` declares that validity interval once every row is
+  loaded. On an edge, `from`/`to` name the stored property (after `rename`)
+  and the declaration is made for the spec's node type as the source type. A
+  bound the rows cannot satisfy fails the build, naming the row. Columns typed
+  `validFrom`/`validTo` without a `temporal` key, or a `temporal` key without
+  `convention`, declare nothing and the build warns with what to add — the
+  blueprint guide's earlier claim that those types enable temporal filtering
+  was not true.
 - Rust API: `kglite::api::temporal` (`declare`, `declare_loaded`,
   `declare_defaulted`, `declare_from_column_types`, `LoadDeclaration`,
   `undeclare`, `list`, `node_config`, `edge_configs`, `TemporalTarget`,
