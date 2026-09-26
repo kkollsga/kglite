@@ -399,7 +399,10 @@ fn a_graph_that_was_not_built_from_a_directory_carries_no_provenance() {
 fn provenance_survives_a_save_and_load() {
     let dir = vault();
     let mut built = build(dir.path(), &vault_opts()).unwrap().graph;
-    let file = dir.path().join("../vault.kgl");
+    // Saved beside the vault, never inside it (the fingerprint would move) and
+    // never at a path two tests share: `../vault.kgl` is one /tmp file.
+    let out = tempfile::tempdir().unwrap();
+    let file = out.path().join("vault.kgl");
     crate::graph::io::file::save_graph(&mut built, &file.to_string_lossy()).unwrap();
     let loaded = crate::graph::io::file::load_file(&file.to_string_lossy()).unwrap();
     assert_eq!(loaded.source_root, built.source_root);
@@ -594,7 +597,10 @@ fn a_build_stamps_the_dialect_it_read_with_and_it_survives_a_save_and_load() {
         "the stamp is what was read, not what a vault would have been"
     );
 
-    let file = dir.path().join("../vault.kgl");
+    // Saved beside the vault, never inside it (the fingerprint would move) and
+    // never at a path two tests share: `../vault.kgl` is one /tmp file.
+    let out = tempfile::tempdir().unwrap();
+    let file = out.path().join("vault.kgl");
     crate::graph::io::file::save_graph(&mut built, &file.to_string_lossy()).unwrap();
     let loaded = crate::graph::io::file::load_file(&file.to_string_lossy()).unwrap();
     assert_eq!(loaded.source_dialect, built.source_dialect);
