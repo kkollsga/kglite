@@ -733,6 +733,16 @@ class TestTimeseries:
         assert result[0]["total_oil"] == pytest.approx(4.5)
         assert result[0]["p.title"] == "Troll"
 
+        # One parent edge per node, not one per CSV row, and a join through it
+        # sums each parent's own series once.
+        assert graph.cypher("MATCH (:Production)-[r:OF_FIELD]->(:Field) RETURN count(r) AS c")[0]["c"] == 2
+        joined = graph.cypher(
+            "MATCH (f:Field)<-[r:OF_FIELD]-(p:Production) "
+            "RETURN f.title AS t, count(r) AS c, ts_sum(p.oil) AS total ORDER BY t"
+        ).to_list()
+        assert [(r["t"], r["c"]) for r in joined] == [("Ekofisk", 1), ("Troll", 1)]
+        assert [r["total"] for r in joined] == [pytest.approx(1.8), pytest.approx(4.5)]
+
 
 class TestSaveOutput:
     def test_save_to_output_path(self, tmp_path):

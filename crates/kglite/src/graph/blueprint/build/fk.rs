@@ -34,6 +34,18 @@ struct PreppedFkEdges {
     warnings: Vec<String>,
 }
 
+/// The implicit `OF_<PARENT>` edge a spec with `parent_fk` gets. The parent is
+/// the spec's own `parent` key, else the enclosing type of a sub-node. A
+/// same-named `fk_edges` entry wins (callers use `entry().or_insert`).
+fn implicit_parent_edge(spec: &FlatSpec) -> Option<(String, super::super::schema::FkEdge)> {
+    let parent_fk = spec.spec.parent_fk.as_ref()?;
+    let parent_type = spec.spec.parent.as_ref().or(spec.parent.as_ref())?;
+    Some((
+        format!("OF_{}", parent_type.to_uppercase()),
+        super::super::schema::FkEdge::plain(parent_type.clone(), parent_fk.clone()),
+    ))
+}
+
 struct PreppedFkEdge {
     edge_type: String,
     target_type: String,
@@ -56,11 +68,8 @@ fn prep_fk_edges(
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    if let (Some(parent_type), Some(parent_fk)) = (&spec.spec.parent, &spec.spec.parent_fk) {
-        let edge_type = format!("OF_{}", parent_type.to_uppercase());
-        fk_edges.entry(edge_type).or_insert_with(|| {
-            super::super::schema::FkEdge::plain(parent_type.clone(), parent_fk.clone())
-        });
+    if let Some((edge_type, edge)) = implicit_parent_edge(spec) {
+        fk_edges.entry(edge_type).or_insert(edge);
     }
     if fk_edges.is_empty() {
         return None;
@@ -76,7 +85,8 @@ fn prep_fk_edges(
         apply_filter(&mut raw, &spec.spec.filter);
     }
     if let Some(tspec) = &spec.spec.timeseries {
-        ts::drop_zero_time_components(&mut raw, tspec);
+        // The node phase already reported the drop; this pass sees the same rows.
+        let _ = ts::drop_zero_time_components(&mut raw, tspec);
     }
     let raw_pk = spec.spec.pk.clone().unwrap_or_else(|| "id".to_string());
     let pk = if raw_pk == "auto" {
@@ -124,9 +134,20 @@ fn prep_fk_edges(
             }
         };
 
+        // A timeseries spec has one CSV row per time step but one node per
+        // pk, so the FK repeats on every row; the edge is declared once per
+        // distinct (pk, fk, property values). A changing FK keeps both targets.
+        let distinct;
+        let edge_raw: &RawCsv = if spec.spec.timeseries.is_some() {
+            distinct = distinct_edge_rows(&raw, pk_idx, fk_idx, &props.columns);
+            &distinct
+        } else {
+            &raw
+        };
+
         let mut misparses = MisparseTally::default();
         let frame = match fk_edge_frame(
-            &raw,
+            edge_raw,
             &pk,
             edge,
             IdColumnIdx {
@@ -169,6 +190,24 @@ fn prep_fk_edges(
         errors,
         warnings,
     })
+}
+
+/// `raw` reduced to its first row per distinct (pk, fk, declared property
+/// values) combination, in source order. Properties absent from the CSV are
+/// ignored here; `fk_edge_frame` reports them.
+fn distinct_edge_rows(raw: &RawCsv, pk_idx: usize, fk_idx: usize, props: &[String]) -> RawCsv {
+    let key_cols: Vec<usize> = [pk_idx, fk_idx]
+        .into_iter()
+        .chain(props.iter().filter_map(|c| raw.col_index(c)))
+        .collect();
+    let mut seen: HashSet<Vec<&str>> = HashSet::new();
+    let keep: Vec<usize> = (0..raw.row_count())
+        .filter(|&r| {
+            let key = key_cols.iter().map(|&c| raw.rows[r][c].as_str()).collect();
+            seen.insert(key)
+        })
+        .collect();
+    subset_rows(raw, &keep)
 }
 
 fn missing_fk_property_error(node_type: &str, edge_type: &str, column: &str) -> String {
@@ -562,7 +601,7 @@ fn load_streamed_fk_edges(
     };
 
     // Declared edges plus the implicit `OF_{PARENT}` edge for any spec
-    // that declares both `parent` and `parent_fk`.
+    // that declares `parent_fk` (see `implicit_parent_edge`).
     let mut fk_edges: IndexMap<String, super::super::schema::FkEdge> = spec
         .spec
         .connections
@@ -570,11 +609,8 @@ fn load_streamed_fk_edges(
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    if let (Some(parent_type), Some(parent_fk)) = (&spec.spec.parent, &spec.spec.parent_fk) {
-        let edge_type = format!("OF_{}", parent_type.to_uppercase());
-        fk_edges.entry(edge_type).or_insert_with(|| {
-            super::super::schema::FkEdge::plain(parent_type.clone(), parent_fk.clone())
-        });
+    if let Some((edge_type, edge)) = implicit_parent_edge(spec) {
+        fk_edges.entry(edge_type).or_insert(edge);
     }
     if fk_edges.is_empty() {
         return Ok(());

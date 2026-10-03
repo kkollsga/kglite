@@ -35,11 +35,10 @@ pub(super) fn collect_specs(nodes: &IndexMap<String, NodeSpec>) -> (Vec<FlatSpec
             input,
         });
         for (sub_name, sub_spec) in &spec.sub_nodes {
-            // Sub-nodes keep their raw `parent` field untouched — the
-            // enclosing type name is recorded on `FlatSpec.parent` so we
-            // can call `set_parent_type` without also generating an
-            // implicit OF_PARENT edge (that is reserved for top-level
-            // specs that explicitly declare `parent` + `parent_fk`).
+            // Sub-nodes keep their raw `parent` field untouched; the
+            // enclosing type name is recorded on `FlatSpec.parent`, which
+            // `set_parent_type` and the implicit `OF_<PARENT>` edge for a
+            // `parent_fk` (see `fk::implicit_parent_edge`) both read.
             let sub_clone = clone_without_subs(sub_spec);
             subs.push(FlatSpec {
                 node_type: sub_name.clone(),

@@ -9,6 +9,41 @@ before upgrading.
 
 ## [Unreleased]
 
+### Changed
+
+- A blueprint sub-node that declares `parent_fk` now gets an implicit
+  `OF_<PARENT>` edge (parent type upper-cased, e.g. `OF_EMPLOYEE`) to its
+  enclosing node, as the blueprint guide always described; before, only a spec
+  with a raw `parent` key got one. A `fk_edges` entry of the same name replaces
+  it. A sub-node that also declares a differently named edge to its parent now
+  has both edge types. There is no opt-out key: omit `parent_fk` (keeping the
+  column under `skipped`) to load without the generated edge.
+- A blueprint timeseries spec that drops aggregate rows (a time component
+  below `year` equal to zero, e.g. `month = 0`) now warns once per node type
+  with the count, the zero columns and any channel whose only values were on
+  those rows (it loaded empty), and names the sibling sub-node
+  (`"filter": {"<col>": 0}` plus a year-only `time_key`) that loads them as a
+  yearly series. A row whose time component is not a whole number (`2020.5`,
+  `abc`, an empty year) is dropped from the series with one warning giving the
+  count, columns and example values, instead of being filed under year 0.
+  Unknown keys inside a `timeseries` block (e.g. `aggregates`)
+  now warn like unknown keys elsewhere in a blueprint.
+
+### Fixed
+
+- Blueprint timeseries time components written as whole floats (`2020.0`,
+  `1.0`..`12.0`, `0.0`, as pandas writes them for a column holding a NaN) were
+  read as year 0 / January, and `0.0` aggregate rows were folded into January
+  instead of dropped. They are now read as integers, like whole-float ids.
+
+- A blueprint timeseries sub-node (or a top-level timeseries spec with `parent`
+  + `parent_fk`) wrote its parent FK edge once per CSV row instead of once per
+  node, so joins through it multiplied every aggregate by the series length
+  (`count(r)` and `sum(ts_sum(...))` over the parent edge were inflated). The
+  edge is now written once per distinct (source, target, edge-property values);
+  an FK that changes over the series keeps both targets. Graphs built from a
+  blueprint with a timeseries sub-node on 0.19.0 or 0.19.1 should be rebuilt.
+
 ## [0.19.1] - 2026-10-02
 
 ### Added

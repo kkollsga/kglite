@@ -556,7 +556,7 @@ pub fn unknown_property_type_warnings(blueprint: &Blueprint) -> Vec<String> {
 pub fn unknown_key_warnings(blueprint: &Blueprint) -> Vec<String> {
     use super::schema::{
         ACCEPTED_BLUEPRINT_KEYS, ACCEPTED_FK_EDGE_KEYS, ACCEPTED_JUNCTION_EDGE_KEYS,
-        ACCEPTED_NODE_KEYS, ACCEPTED_SETTINGS_KEYS,
+        ACCEPTED_NODE_KEYS, ACCEPTED_SETTINGS_KEYS, ACCEPTED_TIMESERIES_KEYS,
     };
 
     fn check(
@@ -607,6 +607,14 @@ pub fn unknown_key_warnings(blueprint: &Blueprint) -> Vec<String> {
             &spec.extra,
             ACCEPTED_NODE_KEYS,
         );
+        if let Some(ts) = &spec.timeseries {
+            check(
+                warnings,
+                &format!("timeseries (node '{node_type}')"),
+                &ts.extra,
+                ACCEPTED_TIMESERIES_KEYS,
+            );
+        }
         for (edge_type, fk) in &spec.connections.fk_edges {
             check(
                 warnings,
@@ -1274,6 +1282,12 @@ mod accepted_key_tests {
                 ("timeseries", json!(null)),
                 ("temporal", json!(null)),
             ],
+            "timeseries" => vec![
+                ("time_key", json!({"year": "yr"})),
+                ("channels", json!({})),
+                ("resolution", json!("year")),
+                ("units", json!({})),
+            ],
             "fk_edge" => vec![
                 ("target", json!("Org")),
                 ("fk", json!("org_id")),
@@ -1404,7 +1418,7 @@ mod accepted_key_tests {
         use super::super::input::xlsx::ACCEPTED_FILE_KEYS_XLSX;
         use super::super::schema::{
             ACCEPTED_BLUEPRINT_KEYS, ACCEPTED_FK_EDGE_KEYS, ACCEPTED_JUNCTION_EDGE_KEYS,
-            ACCEPTED_NODE_KEYS, ACCEPTED_SETTINGS_KEYS,
+            ACCEPTED_NODE_KEYS, ACCEPTED_SETTINGS_KEYS, ACCEPTED_TIMESERIES_KEYS,
         };
         for (level, accepted) in [
             ("blueprint", ACCEPTED_BLUEPRINT_KEYS),
@@ -1415,6 +1429,7 @@ mod accepted_key_tests {
             #[cfg(feature = "xlsx")]
             ("file_xlsx", ACCEPTED_FILE_KEYS_XLSX),
             ("node", ACCEPTED_NODE_KEYS),
+            ("timeseries", ACCEPTED_TIMESERIES_KEYS),
             ("fk_edge", ACCEPTED_FK_EDGE_KEYS),
             ("junction_edge", ACCEPTED_JUNCTION_EDGE_KEYS),
         ] {
@@ -1447,6 +1462,7 @@ mod accepted_key_tests {
             "fk_edges": {"IN_ORG": object("fk_edge")},
             "junction_edges": {"KNOWS": object("junction_edge")},
         });
+        node["timeseries"] = object("timeseries");
         node["sub_nodes"] = json!({"Alias": object("node")});
         blueprint["nodes"] = json!({"Person": node});
 

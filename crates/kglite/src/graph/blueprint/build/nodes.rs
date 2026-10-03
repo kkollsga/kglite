@@ -57,8 +57,10 @@ fn prep_node_spec(
     if !spec.spec.filter.is_empty() {
         apply_filter(&mut raw, &spec.spec.filter);
     }
+    let mut ts_warnings = Vec::new();
     if let Some(tspec) = &spec.spec.timeseries {
-        ts::drop_zero_time_components(&mut raw, tspec);
+        let drop = ts::drop_zero_time_components(&mut raw, tspec);
+        ts_warnings.extend(drop.warnings(&spec.node_type, tspec));
     }
 
     let pk = spec.spec.pk.clone().unwrap_or_else(|| "id".to_string());
@@ -149,7 +151,8 @@ fn prep_node_spec(
         &HashMap::new(),
         &mut misparses,
     )?;
-    let warnings = misparses.into_warnings(&format!("node '{}'", spec.node_type));
+    let mut warnings = ts_warnings;
+    warnings.extend(misparses.into_warnings(&format!("node '{}'", spec.node_type)));
 
     let title_arg = if title_field != pk {
         Some(title_field.clone())
@@ -506,7 +509,7 @@ pub(super) fn node_chunk_size() -> usize {
 }
 
 /// The id columns the FK phase will type for this spec: its pk plus every
-/// declared FK column, including the implicit `parent` one.
+/// declared FK column, including the implicit parent one (`parent` key or enclosing type).
 pub(super) fn fk_id_columns(spec: &FlatSpec, pk: &str) -> Vec<String> {
     let mut columns = vec![pk.to_string()];
     let declared_fks = spec
@@ -519,7 +522,7 @@ pub(super) fn fk_id_columns(spec: &FlatSpec, pk: &str) -> Vec<String> {
             spec.spec
                 .parent_fk
                 .clone()
-                .filter(|_| spec.spec.parent.is_some()),
+                .filter(|_| spec.spec.parent.is_some() || spec.parent.is_some()),
         );
     for fk in declared_fks {
         if !columns.contains(&fk) {

@@ -136,6 +136,9 @@ pub const ACCEPTED_NODE_KEYS: &[&str] = &[
     "temporal",
 ];
 
+/// Keys a node's `timeseries` block reads.
+pub const ACCEPTED_TIMESERIES_KEYS: &[&str] = &["time_key", "channels", "resolution", "units"];
+
 /// Keys an `fk_edges` entry reads.
 pub const ACCEPTED_FK_EDGE_KEYS: &[&str] = &[
     "target",
@@ -393,6 +396,10 @@ pub struct TimeseriesSpec {
     pub resolution: Option<String>,
     #[serde(default)]
     pub units: IndexMap<String, String>,
+    /// Keys the loader does not read, kept so
+    /// [`super::validation::unknown_key_warnings`] can name them.
+    #[serde(flatten)]
+    pub extra: IndexMap<String, serde_json::Value>,
 }
 
 // ─── compute pipeline (0.9.47) ────────────────────────────────────────────
