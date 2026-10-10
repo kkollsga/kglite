@@ -235,6 +235,17 @@ final class Abi {
             "kglite_session_define_ontology", FunctionDescriptor.of(I32, PTR, PTR, PTR, PTR));
     private static final MethodHandle SESSION_CLEAR_ONTOLOGY =
             bind("kglite_session_clear_ontology", FunctionDescriptor.of(I32, PTR, PTR));
+    private static final MethodHandle SESSION_EXPORT_CSV = bind(
+            "kglite_session_export_csv", FunctionDescriptor.of(I32, PTR, PTR, PTR, PTR));
+    // The RDF symbols exist only in a native library built with kglite-c's
+    // `rdf` feature, which the default build is not. They are still counted in
+    // boundSymbols() so the ABI contract does not depend on how the library
+    // was built; a library without them makes the calls throw instead.
+    private static final MethodHandle SESSION_EXPORT_RDF = bindOptional(
+            "kglite_session_export_rdf", FunctionDescriptor.of(I32, PTR, PTR, PTR, PTR, U8, PTR, PTR));
+    private static final MethodHandle LOAD_RDF_WITH_OPTIONS = bindOptional(
+            "kglite_load_rdf_with_options",
+            FunctionDescriptor.of(I32, PTR, PTR, PTR, U8, PTR, I64, U8, PTR, PTR, PTR));
 
     @SuppressWarnings("restricted") // downcallHandle: the whole point of this class
     private static MethodHandle bind(String symbol, FunctionDescriptor descriptor) {
@@ -243,6 +254,32 @@ final class Abi {
                         + " — it is older than this wrapper, or a different library"));
         MethodHandle handle = LINKER.downcallHandle(address, descriptor);
         BOUND.put(symbol, handle);
+        return handle;
+    }
+
+    /**
+     * {@link #bind} for a symbol only some builds of the library export.
+     * Returns {@code null} when it is absent; the name is still recorded in
+     * {@link #BOUND} so {@link #boundSymbols()} is the same for every build.
+     */
+    @SuppressWarnings("restricted") // downcallHandle: the whole point of this class
+    private static MethodHandle bindOptional(String symbol, FunctionDescriptor descriptor) {
+        MethodHandle handle = LOOKUP.find(symbol)
+                .map(address -> LINKER.downcallHandle(address, descriptor)).orElse(null);
+        BOUND.put(symbol, handle);
+        return handle;
+    }
+
+    /** Whether the loaded native library was built with kglite-c's {@code rdf} feature. */
+    static boolean rdfSupported() {
+        return SESSION_EXPORT_RDF != null && LOAD_RDF_WITH_OPTIONS != null;
+    }
+
+    private static MethodHandle requireRdf(MethodHandle handle, String symbol) {
+        if (handle == null) {
+            throw new KgliteException("the kglite native library was built without RDF support"
+                    + " (it does not export " + symbol + "); rebuild kglite-c with --features rdf");
+        }
         return handle;
     }
 
@@ -974,6 +1011,77 @@ final class Abi {
         } catch (Throwable t) {
             throw rethrow(t);
         }
+    }
+
+    /** {@code kglite_session_export_csv} — returns the summary JSON. */
+    static String sessionExportCsv(MemorySegment session, String outputDir) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outSummary = arena.allocate(PTR);
+            MemorySegment outError = arena.allocate(PTR);
+            int rc = (int) SESSION_EXPORT_CSV.invokeExact(
+                    session, cstr(arena, outputDir), outSummary, outError);
+            check(rc, outError);
+            return requireSummary(takeString(outSummary.get(PTR, 0)), "CSV export");
+        } catch (Throwable t) {
+            throw rethrow(t);
+        }
+    }
+
+    /**
+     * {@code kglite_session_export_rdf} — returns the summary JSON.
+     *
+     * @param format {@code "nq"}, {@code "trig"}, or {@code null} to infer from the path
+     * @param base   the IRI prefix, or {@code null} for the engine default
+     */
+    static String sessionExportRdf(
+            MemorySegment session, String path, String format, String base, boolean schemaOrg) {
+        MethodHandle handle = requireRdf(SESSION_EXPORT_RDF, "kglite_session_export_rdf");
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outSummary = arena.allocate(PTR);
+            MemorySegment outError = arena.allocate(PTR);
+            int rc = (int) handle.invokeExact(session, cstr(arena, path), cstr(arena, format),
+                    cstr(arena, base), (byte) (schemaOrg ? 1 : 0), outSummary, outError);
+            check(rc, outError);
+            return requireSummary(takeString(outSummary.get(PTR, 0)), "RDF export");
+        } catch (Throwable t) {
+            throw rethrow(t);
+        }
+    }
+
+    /**
+     * {@code kglite_load_rdf_with_options} — returns the new graph handle.
+     * The stats string the engine allocates is freed and discarded.
+     *
+     * @param languagesJson         JSON array of language tags, or {@code null} for all
+     * @param labelPredicatesJson   JSON array of predicate IRIs, or {@code null} for the default
+     * @param defaultType           node type for untyped subjects, or {@code null}
+     * @param maxTriples            triple cap; negative for none
+     */
+    static MemorySegment loadRdf(
+            String path, String languagesJson, String labelPredicatesJson, boolean keepFullIris,
+            String defaultType, long maxTriples, boolean languageMaps) {
+        MethodHandle handle = requireRdf(LOAD_RDF_WITH_OPTIONS, "kglite_load_rdf_with_options");
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outGraph = arena.allocate(PTR);
+            MemorySegment outStats = arena.allocate(PTR);
+            MemorySegment outError = arena.allocate(PTR);
+            int rc = (int) handle.invokeExact(cstr(arena, path), cstr(arena, languagesJson),
+                    cstr(arena, labelPredicatesJson), (byte) (keepFullIris ? 1 : 0),
+                    cstr(arena, defaultType), maxTriples, (byte) (languageMaps ? 1 : 0),
+                    outGraph, outStats, outError);
+            takeString(outStats.get(PTR, 0));
+            check(rc, outError);
+            return outGraph.get(PTR, 0);
+        } catch (Throwable t) {
+            throw rethrow(t);
+        }
+    }
+
+    private static String requireSummary(String json, String what) {
+        if (json == null) {
+            throw new KgliteException("the engine reported a successful " + what + " with no summary");
+        }
+        return json;
     }
 
     /**

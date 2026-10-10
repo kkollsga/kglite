@@ -19,6 +19,8 @@ before upgrading.
 
 ### Added
 
+- **Java: `exportCsv`, `exportRdf` and `loadRdf`.** `KnowledgeGraph.exportCsv(dir)` and `exportRdf(file[, RdfExportOptions])` return an `ExportReport`; `KnowledgeGraph.loadRdf(file[, RdfLoadOptions])` loads Turtle, N-Triples, N-Quads or TriG, with `languageMaps` support. The RDF calls need a native library built with `kglite-c`'s `rdf` feature.
+- **C ABI: `kglite_session_export_csv` and `kglite_session_export_rdf`.** The session-scoped twins of `kglite_export_csv` / `kglite_export_rdf` for a binding that holds only a session; they export a consistent snapshot of the committed state. Additive.
 - **`--version` on `kglite-mcp-server` and `kglite-bolt-server`.** Prints the kglite version and exits; the pip `kglite-mcp-server` entry point shares the flag.
 
 ### Changed

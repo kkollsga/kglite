@@ -1275,6 +1275,137 @@ public final class KnowledgeGraph implements AutoCloseable {
                 session.use(handle -> Abi.sessionBackup(handle, destination, live)));
     }
 
+    // ---- open-format exports and RDF import -------------------------------
+
+    /**
+     * Export the graph to a lossless CSV tree under {@code outputDir}.
+     *
+     * <p>Writes {@code nodes/} and {@code connections/} CSVs, a
+     * {@code blueprint.json} that re-imports the tree and a
+     * {@code manifest.json} under the directory, creating it if missing. The
+     * manifest restores valid-time declarations, secondary labels and every
+     * property's type when the tree is rebuilt from the blueprint. Rows stream
+     * in bounded batches.
+     *
+     * <p>The export reads a consistent snapshot of the committed state and does
+     * not block writers; changes committed after it starts are not included.
+     *
+     * @param outputDir the directory to write into
+     * @return the counts of what was written
+     * @throws KgliteException with status {@code FileIo} if the tree could not
+     *     be written, for example because {@code outputDir} is empty or cannot
+     *     be created
+     * @throws IllegalStateException if this graph is closed
+     */
+    public ExportReport exportCsv(Path outputDir) {
+        if (outputDir == null) {
+            throw new KgliteException("exportCsv requires an output directory");
+        }
+        String dir = outputDir.toAbsolutePath().toString();
+        return ExportReport.parse(
+                session.use(handle -> Abi.sessionExportCsv(handle, dir)), "output_dir");
+    }
+
+    /**
+     * Export the graph to RDF 1.2 at {@code file}, inferring the format from
+     * the name ({@code .trig} is TriG, anything else N-Quads).
+     *
+     * @param file the output file
+     * @return the counts of what was written
+     * @throws KgliteException see {@link #exportRdf(Path, RdfExportOptions)}
+     * @throws IllegalStateException if this graph is closed
+     */
+    public ExportReport exportRdf(Path file) {
+        return exportRdf(file, RdfExportOptions.defaults());
+    }
+
+    /**
+     * Export the graph to RDF 1.2 (N-Quads or TriG) that
+     * {@link #loadRdf(Path, RdfLoadOptions)} reads back.
+     *
+     * <p>Typed literals, edge properties on {@code rdf:reifies} reifiers and
+     * one {@code kg:manifest} statement are written, so valid-time
+     * declarations, secondary labels, parent types and id/title kinds survive
+     * the round trip. Streams in bounded batches, from a consistent snapshot of
+     * the committed state.
+     *
+     * <p>Needs a native library built with the {@code rdf} feature of
+     * {@code kglite-c}; the default build is not.
+     *
+     * @param file    the output file
+     * @param options the format, IRI prefix and {@code schema.org} choice
+     * @return the counts of what was written
+     * @throws KgliteException with status {@code InvalidArgument} if the base
+     *     IRI is malformed or inside a well-known namespace, {@code FileIo} if
+     *     the file could not be written, or a wrapper-side failure if the
+     *     native library has no RDF support
+     * @throws IllegalStateException if this graph is closed
+     */
+    public ExportReport exportRdf(Path file, RdfExportOptions options) {
+        if (file == null) {
+            throw new KgliteException("exportRdf requires an output file");
+        }
+        if (options == null) {
+            throw new KgliteException("options cannot be null; pass RdfExportOptions.defaults()");
+        }
+        String path = file.toAbsolutePath().toString();
+        return ExportReport.parse(
+                session.use(handle -> Abi.sessionExportRdf(
+                        handle, path, options.formatWire(), options.base(), options.schemaOrg())),
+                "output_path");
+    }
+
+    /**
+     * Load an RDF file into a fresh in-memory graph with default options.
+     *
+     * @param file the RDF file; its extension picks the parser
+     * @return the loaded graph
+     * @throws KgliteException see {@link #loadRdf(Path, RdfLoadOptions)}
+     */
+    public static KnowledgeGraph loadRdf(Path file) {
+        return loadRdf(file, RdfLoadOptions.defaults());
+    }
+
+    /**
+     * Load an RDF file into a fresh in-memory graph.
+     *
+     * <p>The extension picks the parser: {@code .ttl} (Turtle), {@code .nt}
+     * (N-Triples), {@code .nq} (N-Quads) or {@code .trig} (TriG). Object
+     * literals become typed node properties, resource objects become
+     * relationships, and {@code rdf:type} sets the node label (the first wins;
+     * the rest are kept in an {@code rdf_types} property). Predicate and type
+     * IRIs are compacted with a {@code __} separator, so
+     * {@code [:foaf__knows]} matches in Cypher. Each node keeps its subject IRI
+     * in a {@code uri} property unless the file carries a {@code kg:manifest},
+     * which an {@link #exportRdf(Path)} file does: the manifest restores
+     * valid-time declarations, secondary labels, parent types and node
+     * ids/titles instead.
+     *
+     * <p>Needs a native library built with the {@code rdf} feature of
+     * {@code kglite-c}; the default build is not.
+     *
+     * @param file    the RDF file
+     * @param options what to keep and how to name it
+     * @return the loaded in-memory graph
+     * @throws KgliteException with status {@code FileNotFound} if the file is
+     *     absent, {@code FileFormat} if it does not parse, {@code InvalidArgument}
+     *     if the extension is not an RDF format, or a wrapper-side failure if
+     *     the native library has no RDF support
+     */
+    public static KnowledgeGraph loadRdf(Path file, RdfLoadOptions options) {
+        if (file == null) {
+            throw new KgliteException("loadRdf requires a file");
+        }
+        if (options == null) {
+            throw new KgliteException("options cannot be null; pass RdfLoadOptions.defaults()");
+        }
+        MemorySegment graph = Abi.loadRdf(
+                file.toAbsolutePath().toString(), options.languagesJson(),
+                options.labelPredicatesJson(), options.keepFullIris(), options.defaultType(),
+                options.maxTriples(), options.languageMaps());
+        return sessionOver(graph, null, false);
+    }
+
     // ---- ontology ----------------------------------------------------------
 
     /**

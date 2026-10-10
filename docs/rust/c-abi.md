@@ -69,7 +69,9 @@ The header exposes:
 - open-format exits: `kglite_export_csv` (lossless CSV tree) and
   `kglite_export_rdf` (RDF 1.2 N-Quads / TriG, `rdf` feature), each writing the
   whole graph and returning a JSON summary, and `kglite_load_rdf_with_options`
-  (`kglite_load_rdf` plus `language_maps`);
+  (`kglite_load_rdf` plus `language_maps`). A session consumes its graph handle,
+  so `kglite_session_export_csv` and `kglite_session_export_rdf` export a
+  consistent snapshot of a live session instead;
 - `kglite_open_or_create_graph_in_mode`, which opens or creates a path in an
   explicit mode (null mode = honour what the checkpoint recorded) and reports
   any conversion through `out_converted_from`. It can write: a mode with a

@@ -486,6 +486,19 @@ keep committing and returns a `BackupReport` (`path`, `bytes`, `nodes`,
 checkpoint alone; an existing `dest` is replaced atomically. A backup over the
 graph's own file, and a disk-mode graph, are refused.
 
+## Open-format exports and RDF import
+
+- `graph.exportCsv(dir)` writes the lossless CSV tree (`nodes/`, `connections/`,
+  `blueprint.json`, `manifest.json`); `graph.exportRdf(file[, RdfExportOptions])`
+  writes N-Quads or TriG. Both return an `ExportReport` and read a consistent
+  snapshot without blocking writers.
+- `KnowledgeGraph.loadRdf(file[, RdfLoadOptions])` loads Turtle, N-Triples,
+  N-Quads or TriG into a fresh in-memory graph; `languageMaps(true)` keeps
+  language tags as map properties.
+- The RDF calls need a native built with `cargo build -p kglite-c --features rdf`.
+  Against the default build they throw a `KgliteException` saying so. CSV export
+  needs nothing extra.
+
 ## Ontology
 
 ```java
@@ -823,7 +836,7 @@ same performance. What differs is the shell around it: **Python is the richest
 one** (fluent API, dataset loaders, embedders, introspection helpers), and this
 binding is deliberately the lean one. Its entire surface is open/create
 (including the durable open), `cypher` / `query` with per-query limits and
-cancellation, `save`, `checkpoint`, `backup`, `close`, staged and interactive
+cancellation, `save`, `checkpoint`, `backup`, `exportCsv` / `exportRdf` / `loadRdf`, `close`, staged and interactive
 transactions, the writer lease, ontology declaration, error mapping,
 embedding ingest (`setEmbeddings` / `addEmbeddings` / `buildVectorIndex` /
 `listEmbeddings`), and the Cypher DSL that builds the text those two methods
