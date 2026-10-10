@@ -3199,6 +3199,8 @@ pub kglite::api::session::ResolvedQueryOptions::row_limit: core::option::Option<
 pub kglite::api::session::ResolvedQueryOptions::timeout_ms: core::option::Option<u64>
 pub struct kglite::api::session::Session
 impl kglite::api::session::Session
+pub fn kglite::api::session::Session::auto_commit_is_grouped(&self, query: &str, opts: &kglite::api::session::ExecuteOptions<'_>) -> bool
+impl kglite::api::session::Session
 pub fn kglite::api::session::Session::backup(&self, dest: &std::path::Path, opts: &kglite::api::session::BackupOptions) -> core::result::Result<kglite::api::session::BackupReport, kglite::api::io::SaveError>
 impl kglite::api::session::Session
 pub fn kglite::api::session::Session::begin(&self) -> kglite::api::session::Transaction
