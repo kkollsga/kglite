@@ -41,6 +41,16 @@ impl Session {
     /// it ignores `attempts`. See [`Self::execute_auto_commit_in_place`] for
     /// the conditions; anything else takes the fork path described below.
     ///
+    /// **Concurrent writers at `full` share a barrier.** A plain data write on
+    /// a session durable at `full` joins the group-commit queue (see
+    /// [`super::group_commit`]): writers that arrive while another is flushing
+    /// run one after another on a single fork, each under its own undo
+    /// journal, and one log barrier covers the batch. A statement still
+    /// returns only after its own frame is durable, a failing statement fails
+    /// alone, and no write of the batch is visible before the barrier. This
+    /// path serializes writers itself, so it never loses an optimistic race
+    /// and ignores `attempts`.
+    ///
     /// A lost race published nothing, so re-running on a fresh `begin()` cannot
     /// double-apply. Errors: whatever the statement raised, a
     /// [`KgError::TransactionConflict`] once the attempts are spent, and a
@@ -56,6 +66,9 @@ impl Session {
         attempts: u32,
     ) -> Result<ExecuteOutcome, KgError> {
         if let Some(outcome) = self.execute_auto_commit_in_place(query, opts) {
+            return outcome;
+        }
+        if let Some(outcome) = self.execute_grouped(query, opts) {
             return outcome;
         }
         self.execute_auto_commit_observed(query, opts, attempts, &mut |_| {})
@@ -126,15 +139,7 @@ impl Session {
             bool,
         ) -> Result<ExecuteOutcome, KgError>,
     ) -> Option<Result<ExecuteOutcome, KgError>> {
-        if opts.embedder.is_some() {
-            return None;
-        }
-        let parsed = cypher::parse_cypher(query).ok()?;
-        if parsed.explain
-            || parsed.profile
-            || !cypher::is_mutation_query(&parsed)
-            || !parsed.clauses.iter().all(is_plain_data_clause)
-        {
+        if !is_plain_data_write(query, opts) {
             return None;
         }
         // At `full` the statement's graph is the one readers receive, so it
@@ -266,6 +271,23 @@ impl Session {
         *last_version = Some(version);
         Ok(CheckpointOutcome::Written(version))
     }
+}
+
+/// Whether `query` is a plain data write that may run under a journal-backed
+/// statement checkpoint on a graph other threads are not reading: a mutation
+/// made only of the clauses [`is_plain_data_clause`] admits, with no embedder
+/// whose model callbacks would run foreign code under the session's locks.
+pub(super) fn is_plain_data_write(query: &str, opts: &ExecuteOptions<'_>) -> bool {
+    if opts.embedder.is_some() {
+        return false;
+    }
+    let Ok(parsed) = cypher::parse_cypher(query) else {
+        return false;
+    };
+    !parsed.explain
+        && !parsed.profile
+        && cypher::is_mutation_query(&parsed)
+        && parsed.clauses.iter().all(is_plain_data_clause)
 }
 
 /// Whether `clause` is a data read or write the in-place path may run: no

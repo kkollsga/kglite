@@ -94,6 +94,9 @@ pub(crate) mod durable;
 #[cfg(test)]
 mod endpoint_contract_tests;
 pub(crate) mod execute;
+mod group_commit;
+#[cfg(test)]
+mod group_commit_tests;
 #[cfg(test)]
 mod in_place_tests;
 #[cfg(test)]

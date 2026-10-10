@@ -61,6 +61,12 @@
 //! for brief reads and the swap; the `durable` mutex only to append (or cut a
 //! failed frame back), never across the barrier.
 //!
+//! Auto-commit statements at `full` hold the gate for a whole batch: one
+//! leader forks, the queued writers each stage a frame on that fork, and one
+//! barrier covers all of them (see [`super::group_commit`]). Frames then reach
+//! the log in publish order exactly as for a lone commit, and the log is cut
+//! back to the batch's first frame if the barrier fails.
+//!
 //! ## Single owner per path
 //!
 //! One `DurableState` per checkpoint path, full stop. Two owners logging to
@@ -234,6 +240,17 @@ impl StagedLog {
             raw: Vec::new(),
             staged: None,
         }
+    }
+
+    /// The ops this commit captured, in capture order.
+    pub(super) fn raw(&self) -> &[RawOp] {
+        &self.raw
+    }
+
+    /// Hand the staged frame to a group commit, which takes one barrier for
+    /// every frame it collected. `None` when this commit logged nothing.
+    pub(super) fn take_frame(&mut self) -> Option<(u64, StagedFrame)> {
+        self.staged.take()
     }
 }
 
@@ -525,6 +542,41 @@ impl Session {
         }
     }
 
+    /// Take ONE commit point for a group of staged frames, with no session lock
+    /// held. The frames are contiguous in the log and share its file, so the
+    /// barrier on the last one makes all of them durable. On a failed or
+    /// unwound barrier the log is cut back to the FIRST frame and its LSN is
+    /// given back, which is sound for the same reason as [`Self::flush_staged`]:
+    /// the commit gate keeps every other appender out until this returns.
+    pub(super) fn flush_group(&self, mut frames: Vec<(u64, StagedFrame)>) -> Result<(), String> {
+        if frames.is_empty() {
+            return Ok(());
+        }
+        let (lsn, first) = frames.remove(0);
+        let mut pending = PendingFrame {
+            session: self,
+            lsn,
+            frame: Some(first),
+            error: "the group commit unwound before its barrier completed".to_string(),
+        };
+        let synced = match frames.last() {
+            Some((_, last)) => last.sync(),
+            None => pending.frame.as_ref().map_or(Ok(()), StagedFrame::sync),
+        };
+        match synced {
+            Ok(()) => {
+                pending.frame = None;
+                Ok(())
+            }
+            Err(e) => {
+                pending.error = e.to_string();
+                let message = pending.error.clone();
+                drop(pending);
+                Err(message)
+            }
+        }
+    }
+
     /// Save while the graph mutex is held; always take the durability mutex second.
     /// A foreign destination gets a new log only after its checkpoint is published.
     pub(super) fn save_checkpoint(
@@ -648,6 +700,16 @@ impl Session {
         }
     }
 
+    /// Barriers the log has taken. Test-only.
+    #[cfg(test)]
+    pub(super) fn wal_barrier_count(&self) -> u64 {
+        self.durable
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map_or(0, |ds| ds.wal.barrier_count())
+    }
+
     #[cfg(test)]
     pub(super) fn next_lsn(&self) -> Option<u64> {
         self.durable
@@ -666,6 +728,7 @@ impl Session {
             durable: Mutex::new(Some(state)),
             checkpoint_gate: Mutex::new(()),
             commit_gate: Mutex::new(()),
+            group: Default::default(),
             in_place_commits: Default::default(),
             forked_commits: Default::default(),
         }

@@ -47,6 +47,7 @@ mod selector;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use event::PendingEvent;
 pub use event::{CdcChange, CdcEvent, CdcEventKind, EdgeState, NodeState};
 pub use log::{CdcEnrichment, CdcHandoff, CdcLog, CdcStatus, DEFAULT_CAPACITY, MAX_CAPACITY};
 pub use selector::{needs_before_images, parse_selectors, CdcSelector};
@@ -241,19 +242,31 @@ pub fn read(
 /// resolution reads what the commit left behind) — the same two preconditions
 /// [`resolve_ops`](crate::graph::storage::recording::resolve_ops) has.
 pub fn publish_drained(graph: &DirGraph, raw: &[RawOp]) {
-    if raw.is_empty() {
-        return;
+    publish_pending(graph, pending_events(graph, raw));
+}
+
+/// The events one commit's drained ops describe, resolved against `graph`
+/// without publishing them. A group commit builds each statement's events at
+/// that statement's post-state and publishes them all once the batch is
+/// visible; resolving them at publish time would show every statement the
+/// batch's final state.
+pub(crate) fn pending_events(graph: &DirGraph, raw: &[RawOp]) -> Vec<PendingEvent> {
+    if raw.is_empty() || graph.cdc.is_none() {
+        return Vec::new();
     }
-    let Some(handle) = graph.cdc.as_ref() else {
-        return;
-    };
-    let events = event::events_from_raw(raw, &graph.graph, &graph.interner, |idx| {
+    event::events_from_raw(raw, &graph.graph, &graph.interner, |idx| {
         graph.secondary_label_names(idx)
-    });
+    })
+}
+
+/// Append events built by [`pending_events`] to the graph's log.
+pub(crate) fn publish_pending(graph: &DirGraph, events: Vec<PendingEvent>) {
     if events.is_empty() {
         return;
     }
-    lock(handle).append(events);
+    if let Some(handle) = graph.cdc.as_ref() {
+        lock(handle).append(events);
+    }
 }
 
 /// Drain the capture buffer at a commit boundary, publishing what it holds,

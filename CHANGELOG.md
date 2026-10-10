@@ -27,6 +27,34 @@ before upgrading.
     mid-flush, so a checkpoint cannot pair a graph with a log position that
     includes a frame the graph lacks.
 
+- **`durability: full` concurrent writers share one fsync.**
+  - Before: every auto-commit statement paid its own fsync (about 3.9 ms on
+    macOS), so one session committed about 250 statements per second however
+    many threads wrote.
+  - Now: writers that arrive while another is flushing run one after another
+    on a single copy of the graph, each under its own undo journal, and one
+    fsync covers the batch of up to 256. A statement still returns only after
+    its own log frame is durable, and readers see none of the batch until it
+    is. A statement that fails (including an ontology refusal) rolls back
+    alone and returns its own error; the rest commit. A failed fsync fails
+    every statement of its batch and publishes nothing.
+  - Measured on a 550,000-node graph, release build, 4 / 16 / 64 writers:
+    1,000 / 3,300 / 10,600 statements per second, against 267 with the
+    writers serialized. A lone writer is unchanged.
+  - Applies to plain data writes (`CREATE`, `MERGE`, `SET`, `REMOVE`,
+    `DELETE`) through `Session::execute_auto_commit`. Schema commands,
+    procedure calls, explicit transactions and `normal` durability keep their
+    existing paths.
+  - C ABI and Java: a durable auto-commit statement at `full` that the queue
+    takes now holds the session's write gate shared, so concurrent threads can
+    reach the queue. Every other write still holds it exclusively.
+
+### Rust API
+
+- `Session::auto_commit_is_grouped(query, opts)` reports whether
+  `execute_auto_commit` routes a statement through the group-commit queue, for
+  a binding that serializes its own writers ahead of the session.
+
 ### Fixed
 
 - **C ABI and Java: concurrent writes on one durable session no longer fail

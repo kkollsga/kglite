@@ -118,6 +118,9 @@ pub struct Session {
     /// reach the log in publish order, while the `graph` mutex — which readers
     /// take — is held only briefly.
     pub(super) commit_gate: Mutex<()>,
+    /// Queue that lets concurrent durable auto-commit statements at `full`
+    /// share one barrier; see [`super::group_commit`].
+    pub(super) group: super::group_commit::GroupCommit,
     /// Auto-commit statements that ran in place on the published graph, and
     /// those that forked because it was shared. Test observability only.
     pub(super) in_place_commits: std::sync::atomic::AtomicU64,
@@ -182,6 +185,7 @@ impl Session {
             durable: Mutex::new(None),
             checkpoint_gate: Mutex::new(()),
             commit_gate: Mutex::new(()),
+            group: Default::default(),
             in_place_commits: Default::default(),
             forked_commits: Default::default(),
         }

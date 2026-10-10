@@ -1528,6 +1528,10 @@ pub struct Wal {
     fault: Option<AppendFault>,
     #[cfg(test)]
     park: Option<std::sync::Arc<ParkHook>>,
+    /// Barriers taken through staged frames: fsyncs shared by a group show up
+    /// as fewer barriers than commits.
+    #[cfg(test)]
+    barriers: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Test seam that blocks a committing thread inside its barrier, so a test can
@@ -1595,6 +1599,8 @@ pub(crate) struct StagedFrame {
     fault: Option<AppendFault>,
     #[cfg(test)]
     park: Option<std::sync::Arc<ParkHook>>,
+    #[cfg(test)]
+    barriers: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl StagedFrame {
@@ -1611,6 +1617,9 @@ impl StagedFrame {
         if let Some(file) = &self.barrier {
             crate::graph::durable_io::trace::record(|| "wal sync_data".to_string());
             file.sync_data()?;
+            #[cfg(test)]
+            self.barriers
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         Ok(())
     }
@@ -1698,6 +1707,8 @@ impl Wal {
             fault: None,
             #[cfg(test)]
             park: None,
+            #[cfg(test)]
+            barriers: Default::default(),
         })
     }
 
@@ -1786,6 +1797,8 @@ impl Wal {
             fault: self.fault,
             #[cfg(test)]
             park: self.park.clone(),
+            #[cfg(test)]
+            barriers: std::sync::Arc::clone(&self.barriers),
         })
     }
 
@@ -1847,6 +1860,12 @@ impl Wal {
     #[cfg(test)]
     pub(crate) fn set_fault(&mut self, fault: Option<AppendFault>) {
         self.fault = fault;
+    }
+
+    /// Test seam: barriers taken so far through staged frames.
+    #[cfg(test)]
+    pub(crate) fn barrier_count(&self) -> u64 {
+        self.barriers.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Test seam: park the next commit inside its barrier.
