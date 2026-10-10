@@ -8907,7 +8907,7 @@ class KnowledgeGraph:
         where the *column* name (``'summary'``) belongs. It resolves exactly as
         a Cypher property reference does: a stored property, an **identity
         alias** (a type built with ``title_field='name'`` accepts ``'name'``,
-        one built with ``id_field='npdid'`` accepts ``'npdid'``), the canonical
+        one built with ``id_field='person_id'`` accepts ``'person_id'``), the canonical
         ``id``/``title``, or a structural alias (``name``, ``type``,
         ``node_type``, ``label``).
 
@@ -10819,7 +10819,7 @@ class KnowledgeGraph:
 
         The property is read through the same alias resolution a Cypher
         ``MATCH`` filter uses, so a type's id/title column can be indexed under
-        the name the loader gave it (``add_nodes(df, "Person", "npdid",
+        the name the loader gave it (``add_nodes(df, "Person", "person_id",
         "name")`` makes ``build_text_index("Person", "name")`` index titles).
         The index is keyed by the spelling you pass, not by what it resolves
         to.

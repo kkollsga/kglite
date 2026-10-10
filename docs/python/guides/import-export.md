@@ -697,9 +697,9 @@ File versions:
 graph.define_schema({
     'nodes': {
         'Proposal': {
-            'required': ['npdid_proposal', 'proposal_name'],
+            'required': ['proposal_id', 'proposal_name'],
             'optional': ['proposal_status'],
-            'types': {'npdid_proposal': 'integer', 'proposal_name': 'string'}
+            'types': {'proposal_id': 'integer', 'proposal_name': 'string'}
         }
     },
     'connections': {

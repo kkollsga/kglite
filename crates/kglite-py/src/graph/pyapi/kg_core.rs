@@ -1843,7 +1843,8 @@ impl KnowledgeGraph {
 
         // Pre-parse only to route: mutation → execute_mut (&mut DirGraph),
         // read → execute_read (&DirGraph via Arc snapshot). The parser is
-        // cached, so the re-parse inside session::execute is a hit, ~0 µs.
+        // cached, so the re-parse inside session::execute is a hit: an AST clone
+        // (71 ns for `RETURN 1`, measured 2026-09-29), not a parse.
         let pre_parsed = cypher::parse_cypher(query).map_err(crate::error_py::kg_to_pyerr)?;
         let is_mutation = cypher::is_mutation_query(&pre_parsed);
 

@@ -1149,8 +1149,8 @@ fn prepare_uncached(
     //
     // The **lookup** above deliberately stays. `prepare` runs before anything
     // has parsed the query, so this classification does not exist yet there,
-    // and buying it early means a `parse_cypher_cached` AST clone (~700 ns per
-    // its own module docs) on the read-hit path that the plan cache exists to
+    // and buying it early means a `parse_cypher_cached` AST clone (71 ns for
+    // `RETURN 1`, measured 2026-09-29, growing with the AST) on the read-hit path that the plan cache exists to
     // keep at ~1.9 us. With no mutation ever inserted, a mutation's lookup is
     // a guaranteed miss: one shared read lock and one hash, and nothing more.
     //

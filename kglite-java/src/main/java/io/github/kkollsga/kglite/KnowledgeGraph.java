@@ -124,21 +124,26 @@ import java.util.function.Function;
  * <h2>Threading</h2>
  *
  * <p>The engine is synchronous — a call runs to completion on the calling
- * thread, and this class adds no thread pool and no async surface. What one
- * instance guarantees, from the engine's session model (an
- * {@code Arc<DirGraph>} behind a mutex: readers clone the pointer, writers take
- * the lock for the whole mutation and swap):
+ * thread, and this class adds no thread pool and no async surface. One
+ * instance may be shared by many threads. What it guarantees comes from the
+ * engine's session model (an {@code Arc<DirGraph>} behind a mutex):
  *
  * <ul>
- *   <li>One instance may be shared by many threads. {@link #query(String)}
- *       calls run <em>concurrently</em> — each takes a snapshot under a brief
- *       lock and then executes outside it.</li>
- *   <li>{@link #cypher(String, Map)} calls <em>serialize</em> against each
- *       other and against {@link #save(Path)}. A mutation is all-or-nothing:
- *       a concurrent reader sees the state before it or the state after it,
- *       never a half-applied statement.</li>
- *   <li>A reader that already started keeps its snapshot while a writer
- *       commits; it does not block the writer and is not blocked by it.</li>
+ *   <li>{@link #query(String)} calls run <em>concurrently</em>. Each takes a
+ *       snapshot under a brief lock and then executes outside it.</li>
+ *   <li>Writes are serialized per instance. A mutation is all-or-nothing: a
+ *       reader sees the state before it or the state after it, never a
+ *       half-applied statement. {@link #save(Path)} is serialized with
+ *       writes.</li>
+ *   <li>A reader that already holds a snapshot keeps it while a writer
+ *       commits. A reader that <em>requests</em> a snapshot while a
+ *       single-statement {@link #cypher(String, Map)} write is executing, or
+ *       while its write-ahead-log frame is being appended, waits for that
+ *       write to finish.</li>
+ *   <li>Serialization does not make concurrent writes conflict-free. A
+ *       durable instance can fail a write with a transaction conflict, and an
+ *       explicit transaction can fail at commit when another write landed
+ *       first. Retry the failed unit of work.</li>
  * </ul>
  *
  * <p><strong>{@link #close()} is safe from any thread, at any time.</strong>
@@ -148,7 +153,7 @@ import java.util.function.Function;
  * threads close at once, and a call that arrives after it throws
  * {@link IllegalStateException} rather than dereferencing freed memory. It is
  * shared, so it introduces no serialization between concurrent calls — the
- * three guarantees above are unchanged.
+ * guarantees above are unchanged.
  *
  * <p>The result of a call that races a close is itself a race: a worker gets
  * either its rows or an {@code IllegalStateException}. Join the workers before

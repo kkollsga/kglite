@@ -22,6 +22,18 @@ kglite-bolt-server --graph my-graph.kgl --bind 127.0.0.1 --port 7687
 Then point a Bolt v5 client at `bolt://localhost:7687` and run KGLite's
 documented Cypher dialect against the loaded `.kgl` graph.
 
+**Durability.** The default is `--durability normal`: each commit is appended
+to a write-ahead log (`<graph>-wal`) before it is acknowledged. A commit then
+survives the server process dying, but an OS crash or power loss can lose
+commits since the last checkpoint. Use `--durability full` to survive power
+loss, or `--durability off` for no log. A checkpoint folds the log into the
+`.kgl`; the log size trigger defaults to 16 MiB.
+
+**Memory.** The default `memory` storage mode holds the whole graph in RAM,
+and a running backup adds roughly 10-30% of the graph's size. For a graph that
+outgrows RAM, start with `--storage mapped`. See the
+[Bolt server guide](https://kglite.readthedocs.io/en/latest/operators/bolt-server.html).
+
 ## Features
 
 - **Bolt v5.x handshake + PackStream framing** (handshake versions
@@ -94,7 +106,7 @@ Options:
                                (also KGLITE_BOLT_CHECKPOINT_INTERVAL=<secs>;
                                unchanged graphs are skipped; same refusals)
   --checkpoint-wal-mib <MIB>   Checkpoint when the write-ahead log passes MIB and is
-                               at least as large as the .kgl [default: 32 while a
+                               at least as large as the .kgl [default: 16 while a
                                log is kept; 0 disables]. Also
                                KGLITE_BOLT_CHECKPOINT_WAL_MIB=<mib>
   --durability <LEVEL>         What a committed write survives: full (power
