@@ -1581,6 +1581,41 @@ impl ParkHook {
     }
 }
 
+/// A frame written to the log whose commit point has not been taken yet.
+///
+/// Holds its own duplicate of the log handle, so [`Self::sync`] runs without
+/// the `Wal` (and whatever lock guards it).
+#[derive(Debug)]
+pub(crate) struct StagedFrame {
+    /// Where the frame began: the cut-back point if its barrier fails.
+    prev_end: u64,
+    /// `None` under [`SyncMode::PageCache`], where there is no barrier.
+    barrier: Option<File>,
+    #[cfg(test)]
+    fault: Option<AppendFault>,
+    #[cfg(test)]
+    park: Option<std::sync::Arc<ParkHook>>,
+}
+
+impl StagedFrame {
+    /// The commit point: flush the frame to stable storage under a barrier.
+    pub(crate) fn sync(&self) -> io::Result<()> {
+        #[cfg(test)]
+        if let Some(park) = &self.park {
+            park.enter();
+        }
+        #[cfg(test)]
+        if let Some(AppendFault::SyncError) = self.fault {
+            return Err(io::Error::other("injected barrier failure"));
+        }
+        if let Some(file) = &self.barrier {
+            crate::graph::durable_io::trace::record(|| "wal sync_data".to_string());
+            file.sync_data()?;
+        }
+        Ok(())
+    }
+}
+
 /// An injected failure for the append path, standing in for a full device or
 /// a failing barrier, which a test cannot provoke on a real file.
 #[cfg(test)]
@@ -1697,41 +1732,96 @@ impl Wal {
         raw: &[crate::graph::storage::recording::RawOp],
         dir: &crate::graph::schema::DirGraph,
     ) -> io::Result<()> {
+        let staged = self.stage_resolved(lsn, raw, dir)?;
+        self.finish_staged(staged)
+    }
+
+    /// Write the frame for `raw` at `lsn` without taking the commit point.
+    ///
+    /// The caller completes it with [`StagedFrame::sync`] — which needs no
+    /// access to the `Wal`, so it can run with the lock that guards the `Wal`
+    /// released — and on failure undoes it with [`Self::abort_staged`]. Until
+    /// then the frame is in the log but not committed: nothing may be appended,
+    /// trimmed or reset behind it, which is the caller's commit-gate invariant.
+    pub(crate) fn stage_resolved(
+        &mut self,
+        lsn: u64,
+        raw: &[crate::graph::storage::recording::RawOp],
+        dir: &crate::graph::schema::DirGraph,
+    ) -> io::Result<StagedFrame> {
         let mut body = FrameBody::new();
         crate::graph::storage::recording::resolve_ops_into(raw, dir, &mut |op| body.push(&op));
         let payload = body.finish(lsn)?;
-        self.append_framed(&frame_bytes(&payload)?)
+        self.stage_framed(&frame_bytes(&payload)?)
     }
 
-    /// Write one envelope and take the commit point, leaving the log exactly as
-    /// it was if either fails.
+    /// Write one envelope and advance `end` past it; the barrier is separate.
     ///
     /// A frame that did not commit has no LSN and its caller sees an error, so
     /// its bytes must not stay: the next commit would append *behind* them and
     /// every later acknowledged frame would sit past a torn or unacknowledged
     /// one, where recovery stops. If the log cannot be cut back it is poisoned
     /// rather than appended to blindly.
-    fn append_framed(&mut self, framed: &[u8]) -> io::Result<()> {
+    fn stage_framed(&mut self, framed: &[u8]) -> io::Result<StagedFrame> {
         if let Some(reason) = &self.poisoned {
             return Err(io::Error::other(reason.clone()));
         }
-        let written = self.write_frame(framed).and_then(|()| self.commit_point());
-        match written {
-            Ok(()) => {
-                self.end += framed.len() as u64;
-                Ok(())
-            }
+        if let Err(error) = self.write_frame(framed) {
+            self.cut_back_after(&error);
+            return Err(error);
+        }
+        let prev_end = self.end;
+        self.end += framed.len() as u64;
+        Ok(StagedFrame {
+            prev_end,
+            barrier: if self.sync == SyncMode::Barrier {
+                Some(self.file.try_clone().inspect_err(|_| {
+                    // The frame is written but cannot be barriered: undo it.
+                    self.end = prev_end;
+                })?)
+            } else {
+                None
+            },
+            #[cfg(test)]
+            fault: self.fault,
+            #[cfg(test)]
+            park: self.park.clone(),
+        })
+    }
+
+    /// Take the commit point for a staged frame on this thread.
+    fn finish_staged(&mut self, staged: StagedFrame) -> io::Result<()> {
+        match staged.sync() {
+            Ok(()) => Ok(()),
             Err(error) => {
-                if let Err(cut) = self.cut_back_to_end() {
-                    let reason = format!(
-                        "WAL append failed ({error}) and the log could not be cut back to its \
-                         last complete frame ({cut}); refusing further appends until restart"
-                    );
-                    self.poisoned = Some(reason);
-                }
+                self.abort_staged(&staged, &error);
                 Err(error)
             }
         }
+    }
+
+    /// Undo a staged frame whose barrier failed: cut the log back to where the
+    /// frame began, or poison it if that is impossible.
+    pub(crate) fn abort_staged(&mut self, staged: &StagedFrame, error: &io::Error) {
+        self.end = staged.prev_end;
+        self.cut_back_after(error);
+    }
+
+    fn cut_back_after(&mut self, error: &io::Error) {
+        if let Err(cut) = self.cut_back_to_end() {
+            let reason = format!(
+                "WAL append failed ({error}) and the log could not be cut back to its \
+                 last complete frame ({cut}); refusing further appends until restart"
+            );
+            self.poisoned = Some(reason);
+        }
+    }
+
+    /// Write one envelope and take the commit point, leaving the log exactly as
+    /// it was if either fails.
+    fn append_framed(&mut self, framed: &[u8]) -> io::Result<()> {
+        let staged = self.stage_framed(framed)?;
+        self.finish_staged(staged)
     }
 
     fn write_frame(&mut self, framed: &[u8]) -> io::Result<()> {
@@ -1749,23 +1839,6 @@ impl Wal {
         file.set_len(self.end)?;
         if self.sync == SyncMode::Barrier {
             file.sync_all()?;
-        }
-        Ok(())
-    }
-
-    fn commit_point(&mut self) -> io::Result<()> {
-        self.file.flush()?;
-        #[cfg(test)]
-        if let Some(park) = &self.park {
-            park.enter();
-        }
-        #[cfg(test)]
-        if let Some(AppendFault::SyncError) = self.fault {
-            return Err(io::Error::other("injected barrier failure"));
-        }
-        if self.sync == SyncMode::Barrier {
-            crate::graph::durable_io::trace::record(|| "wal sync_data".to_string());
-            self.file.sync_data()?;
         }
         Ok(())
     }

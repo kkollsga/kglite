@@ -134,6 +134,9 @@ impl Session {
         {
             return None;
         }
+        // The gate keeps a fork-path committer's check-to-swap window free of
+        // this statement's in-place mutation and version bump.
+        let _commit = self.lock_commit_gate();
         let mut guard = self.graph.lock().unwrap_or_else(|p| p.into_inner());
         let Some(graph) = Arc::get_mut(&mut guard) else {
             self.forked_commits.fetch_add(1, Ordering::Relaxed);

@@ -9,6 +9,20 @@ before upgrading.
 
 ## [Unreleased]
 
+### Changed
+
+- **`durability: full` no longer makes readers wait for a commit's fsync.**
+  - Before: a durable commit held the session lock across the log append and
+    the fsync, so every reader waited for every writer's flush. In the
+    Node shootout the `full` realistic mix topped out at 5,750 virtual users
+    where `normal` passed 64,000.
+  - Now: the commit flushes the log with no reader-facing lock held, then
+    publishes. Readers keep reading the previous graph meanwhile and never see
+    a commit before it is durable. Change events follow the publish.
+  - `save`, backup, the online checkpoint and `sync` wait for a commit that is
+    mid-flush, so a checkpoint cannot pair a graph with a log position that
+    includes a frame the graph lacks.
+
 ### Fixed
 
 - **C ABI and Java: concurrent writes on one durable session no longer fail

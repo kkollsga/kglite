@@ -103,15 +103,21 @@ pub struct Session {
     /// [`Session::open_durable`]; `None` for every ordinary session.
     ///
     /// It lives here rather than on `DirGraph` because it owns an open `File`
-    /// and `DirGraph` must stay `Clone`. **The lock is only ever taken while
-    /// [`graph`](Self::graph)'s lock is already held, or on its own — never
-    /// the other way round.** That ordering is what makes "append the frame,
-    /// then publish the Arc" indivisible for concurrent committers. See
-    /// [`super::durable`].
+    /// and `DirGraph` must stay `Clone`. The lock lives innermost — taken
+    /// while [`graph`](Self::graph)'s lock is held, or on its own, never the
+    /// other way round — and only to append or cut back a frame, never across
+    /// the barrier. See [`super::durable`] for the full order.
     pub(super) durable: Mutex<Option<super::durable::DurableState>>,
     /// Serializes checkpoints (`save` and the online checkpoint). Taken before
-    /// the graph lock, so it sits first in the lock order.
+    /// the commit gate, so it sits first in the lock order.
     pub(super) checkpoint_gate: Mutex<()>,
+    /// Serializes everything that publishes a new graph or fixes a (graph, LSN,
+    /// log offset) triple: commits (OCC check through swap, including the
+    /// barrier), direct writes, `save`, backup, `sync`, the online checkpoint's
+    /// fix and trim. Held across a durable commit's barrier so that frames
+    /// reach the log in publish order, while the `graph` mutex — which readers
+    /// take — is held only briefly.
+    pub(super) commit_gate: Mutex<()>,
     /// Auto-commit statements that ran in place on the published graph, and
     /// those that forked because it was shared. Test observability only.
     pub(super) in_place_commits: std::sync::atomic::AtomicU64,
@@ -128,6 +134,8 @@ pub struct Session {
 /// ops, so only applied changes are published.
 pub struct SessionWriteGuard<'a> {
     guard: MutexGuard<'a, Arc<DirGraph>>,
+    /// Declared after `guard`, so the graph lock releases first.
+    _commit: MutexGuard<'a, ()>,
 }
 
 impl Drop for SessionWriteGuard<'_> {
@@ -173,9 +181,15 @@ impl Session {
             graph: Mutex::new(graph),
             durable: Mutex::new(None),
             checkpoint_gate: Mutex::new(()),
+            commit_gate: Mutex::new(()),
             in_place_commits: Default::default(),
             forked_commits: Default::default(),
         }
+    }
+
+    /// Take the commit gate; see [`Self::commit_gate`].
+    pub(super) fn lock_commit_gate(&self) -> MutexGuard<'_, ()> {
+        self.commit_gate.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// Take a snapshot of the current graph. Wait-free apart from the momentary
@@ -219,8 +233,10 @@ impl Session {
     /// logged one.
     pub fn write(&self) -> SessionWriteGuard<'_> {
         self.mark_diverged();
+        let commit = self.lock_commit_gate();
         SessionWriteGuard {
             guard: self.graph.lock().unwrap_or_else(|p| p.into_inner()),
+            _commit: commit,
         }
     }
 
@@ -229,6 +245,7 @@ impl Session {
     /// posture, not graph data, so a durable session needs no log frame for
     /// it and is not marked diverged; later forks and commits carry it.
     pub fn lock_ontology(&self) {
+        let _commit = self.lock_commit_gate();
         let mut guard = self.graph.lock().unwrap_or_else(|p| p.into_inner());
         if Arc::get_mut(&mut guard).is_none() {
             let child = guard.fork_transaction();
@@ -272,6 +289,7 @@ impl Session {
         operation: impl FnOnce(&mut DirGraph) -> Result<T, E>,
     ) -> Result<T, E> {
         self.mark_diverged();
+        let _commit = self.lock_commit_gate();
         let mut guard = self.graph.lock().unwrap_or_else(|p| p.into_inner());
         let current_version = guard.version();
         let mut working = guard.fork_transaction();
@@ -338,6 +356,7 @@ impl Session {
             .checkpoint_gate
             .lock()
             .unwrap_or_else(|p| p.into_inner());
+        let _commit = self.lock_commit_gate();
         let mut guard = self.graph.lock().unwrap_or_else(|p| p.into_inner());
         self.save_checkpoint(&mut guard, path, fsync)
     }
@@ -419,18 +438,21 @@ impl Session {
         // ops below are unaffected.
         working.compact_columns_if_fragmented();
 
-        // Hold ONE lock guard across both the OCC check and the Arc swap so
-        // check-and-swap is atomic. Reading the version via `self.version()`
-        // (which locks, clones, unlocks) and then swapping under a *separate*
-        // lock acquisition is a TOCTOU race: two concurrent committers could
-        // both pass the check and both swap — losing one commit and even
-        // moving the version backwards. The Python `Session` masks this with a
-        // writer lock (one committer at a time), but the core `Session` is
-        // driven concurrently by the bolt-server, so the atomicity must live
-        // here. (std `Mutex` is not reentrant, so read the version off the
+        // The commit gate, not the graph mutex, makes check-and-swap atomic:
+        // every other publisher (commits, direct writes, in-place statements)
+        // takes it too, so the version read below is still current at the swap
+        // even though the graph mutex is released while the frame is flushed.
+        // Reading the version through a separate lock acquisition without the
+        // gate would be a TOCTOU race — two committers could both pass the
+        // check and both swap, losing one commit and even moving the version
+        // backwards. (std `Mutex` is not reentrant, so read the version off the
         // guarded Arc, never via `self.version()`.)
-        let mut guard = self.graph.lock().unwrap_or_else(|p| p.into_inner());
-        let current_version = guard.version();
+        let _commit = self.lock_commit_gate();
+        let current_version = self
+            .graph
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .version();
         if check_occ && current_version != base_version {
             return CommitOutcome::ConflictDetected {
                 current_version,
@@ -438,22 +460,34 @@ impl Session {
             };
         }
 
-        // Durable sessions log the commit BEFORE publishing it. A frame that
-        // could not be appended means the caller must not be told the write
-        // happened, so the Arc swap below is skipped entirely — the working
-        // copy is dropped and the graph is exactly as it was. (The wheel's
+        // Durable sessions log the commit BEFORE publishing it, and flush it
+        // before anyone can see it. A frame that could not be appended or
+        // flushed means the caller must not be told the write happened, so the
+        // Arc swap below is skipped entirely — the working copy is dropped and
+        // the graph is exactly as it was. The flush holds no lock readers take,
+        // so they keep reading the previous graph meanwhile. (The wheel's
         // apply-then-log ordering can only report the same failure *after* the
         // mutation is visible; this is the stronger half of the rung.) No-op
         // for a non-durable session.
-        if let Err(error) = self.log_working_commit(&mut working) {
-            return CommitOutcome::DurabilityFailed { error };
-        }
+        let staged = match self.stage_working_commit(&mut working) {
+            Ok(staged) => staged,
+            Err(error) => return CommitOutcome::DurabilityFailed { error },
+        };
+        let logged = match self.flush_staged(staged) {
+            Ok(logged) => logged,
+            Err(error) => return CommitOutcome::DurabilityFailed { error },
+        };
 
         // Bump from the *current* version (not the possibly-stale base) so the
         // version is monotonic even in last-writer-wins mode (check_occ=false).
         let new_version = current_version + 1;
         working.set_version(new_version);
+        let mut guard = self.graph.lock().unwrap_or_else(|p| p.into_inner());
         *guard = Arc::new(working);
+        // Change events follow visibility: a consumer that sees one can read
+        // the commit it describes. Their after-state is read off the graph that
+        // was just published.
+        crate::graph::cdc::publish_drained(&guard, &logged);
         // Assignment drops the former owner before checking layer ownership.
         // Retained snapshots still prevent their shared bases from being folded.
         if let Some(published) = Arc::get_mut(&mut guard) {

@@ -93,7 +93,6 @@ fn reopen(path: &Path) -> Session {
 }
 
 #[test]
-#[ignore = "red until P9"]
 fn a_reader_is_not_blocked_by_a_commit_parked_in_its_barrier() {
     for level in [DurabilityLevel::Full, DurabilityLevel::Normal] {
         let dir = tempfile::tempdir().unwrap();
@@ -128,7 +127,6 @@ fn a_reader_is_not_blocked_by_a_commit_parked_in_its_barrier() {
 }
 
 #[test]
-#[ignore = "red until P9"]
 fn change_events_follow_the_commit_they_describe() {
     let dir = tempfile::tempdir().unwrap();
     let session = Arc::new(open_graph(
@@ -286,4 +284,36 @@ fn checkpoints_racing_a_parked_commit_lose_nothing() {
             "{name}: a crash after the race must lose nothing and invent nothing"
         );
     }
+}
+
+/// A committer that began before another's commit published conflicts on the
+/// version, even though it reached the gate while that commit was mid-barrier.
+#[test]
+fn a_committer_queued_behind_a_parked_commit_sees_its_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = Arc::new(open(&dir.path().join("g.kgl"), DurabilityLevel::Full));
+    let params = HashMap::new();
+    let opts = ExecuteOptions::eager(&params);
+    let mut late = session.begin();
+    execute_mut(late.working_mut().unwrap(), "CREATE (:N {id: 9})", &opts).unwrap();
+
+    let hook = session.park_next_commit();
+    let _release = ReleaseOnDrop(Arc::clone(&hook));
+    let writer = spawn_commit(&session, "CREATE (:N {id: 1})");
+    assert!(hook.wait_entered(WAIT));
+    let queued = {
+        let session = Arc::clone(&session);
+        thread::spawn(move || session.commit(late, true))
+    };
+    thread::sleep(Duration::from_millis(200));
+    hook.release();
+    assert!(matches!(
+        writer.join().unwrap(),
+        CommitOutcome::Committed { .. }
+    ));
+    assert!(matches!(
+        queued.join().unwrap(),
+        CommitOutcome::ConflictDetected { .. }
+    ));
+    assert_eq!(ids(&session.snapshot()), vec![1]);
 }

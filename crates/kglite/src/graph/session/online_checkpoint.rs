@@ -3,13 +3,14 @@
 //! [`Session::save`] holds the graph mutex for the whole serialize, so every
 //! committer waits out the write. [`Session::checkpoint_online`] instead:
 //!
-//! 1. **Snapshot** under both session locks for an `Arc` clone: the published
-//!    graph, the LSN of the last frame inside it, the log offset just past that
-//!    frame and the log's epoch (commits append under both locks, so the four
-//!    agree).
+//! 1. **Snapshot** under the commit gate and both session locks for an `Arc`
+//!    clone: the published graph, the LSN of the last frame inside it, the log
+//!    offset just past that frame and the log's epoch (a commit appends and
+//!    publishes under the gate, so the four agree; a commit mid-barrier makes
+//!    this step wait for it).
 //! 2. **Write** the snapshot as the live `.kgl`, stamped with that LSN, by temp +
 //!    fsync + rename + directory fsync, with no session lock held.
-//! 3. **Trim** under both locks again: drop the frames up to the recorded
+//! 3. **Trim** under the gate and both locks again: drop the frames up to the recorded
 //!    offset and keep the frames committed during step 2
 //!    ([`Wal::trim_through`](crate::graph::wal::Wal::trim_through)).
 //!
@@ -59,7 +60,7 @@ pub struct OnlineCheckpointReport {
     /// Log frame bytes before the checkpoint and after the trim.
     pub wal_bytes_before: u64,
     pub wal_bytes_after: u64,
-    /// How long both locks were held to fix the snapshot, and again to trim.
+    /// How long the locks were held to fix the snapshot, and again to trim.
     /// These are the only intervals a committer can wait on this checkpoint.
     pub snapshot_hold: Duration,
     pub trim_hold: Duration,
@@ -123,6 +124,7 @@ impl Session {
     fn checkpoint_online_gated(&self) -> Result<OnlineCheckpointReport, String> {
         let started = Instant::now();
         let (snapshot, point, snapshot_hold) = {
+            let _commit = self.lock_commit_gate();
             let graph = self.graph.lock().unwrap_or_else(|p| p.into_inner());
             let mut slot = self.durable.lock().unwrap_or_else(|p| p.into_inner());
             let held = Instant::now();
@@ -146,6 +148,7 @@ impl Session {
         let graph_version = snapshot.version();
         drop(snapshot);
         let (trimmed, trim_hold) = {
+            let _commit = self.lock_commit_gate();
             let _graph = self.graph.lock().unwrap_or_else(|p| p.into_inner());
             let mut slot = self.durable.lock().unwrap_or_else(|p| p.into_inner());
             let held = Instant::now();
