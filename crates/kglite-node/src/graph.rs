@@ -914,19 +914,6 @@ impl Graph {
         })
     }
 
-    /// Test-only: log barriers (fsyncs) the write-ahead log has taken, to show concurrent writes share them.
-    #[cfg(feature = "test-hooks")]
-    #[napi(js_name = "__walBarriers")]
-    pub fn wal_barriers(&self) -> napi::Result<f64, &'static str> {
-        contain(|| {
-            Ok(self
-                .inner
-                .session()
-                .map_err(to_sync_error)?
-                .wal_barrier_count() as f64)
-        })
-    }
-
     /// The path this graph was opened at.
     #[napi(getter)]
     pub fn path(&self) -> napi::Result<String, &'static str> {
@@ -1139,4 +1126,21 @@ pub(crate) fn wire_signal<'e>(
     wire_query(env, signal, handle, promise.raw())
         .map(|raw| Object::from_raw(env.raw(), raw))
         .map_err(to_sync_error)
+}
+
+/// The napi macro does not honour `cfg` on a method, so the test hook gets an impl block of its own.
+#[cfg(feature = "test-hooks")]
+#[napi]
+impl Graph {
+    /// Test-only: log barriers (fsyncs) the write-ahead log has taken, to show concurrent writes share them.
+    #[napi(js_name = "__walBarriers")]
+    pub fn wal_barriers(&self) -> napi::Result<f64, &'static str> {
+        contain(|| {
+            Ok(self
+                .inner
+                .session()
+                .map_err(to_sync_error)?
+                .wal_barrier_count() as f64)
+        })
+    }
 }
