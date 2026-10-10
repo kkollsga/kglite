@@ -260,6 +260,10 @@ concurrent writers queue instead of conflicting at commit. Reads never wait.
 - An auto-commit write, data or schema (`CREATE`/`DROP INDEX`, `CREATE`/`DROP
   CONSTRAINT`), takes the slot for its one-shot transaction and obeys the wait
   timeout.
+- At `--durability full`, a plain auto-commit data write (`CREATE`, `MERGE`,
+  `SET`, `REMOVE`, `DELETE`) holds the slot shared instead: concurrent ones run
+  together and share a log fsync, but none runs while a write transaction or a
+  schema statement holds the slot.
 - Automatic and periodic checkpoints never take the slot. They save only
   committed state, so an open writer's uncommitted work is never written, and
   they neither wait for nor delay a queued writer.

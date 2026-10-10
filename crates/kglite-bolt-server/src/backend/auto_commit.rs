@@ -70,15 +70,23 @@ impl KgliteBackend {
 
         let kg_params = decode_params(parameters)?;
         let started = Instant::now();
-        // Queue mode holds the slot to the end of the function, past the
-        // publish; optimistic mode takes none and retries a lost race.
-        let (_slot, attempts) = if self.writer.config().mode == WriteConcurrency::Queue {
-            (Some(self.auto_commit_slot().await?), 1)
-        } else {
-            (None, OPTIMISTIC_ATTEMPTS)
-        };
         let mut opts = self.execute_opts(&kg_params, meta);
         opts.cancel = Some(cancel.clone());
+        // Queue mode holds the slot to the end of the function, past the
+        // publish; optimistic mode takes none and retries a lost race. A
+        // statement the engine's group-commit queue takes holds the slot
+        // shared, so concurrent ones reach the queue and share a log barrier
+        // while an open write transaction still excludes them.
+        let (_slot, attempts): (Option<Box<dyn Send>>, u32) =
+            if self.writer.config().mode == WriteConcurrency::Queue {
+                if self.session.auto_commit_is_grouped(query, &opts) {
+                    (Some(Box::new(self.auto_commit_shared_slot().await?)), 1)
+                } else {
+                    (Some(Box::new(self.auto_commit_slot().await?)), 1)
+                }
+            } else {
+                (None, OPTIMISTIC_ATTEMPTS)
+            };
         let result = off_async_worker(|| {
             self.session
                 .execute_auto_commit(query, &opts, attempts)
@@ -95,6 +103,21 @@ impl KgliteBackend {
             "rw"
         };
         finish_stream(result, type_str, false, started)
+    }
+
+    /// Wait for a shared permit on the writer slot, for a grouped statement.
+    async fn auto_commit_shared_slot(&self) -> Result<SharedPermit, BoltError> {
+        let started = Instant::now();
+        let permit = self
+            .writer
+            .acquire_shared(|holder| self.reclaim_idle_writer(holder))
+            .await
+            .map_err(|timed_out| wait_timeout_error("auto-commit", &timed_out))?;
+        tracing::debug!(
+            waited_ms = started.elapsed().as_millis() as u64,
+            "acquired a shared writer permit"
+        );
+        Ok(permit)
     }
 
     /// Wait for the writer slot as an auto-commit statement. The returned guard

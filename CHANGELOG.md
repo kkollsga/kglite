@@ -57,6 +57,11 @@ before upgrading.
     transaction commits and `close()` still run one at a time on the writer
     thread, ahead of or behind grouped writes in no fixed order. `onQueueFull`,
     `timeoutMs` and `AbortSignal` apply to both lanes unchanged.
+  - Bolt server: with the default `--write-concurrency queue`, a plain
+    auto-commit data write at `--durability full` holds the writer slot shared,
+    so concurrent writes reach the queue and share an fsync. Write
+    transactions, schema statements and every other write still hold the slot
+    alone, and a shared write waits behind an open write transaction.
 
 ### Rust API
 

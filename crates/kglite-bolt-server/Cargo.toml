@@ -111,3 +111,8 @@ chrono = { version = "0.4.45", default-features = false }
 # kglite-mcp-server's: cargo unifies the version across the workspace, so a
 # higher floor here conflicts with the 1.0.0 that member's floor selects.
 bytes = "1"
+
+[dev-dependencies]
+# `test-seam` exposes the log's barrier count, so a test can show that
+# concurrent auto-commit writes shared an fsync.
+kglite = { path = "../kglite", default-features = false, features = ["test-seam"] }

@@ -12,12 +12,25 @@
 //! writer is queued it polls the holder's activity record and, past the idle
 //! timeout, asks the backend to discard the holder's transaction. An idle
 //! holder nobody is waiting on is never disturbed.
+//!
+//! The slot is a readers-writer gate over one fair semaphore. A transaction or
+//! an auto-commit statement the engine cannot batch holds all of it
+//! (exclusive). An auto-commit statement the engine's group-commit queue takes
+//! (`Session::auto_commit_is_grouped`) holds one permit (shared): it may run
+//! beside other shared holders, which is what lets concurrent writes at `full`
+//! share a log barrier, and it never overlaps an exclusive holder, so a
+//! transaction's BEGIN-to-COMMIT window still sees no other publish. Waiters
+//! of both kinds are served in arrival order.
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+/// Permits in the slot's semaphore: an exclusive holder takes all of them, a
+/// shared holder one, so up to this many grouped writes can run together.
+const SLOT_PERMITS: u32 = 1 << 20;
 
 /// How write transactions are admitted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,7 +150,7 @@ pub(crate) struct WriterSlot {
 impl WriterSlot {
     pub(crate) fn new(config: WriterConfig) -> Arc<Self> {
         Arc::new(Self {
-            semaphore: Arc::new(Semaphore::new(1)),
+            semaphore: Arc::new(Semaphore::new(SLOT_PERMITS as usize)),
             holder: Mutex::new(None),
             config,
         })
@@ -156,7 +169,7 @@ impl WriterSlot {
         (h.in_flight.load(Ordering::Acquire) == 0 && h.idle_for() > idle).then(|| h.handle.clone())
     }
 
-    /// Wait for the slot on behalf of transaction `handle`.
+    /// Wait for the whole slot on behalf of transaction `handle`.
     ///
     /// `reclaim` is called with the holder's handle when the holder has gone
     /// idle past the timeout; it must discard that transaction (dropping its
@@ -166,28 +179,7 @@ impl WriterSlot {
         handle: &str,
         reclaim: impl Fn(&str),
     ) -> Result<WriterPermit, WaitTimedOut> {
-        let started = Instant::now();
-        let deadline = self.config.wait_timeout.map(|t| started + t);
-        let acquire = Arc::clone(&self.semaphore).acquire_owned();
-        tokio::pin!(acquire);
-        let permit = loop {
-            let next_poll = tokio::time::sleep(REAP_POLL);
-            tokio::select! {
-                // Prefer the permit over the timeout when both are ready.
-                biased;
-                got = &mut acquire => {
-                    break got.expect("the writer semaphore is never closed");
-                }
-                _ = next_poll => {
-                    if let Some(h) = self.reclaimable_holder() {
-                        reclaim(&h);
-                    }
-                    if deadline.is_some_and(|d| Instant::now() >= d) {
-                        return Err(WaitTimedOut { waited: started.elapsed() });
-                    }
-                }
-            }
-        };
+        let permit = self.wait_for(SLOT_PERMITS, reclaim).await?;
         let activity = Arc::new(HolderActivity {
             handle: handle.to_string(),
             epoch: Instant::now(),
@@ -201,6 +193,53 @@ impl WriterSlot {
             slot: Arc::clone(self),
         })
     }
+
+    /// Wait for one shared permit, for an auto-commit statement the engine
+    /// batches. Waits behind an exclusive holder (reclaiming it when idle, as
+    /// [`Self::acquire`] does) and is excluded by it; shared holders have no
+    /// holder record because nothing about them can go idle.
+    pub(crate) async fn acquire_shared(
+        &self,
+        reclaim: impl Fn(&str),
+    ) -> Result<SharedPermit, WaitTimedOut> {
+        self.wait_for(1, reclaim)
+            .await
+            .map(|_permit| SharedPermit { _permit })
+    }
+
+    async fn wait_for(
+        &self,
+        permits: u32,
+        reclaim: impl Fn(&str),
+    ) -> Result<OwnedSemaphorePermit, WaitTimedOut> {
+        let started = Instant::now();
+        let deadline = self.config.wait_timeout.map(|t| started + t);
+        let acquire = Arc::clone(&self.semaphore).acquire_many_owned(permits);
+        tokio::pin!(acquire);
+        loop {
+            let next_poll = tokio::time::sleep(REAP_POLL);
+            tokio::select! {
+                // Prefer the permit over the timeout when both are ready.
+                biased;
+                got = &mut acquire => {
+                    break Ok(got.expect("the writer semaphore is never closed"));
+                }
+                _ = next_poll => {
+                    if let Some(h) = self.reclaimable_holder() {
+                        reclaim(&h);
+                    }
+                    if deadline.is_some_and(|d| Instant::now() >= d) {
+                        return Err(WaitTimedOut { waited: started.elapsed() });
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One shared permit on the slot. Dropping it releases the permit.
+pub(crate) struct SharedPermit {
+    _permit: OwnedSemaphorePermit,
 }
 
 /// Handles whose transaction was discarded by an idle reclaim, newest last.
@@ -349,5 +388,33 @@ mod tests {
         }
         assert!(!r.contains("tx-0"));
         assert!(r.contains(&format!("tx-{}", ReapedHandles::CAP + 9)));
+    }
+
+    #[tokio::test]
+    async fn shared_permits_coexist_and_exclude_the_whole_slot() {
+        let slot = WriterSlot::new(cfg(0, 0));
+        let a = slot.acquire_shared(|_| {}).await.unwrap();
+        let b = slot.acquire_shared(|_| {}).await.unwrap();
+
+        let s2 = Arc::clone(&slot);
+        let exclusive = tokio::spawn(async move { s2.acquire("tx-0", |_| {}).await.map(|_| ()) });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !exclusive.is_finished(),
+            "an exclusive holder ran beside shared ones"
+        );
+
+        // The exclusive waiter is ahead of a later shared one, so it is not starved.
+        let s3 = Arc::clone(&slot);
+        let late = tokio::spawn(async move { s3.acquire_shared(|_| {}).await.map(|_| ()) });
+        drop(a);
+        drop(b);
+        exclusive
+            .await
+            .unwrap()
+            .expect("exclusive after the shared holders");
+        late.await
+            .unwrap()
+            .expect("shared after the exclusive holder");
     }
 }
