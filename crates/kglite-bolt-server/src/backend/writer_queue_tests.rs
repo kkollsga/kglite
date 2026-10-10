@@ -2,6 +2,7 @@
 //! `optimistic`, driven through the same `BoltBackend` calls boltr makes.
 
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -632,4 +633,139 @@ async fn automatic_checkpoint_neither_waits_for_nor_blocks_the_slot_and_never_sa
         .expect("checkpoint");
     assert!(matches!(next, CheckpointOutcome::Written(v) if v > before));
     let _ = std::fs::remove_file(&path);
+}
+
+/// A backend over a graph file durable at `full`, so auto-commit data writes
+/// go through the engine's group-commit queue. The directory is removed on drop.
+struct DurableBackend {
+    backend: Arc<KgliteBackend>,
+    dir: std::path::PathBuf,
+}
+
+impl Drop for DurableBackend {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn durable_full_backend(wait_ms: u64) -> DurableBackend {
+    use kglite::api::durable::DurabilityLevel;
+    use kglite::api::session::{open_path, OpenSpec};
+    static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "kglite-bolt-group-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("g.kgl");
+    let spec = OpenSpec {
+        durability: DurabilityLevel::Full,
+        durability_explicit: true,
+        lease_timeout: None,
+        ..OpenSpec::writer()
+    };
+    let opened = open_path(&path, &spec).expect("open durable graph");
+    let backend = Arc::new(
+        KgliteBackend::new(
+            opened.session,
+            path,
+            false,
+            "127.0.0.1:0".into(),
+            CsvImportPolicy::Denied,
+            ServerIdentity::default(),
+            None,
+        )
+        .with_writer_config(WriterConfig {
+            mode: WriteConcurrency::Queue,
+            wait_timeout: (wait_ms > 0).then(|| Duration::from_millis(wait_ms)),
+            idle_timeout: None,
+        }),
+    );
+    DurableBackend { backend, dir }
+}
+
+async fn auto_write(b: &KgliteBackend, n: usize, q: &str) -> Result<(), BoltError> {
+    b.execute(&session(n), q, &HashMap::new(), &BoltDict::new(), None)
+        .await
+        .map(|_| ())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_auto_commit_writes_at_full_share_log_barriers() {
+    let d = durable_full_backend(0);
+    let b = &d.backend;
+    auto_write(b, 0, "CREATE (:Warm)").await.unwrap();
+    let writers = 48;
+    let before = b.session.wal_barrier_count();
+    let tasks: Vec<_> = (0..writers)
+        .map(|i| {
+            let b = Arc::clone(b);
+            tokio::spawn(
+                async move { auto_write(&b, i, &format!("CREATE (:Shared {{i: {i}}})")).await },
+            )
+        })
+        .collect();
+    for t in tasks {
+        t.await.unwrap().expect("queued writers never conflict");
+    }
+    let barriers = b.session.wal_barrier_count() - before;
+    assert_eq!(
+        scalar(b, "MATCH (n:Shared) RETURN count(n)"),
+        writers as i64
+    );
+    assert!(
+        barriers < writers as u64,
+        "{writers} commits took {barriers} barriers; none were shared"
+    );
+}
+
+#[tokio::test]
+async fn an_open_write_transaction_excludes_grouped_auto_commit_writes() {
+    let d = durable_full_backend(0);
+    let b = &d.backend;
+    let sa = session(1);
+    let tx = b.begin_transaction(&sa, &BoltDict::new()).await.unwrap();
+    run(b, &tx, "CREATE (:Held)").unwrap();
+
+    let b2 = Arc::clone(b);
+    let write = tokio::spawn(async move { auto_write(&b2, 2, "CREATE (:Grouped)").await });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        !write.is_finished(),
+        "a grouped write must wait behind the open writer"
+    );
+    b.commit(&sa, &tx)
+        .await
+        .expect("no grouped commit interleaved with the transaction");
+    tokio::time::timeout(Duration::from_secs(5), write)
+        .await
+        .expect("the grouped write proceeds once the slot frees")
+        .unwrap()
+        .unwrap();
+    assert_eq!(scalar(b, "MATCH (n) RETURN count(n)"), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn write_transactions_commit_cleanly_amid_grouped_auto_commit_writes() {
+    let d = durable_full_backend(0);
+    let b = &d.backend;
+    let grouped: Vec<_> = (0..24)
+        .map(|i| {
+            let b = Arc::clone(b);
+            tokio::spawn(async move {
+                auto_write(&b, 100 + i, &format!("CREATE (:Auto {{i: {i}}})")).await
+            })
+        })
+        .collect();
+    for r in 0..6 {
+        write_once(b, &session(r), &format!("CREATE (:ViaTx {{r: {r}}})"))
+            .await
+            .expect("a queued transaction never conflicts");
+    }
+    for t in grouped {
+        t.await.unwrap().unwrap();
+    }
+    assert_eq!(scalar(b, "MATCH (n:Auto) RETURN count(n)"), 24);
+    assert_eq!(scalar(b, "MATCH (n:ViaTx) RETURN count(n)"), 6);
 }

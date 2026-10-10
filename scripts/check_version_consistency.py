@@ -82,6 +82,18 @@ skipped, each labelled. When the announced entry cannot be resolved the section
 is omitted and a warning goes to stderr: a blurb that is silently a different
 release's is worse than an absent one, and three shipped notes proved it.
 
+CORRECTNESS-FIX ARM: the criteria above ask "can this release break the
+consumer". They cannot see "does this release FIX something the consumer is
+silently broken by". A ``### Fixed`` bullet in a CHANGELOG entry that opens
+with the marker ``**Silent wrong answer:**`` (``CORRECTNESS_FIX_MARKER``) forces
+a note to every consumer whose own version (``downstream_base``) sits below that
+release, regardless of range, quoting the marked bullets. Only the marker
+triggers it; an unmarked fix never does.
+
+Prose hits the classifier reads as history (``citation``) are never actions. A
+repo notified for another reason gets them in a separate, labelled
+"do not change" block; a repo whose only hits are citations is not notified.
+
 When a downstream is unaffected the run prints ``SKIP <repo>: <reason>`` and
 writes nothing.
 
@@ -1598,6 +1610,11 @@ class NotifyDecision:
     #: The upstream version this downstream already declares or resolves —
     #: max(metadata floor, lockfile) — or None when it declares neither.
     since: tuple[int, int, int] | None = None
+    #: ``(release, bullet text)`` for each marked silent-wrong-answer fix in a
+    #: release the downstream has not yet taken.
+    fixes: list[tuple[str, str]] = dataclasses.field(default_factory=list)
+    #: Prose the classifier read as history; informational, never an action.
+    citations: list[Finding] = dataclasses.field(default_factory=list)
 
 
 #: Files a symbol reference can live in at all. Markdown, RST and text are
@@ -1764,6 +1781,7 @@ def decide_notifications(
     repos: dict[str, Path],
     upstream_version: tuple[int, int, int],
     breaking_symbols: list[str] | None,
+    changelog: Path | None = None,
 ) -> list[NotifyDecision]:
     """Decide, per downstream, whether a note is owed.
 
@@ -1772,6 +1790,9 @@ def decide_notifications(
     has not yet taken: after its own version (``downstream_base``) up to and
     including ``upstream_version``. A downstream that skips releases otherwise
     never hears about their breaks.
+
+    ``changelog`` is the upstream CHANGELOG; with it, marked correctness fixes
+    in those same releases also earn a note (see ``marked_fixes``).
     """
     decisions: list[NotifyDecision] = []
     for repo in DOWNSTREAM_REPOS:
@@ -1798,6 +1819,8 @@ def decide_notifications(
         else:
             symbol_versions = dict(breaking_symbols_between(since, upstream_version))
         touched = find_symbol_uses(root, list(symbol_versions))
+        fixes = marked_fixes(changelog, since, upstream_version) if changelog is not None else []
+        citations = [f for f in mine if f.kind == "citation"]
 
         reasons: list[str] = []
         relevant: list[Finding] = []
@@ -1827,6 +1850,11 @@ def decide_notifications(
                 + ", ".join(f"`{s}` (broken in {symbol_versions[s]})" for s, _ in touched)
                 + " — touched by a breaking change you have not yet taken"
             )
+        if fixes:
+            reasons.append(
+                f"{len(fixes)} marked silent-wrong-answer fix(es) in releases you have not yet taken "
+                f"({', '.join(sorted({v for v, _ in fixes}, key=parse_version))})"
+            )
 
         if reasons:
             decisions.append(
@@ -1839,6 +1867,8 @@ def decide_notifications(
                     touched_symbols=touched,
                     symbol_versions={s: symbol_versions[s] for s, _ in touched},
                     since=since,
+                    fixes=fixes,
+                    citations=citations,
                 )
             )
             continue
@@ -1900,26 +1930,24 @@ def changelog_entry(path: Path, version: tuple[int, int, int]) -> list[str] | No
     return body
 
 
-def summarise_changelog_entry(body: list[str], version: str) -> list[str]:
-    """Condense a changelog entry into one line per top-level bullet.
+#: The greppable label that marks a ``### Fixed`` bullet as a silent wrong
+#: answer (a result that was wrong without any error). The notifier reads it
+#: from the CHANGELOG entries it parses here; write the bullet as
+#: ``- **Silent wrong answer:** <what was wrong and what is right now>``.
+CORRECTNESS_FIX_MARKER = "**Silent wrong answer:**"
+MAX_FIX_QUOTE = 600
 
-    Each entry in this project's changelog opens with a bold lead sentence that
-    states the change; the paragraphs after it are evidence and measurement.
-    Quoting the lead verbatim keeps the note honest — it is the changelog's own
-    words about the release it names — while staying short enough to read in an
-    inbox. A bullet without a bold lead falls back to its first sentence.
-    """
-    picked: list[tuple[str, str]] = []
+
+def _changelog_bullets(body: list[str]) -> list[tuple[str, str]]:
+    """``(subsection, text)`` per top-level bullet of an entry body."""
+    out: list[tuple[str, str]] = []
     section = ""
     current: list[str] | None = None
 
     def flush() -> None:
         nonlocal current
         if current:
-            text = " ".join(part.strip() for part in current).strip()
-            lead = _lead_sentence(text)
-            if lead:
-                picked.append((section, lead))
+            out.append((section, " ".join(part.strip() for part in current).strip()))
         current = None
 
     for raw in body:
@@ -1938,6 +1966,43 @@ def summarise_changelog_entry(body: list[str], version: str) -> list[str]:
             else:
                 current.append(raw)
     flush()
+    return out
+
+
+def marked_fixes(
+    path: Path, since: tuple[int, int, int] | None, upstream_version: tuple[int, int, int]
+) -> list[tuple[str, str]]:
+    """``(release, bullet)`` for each ``### Fixed`` bullet opening with
+    ``CORRECTNESS_FIX_MARKER`` in a release after ``since`` through
+    ``upstream_version``. Empty when ``since`` is None: a repo that declares
+    nothing from us is not a consumer."""
+    if since is None:
+        return []
+    out: list[tuple[str, str]] = []
+    for release in sorted((v for v in changelog_versions(path) if since < v <= upstream_version), reverse=True):
+        for section, text in _changelog_bullets(changelog_entry(path, release) or []):
+            if section.lower().startswith("fixed") and text.startswith(CORRECTNESS_FIX_MARKER):
+                quote = " ".join(text[len(CORRECTNESS_FIX_MARKER) :].split())
+                if len(quote) > MAX_FIX_QUOTE:
+                    quote = quote[: MAX_FIX_QUOTE - 1].rstrip() + "…"
+                out.append((fmt_version(release), quote))
+    return out
+
+
+def summarise_changelog_entry(body: list[str], version: str) -> list[str]:
+    """Condense a changelog entry into one line per top-level bullet.
+
+    Each entry in this project's changelog opens with a bold lead sentence that
+    states the change; the paragraphs after it are evidence and measurement.
+    Quoting the lead verbatim keeps the note honest — it is the changelog's own
+    words about the release it names — while staying short enough to read in an
+    inbox. A bullet without a bold lead falls back to its first sentence.
+    """
+    picked: list[tuple[str, str]] = []
+    for section, text in _changelog_bullets(body):
+        lead = _lead_sentence(text)
+        if lead:
+            picked.append((section, lead))
 
     out = [f"{sec}: {lead}" if sec else lead for sec, lead in picked[:MAX_HIGHLIGHTS]]
     if len(picked) > MAX_HIGHLIGHTS:
@@ -2033,7 +2098,8 @@ def compose_note(
     """
     ver = fmt_version(upstream_version)
     kinds = {f.kind for f in decision.findings}
-    docs_only = kinds <= {"stale-docs"} and not decision.touched_symbols
+    docs_only = kinds <= {"stale-docs"} and not decision.touched_symbols and not decision.fixes
+    fix_only = bool(decision.fixes) and not decision.findings and not decision.touched_symbols
 
     if decision.blocked:
         slug, note_type = "blocked-upgrade", "coordination"
@@ -2043,6 +2109,16 @@ def compose_note(
             f"to the rest of the ecosystem because {decision.repo} **cannot resolve it "
             f"as declared** — a version requirement here excludes {ver}, so the upgrade "
             f"fails before any code compiles."
+        )
+    elif fix_only:
+        slug, note_type = "correctness-fix", "heads-up"
+        title = f"kglite {ver} published — fixes a silent wrong answer in a release you have not taken"
+        opening = (
+            f"kglite {ver} is published. Nothing in {decision.repo} is blocked or broken by it. "
+            f"This note is going to {decision.repo} because a release after "
+            f"{fmt_version(decision.since)} carries a CHANGELOG fix marked as a silent wrong "
+            f"answer: a result that came back wrong with no error. Your range admits the fix; "
+            f"whether you are exposed depends on what you query."
         )
     elif docs_only:
         slug, note_type = "documented-version-drift", "heads-up"
@@ -2107,7 +2183,12 @@ def compose_note(
         ]
         lines.append("")
 
-    if highlights and not docs_only:
+    if decision.fixes:
+        lines += ["**Silent-wrong-answer fixes you have not yet taken** (quoted from the CHANGELOG):", ""]
+        lines += [f"- [{v}] {text}" for v, text in decision.fixes]
+        lines.append("")
+
+    if highlights and not docs_only and not fix_only:
         # Decided by coverage, not by the first character of the first line: a
         # bullet that opens with a markdown link starts with "[" too.
         if releases_covered > 1:
@@ -2123,8 +2204,31 @@ def compose_note(
         lines += [f"- {h}" for h in highlights]
         lines.append("")
 
+    if decision.citations:
+        cited: list[str] = []
+        for f in decision.citations:
+            for d in f.declarations:
+                entry = f"{d.rel}:{d.line}\n    {d.raw}"
+                if entry not in cited:
+                    cited.append(entry)
+        lines += [
+            "**Informational — do NOT change** (prose the classifier read as recorded history, "
+            "not a requirement; moving it would falsify the record):",
+            "",
+            "```",
+            *cited,
+            "```",
+            "",
+        ]
+
     lines += ["## Ask / action requested", ""]
-    if decision.blocked:
+    if fix_only:
+        lines.append(
+            f"- Upgrade to {ver} when convenient and re-run the queries the fix touches. A golden "
+            f"or snapshot frozen against the old answer will now differ: check it against the "
+            f"bullet(s) above before re-freezing."
+        )
+    elif decision.blocked:
         lines.append(
             f"- Widen or bump every requirement above so it admits {ver}, refresh the "
             f"lockfile, and run your gate. Until that lands this repo is held on a "
@@ -2140,6 +2244,11 @@ def compose_note(
         lines.append(
             f"- Move the sites above to {ver} and refresh the lockfile. They sit outside "
             f"package metadata, so nothing in your own CI will notice they drifted."
+        )
+    if decision.fixes and not fix_only:
+        lines.append(
+            "- Read the marked fix(es) above: a golden or snapshot frozen against the old answer "
+            "will differ after the upgrade."
         )
     # A note whose only reason is a referenced breaking symbol has no sites to
     # move; "move the sites above" pointed at nothing at all in that case.
@@ -2437,7 +2546,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.notify:
         date = args.date or _dt.date.today().isoformat()
-        decisions = decide_notifications(findings, decls, repos, upstream_version, args.breaking_symbol)
+        decisions = decide_notifications(
+            findings, decls, repos, upstream_version, args.breaking_symbol, repos[UPSTREAM_REPO] / "CHANGELOG.md"
+        )
         return run_notify(decisions, repos, upstream_version, date, repos[UPSTREAM_REPO], args.dry_run)
 
     if args.json:

@@ -638,18 +638,6 @@
   "tests/test_temporal_empty_intervals.py::test_a_load_keeps_an_empty_row_with_one_warning[memory_guards]": {
     "owner": "storage-parity"
   },
-  "tests/test_mixed_kind_column_save_parity.py::test_a_float_column_reports_the_type_it_stores_after_an_int_batch[memory]": {
-    "owner": "storage-parity"
-  },
-  "tests/test_mixed_kind_column_save_parity.py::test_a_float_column_reports_the_type_it_stores_after_an_int_batch[mapped]": {
-    "owner": "storage-parity"
-  },
-  "tests/test_mixed_kind_column_save_parity.py::test_a_float_column_reports_the_type_it_stores_after_an_int_batch[disk]": {
-    "owner": "storage-parity"
-  },
-  "tests/test_mixed_kind_column_save_parity.py::test_a_float_column_reports_the_type_it_stores_after_an_int_batch[disk_reopened]": {
-    "owner": "storage-parity"
-  },
   "tests/test_timestamp_column_parity.py::test_microsecond_timestamps_round_trip_with_nulls_and_set[memory]": {
     "owner": "storage-parity"
   },
@@ -1431,6 +1419,99 @@
     "owner": "storage-parity"
   },
   "tests/test_valid_time_peer_hist.py::test_a_write_between_two_counts_moves_the_answer[with_contractor_peer-1-all-disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_mixed_kind_column_save_parity.py::test_a_float_first_column_keeps_a_later_integer_an_integer[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_mixed_kind_column_save_parity.py::test_a_float_first_column_keeps_a_later_integer_an_integer[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_mixed_kind_column_save_parity.py::test_a_float_first_column_keeps_a_later_integer_an_integer[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_mixed_kind_column_save_parity.py::test_a_float_first_column_keeps_a_later_integer_an_integer[disk_reopened]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_mixed_kind_column_save_parity.py::test_an_integer_first_column_keeps_a_later_float_and_records_mixed[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_mixed_kind_column_save_parity.py::test_an_integer_first_column_keeps_a_later_float_and_records_mixed[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_mixed_kind_column_save_parity.py::test_an_integer_first_column_keeps_a_later_float_and_records_mixed[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_mixed_kind_column_save_parity.py::test_an_integer_first_column_keeps_a_later_float_and_records_mixed[disk_reopened]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_mixed_kind_column_save_parity.py::test_a_declared_float_column_still_converts_integers": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_text_bounds_of_a_reload_are_stored_as_dates[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_text_bounds_of_a_reload_are_stored_as_dates[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_text_bounds_of_a_reload_are_stored_as_dates[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_text_bounds_with_a_time_part_are_stored_as_timestamps[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_text_bounds_with_a_time_part_are_stored_as_timestamps[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_text_bounds_with_a_time_part_are_stored_as_timestamps[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_an_unparsable_text_bound_is_still_refused[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_an_unparsable_text_bound_is_still_refused[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_an_unparsable_text_bound_is_still_refused[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_text_edge_bounds_are_stored_as_dates[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_text_edge_bounds_are_stored_as_dates[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_text_edge_bounds_are_stored_as_dates[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_half_open_timestamp_from_after_a_date_to_midnight_is_refused_as_inverted[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_half_open_timestamp_from_after_a_date_to_midnight_is_refused_as_inverted[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_half_open_timestamp_from_after_a_date_to_midnight_is_refused_as_inverted[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_closed_timestamp_from_within_a_date_to_day_is_valid[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_closed_timestamp_from_within_a_date_to_day_is_valid[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_closed_timestamp_from_within_a_date_to_day_is_valid[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_index_listing_parity.py::test_an_index_is_reported_by_has_index_and_list_indexes[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_index_listing_parity.py::test_an_index_is_reported_by_has_index_and_list_indexes[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_index_listing_parity.py::test_an_index_is_reported_by_has_index_and_list_indexes[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_index_listing_parity.py::test_an_index_is_reported_by_has_index_and_list_indexes[disk_reopened]": {
     "owner": "storage-parity"
   }
 }

@@ -24,10 +24,8 @@ impl DirGraph {
     /// A type that is absent still falls through, so declaring a type with no
     /// properties creates its (empty) entry exactly as before.
     ///
-    /// A `Float64` record whose stored column is still a float column is kept
-    /// when an `Int64` arrives ([`Self::float_column_absorbs_int`]): the column
-    /// stores the integer as a float, so an `Int64` record would contradict
-    /// every value read back.
+    /// An `Int64` against a `Float64` record (or the reverse) records `mixed`,
+    /// as the column then holds both kinds ([`crate::graph::schema::numeric_record_after`]).
     pub fn upsert_node_type_metadata(
         &mut self,
         node_type: &str,
@@ -35,10 +33,11 @@ impl DirGraph {
     ) {
         if let Some(existing) = self.node_type_metadata.get(node_type) {
             for (key, kind) in props.iter_mut() {
-                if let Some(recorded) = existing.get(key) {
-                    if self.float_column_absorbs_int(node_type, key, recorded, kind) {
-                        kind.clone_from(recorded);
-                    }
+                if let Some(now) = existing
+                    .get(key)
+                    .and_then(|recorded| crate::graph::schema::numeric_record_after(recorded, kind))
+                {
+                    *kind = now.to_string();
                 }
             }
             if props.iter().all(|(k, v)| existing.get(k) == Some(v)) {
@@ -52,29 +51,6 @@ impl DirGraph {
         for (k, v) in props {
             entry.insert(k, v);
         }
-    }
-
-    /// Whether an `incoming` Int64 value of `node_type.key`, recorded
-    /// `Float64`, lands in a stored float column — which converts an integer
-    /// it can hold exactly (`TypedColumn::push`), so the record stays the
-    /// float one. A heap tail holds the column of a key first written to its
-    /// rows; the base part and the tail fold into one column, so either part
-    /// holding a float column decides.
-    pub(crate) fn float_column_absorbs_int(
-        &self,
-        node_type: &str,
-        key: &str,
-        recorded: &str,
-        incoming: &str,
-    ) -> bool {
-        use crate::graph::storage::column_store::TypedColumn;
-        TypedColumn::canonical_type_str(recorded) == Some("float64")
-            && TypedColumn::canonical_type_str(incoming) == Some("int64")
-            && self.column_store(node_type).is_some_and(|store| {
-                store
-                    .key_column_types(InternedKey::from_str(key))
-                    .any(|kind| kind == "float64")
-            })
     }
 
     /// Run one write with caller-supplied freshness provenance, restoring the

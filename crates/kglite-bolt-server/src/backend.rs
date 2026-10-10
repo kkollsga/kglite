@@ -128,6 +128,7 @@ mod result_stream;
 #[cfg(test)]
 mod writer_queue_tests;
 mod writer_slot;
+use admission::wait_timeout_error;
 use auto_commit::{access_mode_error, is_write_statement};
 use intercepts::{
     backup_stream, checkpoint_stream, parse_backup_call, parse_checkpoint_call,
@@ -135,7 +136,7 @@ use intercepts::{
     ServerFactsCall, ServerFactsVerb,
 };
 use result_stream::{decode_params, finish_stream, off_async_worker};
-use writer_slot::{ReapedHandles, WriterPermit, WriterSlot};
+use writer_slot::{ReapedHandles, SharedPermit, WriterPermit, WriterSlot};
 pub(crate) use writer_slot::{WriteConcurrency, WriterConfig};
 
 /// Bolt backend wrapping a loaded kglite graph.

@@ -205,9 +205,9 @@
       "status": "accepted"
     },
     "current.linux.json": {
-      "evidence": "reference_0_19_3_forked_cells_renamed.linux.json with one cell renamed: test_bench_hop1_deg3_memory is now test_bench_hop1_deg3_expand_memory (0.19.6), because the old name's earlier rows measured the fused count(*) query and every longitudinal gate read the expansion as millions of percent of drift. The renamed row is PROVISIONAL: its stats are the old row scaled to 157.4 ms min, the slowest Linux CI min observed for the expansion query on this branch (PR #223 perf-gate logs: 152.6, 151.8, 157.4 ms), so it only loosens the leg-2 gate; it is replaced by a Linux measurement once a CI artifact carries the cell. All other rows unchanged.",
+      "evidence": "Verified released kglite==0.13.2 Linux/Python3.12 wheel and complete workload; provenance retained in kglite_baseline.",
       "platform": "Linux/x86_64",
-      "sha256": "99bd2cd25cca9925e3bd1881ae510f1c5f4002401f3335b3207c53569b2ca221",
+      "sha256": "1aa5aafdcf1b66438dc851e938898c1d790227c3677697770bf36f78e0b49ebf",
       "status": "accepted"
     },
     "reference_0_16_23.linux.json": {
@@ -269,11 +269,17 @@
       "platform": "Linux/x86_64",
       "sha256": "99bd2cd25cca9925e3bd1881ae510f1c5f4002401f3335b3207c53569b2ca221",
       "status": "accepted"
+    },
+    "reference_0_19_6_measured_7763.linux.json": {
+      "evidence": "Verified released kglite==0.13.2 Linux/Python3.12 wheel and complete workload; provenance retained in kglite_baseline.",
+      "platform": "Linux/x86_64",
+      "sha256": "1aa5aafdcf1b66438dc851e938898c1d790227c3677697770bf36f78e0b49ebf",
+      "status": "accepted"
     }
   },
   "references": {
     "Darwin/arm64": "0_19_6.json",
-    "Linux/x86_64": "reference_0_19_6_hop1_renamed.linux.json"
+    "Linux/x86_64": "reference_0_19_6_measured_7763.linux.json"
   },
   "schema_version": 1
 }

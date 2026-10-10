@@ -117,8 +117,8 @@ These attributes matter when you paste `describe()` into a prompt.
   - The local `pip install kglite` can be on a different version from the MCP-server-side binary. The schema you read comes from the server's binary, not your local one.
   - Surface this if you see a schema/query mismatch.
 - **`id_alias="…"` / `title_alias="…"`** on a `<type>` element.
-  - They are set when `add_nodes(...)` was called with a `unique_id_field` other than `"id"` (e.g. `"npdid"`) or a `node_title_field` other than `"title"` (e.g. `"proposal_name"`).
-  - The alias tells the agent that `n.npdid` and `n.id` resolve to the same field. The agent can use whichever name appears in the source data.
+  - They are set when `add_nodes(...)` was called with a `unique_id_field` other than `"id"` (e.g. `"person_id"`) or a `node_title_field` other than `"title"` (e.g. `"proposal_name"`).
+  - The alias tells the agent that `n.person_id` and `n.id` resolve to the same field. The agent can use whichever name appears in the source data.
   - Both forms work in `MATCH` / `WHERE`. Result rows always come back keyed under the canonical `id` / `title`.
 - **`revs="…"`** on the `<active_graph …/>` header (MCP code-graph sessions).
   - It is present only when the server built a **multi-revision** code graph: `repo_management(name, revs=N|[list])` (github) or `set_root_dir(path, revs=…)` (local). It names the loaded rev-set, e.g. `revs="v1.0,v2.0,HEAD"`.

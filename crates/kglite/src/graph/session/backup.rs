@@ -1,13 +1,14 @@
 //! Online backup: a consistent single-file `.kgl` of the published graph.
 //!
-//! [`Session::backup`] fixes its point in time under both session locks for the
-//! length of an `Arc` clone, then serializes that snapshot with no lock held,
+//! [`Session::backup`] fixes its point in time under the commit gate and both
+//! session locks for the length of an `Arc` clone, then serializes that snapshot with no lock held,
 //! so committers are never stalled for the serialize.
 //!
-//! **The point.** A commit holds the graph mutex across its log append and the
-//! `Arc` swap, and the durability mutex is only taken while the graph mutex is
-//! held (see [`super::durable`]). Holding both therefore yields a published
-//! graph together with the exact LSN of the last frame inside it.
+//! **The point.** A commit holds the commit gate across its log append, its
+//! barrier and the `Arc` swap (see [`super::durable`]). Holding the gate
+//! therefore yields a published graph together with the exact LSN of the last
+//! frame inside it; without it a commit between append and swap would pair the
+//! graph that lacks its frame with an LSN that includes it.
 //!
 //! **No mutation of the snapshot.** The ordinary save prepares the graph it
 //! writes in place (`prepare_kgl_write`), which on a shared `Arc` forks the
@@ -74,8 +75,8 @@ const DISK_REFUSAL: &str = "online backup writes a single .kgl file, which a dis
 impl Session {
     /// Write a consistent single-file backup of the published graph to `dest`.
     ///
-    /// Concurrent commits keep flowing: both locks are held only to fix the
-    /// point in time. Memory and mapped graphs are supported; a disk graph is
+    /// Concurrent commits keep flowing: the gate and both locks are held only to
+    /// fix the point in time (which waits out a commit mid-barrier). Memory and mapped graphs are supported; a disk graph is
     /// refused. `dest` must not alias the live checkpoint (see
     /// [`BackupOptions::live_path`]) and a stray `dest-wal` holding commits the
     /// previous `dest` lacks is refused; an existing `dest` is replaced
@@ -124,9 +125,11 @@ impl Session {
     }
 
     /// The published graph and the LSN of the last frame it contains, fixed
-    /// together under both locks (graph first, then durability — the commit
-    /// order). The second value is `None` for a non-durable session.
+    /// together under the commit gate (so no commit is between its append and
+    /// its swap), then graph, then durability. The second value is `None` for a
+    /// non-durable session.
     fn consistent_point(&self) -> (Arc<DirGraph>, Option<u64>, Duration) {
+        let _commit = self.lock_commit_gate();
         let graph = self.graph.lock().unwrap_or_else(|p| p.into_inner());
         let durable = self.durable.lock().unwrap_or_else(|p| p.into_inner());
         let held = Instant::now();

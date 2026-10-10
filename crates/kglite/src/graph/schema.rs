@@ -675,10 +675,24 @@ impl SelectionLevel {
         self.selections.insert(parent, children);
     }
 
+    /// The groups in a fixed order: the parentless group first, then parents by
+    /// ascending node index (creation order). `selections` is a hash map, so
+    /// its own iteration order changes between processes; every accessor that
+    /// lists groups or nodes goes through here, and the children of each group
+    /// are already in ascending node index order from the traversal that built
+    /// them.
+    fn ordered_groups(&self) -> Vec<(&Option<NodeIndex>, &Vec<NodeIndex>)> {
+        let mut groups: Vec<_> = self.selections.iter().collect();
+        if groups.len() > 1 {
+            groups.sort_unstable_by_key(|(parent, _)| **parent);
+        }
+        groups
+    }
+
     pub fn get_all_nodes(&self) -> Vec<NodeIndex> {
-        self.selections
-            .values()
-            .flat_map(|children| children.iter().copied())
+        self.ordered_groups()
+            .into_iter()
+            .flat_map(|(_, children)| children.iter().copied())
             .collect()
     }
 
@@ -687,14 +701,14 @@ impl SelectionLevel {
     }
 
     pub fn iter_groups(&self) -> impl Iterator<Item = (&Option<NodeIndex>, &Vec<NodeIndex>)> {
-        self.selections.iter()
+        self.ordered_groups().into_iter()
     }
 
     /// Non-allocating alternative to `get_all_nodes()` for iterating or counting.
     pub fn iter_node_indices(&self) -> impl Iterator<Item = NodeIndex> + '_ {
-        self.selections
-            .values()
-            .flat_map(|children| children.iter().copied())
+        self.ordered_groups()
+            .into_iter()
+            .flat_map(|(_, children)| children.iter().copied())
     }
 
     pub fn node_count(&self) -> usize {
@@ -1047,6 +1061,25 @@ impl ConnectionTypeInfo {
             }
         }
     }
+}
+
+/// The record a numeric write leaves when it disagrees with the recorded
+/// kind: `mixed` for an `Int64` against `Float64` (either order) or against an
+/// already-`mixed` record. A float column no longer converts an integer, so the
+/// column holds both kinds and a bare `Int64` or `Float64` record would
+/// contradict a value read back. `None` leaves the incoming kind as it is.
+pub(crate) fn numeric_record_after(recorded: &str, incoming: &str) -> Option<&'static str> {
+    use crate::graph::storage::column_store::TypedColumn;
+    let numeric = |kind| matches!(kind, Some("int64" | "float64"));
+    let recorded_mixed = recorded.eq_ignore_ascii_case("mixed");
+    let (recorded, incoming) = (
+        TypedColumn::canonical_type_str(recorded),
+        TypedColumn::canonical_type_str(incoming),
+    );
+    let diverges = (recorded == Some("float64") && incoming == Some("int64"))
+        || (recorded == Some("int64") && incoming == Some("float64"))
+        || (recorded_mixed && numeric(incoming));
+    diverges.then_some("mixed")
 }
 
 /// What a recorded property type becomes when a write observes `observed` —

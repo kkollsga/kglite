@@ -906,6 +906,56 @@ KgliteStatusCode kglite_export_rdf(struct KgliteGraph *graph,
 #endif
 
 /**
+ * [`kglite_export_csv`] over a session's current graph.
+ *
+ * Exports the committed state the session publishes at the call — a
+ * consistent snapshot, so concurrent writers neither block nor tear it. The
+ * graph a session wraps is consumed from its `KgliteGraph` handle at
+ * [`kglite_session_new`](crate::kglite_session_new), so a binding that holds
+ * only a session uses this symbol; arguments, outputs and errors are those of
+ * `kglite_export_csv` with `session` (borrowed, not consumed) in place of
+ * `graph`.
+ *
+ * # Safety
+ *
+ * `session` must be a valid handle from
+ * [`kglite_session_new`](crate::kglite_session_new), not yet freed;
+ * `output_dir` a null-terminated UTF-8 string; the out-pointers null or valid
+ * writable slots.
+ */
+
+KgliteStatusCode kglite_session_export_csv(const struct KgliteSession *session,
+                                           const char *output_dir,
+                                           const char **out_summary_json,
+                                           const char **out_error_msg);
+
+#if defined(KGLITE_FEATURE_RDF)
+/**
+ * [`kglite_export_rdf`] over a session's current graph.
+ *
+ * Exports a consistent snapshot of the committed state, like
+ * [`kglite_session_export_csv`]. Arguments, outputs and errors are those of
+ * `kglite_export_rdf` with `session` (borrowed, not consumed) in place of
+ * `graph`. Requires the `rdf` feature.
+ *
+ * # Safety
+ *
+ * `session` must be a valid handle from
+ * [`kglite_session_new`](crate::kglite_session_new), not yet freed; string
+ * arguments null-terminated UTF-8 or null where `kglite_export_rdf` allows;
+ * the out-pointers null or valid writable slots.
+ */
+
+KgliteStatusCode kglite_session_export_rdf(const struct KgliteSession *session,
+                                           const char *path,
+                                           const char *format,
+                                           const char *base,
+                                           uint8_t schema_org,
+                                           const char **out_summary_json,
+                                           const char **out_error_msg);
+#endif
+
+/**
  * Create a new, empty in-memory knowledge graph.
  *
  * The returned handle owns a fresh, empty `DirGraph` — the C-side

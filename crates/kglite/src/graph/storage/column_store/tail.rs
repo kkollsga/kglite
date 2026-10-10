@@ -434,27 +434,6 @@ impl ColumnStore {
 
     /// Whether this is a heap store with a tail ([`Self::fold_heap_tail`]).
     #[inline]
-    /// The type tag of `key`'s column in each part of the store that has
-    /// one: the base part (its own column, else its mmap base) and the tail.
-    /// A key first written while a tail exists may live only in the tail.
-    pub(crate) fn key_column_types(
-        &self,
-        key: InternedKey,
-    ) -> impl Iterator<Item = &'static str> + '_ {
-        let own = |store: &ColumnStore| {
-            store
-                .schema
-                .slot(key)
-                .and_then(|slot| store.column_type_str(slot as usize))
-        };
-        let base = own(self).or_else(|| {
-            self.mmap_store
-                .as_ref()
-                .and_then(|base| base.column_kind(key))
-        });
-        base.into_iter().chain(self.tail.as_deref().and_then(own))
-    }
-
     pub(crate) fn has_heap_tail(&self) -> bool {
         self.mmap_store.is_none() && self.tail.is_some()
     }

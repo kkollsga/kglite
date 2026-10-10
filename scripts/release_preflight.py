@@ -292,6 +292,21 @@ def check_hygiene() -> Check:
     return Check("release hygiene", True, "CHANGELOG structure and release-constant markers clean")
 
 
+def check_docs_facts() -> Check:
+    """The rendered project-facts page must match the registries it is built
+    from; a qualification after the last render leaves it stale and the docs
+    job red on the release commit (0.17.1, 0.18.0, 0.19.x)."""
+    result = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts/render_docs_facts.py"), "--check"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return Check("docs facts", False, "docs/_generated/project-facts.md is stale", "make docs-facts")
+    return Check("docs facts", True, "project-facts page matches the registries")
+
+
 def check_fast_forward(base: str) -> Check:
     """`base` must be an ancestor of HEAD, or the release push is not a
     fast-forward and step 9's `git push origin HEAD:main` will be
@@ -352,6 +367,7 @@ def main() -> int:
         check_captured_constants(version),
         check_server_binaries(),
         check_formatting(),
+        check_docs_facts(),
         check_fast_forward(args.base),
     ]
 

@@ -51,6 +51,7 @@ enum AuthScheme {
 #[derive(Parser, Debug)]
 #[command(
     name = "kglite-bolt-server",
+    version,
     about = "Bolt v5.x protocol server for kglite knowledge graphs.",
     long_about = "Loads a .kgl file and serves it over the Neo4j Bolt wire protocol. \
                   The official Python driver path is regression-tested; other Bolt v5 \
@@ -1329,6 +1330,14 @@ async fn finish_shutdown(
 mod tests {
     use super::*;
 
+    #[test]
+    fn version_flag_displays_version() {
+        let error = Cli::try_parse_from(["kglite-bolt-server", "--version"])
+            .expect_err("--version exits through clap");
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+        assert!(error.to_string().contains(env!("CARGO_PKG_VERSION")));
+    }
+
     /// Process id + nanosecond clock so parallel test threads (and parallel
     /// `cargo test` invocations) cannot collide.
     fn scratch_dir(tag: &str) -> PathBuf {
@@ -1514,6 +1523,12 @@ mod tests {
         .expect("a durable memory graph");
         let session = Arc::new(started.session);
         let lease = started.writer_lease;
+        // A fresh log is its header alone. The checkpoint policy measures the
+        // frames after it, so the settled bound below adds it back: a log whose
+        // frames sit just under the threshold is within policy, not untrimmed.
+        let wal_header =
+            std::fs::metadata(kglite::api::durable::wal_path(&path)).map_or(0, |m| m.len());
+        assert!(wal_header > 0, "a durable open writes the log header");
         let state: CheckpointState = Arc::default();
         let stop = Arc::new(AtomicBool::new(false));
         let progress = Arc::new(AtomicU64::new(0));
@@ -1575,7 +1590,7 @@ mod tests {
         // `Session::needs_checkpoint`); the load-independent proof that trimming happened is that
         // far more than the threshold was acknowledged.
         let deadline = Instant::now() + Duration::from_secs(60);
-        let bound = || (8 * 1024).max(std::fs::metadata(&path).map_or(0, |m| m.len()));
+        let bound = || (8 * 1024).max(std::fs::metadata(&path).map_or(0, |m| m.len())) + wal_header;
         while wal_len() > bound() && Instant::now() < deadline {
             tokio::time::sleep(poll).await;
         }

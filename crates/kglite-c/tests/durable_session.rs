@@ -697,6 +697,48 @@ fn wal_len(path: &Path) -> u64 {
 /// into the checkpoint inline; with `0` the log only grows. The bound is whole
 /// MiB, so the writes carry a 64 KiB payload to cross 1 MiB in a few dozen
 /// commits.
+/// At `full`, plain statements share the session's group-commit queue and its
+/// log barriers, while a statement outside the queue (schema DDL) still takes
+/// the gate exclusively. Neither side may lose a commit to the other.
+#[test]
+fn full_writers_share_the_queue_and_ddl_never_conflicts_with_them() {
+    let dir = TestDir::new("full-queue");
+    let opened = open_ok(&dir.graph(), create("full"));
+    let session = opened.session as usize;
+    let writers: Vec<_> = (0..8)
+        .map(|w| {
+            std::thread::spawn(move || {
+                (0..40)
+                    .map(|i| {
+                        write(
+                            session as *mut KgliteSession,
+                            &format!("CREATE (:T {{w: {w}, i: {i}}})"),
+                        )
+                    })
+                    .filter(|status| *status != KgliteStatusCode::Ok)
+                    .count()
+            })
+        })
+        .collect();
+    let ddl = std::thread::spawn(move || {
+        (0..10)
+            .map(|k| {
+                write(
+                    session as *mut KgliteSession,
+                    &format!("CREATE INDEX FOR (n:T) ON (n.p{k})"),
+                )
+            })
+            .filter(|status| *status != KgliteStatusCode::Ok)
+            .count()
+    });
+    let failed: usize = writers.into_iter().map(|w| w.join().unwrap()).sum();
+    assert_eq!(failed, 0, "queued writes refused under concurrency");
+    assert_eq!(ddl.join().unwrap(), 0, "DDL lost a race with the queue");
+    assert_eq!(count(opened.session), 320);
+    assert_eq!(close(opened.session), KgliteStatusCode::Ok);
+    free(opened.session);
+}
+
 #[test]
 fn auto_checkpoint_bounds_the_log_and_zero_disables_it() {
     let pad = "x".repeat(64 * 1024);
@@ -728,4 +770,50 @@ fn auto_checkpoint_bounds_the_log_and_zero_disables_it() {
         assert_eq!(count(second.session), 40, "mib={mib}");
         free(second.session);
     }
+}
+
+/// Concurrent writers on one durable handle must all commit. A durable write
+/// runs on a fork and commits optimistically; before the session write gate,
+/// readers holding snapshots pushed writers onto that path and racing commits
+/// came back `TransactionConflict` (the 0.19.6 Java shootout: 1 in ~7k).
+#[test]
+fn concurrent_durable_writers_with_readers_all_commit() {
+    let dir = TestDir::new("concurrent-writers");
+    let opened = open_ok(&dir.graph(), create("normal"));
+    let session = opened.session as usize;
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let readers: Vec<_> = (0..4)
+        .map(|_| {
+            let done = done.clone();
+            std::thread::spawn(move || {
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    count(session as *const KgliteSession);
+                }
+            })
+        })
+        .collect();
+    let writers: Vec<_> = (0..8)
+        .map(|w| {
+            std::thread::spawn(move || {
+                (0..50)
+                    .map(|i| {
+                        write(
+                            session as *mut KgliteSession,
+                            &format!("CREATE (:T {{w: {w}, i: {i}}})"),
+                        )
+                    })
+                    .filter(|status| *status != KgliteStatusCode::Ok)
+                    .count()
+            })
+        })
+        .collect();
+    let failed: usize = writers.into_iter().map(|w| w.join().unwrap()).sum();
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    for reader in readers {
+        reader.join().unwrap();
+    }
+    assert_eq!(failed, 0, "writes refused under concurrency");
+    assert_eq!(count(opened.session), 400);
+    assert_eq!(close(opened.session), KgliteStatusCode::Ok);
+    free(opened.session);
 }

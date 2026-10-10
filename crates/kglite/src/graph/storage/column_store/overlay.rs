@@ -7,8 +7,8 @@ type OverflowBytes<'a> = (Cow<'a, [u8]>, Cow<'a, [u8]>);
 
 /// The kinds of one column's values, tallied for [`ColumnStore::flattened_owned`].
 ///
-/// A typed column may convert what it is handed — a Float64 column stores an
-/// exact Int64 as a float — so a copy that must return every value as it was
+/// A typed column may convert what it is handed — a Float64 column stores a
+/// `UniqueId` as a float — so a copy that must return every value as it was
 /// types a column only by a kind every non-null value already has.
 #[derive(Default)]
 struct FlattenKind {

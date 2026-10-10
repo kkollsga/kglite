@@ -153,15 +153,15 @@ A skill does not have to be a file. A `.kgl` can carry its own methodology as no
 
 ```python
 graph.set_skill(
-    "wells",
-    "TRIGGER for any question about wells, their operators or their depths.",
+    "projects",
+    "TRIGGER for any question about projects, their owners or their budgets.",
     body=methodology_markdown,
     references_tools=["cypher_query"],
 )
-graph.save("field.kgl")
+graph.save("projects.kgl")
 ```
 
-With `skills: true` in the manifest, `kglite-mcp-server --graph field.kgl` now serves `wells` alongside its bundled methodology.
+With `skills: true` in the manifest, `kglite-mcp-server --graph projects.kgl` now serves `projects` alongside its bundled methodology.
 
 ### The node
 
@@ -212,7 +212,7 @@ Import ignores frontmatter keys the graph has no property for (`applies_when`, `
   - body within 16 KiB.
 
   A record that fails (a hand-written `CREATE` can store anything) is skipped with a warning naming the skill and the rule. Its siblings still load.
-- **Named on the boot summary.** A graph that contributed anything adds a line like `graph skills: 3 served (9412 B), 2 active as owned:graph, 1 skipped: wells: description must not be empty` to stderr.
+- **Named on the boot summary.** A graph that contributed anything adds a line like `graph skills: 3 served (9412 B), 2 active as owned:graph, 1 skipped: projects: description must not be empty` to stderr.
   - `--selftest` mirrors that stderr. It separately reports how many skills the session serves in total.
   - `--selftest` speaks MCP to a child process, and `prompts/list` carries names and descriptions only. Attribution and byte totals therefore reach you on the boot line, not from the check.
 - **Re-resolved on a graph swap.** `reload_graph`, `load_graph` and `create_graph` rebuild the whole skill layer against the graph they just swapped in and send `tools/list_changed`. A `.kgl` rebuilt by another process serves its new methodology on the next reload rather than at the next restart. This is where skills differ from graph-carried recipes, whose catalogue is fixed for the session.
@@ -310,7 +310,7 @@ Why: a skill body used to be copied into every tool it referenced, at `tools/lis
 - An unknown or inactive name is refused with the list of active skills.
 - What a session has loaded is remembered for as long as the session keeps making tool calls. A new session, or one that has made no tool call for ten minutes, starts empty.
 
-**The nudge.** The first call in a session to a tool that advertises a lazy skill the agent has not fetched gets one extra footer line naming it (`Skill "wells" applies to this tool and has not been loaded this session — call skill("wells")`). It is silent afterwards. It comes back only if the skill's body changed under the agent or the session went quiet past that ten-minute window.
+**The nudge.** The first call in a session to a tool that advertises a lazy skill the agent has not fetched gets one extra footer line naming it (`Skill "projects" applies to this tool and has not been loaded this session — call skill("projects")`). It is silent afterwards. It comes back only if the skill's body changed under the agent or the session went quiet past that ten-minute window.
 
 The footer shares the text part of a typed tool's reply with the JSON, separated by a blank line. A scripted consumer of such a tool expects the trailer: `json.loads(part.text)` raises "Extra data" on a tool's first call. Decode the leading value with `json.JSONDecoder().raw_decode(part.text)` instead.
 
@@ -329,7 +329,7 @@ Bare `graph_overview()` ends with an index of what this server serves, one line 
 ```xml
 <skills count="2" get-via="skill(name)">
 cypher_query [eager] — Run Cypher against the active knowledge graph.
-wells [lazy] — TRIGGER for any question about wells.
+projects [lazy] — TRIGGER for any question about projects.
 </skills>
 ```
 

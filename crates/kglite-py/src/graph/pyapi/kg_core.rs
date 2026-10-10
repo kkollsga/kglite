@@ -743,6 +743,20 @@ impl KnowledgeGraph {
             } else {
                 effective.into()
             };
+            // A process that holds the target's lease owns it; any other holder
+            // refuses the save before the write-ahead-log guard below, which
+            // would otherwise answer a foreign holder's sidecar with a recovery
+            // instruction. `open(..., lock=False)` opted out of lease checks.
+            if !self.lifecycle.lease_opt_out {
+                if let Err(refusal) = io::refuse_foreign_writer(&target) {
+                    let error = crate::error::KgError::from(refusal);
+                    let message = error.to_string();
+                    if matches!(error, crate::error::KgError::WriterLeaseHeld { .. }) {
+                        lease_contention = Some(error);
+                    }
+                    return Err(io::SaveError::Io(message));
+                }
+            }
             let target_lease = if !same_target && self.lifecycle.writer_lease.is_some() {
                 match io::GraphWriterLease::acquire_ex(&target, std::time::Duration::ZERO) {
                     Ok(lease) => Some(lease),
@@ -1843,7 +1857,8 @@ impl KnowledgeGraph {
 
         // Pre-parse only to route: mutation → execute_mut (&mut DirGraph),
         // read → execute_read (&DirGraph via Arc snapshot). The parser is
-        // cached, so the re-parse inside session::execute is a hit, ~0 µs.
+        // cached, so the re-parse inside session::execute is a hit: an AST clone
+        // (71 ns for `RETURN 1`, measured 2026-09-29), not a parse.
         let pre_parsed = cypher::parse_cypher(query).map_err(crate::error_py::kg_to_pyerr)?;
         let is_mutation = cypher::is_mutation_query(&pre_parsed);
 

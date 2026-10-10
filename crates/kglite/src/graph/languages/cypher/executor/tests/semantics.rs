@@ -31,6 +31,14 @@ fn query_error(graph: &DirGraph, query: &str) -> String {
 }
 
 /// Run a read query and return its single row's single cell.
+fn try_cell(graph: &DirGraph, query: &str) -> Result<Value, String> {
+    let parsed = parser::parse_cypher(query)
+        .unwrap_or_else(|e| panic!("query failed to parse: {query}\n  error: {e}"));
+    let no_params = HashMap::new();
+    let result = CypherExecutor::with_params(graph, &no_params, None).execute(&parsed)?;
+    Ok(result.rows[0][0].clone())
+}
+
 fn one_cell(graph: &DirGraph, query: &str) -> Value {
     let parsed = parser::parse_cypher(query)
         .unwrap_or_else(|e| panic!("query failed to parse: {query}\n  error: {e}"));
@@ -173,11 +181,9 @@ fn datetime_preserves_time_and_normalises_the_zone_to_utc() {
             "RETURN datetime('2024-01-15') AS d",
             timestamp(2024, 1, 15, 0, 0, 0),
         ),
-        // Unparseable input keeps the documented Null contract — but a string
-        // that *has* a time part and does not parse is now Null rather than a
-        // silently invented midnight.
-        ("RETURN datetime('not-a-date') AS d", Value::Null),
-        ("RETURN datetime('2024-01-15T25:99:99') AS d", Value::Null),
+        // NULL input stays NULL; unparseable strings raise (see
+        // `unparsable_temporal_literals_raise`).
+        ("RETURN datetime(null) AS d", Value::Null),
         // A year wider than four digits is representable in
         // `NaiveDateTime`, so it parses rather than being refused for
         // chrono's unsigned-`%Y` rule.
@@ -188,6 +194,32 @@ fn datetime_preserves_time_and_normalises_the_zone_to_utc() {
     ];
     for (query, expected) in cases {
         assert_eq!(one_cell(&graph, query), *expected, "for: {query}");
+    }
+}
+
+#[test]
+fn unparsable_temporal_literals_raise() {
+    let graph = DirGraph::new();
+    for q in [
+        "RETURN date('') AS d",
+        "RETURN date('2009-02-30') AS d",
+        "RETURN date('2016-13-01') AS d",
+        "RETURN datetime('not-a-date') AS d",
+        "RETURN datetime('2024-01-15T25:99:99') AS d",
+        "RETURN datetime('2009-02-30T00:00:00') AS d",
+        "RETURN localdatetime('garbage') AS d",
+        "RETURN time('25:99') AS d",
+        "RETURN localtime('garbage') AS d",
+    ] {
+        let err = try_cell(&graph, q).expect_err(q);
+        assert!(err.contains("cannot parse"), "for {q}: {err}");
+    }
+    for q in [
+        "RETURN date(null) AS d",
+        "RETURN localdatetime(null) AS d",
+        "RETURN localtime(null) AS d",
+    ] {
+        assert_eq!(one_cell(&graph, q), Value::Null, "for: {q}");
     }
 }
 

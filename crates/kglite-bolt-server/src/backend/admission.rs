@@ -2,6 +2,7 @@
 //! outcome-to-wire mapping shared by `COMMIT` and one-shot schema statements,
 //! and the slot acquire / idle-reclaim / reaped-handle error helpers.
 
+use super::writer_slot::WaitTimedOut;
 use super::*;
 
 impl KgliteBackend {
@@ -169,27 +170,30 @@ impl KgliteBackend {
             .writer
             .acquire(handle, |holder| self.reclaim_idle_writer(holder))
             .await
-            .map_err(|timed_out| {
-                tracing::warn!(
-                    tx = %handle,
-                    waited_ms = timed_out.waited.as_millis() as u64,
-                    "write transaction gave up waiting for the writer slot"
-                );
-                BoltError::Query {
-                    code: "Neo.TransientError.Transaction.LockAcquisitionTimeout".into(),
-                    message: format!(
-                        "Could not begin a write transaction: another write transaction held \
-                         the writer slot for {:.1}s (--writer-wait-timeout). Retry the \
-                         transaction.",
-                        timed_out.waited.as_secs_f64()
-                    ),
-                }
-            })?;
+            .map_err(|timed_out| wait_timeout_error(handle, &timed_out))?;
         tracing::debug!(
             tx = %handle,
             waited_ms = started.elapsed().as_millis() as u64,
             "acquired the writer slot"
         );
         Ok(permit)
+    }
+}
+
+/// The retriable failure for a write that gave up waiting for the writer slot.
+pub(super) fn wait_timeout_error(handle: &str, timed_out: &WaitTimedOut) -> BoltError {
+    tracing::warn!(
+        tx = %handle,
+        waited_ms = timed_out.waited.as_millis() as u64,
+        "write transaction gave up waiting for the writer slot"
+    );
+    BoltError::Query {
+        code: "Neo.TransientError.Transaction.LockAcquisitionTimeout".into(),
+        message: format!(
+            "Could not begin a write transaction: another write transaction held \
+             the writer slot for {:.1}s (--writer-wait-timeout). Retry the \
+             transaction.",
+            timed_out.waited.as_secs_f64()
+        ),
     }
 }

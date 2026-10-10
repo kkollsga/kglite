@@ -205,16 +205,20 @@ fn commit(session: &Session, query: &str) {
     ));
 }
 
-fn recorded(graph: &DirGraph, key: &str) -> Option<&'static str> {
-    let kind = graph.get_node_type_metadata("Item")?.get(key)?;
-    super::TypedColumn::canonical_type_str(kind)
+fn recorded(graph: &DirGraph, key: &str) -> Option<String> {
+    Some(
+        graph
+            .get_node_type_metadata("Item")?
+            .get(key)?
+            .to_lowercase(),
+    )
 }
 
 /// `(live, saved and loaded, after the fold)` record of `w`.
 fn record_after(
     session: &Session,
     holder: Option<std::sync::Arc<DirGraph>>,
-) -> [Option<&'static str>; 3] {
+) -> [Option<String>; 3] {
     let published = session.snapshot();
     assert_eq!(heap_tail(&published), holder.is_some());
     let live = recorded(&published, "w");
@@ -232,10 +236,10 @@ fn record_after(
 }
 
 /// A key first written to tail rows has its column only in the tail. An
-/// integer written after a float lands in that float column, so the type
-/// record stays `Float64` — as it does on the store without a tail.
+/// integer written after a float widens that column to Mixed, so the type
+/// record becomes `mixed` — as it does on the store without a tail.
 #[test]
-fn a_tail_only_float_key_keeps_its_float_record_after_an_integer() {
+fn a_tail_only_float_key_records_mixed_after_an_integer() {
     let id = i64::from(ROWS);
     let run = |hold: bool| {
         let session = seed();
@@ -253,14 +257,14 @@ fn a_tail_only_float_key_keeps_its_float_record_after_an_integer() {
         record_after(&session, holder)
     };
     let control = run(false);
-    assert_eq!(control, [Some("float64"); 3]);
+    assert_eq!(control, [(); 3].map(|()| Some("mixed".to_string())));
     assert_eq!(run(true), control);
 }
 
 /// The `add_nodes` route to the same record: a frame bringing the float, then
 /// one bringing an integer, both landing in the tail.
 #[test]
-fn add_nodes_into_a_tail_keeps_the_float_record_after_an_integer() {
+fn add_nodes_into_a_tail_records_mixed_after_an_integer() {
     use crate::datatypes::values::{ColumnData, ColumnType, DataFrame};
     let frame = |id: i64, w: Option<f64>, int_w: Option<i64>| {
         let mut df = DataFrame::new(Vec::new());
@@ -307,7 +311,7 @@ fn add_nodes_into_a_tail_keeps_the_float_record_after_an_integer() {
         record_after(&session, holder)
     };
     let control = run(false);
-    assert_eq!(control, [Some("float64"); 3]);
+    assert_eq!(control, [(); 3].map(|()| Some("mixed".to_string())));
     assert_eq!(run(true), control);
 }
 

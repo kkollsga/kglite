@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 use kglite_c::{
     kglite_cypher_result_free, kglite_cypher_result_rows_json, kglite_export_csv,
     kglite_free_string, kglite_graph_free, kglite_graph_new, kglite_load_file,
-    kglite_session_execute_mut, kglite_session_execute_read, kglite_session_free,
-    kglite_session_new, kglite_session_save, KgliteCypherResult, KgliteGraph, KgliteSession,
-    KgliteStatusCode,
+    kglite_session_execute_mut, kglite_session_execute_read, kglite_session_export_csv,
+    kglite_session_free, kglite_session_new, kglite_session_save, KgliteCypherResult, KgliteGraph,
+    KgliteSession, KgliteStatusCode,
 };
 
 fn scratch(name: &str) -> PathBuf {
@@ -300,4 +300,84 @@ mod rdf {
             serde_json::json!({"en": "Platform", "de": "Plattform"})
         );
     }
+}
+
+/// A live session over the HR rows, for the session-scoped exports.
+fn hr_session() -> *mut KgliteSession {
+    let mut session: *mut KgliteSession = std::ptr::null_mut();
+    assert_eq!(
+        unsafe { kglite_session_new(kglite_graph_new(), &mut session) },
+        KgliteStatusCode::Ok
+    );
+    run(
+        session,
+        "CREATE (:Person {id: 1, title: 'Ada'}), (:Department {id: 10, title: 'Platform'})",
+        true,
+    );
+    run(
+        session,
+        "MATCH (p:Person {id: 1}), (d:Department {id: 10}) CREATE (p)-[:WORKS_IN]->(d)",
+        true,
+    );
+    session
+}
+
+#[test]
+fn session_export_csv_writes_the_committed_state() {
+    let dir = scratch("session_csv");
+    let session = hr_session();
+    let out_c = c(dir.join("tree").to_str().unwrap());
+    let mut summary: *const c_char = std::ptr::null();
+    let mut error: *const c_char = std::ptr::null();
+    let rc =
+        unsafe { kglite_session_export_csv(session, out_c.as_ptr(), &mut summary, &mut error) };
+    assert_eq!(rc, KgliteStatusCode::Ok);
+    let summary = take(summary);
+    assert_eq!(summary["nodes"]["Person"], 1);
+    assert_eq!(summary["connections"]["WORKS_IN"], 1);
+    assert!(dir.join("tree").join("manifest.json").is_file());
+    // The session is borrowed, not consumed.
+    let rows = run(session, "MATCH (n) RETURN count(n) AS c", false);
+    assert!(rows.to_string().contains('2'), "{rows}");
+    unsafe { kglite_session_free(session) };
+}
+
+#[test]
+fn session_export_csv_rejects_null_arguments() {
+    let mut error: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_session_export_csv(
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            &mut error,
+        )
+    };
+    assert_eq!(rc, KgliteStatusCode::NullPointer);
+}
+
+#[cfg(feature = "rdf")]
+#[test]
+fn session_export_rdf_round_trips_through_load_rdf() {
+    let dir = scratch("session_rdf");
+    let session = hr_session();
+    let out = dir.join("g.nq");
+    let out_c = c(out.to_str().unwrap());
+    let mut summary: *const c_char = std::ptr::null();
+    let mut error: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_c::kglite_session_export_rdf(
+            session,
+            out_c.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+            &mut summary,
+            &mut error,
+        )
+    };
+    assert_eq!(rc, KgliteStatusCode::Ok);
+    assert_eq!(take(summary)["nodes"]["Person"], 1);
+    assert!(out.is_file());
+    unsafe { kglite_session_free(session) };
 }

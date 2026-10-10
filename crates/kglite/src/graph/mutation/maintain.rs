@@ -2,7 +2,8 @@ use crate::datatypes::{DataFrame, Value};
 use crate::graph::constraints::{ConstraintResult, UniqueConstraintKey};
 use crate::graph::diagnostics::Diagnostic;
 use crate::graph::features::temporal::{
-    check_edge_load, check_node_load, merge_start_key, EmptyIntervals,
+    check_edge_load, check_node_load, coerce_edge_bounds, coerce_node_bounds, merge_start_key,
+    EmptyIntervals,
 };
 use crate::graph::introspection::reporting::{ConnectionOperationReport, NodeOperationReport};
 use crate::graph::mutation::batch::{
@@ -713,8 +714,8 @@ fn reject_identity_redeclaration(
 /// diagnostic, not a refusal: a column may hold several types, so the values
 /// are written. `now` is the type recorded after the write — usually the
 /// observed one (node metadata is last-write-wins; `describe()` derives
-/// `mixed` from the stored values), but a float column that stores exact
-/// integers as floats keeps its record. The line says what happened, because
+/// `mixed` from the stored values), but a numeric disagreement records
+/// `mixed`. The line says what happened, because
 /// a report entry under `errors` otherwise reads as a skipped row.
 pub(super) fn type_mismatch_message(
     property: &str,
@@ -734,20 +735,6 @@ pub(super) fn type_mismatch_message(
                  data has '{observed}'. The values {outcome}"
             )
         })
-}
-
-/// Whether every value of this call's `column` converts to a float exactly —
-/// what a stored float column needs to keep holding floats only
-/// (`TypedColumn::push` demotes the column to mixed for one that would round).
-fn converts_exactly_to_float(df_data: &DataFrame, column: &str) -> bool {
-    let Some(index) = df_data.get_column_index(column) else {
-        return false;
-    };
-    (0..df_data.row_count()).all(|row| match df_data.get_value_by_index(row, index) {
-        Some(Value::Int64(n)) => crate::graph::schema::exact_float(n).is_some(),
-        Some(Value::Null) | None => true,
-        Some(_) => false,
-    })
 }
 
 /// Merge this call's column types into the node type's metadata and register
@@ -772,15 +759,8 @@ fn install_node_type_metadata(
             let Some(existing_type) = existing_meta.get(col_name) else {
                 continue;
             };
-            let now =
-                if !graph.float_column_absorbs_int(node_type, col_name, existing_type, col_type) {
-                    col_type.clone()
-                } else if converts_exactly_to_float(df_data, col_name) {
-                    existing_type.clone()
-                } else {
-                    // One integer the float column cannot hold demotes it to mixed.
-                    "mixed".to_string()
-                };
+            let now = crate::graph::schema::numeric_record_after(existing_type, col_type)
+                .map_or_else(|| col_type.clone(), str::to_string);
             if let Some(message) = type_mismatch_message(col_name, existing_type, col_type, &now) {
                 errors.push(message);
             }
@@ -991,6 +971,10 @@ pub fn add_nodes(
         },
     )?;
 
+    // A declared bound that arrived as ISO text is stored as a date, so a
+    // reload without `column_types` does not re-record the property as text.
+    coerce_node_bounds(graph, &node_type, &mut df_data);
+
     install_node_type_metadata(
         graph,
         &node_type,
@@ -1077,32 +1061,7 @@ pub fn add_nodes(
 
     let (stats, metrics) = batch.execute(graph)?;
 
-    // Fold this call's creations into the type's id_index. The batch adds rows
-    // to type_indices but deliberately does not touch id_indices, so the entry
-    // is stale until one of these two runs.
-    //
-    // The index must end up *present*, not merely valid: `lookup_by_id_readonly`
-    // — `MATCH (n {id:X})` and the `MERGE` match — does not build it, and an
-    // absent entry sent every id-equality read down an O(node-position) scan
-    // (issue #20). Folding keeps it present at O(created); the rebuild is the
-    // fallback for the cases the fold declines (see
-    // `fold_appended_ids_into_index`), and is what the whole call used to pay
-    // unconditionally.
-    if !graph.fold_appended_ids_into_index(&node_type, stats.creates) {
-        graph.id_indices.remove(&node_type);
-        graph.build_id_index(&node_type);
-    }
-
-    // Same staleness hazard for the *secondary* indexes: the batch path skips
-    // the per-write incremental maintenance the Cypher executor runs, and
-    // `try_index_lookup` trusts `property_indices` unconditionally, so a stale
-    // index silently hides every row this call loaded. Creates get the
-    // per-node maintenance a `CREATE` gives them; updates move buckets and
-    // re-claim tuples from `UpdateFold`'s pre-images; the rebuild stays the
-    // fallback (see `fold_batch_into_user_indexes` for which cases take it).
-    update_fold.fold_or_rebuild(graph, &node_type, stats);
-
-    graph.stamp_ontology_closure_on_tail(&node_type, stats.creates);
+    refresh_type_indexes_after_load(graph, &node_type, stats, update_fold);
 
     let mut report = NodeOperationReport::new(
         "add_nodes".to_string(),
@@ -1123,6 +1082,42 @@ pub fn add_nodes(
     );
     graph.bump_version();
     Ok(report)
+}
+
+/// Bring a type's indexes up to date after an `add_nodes` batch, which writes
+/// rows without the per-write index maintenance a Cypher `CREATE` runs.
+fn refresh_type_indexes_after_load(
+    graph: &mut DirGraph,
+    node_type: &str,
+    stats: BatchStats,
+    update_fold: UpdateFold,
+) {
+    // Fold this call's creations into the type's id_index. The batch adds rows
+    // to type_indices but deliberately does not touch id_indices, so the entry
+    // is stale until one of these two runs.
+    //
+    // The index must end up *present*, not merely valid: `lookup_by_id_readonly`
+    // — `MATCH (n {id:X})` and the `MERGE` match — does not build it, and an
+    // absent entry sent every id-equality read down an O(node-position) scan
+    // (issue #20). Folding keeps it present at O(created); the rebuild is the
+    // fallback for the cases the fold declines (see
+    // `fold_appended_ids_into_index`), and is what the whole call used to pay
+    // unconditionally.
+    if !graph.fold_appended_ids_into_index(node_type, stats.creates) {
+        graph.id_indices.remove(node_type);
+        graph.build_id_index(node_type);
+    }
+
+    // Same staleness hazard for the *secondary* indexes: the batch path skips
+    // the per-write incremental maintenance the Cypher executor runs, and
+    // `try_index_lookup` trusts `property_indices` unconditionally, so a stale
+    // index silently hides every row this call loaded. Creates get the
+    // per-node maintenance a `CREATE` gives them; updates move buckets and
+    // re-claim tuples from `UpdateFold`'s pre-images; the rebuild stays the
+    // fallback (see `fold_batch_into_user_indexes` for which cases take it).
+    update_fold.fold_or_rebuild(graph, node_type, stats);
+
+    graph.stamp_ontology_closure_on_tail(node_type, stats.creates);
 }
 
 /// The report for one connection batch: its created and updated counts, the
@@ -2012,7 +2007,7 @@ pub(crate) fn detach_delete_nodes<S: BuildHasher>(
 #[allow(clippy::too_many_arguments)]
 pub fn replace_connections(
     graph: &mut DirGraph,
-    df_data: DataFrame,
+    mut df_data: DataFrame,
     connection_type: String,
     source_type: String,
     source_id_field: String,
@@ -2091,6 +2086,7 @@ pub fn replace_connections(
     // A declared validity interval judges the rows before the delete, as
     // `add_connections` judges them before its writes; that call reports
     // the empty ones.
+    coerce_edge_bounds(graph, &connection_type, &source_type, &mut df_data);
     check_edge_load(graph, &connection_type, &source_type, &df_data)?;
     // 3. Declared relationship constraints. `add_connections` gates them too,
     //    but that gate runs *after* the delete below — so the frame is judged

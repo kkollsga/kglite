@@ -40,28 +40,20 @@ fn test_typed_column_int64_roundtrip() {
     assert_eq!(col.len(), 3);
 }
 
+/// A float column refuses an `Int64` on push and set, so the caller widens the
+/// column to Mixed and the integer stays an integer; a `UniqueId` still fits.
 #[test]
-fn test_typed_column_float64_with_int_promotion() {
-    let mut col = TypedColumn::from_type_str("float64");
-    assert!(col.push(&Value::Float64(3.14)).is_ok());
-    assert!(col.push(&Value::Int64(42)).is_ok()); // int→float promotion
-    assert_eq!(col.get(0), Some(Value::Float64(3.14)));
-    assert_eq!(col.get(1), Some(Value::Float64(42.0)));
-}
-
-/// A float column promotes only an integer it holds exactly; one it would
-/// round is refused (the caller widens the column to Mixed), on push and set.
-#[test]
-fn a_float64_column_refuses_an_integer_it_would_round() {
+fn a_float64_column_refuses_an_int64() {
     let mut col = TypedColumn::from_type_str("float64");
     assert!(col.push(&Value::Float64(0.5)).is_ok());
-    assert!(col.push(&Value::Int64(1 << 53)).is_ok());
-    for inexact in [(1i64 << 53) + 1, i64::MAX] {
-        assert!(col.push(&Value::Int64(inexact)).is_err(), "{inexact}");
-        assert!(col.set(0, &Value::Int64(inexact)).is_err(), "{inexact}");
+    assert!(col.push(&Value::UniqueId(3)).is_ok());
+    for int in [42i64, 1 << 53, (1i64 << 53) + 1, i64::MAX] {
+        assert!(col.push(&Value::Int64(int)).is_err(), "{int}");
+        assert!(col.set(0, &Value::Int64(int)).is_err(), "{int}");
     }
     assert_eq!(col.get(0), Some(Value::Float64(0.5)));
-    assert_eq!(col.get(1), Some(Value::Float64((1u64 << 53) as f64)));
+    assert_eq!(col.get(1), Some(Value::Float64(3.0)));
+    assert_eq!(col.len(), 2);
 }
 
 #[test]
@@ -1096,21 +1088,24 @@ fn set_types_a_new_column_from_the_value_when_metadata_is_silent() {
 }
 
 #[test]
-fn set_prefers_declared_metadata_over_the_value_in_hand() {
-    // A `float64` property whose first written value happens to be an integer
-    // must not create an `Int64` column that the next 0.5 demotes to `Mixed`.
+fn set_types_a_new_column_from_declared_metadata_and_keeps_an_integer_an_integer() {
+    // A `float64` property is typed from its metadata, so a float written
+    // first gets a float column; an integer written to it is not converted, so
+    // the column widens to Mixed and both values read back as written.
     let (schema, meta, interner) = make_schema_and_meta();
     let mut store = ColumnStore::new(schema, &meta, &interner);
     let width = store.column_count();
 
     store.push_row(&[(InternedKey::from_str("name"), Value::String("A".into()))]);
+    store.push_row(&[(InternedKey::from_str("name"), Value::String("B".into()))]);
     let key = InternedKey::from_str("rate");
-    assert!(store.set(0, key, &Value::Int64(1), Some("float64")));
+    assert!(store.set(0, key, &Value::Float64(0.5), Some("float64")));
     assert_eq!(store.column_type_str(width), Some("float64"));
 
-    assert!(store.set(0, key, &Value::Float64(0.5), None));
-    assert_eq!(store.column_type_str(width), Some("float64"));
+    assert!(store.set(1, key, &Value::Int64(1), None));
+    assert_eq!(store.column_type_str(width), Some("mixed"));
     assert_eq!(store.get(0, key), Some(Value::Float64(0.5)));
+    assert_eq!(store.get(1, key), Some(Value::Int64(1)));
 }
 
 #[test]
@@ -1442,4 +1437,20 @@ fn a_demotion_to_mixed_counts_as_a_column_copy() {
     assert_eq!(store.get(0, age), Some(Value::String("old".into())));
     assert_eq!(store.get_id(0), Some(Value::Int64(1)));
     assert_eq!(store.get_title(1), Some(Value::String("two".into())));
+}
+
+/// A tag no writer emits is refused instead of decoding its bytes as a mixed
+/// column.
+#[test]
+fn unpack_column_refuses_an_unknown_type_tag() {
+    use crate::serde_codec::CURRENT_CODEC;
+    let err = ColumnStore::unpack_column("quaternion", &[0u8; 16], 2, None, "w", CURRENT_CODEC)
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    let message = err.to_string();
+    assert!(
+        message.contains("'w'") && message.contains("'quaternion'"),
+        "{message}"
+    );
 }

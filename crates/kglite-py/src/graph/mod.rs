@@ -262,6 +262,10 @@ pub(crate) struct GraphLifecycle {
     /// otherwise — including on a crash, where the OS drops the underlying
     /// file lock for us.
     pub(crate) writer_lease: Option<kglite_core::api::io::GraphWriterLease>,
+    /// `kglite.open(path, lock=False)`: the caller took the documented
+    /// opt-out of every lease check, so `save()` does not probe the target's
+    /// lease either.
+    pub(crate) lease_opt_out: bool,
 }
 
 impl GraphLifecycle {
@@ -275,6 +279,7 @@ impl GraphLifecycle {
             orphaned_from_durable: false,
             orphaned_from_cdc: false,
             writer_lease: None,
+            lease_opt_out: false,
         }
     }
 
@@ -292,6 +297,7 @@ impl GraphLifecycle {
             orphaned_from_durable: parent.in_durable_lineage(),
             orphaned_from_cdc: parent.orphaned_from_cdc || cdc_shared,
             writer_lease: None,
+            lease_opt_out: false,
         }
     }
 
@@ -684,6 +690,7 @@ impl Clone for KnowledgeGraph {
                 orphaned_from_durable: self.lifecycle.in_durable_lineage(),
                 orphaned_from_cdc: self.lifecycle.orphaned_from_cdc || self.inner.cdc_enabled(),
                 writer_lease: None,
+                lease_opt_out: self.lifecycle.lease_opt_out,
             },
         }
     }

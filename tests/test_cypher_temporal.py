@@ -503,13 +503,18 @@ def test_valid_at_year_string_is_the_first_day_of_the_year(bound_types_graph):
     assert _valid_ids(bound_types_graph, "'2004'") == []
 
 
-@pytest.mark.parametrize("instant", ["'garbage'", "2009", "null", "datetime('garbage')", "[2009]"])
+@pytest.mark.parametrize("instant", ["'garbage'", "2009", "null", "[2009]"])
 def test_valid_at_rejects_an_instant_it_cannot_read(bound_types_graph, instant):
     with pytest.raises(kglite.CypherExecutionError) as info:
         _valid_ids(bound_types_graph, instant)
     message = str(info.value)
     assert "n.vf" in message
     assert "date('2009')" in message
+
+
+def test_valid_at_with_an_unparsable_datetime_literal_raises_at_the_constructor(bound_types_graph):
+    with pytest.raises(kglite.CypherExecutionError, match="cannot parse"):
+        _valid_ids(bound_types_graph, "datetime('garbage')")
 
 
 def test_valid_at_instant_error_names_both_types(bound_types_graph):

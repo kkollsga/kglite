@@ -67,7 +67,7 @@ pub(crate) fn unchecked<T>(f: impl FnOnce() -> T) -> T {
 /// The declarations governing a `rel_type` relationship from a node of
 /// `source_type`: the source's keyed declaration, else every unkeyed one —
 /// the declarations a declare-time walk validates that relationship under.
-fn edge_configs_for<'g>(
+pub(super) fn edge_configs_for<'g>(
     graph: &'g DirGraph,
     rel_type: &str,
     source_type: Option<&str>,

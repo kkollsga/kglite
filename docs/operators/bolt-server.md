@@ -64,6 +64,30 @@ disk mode has no in-place form. Those requests fail startup naming
 `enable_disk_mode()` instead of serving a mode nobody asked for. Omit the flag
 to serve whatever the graph recorded.
 
+### Durability defaults
+
+The default is `--durability normal`. The server keeps a write-ahead log (`<graph>-wal`) beside the `.kgl` and appends each commit before it acknowledges it.
+
+| Level | Promise |
+|---|---|
+| `normal` (default) | An acknowledged commit survives the server process dying. An OS crash or power loss can lose commits since the last checkpoint. |
+| `full` | An acknowledged commit also survives power loss. Each commit waits for a device barrier. |
+| `off` | No log. Commits stay in the process until a checkpoint writes them back. |
+
+- Use `--durability full` when a power cut must not cost an acknowledged commit.
+- The log is folded into the `.kgl` and truncated by a checkpoint. The size trigger is on by default at 16 MiB.
+- Read-only servers and disk-mode graphs serve at `off`. See *Durability* below for the details.
+
+### Memory sizing
+
+The default `memory` storage mode holds the whole graph in RAM. Plan the server's memory for the graph plus working headroom.
+
+- A running `db.backup()` raises memory use by roughly 10-30% of the graph's size (see *Writer cost* under *Backups*).
+- A write transaction forks its working copy on the first mutation, so a large write can need extra memory while it runs.
+- A very large single result (about 1M rows) peaks at several GB (see *Known limitations*).
+- If the graph outgrows RAM, serve it with `--storage mapped`. Mapped mode spills property columns to mmap and keeps the per-commit log.
+- `--storage disk` is for Wikidata-scale exploration. It keeps no per-commit log, so it serves at `--durability off`.
+
 Important options (run `--help` on the installed version for the authority):
 
 | Option | Purpose |
@@ -236,6 +260,10 @@ concurrent writers queue instead of conflicting at commit. Reads never wait.
 - An auto-commit write, data or schema (`CREATE`/`DROP INDEX`, `CREATE`/`DROP
   CONSTRAINT`), takes the slot for its one-shot transaction and obeys the wait
   timeout.
+- At `--durability full`, a plain auto-commit data write (`CREATE`, `MERGE`,
+  `SET`, `REMOVE`, `DELETE`) holds the slot shared instead: concurrent ones run
+  together and share a log fsync, but none runs while a write transaction or a
+  schema statement holds the slot.
 - Automatic and periodic checkpoints never take the slot. They save only
   committed state, so an open writer's uncommitted work is never written, and
   they neither wait for nor delay a queued writer.

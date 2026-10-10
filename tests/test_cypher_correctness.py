@@ -702,9 +702,10 @@ class TestLocalTemporal:
         v = g.cypher("RETURN time('10:30') AS v")[0]["v"]
         assert v == "10:30:00"
 
-    def test_localdatetime_bad_input_is_null(self):
+    def test_localdatetime_bad_input_raises(self):
         g = rg.KnowledgeGraph()
-        assert g.cypher("RETURN localdatetime('garbage') AS v")[0]["v"] is None
+        with pytest.raises(Exception, match="cannot parse"):
+            g.cypher("RETURN localdatetime('garbage') AS v")
 
     def test_localtime_null_arg_is_null(self):
         g = rg.KnowledgeGraph()

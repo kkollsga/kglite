@@ -1490,15 +1490,15 @@ covers declaring intervals and modelling history.
 | Function | Description |
 |----------|-------------|
 | `date()` | Today's date in UTC (no-arg form) |
-| `date(str)` | Parse a date string to a DateTime (date-only) value: `'YYYY'`, `'YYYY-MM'`, `'YYYY-MM-DD'`, or ISO 8601 basic `'YYYYMMDD'`; anything else is null |
+| `date(str)` | Parse a date string to a DateTime (date-only) value: `'YYYY'`, `'YYYY-MM'`, `'YYYY-MM-DD'`, or ISO 8601 basic `'YYYYMMDD'`; any other string raises (a null argument gives null) |
 | `date(datetime)` | The date part of a datetime value |
 | `date({year, month, day})` | Build a date from integers (openCypher's map form): `date({year: y, month: 1, day: 1})`. `month` and `day` default to 1; an impossible date, an unknown key or a non-integer component raises; a null component gives null |
 | `datetime({year, month, day, hour, minute, second, millisecond, microsecond, nanosecond})` | Build a zoneless datetime the same way; missing time fields are 0. A `timezone` key is refused |
-| `datetime(str)` | Parse an ISO-8601 stamp to a Timestamp (date + time). Accepts `YYYY-MM-DD`, `…THH:MM`, `…THH:MM:SS[.fff]`, and a zoned `…Z` / `…±HH:MM`. **A zone is normalised to UTC**, since `Value::Timestamp` carries no zone. Sub-second digits are kept and compare: `datetime('…42.317')` is later than `datetime('…42')` (a Python `datetime` result carries them to the microsecond). Unparseable input is NULL |
+| `datetime(str)` | Parse an ISO-8601 stamp to a Timestamp (date + time). Accepts `YYYY-MM-DD`, `…THH:MM`, `…THH:MM:SS[.fff]`, and a zoned `…Z` / `…±HH:MM`. **A zone is normalised to UTC**, since `Value::Timestamp` carries no zone. Sub-second digits are kept and compare: `datetime('…42.317')` is later than `datetime('…42')` (a Python `datetime` result carries them to the microsecond). An unparseable string raises; a null argument gives null |
 | `datetime()` | Now in naive UTC (no-arg form) — the clock every stored datetime, validity instant and `auto_timestamp` uses |
-| `localdatetime()` | Local wall-clock datetime; 1-arg form parses/normalises a string (NULL on bad input). Unlike `datetime(str)` it keeps the wall-clock reading of a zoned input and drops only the zone label |
-| `time()` | Time of day in UTC as an `HH:MM:SS` string (no-arg form); 1-arg form parses/normalises a string as `localtime(str)` does (NULL on bad input) |
-| `localtime()` | Local wall-clock time of day as an `HH:MM:SS` string; 1-arg form parses/normalises a string (NULL on bad input) |
+| `localdatetime()` | Local wall-clock datetime; 1-arg form parses/normalises a string (raises on bad input). Unlike `datetime(str)` it keeps the wall-clock reading of a zoned input and drops only the zone label |
+| `time()` | Time of day in UTC as an `HH:MM:SS` string (no-arg form); 1-arg form parses/normalises a string as `localtime(str)` does (raises on bad input) |
+| `localtime()` | Local wall-clock time of day as an `HH:MM:SS` string; 1-arg form parses/normalises a string (raises on bad input) |
 | `n.d.year`, `n.d.month`, `n.d.day` | Extract component from a DateTime property (chained accessor — works in `RETURN`, `WHERE`, `ORDER BY`) |
 | `n.d.dayOfWeek`, `n.d.dayOfYear`, `n.d.epochSeconds` | Other temporal field accessors |
 | `duration({days: N, months: M, ...})` | Build a Duration value (see [Duration semantics](#duration-semantics) below) |

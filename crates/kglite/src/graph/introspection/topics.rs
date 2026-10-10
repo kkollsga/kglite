@@ -1404,7 +1404,7 @@ pub(super) fn write_fluent_topic_indexes(xml: &mut String) {
     xml.push_str("      <m sig=\"create_range_index(node_type, property)\">B-tree index: fast range queries (&gt;, &lt;, &gt;=, &lt;=).</m>\n");
     xml.push_str("      <m sig=\"create_composite_index(node_type, [prop1, prop2, ...])\">Multi-property index.</m>\n");
     xml.push_str("      <m sig=\"drop_index(node_type, property) / drop_range_index / drop_composite_index\">Remove indexes.</m>\n");
-    xml.push_str("      <m sig=\"list_indexes() / list_composite_indexes()\">Enumerate declared indexes; each carries state=ONLINE or DEFERRED (declared by a deferred load, not yet built) and serves_lookups, which is false when queries do not read it.</m>\n");
+    xml.push_str("      <m sig=\"list_indexes() / list_composite_indexes()\">Enumerate declared equality indexes, persistent disk ones included (persistent=true); each carries state=ONLINE or DEFERRED (declared by a deferred load, not yet built) and serves_lookups, which is false when queries do not read it.</m>\n");
     xml.push_str(
         "      <m sig=\"index_stats(node_type, property)\">Index metadata and hit count.</m>\n",
     );

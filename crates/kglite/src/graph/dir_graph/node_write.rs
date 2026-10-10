@@ -212,12 +212,11 @@ impl DirGraph {
 
     /// Record the property types this type has not registered yet.
     ///
-    /// Declared metadata wins: an entry that already exists is left alone, so a
-    /// `define_schema`'d `float64` survives the first row that happens to carry
-    /// an integer — a column typed from the wrong value is a column the next
-    /// write demotes to `Mixed`, and `Mixed` is the one shape that cannot be
-    /// spilled. The exception is an entry that holds no evidence (`Unknown`),
-    /// which the first concrete value types. A key written as `Null` registers
+    /// An entry that already exists is left alone, with two exceptions: an
+    /// entry that holds no evidence (`Unknown`), which the first concrete
+    /// value types, and an `Int64`/`Float64` disagreement, which records
+    /// `mixed` because the column then holds both kinds. A key written as
+    /// `Null` registers
     /// as `Unknown`, so the name is known to the `CREATE` typo guard and the
     /// schema lock before any row carries a value for it — an ingest whose
     /// first delivery had nothing in a column is not refused on the second.
@@ -233,7 +232,15 @@ impl DirGraph {
                 let observed = value.type_name();
                 let register = match recorded {
                     None => true,
-                    Some(prior) => prior == "Unknown" && observed != "Null",
+                    Some(prior) => {
+                        (prior == "Unknown" && observed != "Null")
+                            // An integer against a float record (or the
+                            // reverse) leaves the column holding both kinds.
+                            || (prior != observed
+                                && !prior.eq_ignore_ascii_case("mixed")
+                                && crate::graph::schema::numeric_record_after(prior, observed)
+                                    .is_some())
+                    }
                 };
                 register.then(|| {
                     let observed = if observed == "Null" {

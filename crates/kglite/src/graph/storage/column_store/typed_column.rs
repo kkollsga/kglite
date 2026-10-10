@@ -8,7 +8,6 @@
 //! id/title columns, the packed `.kgl` codec — lives in the sibling `mod.rs`.
 
 use crate::datatypes::values::Value;
-use crate::graph::schema::exact_float;
 use crate::graph::storage::mapped::mmap_vec::{MmapBytes, MmapOrVec, MmapPod};
 use crate::graph::storage::packed_codec::write_packed_values;
 use crate::graph::storage::StrField;
@@ -215,10 +214,7 @@ impl TypedColumn {
                 scalar!(Int64, data, nulls)
             }
             Self::Float64 { data, nulls }
-                if matches!(
-                    value,
-                    Value::Float64(_) | Value::Int64(_) | Value::UniqueId(_) | Value::Null
-                ) =>
+                if matches!(value, Value::Float64(_) | Value::UniqueId(_) | Value::Null) =>
             {
                 scalar!(Float64, data, nulls)
             }
@@ -548,15 +544,10 @@ impl TypedColumn {
             (TypedColumn::Float64 { data, nulls }, Value::Float64(v)) => {
                 push_pair(data, *v, nulls, 0)?;
             }
-            // int→float promotion (common from pandas), only when the float
-            // is the integer: one it would round falls to the demotion arm and
-            // the column widens to Mixed rather than store another number.
-            (TypedColumn::Float64 { data, nulls }, Value::Int64(v))
-                if exact_float(*v).is_some() =>
-            {
-                push_pair(data, *v as f64, nulls, 0)?;
-            }
-            // ... and an exact `Float64` (a `u32` is below 2^53).
+            // An `Int64` is not promoted: it falls to the demotion arm and the
+            // column widens to Mixed, keeping the integer an integer. A
+            // declared float column is coerced by its loader before it gets
+            // here. A `UniqueId` is an exact `Float64` (a `u32` is below 2^53).
             (TypedColumn::Float64 { data, nulls }, Value::UniqueId(v)) => {
                 push_pair(data, f64::from(*v), nulls, 0)?;
             }
@@ -842,15 +833,6 @@ impl TypedColumn {
                     return Err(());
                 }
                 data.set(idx, *v);
-                nulls.set(idx, 0);
-            }
-            (TypedColumn::Float64 { data, nulls }, Value::Int64(v))
-                if exact_float(*v).is_some() =>
-            {
-                if idx >= data.len() {
-                    return Err(());
-                }
-                data.set(idx, *v as f64);
                 nulls.set(idx, 0);
             }
             (TypedColumn::Float64 { data, nulls }, Value::Null) => {

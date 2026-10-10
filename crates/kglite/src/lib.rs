@@ -738,8 +738,9 @@ pub mod api {
         /// request and converts (or refuses) on an existing graph too. A
         /// binding that took the mode from a user wants the latter.
         pub use crate::graph::io::open::{
-            open_or_create_graph, open_or_create_graph_in_mode, GraphFileIdentity,
-            GraphWriterLease, LeaseHolder, LeaseRefusal, OpenDisposition, OpenGraphResult,
+            open_or_create_graph, open_or_create_graph_in_mode, refuse_foreign_writer,
+            GraphFileIdentity, GraphWriterLease, LeaseHolder, LeaseRefusal, OpenDisposition,
+            OpenGraphResult,
         };
         /// General-purpose RDF loader (Turtle / N-Triples / N-Quads /
         /// TriG). Gated behind the `rdf` Cargo feature.
@@ -996,5 +997,7 @@ pub mod api {
         pub use crate::graph::session::{
             OnlineCheckpointReport, DEFAULT_AUTO_CHECKPOINT_WAL_BYTES,
         };
+        /// `Session::write_logged` / `Session::apply_unlogged` failure and result.
+        pub use crate::graph::session::{WriteError, WriteOutcome};
     }
 }

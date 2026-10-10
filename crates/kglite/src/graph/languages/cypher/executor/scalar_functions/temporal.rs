@@ -254,10 +254,13 @@ impl CypherExecutor<'_> {
         let val = self.evaluate_expression(&args[0], row)?;
         match val {
             Value::String(s) => {
-                // Return Null on invalid input instead of crashing (BUG-09)
+                // An unparsable literal raises: a NULL here becomes a silent
+                // open validity bound or a missing property once written.
                 match crate::graph::features::timeseries::parse_date_query(&s) {
                     Ok((d, _)) => Ok(Value::DateTime(d)),
-                    Err(_) => Ok(Value::Null),
+                    Err(_) => Err(format!(
+                        "date(): cannot parse '{s}' as a date (expected YYYY, YYYY-MM, YYYY-MM-DD or YYYYMMDD)"
+                    )),
                 }
             }
             Value::DateTime(_) => Ok(val),
@@ -301,8 +304,11 @@ impl CypherExecutor<'_> {
                 // midnight. A zone is normalised to UTC because
                 // `Value::Timestamp` has no zone field to carry it —
                 // the offset is applied, never discarded.
-                Ok(parse_iso_datetime(&s)
-                    .map_or(Value::Null, |parsed| Value::Timestamp(parsed.utc())))
+                parse_iso_datetime(&s)
+                    .map(|parsed| Value::Timestamp(parsed.utc()))
+                    .ok_or_else(|| {
+                        format!("datetime(): cannot parse '{s}' as an ISO-8601 datetime")
+                    })
             }
             Value::Timestamp(_) => Ok(val),
             Value::DateTime(d) => Ok(Value::Timestamp(d.and_hms_opt(0, 0, 0).unwrap_or_default())),

@@ -996,6 +996,17 @@ impl DataFrame {
         }
     }
 
+    /// Swap the type and cells of an existing column in place; the column
+    /// keeps its position and name, and the replacement must keep the row count.
+    pub(crate) fn replace_column(&mut self, name: &str, col_type: ColumnType, data: ColumnData) {
+        let Some(&index) = self.column_indices.get(name) else {
+            return;
+        };
+        debug_assert_eq!(data.len(), self.row_count());
+        self.columns[index].col_type = col_type;
+        self.columns[index].data = data;
+    }
+
     pub fn add_column(
         &mut self,
         name: String,

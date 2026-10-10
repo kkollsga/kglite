@@ -1005,6 +1005,8 @@ jobs:
             tests/test_phase5_parity.py::test_graph_copy_cow_correctness_mapped \
             tests/test_statement_read_after_write_parity.py \
             tests/test_mixed_kind_column_save_parity.py \
+            tests/test_temporal_bound_coercion.py \
+            tests/test_index_listing_parity.py \
             tests/test_timestamp_column_parity.py \
             tests/test_temporal_persistence.py tests/test_valid_time_oracle.py \
             tests/test_valid_time_reach.py tests/test_valid_time_peer_hist.py \

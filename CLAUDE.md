@@ -629,7 +629,7 @@ the report a blocking confirmation sounded safer and was not: it fired *after*
 the irreversible decision had already been made, so it added no information to
 the choice, and it broke unattended releases — 0.15.4 sat at a staged commit
 while the user was away, and they noticed it had not landed before the agent
-did. The safety that matters is upstream and unchanged: green branch CI, the ten
+did. The safety that matters is upstream and unchanged: green branch CI, the eleven
 `release-preflight` preconditions, refreshed constants, artifact-set
 verification, surgical staging, ff-merge clean. Those can fail. A prompt cannot.
 

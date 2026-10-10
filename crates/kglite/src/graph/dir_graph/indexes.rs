@@ -662,6 +662,17 @@ impl DirGraph {
             .collect()
     }
 
+    /// The persistent disk-backed equality bundles on this graph, as
+    /// `(node_type, property)`; empty on a graph with no disk backend. A
+    /// listing, like [`Self::list_indexes_with_state`]: it reads the bundle
+    /// files, so nothing that decides how to answer a query may call it.
+    pub fn list_persistent_indexes(&self) -> Vec<(String, String)> {
+        self.graph
+            .as_disk()
+            .map(|dg| dg.persisted_index_names().0)
+            .unwrap_or_default()
+    }
+
     /// [`Self::list_indexes_with_state`] without the state — the shape callers
     /// that only want the names have always had.
     pub fn list_indexes(&self) -> Vec<(String, String)> {

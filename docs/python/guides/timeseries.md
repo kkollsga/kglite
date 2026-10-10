@@ -26,7 +26,7 @@ graph.timeseries_config("Project")
 graph.add_timeseries(
     "Project",
     data=production_df,
-    fk="npdid",                              # FK column → matches node.id
+    fk="person_id",                              # FK column → matches node.id
     time_key=["year", "month"],              # composite time key columns
     channels={"output": "outOutputCol", "flow": "outFlowCol"},  # channel → column
     resolution="month",                       # required if set_timeseries() wasn't called

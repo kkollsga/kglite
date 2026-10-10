@@ -15,12 +15,12 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 
-use chrono::{NaiveDate, NaiveDateTime};
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::Direction;
 
 use super::declarations::{EntityGrouping, TemporalTarget, DISK_NODE_ABUTMENT_CAP};
-use super::eval::{self, BoundSide, EmptyWhen, Instant, TemporalError};
+use super::eval::{self, BoundSide, EmptyWhen, Instant, IntervalConvention, TemporalError};
 use crate::datatypes::values::{DataFrame, Value};
 use crate::graph::core::value_operations::format_value_compact;
 use crate::graph::diagnostics::{Diagnostic, DiagnosticGroup};
@@ -658,7 +658,7 @@ pub(super) fn check_row(
     // day, so a timestamp `from` later on a date `to`'s day is not inverted
     // (under `half_open` it is empty).
     if let (Some(f), Some(t)) = (from_at, to_at) {
-        if f.chrono_cmp(t) == Ordering::Greater && !is_declared_empty(f, t, config) {
+        if is_inverted(f, t, config) && !is_declared_empty(f, t, config) {
             return Err(format!(
                 "the from bound {} ('{}') is after the to bound {} ('{}'), an inverted interval \
                  under convention '{}'",
@@ -677,6 +677,19 @@ pub(super) fn check_row(
         }
     }
     Ok((from_at, to_at))
+}
+
+/// Whether `from` lies after `to`: at the evaluator's grain, except that a
+/// `half_open` date `to` is the first day no longer valid, so a timestamp
+/// `from` is compared with that day's midnight exactly — one later on that
+/// day starts after the interval ended, and is inverted rather than empty.
+fn is_inverted(from: Instant, to: Instant, config: &TemporalConfig) -> bool {
+    match (config.convention, from, to) {
+        (IntervalConvention::HalfOpen, Instant::Timestamp(f), Instant::Date(t)) => {
+            f > t.and_time(NaiveTime::MIN)
+        }
+        _ => from.chrono_cmp(to) == Ordering::Greater,
+    }
 }
 
 /// Whether the inverted interval `from > to` is the empty one `config`'s
@@ -902,16 +915,19 @@ mod tests {
             judged(&tv("2009-06-30T08:00"), &tv("2009-06-30T20:00"), &half),
             Ok(false)
         );
-        // Ends at the from day's midnight, or a date end on a timestamp
-        // from's day: empty, and kept.
+        // Ends at the from day's midnight: empty, and kept. So is a timestamp
+        // from at a date end's midnight; one later on that day starts after
+        // the interval ended, and is inverted.
         assert_eq!(
             judged(&dv("2009-06-30"), &tv("2009-06-30T00:00"), &half),
             Ok(true)
         );
         assert_eq!(
-            judged(&tv("2009-06-30T08:00"), &dv("2009-06-30"), &half),
+            judged(&tv("2009-06-30T00:00"), &dv("2009-06-30"), &half),
             Ok(true)
         );
+        let err = judged(&tv("2009-06-30T08:00"), &dv("2009-06-30"), &half).unwrap_err();
+        assert!(err.contains("an inverted interval"), "{err}");
         // Two timestamps on one day, the end first: inverted.
         let err = judged(&tv("2009-06-30T20:00"), &tv("2009-06-30T08:00"), &half).unwrap_err();
         assert!(err.contains("an inverted interval"), "{err}");

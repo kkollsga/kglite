@@ -9,6 +9,7 @@
     "okf": "public-api",
     "parallel-bz2": "implementation-only",
     "rdf": "public-api",
+    "test-seam": "implementation-only",
     "xlsx": "implementation-only"
   },
   "profiles": [

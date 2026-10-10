@@ -46,9 +46,9 @@ impl<'a> CypherExecutor<'a> {
     /// Evaluate `localdatetime()` / `localtime()` (and `time(str)`). The no-arg
     /// form reads the local wall clock — a timestamp for `localdatetime()`, an
     /// `HH:MM:SS` string for `localtime()`; the single-string form
-    /// validates/normalises and returns `Null` on unparseable input (mirrors
-    /// `datetime()`'s Null-on-bad-input contract). Any other arity/type is an
-    /// error.
+    /// validates/normalises, returns `Null` for a null argument and raises on an
+    /// unparseable string (as `date()`/`datetime()` do). Any other arity/type is
+    /// an error.
     fn eval_local_temporal(
         &self,
         args: &[Expression],
@@ -81,8 +81,11 @@ impl<'a> CypherExecutor<'a> {
                 // reading, so an offset-bearing input keeps its wall clock and
                 // only loses the zone label — the opposite of `datetime()`,
                 // which normalises. Either way the time is never dropped.
-                Ok(shared::parse_iso_datetime(&s)
-                    .map_or(Value::Null, |parsed| Value::Timestamp(parsed.local)))
+                shared::parse_iso_datetime(&s)
+                    .map(|parsed| Value::Timestamp(parsed.local))
+                    .ok_or_else(|| {
+                        format!("localdatetime(): cannot parse '{s}' as an ISO-8601 datetime")
+                    })
             }
             LocalTemporalKind::Time => {
                 // Accept HH:MM:SS or HH:MM.
@@ -101,7 +104,9 @@ impl<'a> CypherExecutor<'a> {
                         t.second()
                     )))
                 } else {
-                    Ok(Value::Null)
+                    Err(format!(
+                        "time()/localtime(): cannot parse '{s}' as HH:MM:SS or HH:MM"
+                    ))
                 }
             }
         }

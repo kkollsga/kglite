@@ -26,7 +26,9 @@ impl Session {
     /// `attempts` tries (minimum one) while the commit loses an optimistic
     /// race.
     ///
-    /// **In place when nothing else holds the graph.** Under the session lock,
+    /// **In place when nothing else holds the graph** (never at `full`
+    /// durability, which always forks so readers are not held off while the
+    /// write's log frame is flushed). Under the session lock,
     /// a published graph with no other owner (no reader snapshot, cursor,
     /// backup or checkpoint image, open transaction or held result) is
     /// mutated directly instead of forked: no whole-graph copy, no free of the
@@ -38,6 +40,16 @@ impl Session {
     /// blocked readers. The in-place path cannot lose an optimistic race, so
     /// it ignores `attempts`. See [`Self::execute_auto_commit_in_place`] for
     /// the conditions; anything else takes the fork path described below.
+    ///
+    /// **Concurrent writers at `full` share a barrier.** A plain data write on
+    /// a session durable at `full` joins the group-commit queue (see
+    /// [`super::group_commit`]): writers that arrive while another is flushing
+    /// run one after another on a single fork, each under its own undo
+    /// journal, and one log barrier covers the batch. A statement still
+    /// returns only after its own frame is durable, a failing statement fails
+    /// alone, and no write of the batch is visible before the barrier. This
+    /// path serializes writers itself, so it never loses an optimistic race
+    /// and ignores `attempts`.
     ///
     /// A lost race published nothing, so re-running on a fresh `begin()` cannot
     /// double-apply. Errors: whatever the statement raised, a
@@ -54,6 +66,9 @@ impl Session {
         attempts: u32,
     ) -> Result<ExecuteOutcome, KgError> {
         if let Some(outcome) = self.execute_auto_commit_in_place(query, opts) {
+            return outcome;
+        }
+        if let Some(outcome) = self.execute_grouped(query, opts) {
             return outcome;
         }
         self.execute_auto_commit_observed(query, opts, attempts, &mut |_| {})
@@ -88,6 +103,7 @@ impl Session {
     ///   also under the durable capture wrapper). Disk graphs fork: their
     ///   fork is a remap of immutable bases, and the in-place alternative is a
     ///   whole-graph clone checkpoint per statement;
+    /// - the session is not durable at `full` (see the comment in the body);
     /// - `Arc::get_mut` succeeds on the published graph while the lock is
     ///   held, i.e. no snapshot exists. A snapshot taken earlier owns a clone
     ///   of the `Arc`, so it can never observe the write — such a statement
@@ -123,16 +139,23 @@ impl Session {
             bool,
         ) -> Result<ExecuteOutcome, KgError>,
     ) -> Option<Result<ExecuteOutcome, KgError>> {
-        if opts.embedder.is_some() {
+        if !is_plain_data_write(query, opts) {
             return None;
         }
-        let parsed = cypher::parse_cypher(query).ok()?;
-        if parsed.explain
-            || parsed.profile
-            || !cypher::is_mutation_query(&parsed)
-            || !parsed.clauses.iter().all(is_plain_data_clause)
-        {
+        // At `full` the statement's graph is the one readers receive, so it
+        // would have to hold them off until the flush finishes (one fsync per
+        // write, ~4 ms on macOS) to keep an unflushed write invisible. The fork
+        // path flushes with readers unblocked, and costs a few hundred
+        // microseconds more per write on a 550,000-node graph, so `full`
+        // always forks. `normal` has no flush to wait for.
+        if self.durability() == Some(crate::graph::wal::DurabilityLevel::Full) {
             return None;
+        }
+        // The gate keeps a fork-path committer's check-to-swap window free of
+        // this statement's in-place mutation and version bump.
+        let _commit = self.lock_commit_gate();
+        if let Err(message) = self.ensure_not_retired() {
+            return Some(Err(KgError::DurabilityFailed { message }));
         }
         let mut guard = self.graph.lock().unwrap_or_else(|p| p.into_inner());
         let Some(graph) = Arc::get_mut(&mut guard) else {
@@ -251,6 +274,23 @@ impl Session {
         *last_version = Some(version);
         Ok(CheckpointOutcome::Written(version))
     }
+}
+
+/// Whether `query` is a plain data write that may run under a journal-backed
+/// statement checkpoint on a graph other threads are not reading: a mutation
+/// made only of the clauses [`is_plain_data_clause`] admits, with no embedder
+/// whose model callbacks would run foreign code under the session's locks.
+pub(super) fn is_plain_data_write(query: &str, opts: &ExecuteOptions<'_>) -> bool {
+    if opts.embedder.is_some() {
+        return false;
+    }
+    let Ok(parsed) = cypher::parse_cypher(query) else {
+        return false;
+    };
+    !parsed.explain
+        && !parsed.profile
+        && cypher::is_mutation_query(&parsed)
+        && parsed.clauses.iter().all(is_plain_data_clause)
 }
 
 /// Whether `clause` is a data read or write the in-place path may run: no

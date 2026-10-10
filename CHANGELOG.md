@@ -9,6 +9,127 @@ before upgrading.
 
 ## [Unreleased]
 
+### Breaking changes and migration
+
+- **`date()`, `datetime()`, `localdatetime()`, `time()` and `localtime()` raise on an unparsable string.**
+  - Before: `date('2009-02-30')` and `datetime('not-a-date')` returned NULL. Written as a validity bound, the NULL silently became an open-ended interval.
+  - Now: the call fails with `cannot parse '<text>'`. The map forms and `valid_at` already raised.
+  - A NULL argument still returns NULL.
+  - Migration: validate input before the call, or wrap the query and handle the error. To keep NULL for dirty rows, filter them out in a `WHERE` first.
+
+- **A float column no longer converts a later integer.**
+  - Before: `CREATE (:T {x: 1.5})` then `CREATE (:T {x: 9})` stored `9.0`, in memory, mapped and disk graphs alike. `n.x / 2` then gave `4.5`. The mirror (`7`, then `1.5`) kept `7` as an integer.
+  - Now: the integer stays an integer, so both orders keep every value as written. The column holds both kinds, and `schema()` and the load report record `mixed` (they recorded `Int64` while the column held floats).
+  - A column declared float (`column_types={'x': 'float'}`, or a blueprint `float` property) is coerced by its loader and keeps converting.
+  - Saved graphs are unaffected: a stored Float64 column reads as before.
+  - Migration: write `toFloat(...)` or a float literal where a float is meant, or declare the column.
+
+- **`save()` refuses a path another process holds open for writing.**
+  - Before: `kglite.load(path)` followed by `save(path)` renamed the loader's bytes over a graph a `kglite.open(path)` holder was writing, and the holder's unsaved work was lost.
+  - Now: the save raises `WriterLeaseHeldError` naming the holder's pid and writes nothing. A lease held by this process is not foreign. `open(path, lock=False)` opts out of the check.
+  - The Rust `save_graph` and the C ABI save entries do not run the check. `kglite::api::io::refuse_foreign_writer` is the probe a Rust caller can run first.
+  - Migration: take the lease for the whole read-modify-save interval with `kglite.open(path)`, or stop the other writer.
+
+### Added
+
+- **`--version` on `kglite-mcp-server` and `kglite-bolt-server`.** Prints the kglite version and exits; the pip `kglite-mcp-server` entry point shares the flag.
+
+### Changed
+
+- **`has_index()` and `list_indexes()` report a disk graph's persistent indexes.** Before, both answered as though no index existed after `create_index` returned `persistent: True`. Each `list_indexes()` entry now carries `persistent`. `index_stats()` still returns `None` for a persistent index.
+
+- **Fluent traversal results come back in a fixed order.** `traverse()` and the accessors over a selection (`titles()`, `collect()`, `to_df()` and the rest) list each parent's children in node creation order and the parents in creation order. The order used to follow a per-process hash seed: two fresh processes over one graph listed the same nodes differently. A `sort_by` or a `max_nodes` limit applies on top as before.
+
+- **`durability: full` no longer makes readers wait for a commit's fsync.**
+  - Before: a durable commit held the session lock across the log append and
+    the fsync, so every reader waited for every writer's flush. In the
+    Node shootout the `full` realistic mix topped out at 5,750 virtual users
+    where `normal` passed 64,000.
+  - Now: the commit flushes the log with no reader-facing lock held, then
+    publishes. Readers keep reading the previous graph meanwhile and never see
+    a commit before it is durable. Change events follow the publish.
+  - At `full`, auto-commit statements always take the copy-on-write path, so
+    no statement runs on the graph readers are using while its log frame is
+    flushed. A lone writer pays about 0.3-0.5 ms more per write on a
+    550,000-node graph, against a flush of about 4 ms. `normal` is unchanged.
+  - `save`, backup, the online checkpoint and `sync` wait for a commit that is
+    mid-flush, so a checkpoint cannot pair a graph with a log position that
+    includes a frame the graph lacks.
+
+- **`durability: full` concurrent writers share one fsync.**
+  - Before: every auto-commit statement paid its own fsync (about 3.9 ms on
+    macOS), so one session committed about 250 statements per second however
+    many threads wrote.
+  - Now: writers that arrive while another is flushing run one after another
+    on a single copy of the graph, each under its own undo journal, and one
+    fsync covers the batch of up to 256. A statement still returns only after
+    its own log frame is durable, and readers see none of the batch until it
+    is. A statement that fails (including an ontology refusal) rolls back
+    alone and returns its own error; the rest commit. A failed fsync fails
+    every statement of its batch and publishes nothing.
+  - Measured on a 550,000-node graph, release build, 4 / 16 / 64 writers:
+    1,000 / 3,300 / 10,600 statements per second, against 267 with the
+    writers serialized. A lone writer is unchanged.
+  - Applies to plain data writes (`CREATE`, `MERGE`, `SET`, `REMOVE`,
+    `DELETE`) through `Session::execute_auto_commit`. Schema commands,
+    procedure calls, explicit transactions and `normal` durability keep their
+    existing paths.
+  - C ABI and Java: a durable auto-commit statement at `full` that the queue
+    takes now holds the session's write gate shared, so concurrent threads can
+    reach the queue. Every other write still holds it exclusively.
+  - Node: plain data writes on a graph opened at `durability: 'full'` now run
+    on a pool of up to 64 threads (`KGLITE_NODE_GROUP_WRITERS` sets the cap)
+    instead of the single writer thread, so concurrent `executeWrite` calls
+    share an fsync. Writes awaited one after another still commit in call
+    order. Writes started without awaiting may now commit in any order when
+    they are plain data writes; schema commands, ontology changes, checkpoints,
+    transaction commits and `close()` still run one at a time on the writer
+    thread, ahead of or behind grouped writes in no fixed order. `onQueueFull`,
+    `timeoutMs` and `AbortSignal` apply to both lanes unchanged.
+  - Bolt server: with the default `--write-concurrency queue`, a plain
+    auto-commit data write at `--durability full` holds the writer slot shared,
+    so concurrent writes reach the queue and share an fsync. Write
+    transactions, schema statements and every other write still hold the slot
+    alone, and a shared write waits behind an open write transaction.
+
+### Rust API
+
+- `kglite::api::io::refuse_foreign_writer(path)` probes a graph path's writer lease without taking it, and returns the structured `LeaseRefusal` when another process holds it.
+- `DirGraph::list_persistent_indexes()` lists the persistent disk-backed equality indexes as `(node_type, property)`.
+- `Session::auto_commit_is_grouped(query, opts)` reports whether
+  `execute_auto_commit` routes a statement through the group-commit queue, for
+  a binding that serializes its own writers ahead of the session.
+- `Session::write_logged(f)` runs a `&mut DirGraph` closure on a working copy
+  and publishes it after its captured ops are durable. An error, a refused
+  ontology verdict or a failed append publishes nothing and consumes no LSN.
+- `Session::apply_unlogged(f)` publishes a closure for state the log does not
+  describe (schema, configuration, text indexes) and returns
+  `WriteError::CapturedOps` when the closure captured ops.
+- `Session::attach_log(graph, path, level)` is `open_durable` with the
+  `DurableOpenError` category kept (`Io`, `Replay`, `Refused`).
+- `Session::retire()` refuses every later commit, statement, closure write,
+  save and checkpoint; `is_retired()` reports it.
+- `Session::next_lsn()` and `Session::last_lsn()` report the log position.
+
+### Fixed
+
+- **A `.kgl` column with an unknown type tag is refused.** The loader decoded its bytes as a mixed column, reading garbage as values. It now fails with `InvalidData` naming the column and the tag.
+
+- **A declared bound loaded as text is stored as a date.** `add_nodes` and `add_relationships` coerce a declared `valid_from`/`valid_to` column of ISO strings to dates (datetimes when a cell has a time part). Before, a reload without `column_types` wrote `String` cells beside the stored dates and re-recorded the property as `String`. A cell that does not parse is still refused. A Cypher `SET` or `CREATE` of an ISO string onto a bound still stores the string.
+
+- **A `half_open` interval from a timestamp after a date `to`'s midnight is refused as inverted.** `[2011-01-01T12:00, 2011-01-01)` was counted as an empty row with a warning that the bounds are equal. Answers do not change, and the `closed` convention is unaffected.
+
+- **C ABI and Java: concurrent writes on one durable session no longer fail
+  with `TransactionConflict`.**
+  - Before: when several threads wrote through one handle while reads ran, a
+    write could exhaust its retries and fail. A test with 8 writers and 4
+    readers lost 179 of 400 writes.
+  - Now: each session serializes its writers, as the Java threading contract
+    states. That covers auto-commit statements, batches, relationship
+    batches, ontology changes and explicit-transaction commits.
+  - Explicit transactions still fail with `TransactionConflict` when the graph
+    changed since `begin()`; that is their contract.
+
 ## [0.19.6] - 2026-10-09
 
 ### Breaking changes and migration

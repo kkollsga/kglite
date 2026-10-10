@@ -124,21 +124,26 @@ import java.util.function.Function;
  * <h2>Threading</h2>
  *
  * <p>The engine is synchronous — a call runs to completion on the calling
- * thread, and this class adds no thread pool and no async surface. What one
- * instance guarantees, from the engine's session model (an
- * {@code Arc<DirGraph>} behind a mutex: readers clone the pointer, writers take
- * the lock for the whole mutation and swap):
+ * thread, and this class adds no thread pool and no async surface. One
+ * instance may be shared by many threads. What it guarantees comes from the
+ * engine's session model (an {@code Arc<DirGraph>} behind a mutex):
  *
  * <ul>
- *   <li>One instance may be shared by many threads. {@link #query(String)}
- *       calls run <em>concurrently</em> — each takes a snapshot under a brief
- *       lock and then executes outside it.</li>
- *   <li>{@link #cypher(String, Map)} calls <em>serialize</em> against each
- *       other and against {@link #save(Path)}. A mutation is all-or-nothing:
- *       a concurrent reader sees the state before it or the state after it,
- *       never a half-applied statement.</li>
- *   <li>A reader that already started keeps its snapshot while a writer
- *       commits; it does not block the writer and is not blocked by it.</li>
+ *   <li>{@link #query(String)} calls run <em>concurrently</em>. Each takes a
+ *       snapshot under a brief lock and then executes outside it.</li>
+ *   <li>Writes are serialized per instance. A mutation is all-or-nothing: a
+ *       reader sees the state before it or the state after it, never a
+ *       half-applied statement. {@link #save(Path)} is serialized with
+ *       writes.</li>
+ *   <li>A reader that already holds a snapshot keeps it while a writer
+ *       commits. A reader that <em>requests</em> a snapshot while a
+ *       single-statement {@link #cypher(String, Map)} write is executing, or
+ *       while its write-ahead-log frame is being appended, waits for that
+ *       write to finish.</li>
+ *   <li>Serialization does not make concurrent writes conflict-free. A
+ *       durable instance can fail a write with a transaction conflict, and an
+ *       explicit transaction can fail at commit when another write landed
+ *       first. Retry the failed unit of work.</li>
  * </ul>
  *
  * <p><strong>{@link #close()} is safe from any thread, at any time.</strong>
@@ -148,7 +153,7 @@ import java.util.function.Function;
  * threads close at once, and a call that arrives after it throws
  * {@link IllegalStateException} rather than dereferencing freed memory. It is
  * shared, so it introduces no serialization between concurrent calls — the
- * three guarantees above are unchanged.
+ * guarantees above are unchanged.
  *
  * <p>The result of a call that races a close is itself a race: a worker gets
  * either its rows or an {@code IllegalStateException}. Join the workers before
@@ -1268,6 +1273,137 @@ public final class KnowledgeGraph implements AutoCloseable {
         String live = info == null ? null : info.path();
         return BackupReport.parse(
                 session.use(handle -> Abi.sessionBackup(handle, destination, live)));
+    }
+
+    // ---- open-format exports and RDF import -------------------------------
+
+    /**
+     * Export the graph to a lossless CSV tree under {@code outputDir}.
+     *
+     * <p>Writes {@code nodes/} and {@code connections/} CSVs, a
+     * {@code blueprint.json} that re-imports the tree and a
+     * {@code manifest.json} under the directory, creating it if missing. The
+     * manifest restores valid-time declarations, secondary labels and every
+     * property's type when the tree is rebuilt from the blueprint. Rows stream
+     * in bounded batches.
+     *
+     * <p>The export reads a consistent snapshot of the committed state and does
+     * not block writers; changes committed after it starts are not included.
+     *
+     * @param outputDir the directory to write into
+     * @return the counts of what was written
+     * @throws KgliteException with status {@code FileIo} if the tree could not
+     *     be written, for example because {@code outputDir} is empty or cannot
+     *     be created
+     * @throws IllegalStateException if this graph is closed
+     */
+    public ExportReport exportCsv(Path outputDir) {
+        if (outputDir == null) {
+            throw new KgliteException("exportCsv requires an output directory");
+        }
+        String dir = outputDir.toAbsolutePath().toString();
+        return ExportReport.parse(
+                session.use(handle -> Abi.sessionExportCsv(handle, dir)), "output_dir");
+    }
+
+    /**
+     * Export the graph to RDF 1.2 at {@code file}, inferring the format from
+     * the name ({@code .trig} is TriG, anything else N-Quads).
+     *
+     * @param file the output file
+     * @return the counts of what was written
+     * @throws KgliteException see {@link #exportRdf(Path, RdfExportOptions)}
+     * @throws IllegalStateException if this graph is closed
+     */
+    public ExportReport exportRdf(Path file) {
+        return exportRdf(file, RdfExportOptions.defaults());
+    }
+
+    /**
+     * Export the graph to RDF 1.2 (N-Quads or TriG) that
+     * {@link #loadRdf(Path, RdfLoadOptions)} reads back.
+     *
+     * <p>Typed literals, edge properties on {@code rdf:reifies} reifiers and
+     * one {@code kg:manifest} statement are written, so valid-time
+     * declarations, secondary labels, parent types and id/title kinds survive
+     * the round trip. Streams in bounded batches, from a consistent snapshot of
+     * the committed state.
+     *
+     * <p>Needs a native library built with the {@code rdf} feature of
+     * {@code kglite-c}; the default build is not.
+     *
+     * @param file    the output file
+     * @param options the format, IRI prefix and {@code schema.org} choice
+     * @return the counts of what was written
+     * @throws KgliteException with status {@code InvalidArgument} if the base
+     *     IRI is malformed or inside a well-known namespace, {@code FileIo} if
+     *     the file could not be written, or a wrapper-side failure if the
+     *     native library has no RDF support
+     * @throws IllegalStateException if this graph is closed
+     */
+    public ExportReport exportRdf(Path file, RdfExportOptions options) {
+        if (file == null) {
+            throw new KgliteException("exportRdf requires an output file");
+        }
+        if (options == null) {
+            throw new KgliteException("options cannot be null; pass RdfExportOptions.defaults()");
+        }
+        String path = file.toAbsolutePath().toString();
+        return ExportReport.parse(
+                session.use(handle -> Abi.sessionExportRdf(
+                        handle, path, options.formatWire(), options.base(), options.schemaOrg())),
+                "output_path");
+    }
+
+    /**
+     * Load an RDF file into a fresh in-memory graph with default options.
+     *
+     * @param file the RDF file; its extension picks the parser
+     * @return the loaded graph
+     * @throws KgliteException see {@link #loadRdf(Path, RdfLoadOptions)}
+     */
+    public static KnowledgeGraph loadRdf(Path file) {
+        return loadRdf(file, RdfLoadOptions.defaults());
+    }
+
+    /**
+     * Load an RDF file into a fresh in-memory graph.
+     *
+     * <p>The extension picks the parser: {@code .ttl} (Turtle), {@code .nt}
+     * (N-Triples), {@code .nq} (N-Quads) or {@code .trig} (TriG). Object
+     * literals become typed node properties, resource objects become
+     * relationships, and {@code rdf:type} sets the node label (the first wins;
+     * the rest are kept in an {@code rdf_types} property). Predicate and type
+     * IRIs are compacted with a {@code __} separator, so
+     * {@code [:foaf__knows]} matches in Cypher. Each node keeps its subject IRI
+     * in a {@code uri} property unless the file carries a {@code kg:manifest},
+     * which an {@link #exportRdf(Path)} file does: the manifest restores
+     * valid-time declarations, secondary labels, parent types and node
+     * ids/titles instead.
+     *
+     * <p>Needs a native library built with the {@code rdf} feature of
+     * {@code kglite-c}; the default build is not.
+     *
+     * @param file    the RDF file
+     * @param options what to keep and how to name it
+     * @return the loaded in-memory graph
+     * @throws KgliteException with status {@code FileNotFound} if the file is
+     *     absent, {@code FileFormat} if it does not parse, {@code InvalidArgument}
+     *     if the extension is not an RDF format, or a wrapper-side failure if
+     *     the native library has no RDF support
+     */
+    public static KnowledgeGraph loadRdf(Path file, RdfLoadOptions options) {
+        if (file == null) {
+            throw new KgliteException("loadRdf requires a file");
+        }
+        if (options == null) {
+            throw new KgliteException("options cannot be null; pass RdfLoadOptions.defaults()");
+        }
+        MemorySegment graph = Abi.loadRdf(
+                file.toAbsolutePath().toString(), options.languagesJson(),
+                options.labelPredicatesJson(), options.keepFullIris(), options.defaultType(),
+                options.maxTriples(), options.languageMaps());
+        return sessionOver(graph, null, false);
     }
 
     // ---- ontology ----------------------------------------------------------

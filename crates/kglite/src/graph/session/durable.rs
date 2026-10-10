@@ -22,13 +22,17 @@
 //!    already folded into the `.kgl` are skipped rather than rolled back over
 //!    newer state. ([`durability::open_log`](crate::graph::durability::open_log))
 //!
-//! 2. **Commit: append *then* publish.** [`Session::commit`] appends the
-//!    frame between the OCC check and the `Arc` swap, so a failed append
-//!    blocks the publish and the caller is told
+//! 2. **Commit: append, barrier, *then* publish.** [`Session::commit`] appends
+//!    the frame between the OCC check and the `Arc` swap and takes the
+//!    barrier before the swap, so a failed append or barrier blocks the
+//!    publish and the caller is told
 //!    ([`CommitOutcome::DurabilityFailed`](super::CommitOutcome::DurabilityFailed))
 //!    instead of holding an acknowledged-but-unlogged write. This is strictly
 //!    stronger than the wheel's apply-then-log ordering, which can only report
-//!    the failure after the mutation is already visible.
+//!    the failure after the mutation is already visible. The barrier runs with
+//!    neither the graph nor the durability mutex held (see Lock ordering), so
+//!    readers keep taking snapshots of the previous graph while it flushes and
+//!    never see a commit that is not yet durable.
 //!
 //! 3. **Checkpoint: sync → stamp → save → reset.** [`Session::save`] flushes
 //!    the log (load-bearing under [`DurabilityLevel::Normal`], where the tail
@@ -45,10 +49,23 @@
 //!
 //! `DurableState` lives on the [`Session`] behind its own `Mutex`, not on
 //! `DirGraph` — the WAL owns a `File` handle and `DirGraph` must stay `Clone`.
-//! **The durability mutex is only ever acquired while the session's graph
-//! mutex is already held** (or on its own, never the other way round), which
-//! is what makes "append the frame, then publish the Arc" one indivisible
-//! step for concurrent committers.
+//!
+//! Order: `checkpoint_gate` → `commit_gate` → `graph` → `durable`, never
+//! reversed, and each may be taken alone. The `commit_gate` is what makes
+//! "append the frame, flush it, then publish the Arc" one indivisible step for
+//! concurrent committers: it is held from the OCC check to the swap, so frames
+//! reach the log in the order they publish, and anything that fixes a
+//! (graph, LSN, log offset) triple — `save`, the online checkpoint, backup,
+//! `sync` — takes it first, because between the append and the swap the log
+//! holds a frame the published graph does not. The `graph` mutex is held only
+//! for brief reads and the swap; the `durable` mutex only to append (or cut a
+//! failed frame back), never across the barrier.
+//!
+//! Auto-commit statements at `full` hold the gate for a whole batch: one
+//! leader forks, the queued writers each stage a frame on that fork, and one
+//! barrier covers all of them (see [`super::group_commit`]). Frames then reach
+//! the log in publish order exactly as for a lone commit, and the log is cut
+//! back to the batch's first frame if the barrier fails.
 //!
 //! ## Single owner per path
 //!
@@ -69,8 +86,9 @@ use std::sync::{Arc, Mutex};
 use super::transaction::Session;
 use crate::graph::dir_graph::DirGraph;
 use crate::graph::durability;
+use crate::graph::storage::recording::RawOp;
 use crate::graph::storage::GraphRead;
-use crate::graph::wal::{DurabilityLevel, Wal};
+use crate::graph::wal::{DurabilityLevel, StagedFrame, Wal};
 
 /// Session-scoped durability state. Held by the [`Session`] rather than the
 /// graph because it owns an open `File`; see the module docs for the lock
@@ -104,7 +122,7 @@ pub(super) struct DurableState {
     /// append blocks the publish — is about *ordering*, and ordering cannot be
     /// exercised without a reachable append failure; no portable filesystem
     /// trick fails a write on an already-open append handle.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-seam"))]
     fail_append: bool,
 }
 
@@ -209,6 +227,65 @@ impl DurableState {
     }
 }
 
+/// A commit's captured ops and, for a durable session that logged something,
+/// its frame awaiting the barrier. See [`Session::stage_working_commit`].
+pub(super) struct StagedLog {
+    raw: Vec<RawOp>,
+    staged: Option<(u64, StagedFrame)>,
+}
+
+impl StagedLog {
+    fn none() -> Self {
+        Self {
+            raw: Vec::new(),
+            staged: None,
+        }
+    }
+
+    /// LSN of the frame this commit staged, `None` when it logged nothing.
+    pub(super) fn lsn(&self) -> Option<u64> {
+        self.staged.as_ref().map(|(lsn, _)| *lsn)
+    }
+
+    /// The ops this commit captured, in capture order.
+    pub(super) fn raw(&self) -> &[RawOp] {
+        &self.raw
+    }
+
+    /// Hand the staged frame to a group commit, which takes one barrier for
+    /// every frame it collected. `None` when this commit logged nothing.
+    pub(super) fn take_frame(&mut self) -> Option<(u64, StagedFrame)> {
+        self.staged.take()
+    }
+}
+
+/// A staged frame whose barrier has not completed: undoes it when dropped,
+/// whether by a failed barrier or an unwind.
+struct PendingFrame<'a> {
+    session: &'a Session,
+    lsn: u64,
+    frame: Option<StagedFrame>,
+    error: String,
+}
+
+impl Drop for PendingFrame<'_> {
+    fn drop(&mut self) {
+        let Some(frame) = self.frame.take() else {
+            return;
+        };
+        let mut slot = self
+            .session
+            .durable
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if let Some(ds) = slot.as_mut() {
+            ds.wal
+                .abort_staged(&frame, &std::io::Error::other(self.error.clone()));
+            ds.next_lsn = self.lsn;
+        }
+    }
+}
+
 /// What [`DurableState::begin_online`] fixed under the locks.
 pub(super) struct OnlinePoint {
     pub(super) lsn: u64,
@@ -282,8 +359,23 @@ impl Session {
         checkpoint_path: &str,
         level: DurabilityLevel,
     ) -> Result<Session, String> {
+        Self::attach_log(graph, checkpoint_path, level).map_err(|e| e.to_string())
+    }
+
+    /// [`Self::open_durable`] with the failure category kept: a binding that
+    /// maps an unreadable log, a failed replay and a refused open to different
+    /// error classes attaches through this and matches on
+    /// [`DurableOpenError`]. This is also how a binding that previously ran
+    /// [`durability::open_log`] itself hands the log to the engine — it calls
+    /// this *instead of* opening the log, so the sidecar has exactly one
+    /// writer; the caller still owns the writer lease (see `open_durable`).
+    pub fn attach_log(
+        graph: Arc<DirGraph>,
+        checkpoint_path: &str,
+        level: DurabilityLevel,
+    ) -> Result<Session, durability::DurableOpenError> {
         if level.logs() && graph.graph.is_disk() {
-            return Err(format!(
+            return Err(durability::DurableOpenError::Refused(format!(
                 "durable={} is not supported for storage='disk' (only 'off' is). A disk \
                  graph commits by publishing an immutable generation, so its durability \
                  boundary is the generation publish, not a logical write-ahead log: a \
@@ -292,7 +384,7 @@ impl Session {
                  does not have. Use Session::save checkpoints for disk graphs, or a \
                  mapped / in-memory graph if you need per-commit crash safety.",
                 level.name(),
-            ));
+            )));
         }
 
         let mut graph = graph;
@@ -300,8 +392,7 @@ impl Session {
         // recovery-on-open refusal. The wheel's durable `KnowledgeGraph` runs
         // the same sequence through this same function, so the two cannot
         // drift.
-        let opened = durability::open_log(&mut graph, Path::new(checkpoint_path), level)
-            .map_err(|e| e.to_string())?;
+        let opened = durability::open_log(&mut graph, Path::new(checkpoint_path), level)?;
 
         let Some((wal, next_lsn)) = opened else {
             return Ok(Session::from_arc(graph));
@@ -318,7 +409,7 @@ impl Session {
                 checkpoint_floor: std::fs::metadata(checkpoint_path).map_or(0, |m| m.len()),
                 retry_after_wal_bytes: 0,
                 checkpoint_running: false,
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-seam"))]
                 fail_append: false,
             },
         ))
@@ -348,9 +439,9 @@ impl Session {
     /// rather than a silent success: there is no log to flush, so reporting
     /// "flushed" would be a lie about the only thing the caller asked.
     pub fn sync(&self) -> Result<(), String> {
-        // Graph lock first, then the durability lock — the module's ordering
-        // rule, kept even though this path touches only the latter.
-        let _graph = self.graph.lock().unwrap_or_else(|p| p.into_inner());
+        // The gate, not the graph lock: no commit is mid-barrier, so every frame
+        // is complete, and readers are not stalled behind the flush.
+        let _commit = self.lock_commit_gate();
         let mut slot = self.durable.lock().unwrap_or_else(|p| p.into_inner());
         let Some(ds) = slot.as_mut() else {
             return Err(
@@ -370,23 +461,32 @@ impl Session {
         ds.wal.sync().map_err(|e| e.to_string())
     }
 
-    /// Append `working`'s captured mutations as one WAL frame. Called by
-    /// [`Session::commit`] with the session's graph lock already held, between
-    /// the OCC check and the `Arc` swap, so an error here means the commit is
-    /// never published.
-    ///
-    /// A no-op on a non-durable session, and on a transaction that captured
-    /// nothing: an empty frame would consume an LSN and describe no change,
-    /// which is exactly the accounting the checkpoint stamp reads.
+    /// Append `working`'s captured mutations as one WAL frame, flush it, and
+    /// publish its change events: stage, barrier and publish in one call, for
+    /// the in-place path, whose graph is already the published one. Called with
+    /// the commit gate held; an error means the commit must not stand.
     pub(super) fn log_working_commit(&self, working: &mut DirGraph) -> Result<(), String> {
+        let staged = self.stage_working_commit(working)?;
+        let raw = self.flush_staged(staged)?;
+        crate::graph::cdc::publish_drained(working, &raw);
+        Ok(())
+    }
+
+    /// Append `working`'s captured mutations as one WAL frame *without* the
+    /// barrier, under the durability mutex only. Called with the commit gate
+    /// held. The frame is complete in the log but not yet committed: finish it
+    /// with [`Self::flush_staged`].
+    ///
+    /// Nothing is staged (an empty `raw`) for a non-durable session, where this
+    /// is still the commit boundary that discards a CDC-only graph's capture
+    /// buffer so it stays bounded, and for a transaction that captured nothing:
+    /// an empty frame would consume an LSN and describe no change, which is
+    /// exactly the accounting the checkpoint stamp reads.
+    pub(super) fn stage_working_commit(&self, working: &mut DirGraph) -> Result<StagedLog, String> {
         let mut slot = self.durable.lock().unwrap_or_else(|p| p.into_inner());
         let Some(ds) = slot.as_mut() else {
-            // Not durable — but this is still the commit boundary, and it is
-            // where a change-data-capture log gets its events (and where the
-            // capture buffer of a CDC-only graph is discarded, so it stays
-            // bounded). A no-op on a graph carrying no capture layer.
             crate::graph::cdc::drain_at_commit(working);
-            return Ok(());
+            return Ok(StagedLog::none());
         };
         if ds.diverged {
             return Err(DIVERGED_MSG.to_string());
@@ -407,27 +507,93 @@ impl Session {
             }
         };
         if raw.is_empty() {
-            return Ok(());
+            return Ok(StagedLog::none());
         }
-        // Secondary labels are read back through `working` because they are not
-        // backend state — see `resolve_ops`.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-seam"))]
         if ds.fail_append {
             return Err("injected WAL append failure".to_string());
         }
         let lsn = ds.next_lsn;
-        ds.wal
-            .append_resolved(lsn, &raw, working)
+        // Secondary labels are read back through `working` because they are not
+        // backend state — see `resolve_ops`.
+        let frame = ds
+            .wal
+            .stage_resolved(lsn, &raw, working)
             .map_err(|e| e.to_string())?;
-        // Only a frame that reached the log consumes its LSN.
+        // Only a frame that reached the log consumes its LSN; `flush_staged`
+        // gives it back if the barrier fails.
         ds.next_lsn = lsn + 1;
-        // Published from the same drained ops the frame was built from, so the
-        // two views of this commit cannot disagree about what it changed — and
-        // *after* the append, because an append failure aborts the commit
-        // (`Session::commit` skips the `Arc` swap): publishing first would put
-        // a change into the stream that the caller was told did not happen.
-        crate::graph::cdc::publish_drained(working, &raw);
-        Ok(())
+        Ok(StagedLog {
+            raw,
+            staged: Some((lsn, frame)),
+        })
+    }
+
+    /// Take the commit point for a staged frame with no session lock held, and
+    /// return the ops it logged (for the change stream, to publish once the
+    /// commit is visible). On a failed or unwound barrier the frame is cut back
+    /// out of the log and its LSN given back, which is sound because the
+    /// commit gate keeps every other appender out until this returns.
+    pub(super) fn flush_staged(&self, staged: StagedLog) -> Result<Vec<RawOp>, String> {
+        let StagedLog { raw, staged } = staged;
+        let Some((lsn, frame)) = staged else {
+            return Ok(raw);
+        };
+        let mut pending = PendingFrame {
+            session: self,
+            lsn,
+            frame: Some(frame),
+            error: "the commit unwound before its barrier completed".to_string(),
+        };
+        let synced = pending.frame.as_ref().map(StagedFrame::sync);
+        match synced {
+            Some(Ok(())) => {
+                pending.frame = None;
+                Ok(raw)
+            }
+            Some(Err(e)) => {
+                pending.error = e.to_string();
+                let message = pending.error.clone();
+                drop(pending);
+                Err(message)
+            }
+            None => Ok(raw),
+        }
+    }
+
+    /// Take ONE commit point for a group of staged frames, with no session lock
+    /// held. The frames are contiguous in the log and share its file, so the
+    /// barrier on the last one makes all of them durable. On a failed or
+    /// unwound barrier the log is cut back to the FIRST frame and its LSN is
+    /// given back, which is sound for the same reason as [`Self::flush_staged`]:
+    /// the commit gate keeps every other appender out until this returns.
+    pub(super) fn flush_group(&self, mut frames: Vec<(u64, StagedFrame)>) -> Result<(), String> {
+        if frames.is_empty() {
+            return Ok(());
+        }
+        let (lsn, first) = frames.remove(0);
+        let mut pending = PendingFrame {
+            session: self,
+            lsn,
+            frame: Some(first),
+            error: "the group commit unwound before its barrier completed".to_string(),
+        };
+        let synced = match frames.last() {
+            Some((_, last)) => last.sync(),
+            None => pending.frame.as_ref().map_or(Ok(()), StagedFrame::sync),
+        };
+        match synced {
+            Ok(()) => {
+                pending.frame = None;
+                Ok(())
+            }
+            Err(e) => {
+                pending.error = e.to_string();
+                let message = pending.error.clone();
+                drop(pending);
+                Err(message)
+            }
+        }
     }
 
     /// Save while the graph mutex is held; always take the durability mutex second.
@@ -498,6 +664,7 @@ impl Session {
     /// channel calls this first; a caller that does not still cannot lose data
     /// silently, because both paths latch the session (see [`Session::write`]).
     pub fn check_direct_write_allowed(&self) -> Result<(), String> {
+        self.ensure_not_retired()?;
         if self
             .durable
             .lock()
@@ -513,8 +680,9 @@ impl Session {
     /// rather than `pub(super)` because the durability failure path is also
     /// what the change-data-capture tests use to prove a refused commit
     /// publishes nothing.
-    #[cfg(test)]
-    pub(crate) fn set_fail_append(&self, fail: bool) {
+    #[cfg(any(test, feature = "test-seam"))]
+    #[doc(hidden)]
+    pub fn set_fail_append(&self, fail: bool) {
         if let Some(ds) = self
             .durable
             .lock()
@@ -525,13 +693,65 @@ impl Session {
         }
     }
 
+    /// Park the next commit inside its barrier. Test-only.
     #[cfg(test)]
-    pub(super) fn next_lsn(&self) -> Option<u64> {
+    pub(super) fn park_next_commit(&self) -> Arc<crate::graph::wal::ParkHook> {
+        let hook = crate::graph::wal::ParkHook::new();
+        if let Some(ds) = self
+            .durable
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_mut()
+        {
+            ds.wal.set_park(Some(Arc::clone(&hook)));
+        }
+        hook
+    }
+
+    /// Make every later barrier fail (or stop failing). Test-only.
+    #[cfg(test)]
+    pub(super) fn set_wal_fault(&self, fault: Option<crate::graph::wal::AppendFault>) {
+        if let Some(ds) = self
+            .durable
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_mut()
+        {
+            ds.wal.set_fault(fault);
+        }
+    }
+
+    /// Log barriers (fsyncs) taken through staged frames, for tests that count
+    /// how many commits shared one. Present only under the `test-seam` feature.
+    #[cfg(any(test, feature = "test-seam"))]
+    #[doc(hidden)]
+    pub fn wal_barrier_count(&self) -> u64 {
+        self.durable
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map_or(0, |ds| ds.wal.barrier_count())
+    }
+
+    /// Log-sequence number the next logged commit will carry, or `None` for a
+    /// session without a log. A commit that fails to reach the log gives its
+    /// number back, so this moves only when a frame is durable.
+    pub fn next_lsn(&self) -> Option<u64> {
         self.durable
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .as_ref()
             .map(|ds| ds.next_lsn)
+    }
+
+    /// LSN of the newest frame the log holds (`0` when it holds none), or
+    /// `None` for a session without a log.
+    pub fn last_lsn(&self) -> Option<u64> {
+        self.durable
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map(|ds| ds.last_lsn())
     }
 
     /// Build a session that already owns durability state. Private to the
@@ -542,8 +762,11 @@ impl Session {
             graph: Mutex::new(graph),
             durable: Mutex::new(Some(state)),
             checkpoint_gate: Mutex::new(()),
+            commit_gate: Mutex::new(()),
+            group: Default::default(),
             in_place_commits: Default::default(),
             forked_commits: Default::default(),
+            retired: Default::default(),
         }
     }
 }

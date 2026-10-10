@@ -1613,20 +1613,29 @@ class TestBugDatetimeFunction:
 
 
 class TestBugDateInvalidInput:
-    """BUG: date() crashes on invalid input instead of returning null."""
+    """An unparsable date/time literal raises; a NULL argument stays NULL."""
 
-    def test_date_empty_string_returns_null(self, cypher_graph):
-        rows = cypher_graph.cypher("RETURN date('') AS d")
-        assert rows[0]["d"] is None
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            "date('')",
+            "date('2016-00-00')",
+            "date('2016-13-01')",
+            "date('2009-02-30')",
+            "datetime('2009-02-30T00:00:00')",
+            "datetime('not-a-date')",
+            "localdatetime('garbage')",
+            "time('25:99')",
+            "localtime('garbage')",
+        ],
+    )
+    def test_unparsable_literal_raises(self, cypher_graph, expr):
+        with pytest.raises(Exception, match="cannot parse"):
+            cypher_graph.cypher(f"RETURN {expr} AS d")
 
-    def test_date_zero_month_returns_null(self, cypher_graph):
-        rows = cypher_graph.cypher("RETURN date('2016-00-00') AS d")
-        assert rows[0]["d"] is None
-
-    def test_date_partial_month_returns_null(self, cypher_graph):
-        """date('2025-03') should return null or '2025-03-01', not crash."""
-        rows = cypher_graph.cypher("RETURN date('2016-13-01') AS d")
-        assert rows[0]["d"] is None
+    @pytest.mark.parametrize("fn", ["date", "datetime", "localdatetime", "time", "localtime"])
+    def test_null_argument_stays_null(self, cypher_graph, fn):
+        assert cypher_graph.cypher(f"RETURN {fn}(null) AS d")[0]["d"] is None
 
 
 class TestBugDatePropertyAccessor:
