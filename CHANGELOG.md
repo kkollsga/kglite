@@ -21,6 +21,19 @@ before upgrading.
     <version with the fix> adds it to the response-budget union it wraps
     around each schema.
 
+### Performance
+
+- **C ABI and Java: multi-threaded throughput no longer collapses as threads
+  are added.**
+  - Before: the C library's memory-statistics counters were three process-wide
+    atomics updated on every allocation. Concurrent callers fought over them,
+    so 64 Java reader threads served 2,040 req/s at about 9 cores.
+  - Now: each thread counts in its own slot. The same probe serves 48,400 req/s
+    (23.7×); a 7.8%-write mix goes from 2,140 to 22,900 req/s (10.7×).
+  - `kglite_memory_stats` keeps its signature. Its peak is now folded every
+    1,024 allocations per thread, on allocations of 1 MiB or more and at every
+    call, so a brief spike between folds can be missed.
+
 ## [0.19.6] - 2026-10-09
 
 ### Breaking changes and migration
