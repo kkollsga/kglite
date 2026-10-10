@@ -996,5 +996,7 @@ pub mod api {
         pub use crate::graph::session::{
             OnlineCheckpointReport, DEFAULT_AUTO_CHECKPOINT_WAL_BYTES,
         };
+        /// `Session::write_logged` / `Session::apply_unlogged` failure and result.
+        pub use crate::graph::session::{WriteError, WriteOutcome};
     }
 }

@@ -125,6 +125,10 @@ pub struct Session {
     /// those that forked because it was shared. Test observability only.
     pub(super) in_place_commits: std::sync::atomic::AtomicU64,
     pub(super) forked_commits: std::sync::atomic::AtomicU64,
+    /// Set by [`Session::retire`]; read under the gates that every publisher
+    /// and checkpoint takes, so a retire waits out in-flight work and nothing
+    /// publishes after it returns.
+    pub(super) retired: std::sync::atomic::AtomicBool,
 }
 
 /// Serialized mutable access to a Session graph. The guard holds the Session
@@ -188,6 +192,7 @@ impl Session {
             group: Default::default(),
             in_place_commits: Default::default(),
             forked_commits: Default::default(),
+            retired: Default::default(),
         }
     }
 
@@ -361,6 +366,7 @@ impl Session {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let _commit = self.lock_commit_gate();
+        self.ensure_not_retired()?;
         let mut guard = self.graph.lock().unwrap_or_else(|p| p.into_inner());
         self.save_checkpoint(&mut guard, path, fsync)
     }
@@ -452,16 +458,34 @@ impl Session {
         // backwards. (std `Mutex` is not reentrant, so read the version off the
         // guarded Arc, never via `self.version()`.)
         let _commit = self.lock_commit_gate();
+        self.publish_gated(working, base_version, check_occ).0
+    }
+
+    /// The OCC check, log append, barrier and swap of a commit, with the commit
+    /// gate already held by the caller. Also reports the LSN of the frame the
+    /// commit logged (`None` when it logged nothing).
+    pub(super) fn publish_gated(
+        &self,
+        mut working: DirGraph,
+        base_version: u64,
+        check_occ: bool,
+    ) -> (CommitOutcome, Option<u64>) {
+        if let Err(error) = self.ensure_not_retired() {
+            return (CommitOutcome::DurabilityFailed { error }, None);
+        }
         let current_version = self
             .graph
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .version();
         if check_occ && current_version != base_version {
-            return CommitOutcome::ConflictDetected {
-                current_version,
-                base_version,
-            };
+            return (
+                CommitOutcome::ConflictDetected {
+                    current_version,
+                    base_version,
+                },
+                None,
+            );
         }
 
         // Durable sessions log the commit BEFORE publishing it, and flush it
@@ -475,11 +499,12 @@ impl Session {
         // for a non-durable session.
         let staged = match self.stage_working_commit(&mut working) {
             Ok(staged) => staged,
-            Err(error) => return CommitOutcome::DurabilityFailed { error },
+            Err(error) => return (CommitOutcome::DurabilityFailed { error }, None),
         };
+        let lsn = staged.lsn();
         let logged = match self.flush_staged(staged) {
             Ok(logged) => logged,
-            Err(error) => return CommitOutcome::DurabilityFailed { error },
+            Err(error) => return (CommitOutcome::DurabilityFailed { error }, None),
         };
 
         // Bump from the *current* version (not the possibly-stale base) so the
@@ -497,7 +522,7 @@ impl Session {
         if let Some(published) = Arc::get_mut(&mut guard) {
             crate::graph::handle::compact_dir_graph(published);
         }
-        CommitOutcome::Committed { new_version }
+        (CommitOutcome::Committed { new_version }, lsn)
     }
 
     /// Roll back a transaction. The working copy (if materialized)

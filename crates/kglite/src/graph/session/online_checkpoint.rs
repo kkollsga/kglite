@@ -86,11 +86,13 @@ impl Session {
     /// a counter read: cheap enough to call after every commit. The caller
     /// decides where [`Self::checkpoint_online`] then runs.
     pub fn needs_checkpoint(&self) -> bool {
-        self.durable
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .as_ref()
-            .is_some_and(|ds| ds.needs_checkpoint())
+        !self.is_retired()
+            && self
+                .durable
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
+                .is_some_and(|ds| ds.needs_checkpoint())
     }
 
     /// [`Self::checkpoint_online`] when [`Self::needs_checkpoint`] holds and no
@@ -122,6 +124,7 @@ impl Session {
     }
 
     fn checkpoint_online_gated(&self) -> Result<OnlineCheckpointReport, String> {
+        self.ensure_not_retired()?;
         let started = Instant::now();
         let (snapshot, point, snapshot_hold) = {
             let _commit = self.lock_commit_gate();

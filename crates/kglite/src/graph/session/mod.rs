@@ -55,6 +55,7 @@ pub use self::backup::{backup_snapshot, BackupOptions, BackupReport};
 pub use self::cancel::CancelToken;
 pub use self::cursor::{execute_read_cursor, Cursor};
 pub use self::execute::{execute_mut, execute_read, ExecuteOptions, ExecuteOutcome};
+pub use self::logged_write::{WriteError, WriteOutcome};
 pub(crate) use self::noderefs::{
     property_value_needs_snapshot, snapshot_dataframe_properties, snapshot_property_values,
 };
@@ -99,6 +100,9 @@ mod group_commit;
 mod group_commit_tests;
 #[cfg(test)]
 mod in_place_tests;
+mod logged_write;
+#[cfg(test)]
+mod logged_write_tests;
 #[cfg(test)]
 mod merge_unwind_index_tests;
 pub(crate) mod noderefs;

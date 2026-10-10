@@ -87,6 +87,17 @@ before upgrading.
 - `Session::auto_commit_is_grouped(query, opts)` reports whether
   `execute_auto_commit` routes a statement through the group-commit queue, for
   a binding that serializes its own writers ahead of the session.
+- `Session::write_logged(f)` runs a `&mut DirGraph` closure on a working copy
+  and publishes it after its captured ops are durable. An error, a refused
+  ontology verdict or a failed append publishes nothing and consumes no LSN.
+- `Session::apply_unlogged(f)` publishes a closure for state the log does not
+  describe (schema, configuration, text indexes) and returns
+  `WriteError::CapturedOps` when the closure captured ops.
+- `Session::attach_log(graph, path, level)` is `open_durable` with the
+  `DurableOpenError` category kept (`Io`, `Replay`, `Refused`).
+- `Session::retire()` refuses every later commit, statement, closure write,
+  save and checkpoint; `is_retired()` reports it.
+- `Session::next_lsn()` and `Session::last_lsn()` report the log position.
 
 ### Fixed
 

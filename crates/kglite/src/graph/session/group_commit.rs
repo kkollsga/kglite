@@ -235,6 +235,8 @@ impl Session {
         // Declared first so it drops last, after the gate is released.
         let _handoff = Handoff(self);
         let gate = self.lock_commit_gate();
+        self.ensure_not_retired()
+            .map_err(|message| KgError::DurabilityFailed { message })?;
         let fork = {
             let base = self.snapshot();
             base.try_fork_transaction().map_err(KgError::FileIo)?

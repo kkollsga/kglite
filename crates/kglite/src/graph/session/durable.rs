@@ -122,7 +122,7 @@ pub(super) struct DurableState {
     /// append blocks the publish — is about *ordering*, and ordering cannot be
     /// exercised without a reachable append failure; no portable filesystem
     /// trick fails a write on an already-open append handle.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-seam"))]
     fail_append: bool,
 }
 
@@ -242,6 +242,11 @@ impl StagedLog {
         }
     }
 
+    /// LSN of the frame this commit staged, `None` when it logged nothing.
+    pub(super) fn lsn(&self) -> Option<u64> {
+        self.staged.as_ref().map(|(lsn, _)| *lsn)
+    }
+
     /// The ops this commit captured, in capture order.
     pub(super) fn raw(&self) -> &[RawOp] {
         &self.raw
@@ -354,8 +359,23 @@ impl Session {
         checkpoint_path: &str,
         level: DurabilityLevel,
     ) -> Result<Session, String> {
+        Self::attach_log(graph, checkpoint_path, level).map_err(|e| e.to_string())
+    }
+
+    /// [`Self::open_durable`] with the failure category kept: a binding that
+    /// maps an unreadable log, a failed replay and a refused open to different
+    /// error classes attaches through this and matches on
+    /// [`DurableOpenError`]. This is also how a binding that previously ran
+    /// [`durability::open_log`] itself hands the log to the engine — it calls
+    /// this *instead of* opening the log, so the sidecar has exactly one
+    /// writer; the caller still owns the writer lease (see `open_durable`).
+    pub fn attach_log(
+        graph: Arc<DirGraph>,
+        checkpoint_path: &str,
+        level: DurabilityLevel,
+    ) -> Result<Session, durability::DurableOpenError> {
         if level.logs() && graph.graph.is_disk() {
-            return Err(format!(
+            return Err(durability::DurableOpenError::Refused(format!(
                 "durable={} is not supported for storage='disk' (only 'off' is). A disk \
                  graph commits by publishing an immutable generation, so its durability \
                  boundary is the generation publish, not a logical write-ahead log: a \
@@ -364,7 +384,7 @@ impl Session {
                  does not have. Use Session::save checkpoints for disk graphs, or a \
                  mapped / in-memory graph if you need per-commit crash safety.",
                 level.name(),
-            ));
+            )));
         }
 
         let mut graph = graph;
@@ -372,8 +392,7 @@ impl Session {
         // recovery-on-open refusal. The wheel's durable `KnowledgeGraph` runs
         // the same sequence through this same function, so the two cannot
         // drift.
-        let opened = durability::open_log(&mut graph, Path::new(checkpoint_path), level)
-            .map_err(|e| e.to_string())?;
+        let opened = durability::open_log(&mut graph, Path::new(checkpoint_path), level)?;
 
         let Some((wal, next_lsn)) = opened else {
             return Ok(Session::from_arc(graph));
@@ -390,7 +409,7 @@ impl Session {
                 checkpoint_floor: std::fs::metadata(checkpoint_path).map_or(0, |m| m.len()),
                 retry_after_wal_bytes: 0,
                 checkpoint_running: false,
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-seam"))]
                 fail_append: false,
             },
         ))
@@ -490,7 +509,7 @@ impl Session {
         if raw.is_empty() {
             return Ok(StagedLog::none());
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-seam"))]
         if ds.fail_append {
             return Err("injected WAL append failure".to_string());
         }
@@ -645,6 +664,7 @@ impl Session {
     /// channel calls this first; a caller that does not still cannot lose data
     /// silently, because both paths latch the session (see [`Session::write`]).
     pub fn check_direct_write_allowed(&self) -> Result<(), String> {
+        self.ensure_not_retired()?;
         if self
             .durable
             .lock()
@@ -660,8 +680,9 @@ impl Session {
     /// rather than `pub(super)` because the durability failure path is also
     /// what the change-data-capture tests use to prove a refused commit
     /// publishes nothing.
-    #[cfg(test)]
-    pub(crate) fn set_fail_append(&self, fail: bool) {
+    #[cfg(any(test, feature = "test-seam"))]
+    #[doc(hidden)]
+    pub fn set_fail_append(&self, fail: bool) {
         if let Some(ds) = self
             .durable
             .lock()
@@ -712,13 +733,25 @@ impl Session {
             .map_or(0, |ds| ds.wal.barrier_count())
     }
 
-    #[cfg(test)]
-    pub(super) fn next_lsn(&self) -> Option<u64> {
+    /// Log-sequence number the next logged commit will carry, or `None` for a
+    /// session without a log. A commit that fails to reach the log gives its
+    /// number back, so this moves only when a frame is durable.
+    pub fn next_lsn(&self) -> Option<u64> {
         self.durable
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .as_ref()
             .map(|ds| ds.next_lsn)
+    }
+
+    /// LSN of the newest frame the log holds (`0` when it holds none), or
+    /// `None` for a session without a log.
+    pub fn last_lsn(&self) -> Option<u64> {
+        self.durable
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map(|ds| ds.last_lsn())
     }
 
     /// Build a session that already owns durability state. Private to the
@@ -733,6 +766,7 @@ impl Session {
             group: Default::default(),
             in_place_commits: Default::default(),
             forked_commits: Default::default(),
+            retired: Default::default(),
         }
     }
 }
