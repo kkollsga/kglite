@@ -230,3 +230,33 @@ def test_local_manifest_cannot_override_known_rejected_bytes(tmp_path):
     result = run("compare_bench.py", reference, candidate)
     assert result.returncode == 2, result.stdout + result.stderr
     assert "rejected" in result.stderr
+
+
+def test_main_rerenders_docs_facts_after_a_qualification(monkeypatch):
+    # A qualification changes the registry the project-facts page renders from;
+    # main() must re-render it, or the release commit ships a stale page.
+    from scripts import benchmark_qualification as bq
+
+    ran = []
+    monkeypatch.setattr(bq, "qualify", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        sys, "argv", ["benchmark_qualification.py", "x.json", "--status", "accepted", "--evidence", "e"]
+    )
+    monkeypatch.setattr(
+        bq.subprocess, "run", lambda argv, check: ran.append(argv) or subprocess.CompletedProcess(argv, 0)
+    )
+    assert bq.main() == 0
+    assert ran == [[sys.executable, str(bq.RENDER_DOCS_FACTS)]]
+
+    monkeypatch.setattr(bq.subprocess, "run", lambda argv, check: subprocess.CompletedProcess(argv, 1))
+    assert bq.main() == 2
+
+
+def test_release_preflight_reports_stale_docs_facts(monkeypatch):
+    from scripts import release_preflight as rp
+
+    monkeypatch.setattr(rp.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 1, "", ""))
+    stale = rp.check_docs_facts()
+    assert not stale.ok and stale.remedy == "make docs-facts"
+    monkeypatch.setattr(rp.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, "", ""))
+    assert rp.check_docs_facts().ok

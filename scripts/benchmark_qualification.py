@@ -15,8 +15,11 @@ import json
 import math
 from pathlib import Path
 import re
+import subprocess
+import sys
 
 BASELINES_DIR = Path(__file__).resolve().parent.parent / "tests/benchmarks/baselines"
+RENDER_DOCS_FACTS = Path(__file__).resolve().parent / "render_docs_facts.py"
 MANIFEST = "qualifications.json"
 STATUSES = {"accepted", "pending", "rejected"}
 
@@ -211,6 +214,12 @@ def main() -> int:
         print(f"qualification failed: {error}")
         return 2
     print(f"{args.capture.name}: {args.status}; raw capture unchanged")
+    # The project-facts page renders from this registry, so a qualification
+    # stales it; four releases shipped that stale page into a red docs check.
+    rendered = subprocess.run([sys.executable, str(RENDER_DOCS_FACTS)], check=False)
+    if rendered.returncode != 0:
+        print(f"docs facts not re-rendered (exit {rendered.returncode}): run `make docs-facts`")
+        return 2
     return 0
 
 
