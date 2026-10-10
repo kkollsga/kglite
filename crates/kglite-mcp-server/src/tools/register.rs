@@ -2,6 +2,7 @@
 //! `graph_overview` decorations, and the router wiring for every KGLite
 //! MCP route.
 
+use crate::output_schema::ObjectOutputSchema;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
@@ -33,7 +34,7 @@ fn register_cypher_tool<A>(
         Arc::new(serde_json::Map::new()),
     )
     .with_input_schema::<A>()
-    .with_output_schema::<CypherResultEnvelope>()
+    .with_object_output_schema::<CypherResultEnvelope>()
     .with_annotations(
         ToolAnnotations::new()
             .read_only(!writable)

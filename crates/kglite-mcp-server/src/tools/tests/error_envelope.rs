@@ -1228,3 +1228,29 @@ async fn save_graph_over_a_replaced_file_is_an_error_that_keeps_the_work() {
         "a refused save keeps the work it refused to overwrite the file with"
     );
 }
+
+/// MCP 2025-06-18: `Tool.outputSchema` is an object schema with `"type":
+/// "object"` at its root. The Claude desktop app rejects the whole
+/// `tools/list` when one tool breaks that, so every served tool is checked as
+/// a client receives it, after the server's response-budget wrapping.
+#[tokio::test]
+async fn every_served_output_schema_is_an_object_at_its_root() {
+    for builtins in [Builtins::default(), writable_builtins()] {
+        let client = boot(kglite_server(state_with_active(fresh_active()), builtins)).await;
+        let listed = client.list_tools(None).await.expect("list tools");
+        let mut checked = 0;
+        for tool in &listed.tools {
+            if let Some(schema) = &tool.output_schema {
+                assert_eq!(
+                    schema.get("type").and_then(|t| t.as_str()),
+                    Some("object"),
+                    "{} outputSchema root: {:?}",
+                    tool.name,
+                    schema.keys().collect::<Vec<_>>()
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "no tool declared an output schema");
+    }
+}

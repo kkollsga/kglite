@@ -9,6 +9,18 @@ before upgrading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **MCP server: every tool's `outputSchema` declares `"type": "object"` at its
+  root, so the server starts in clients that validate strictly.**
+  - Before: `cypher_query`, manifest Cypher tools and the recipe tools sent a
+    root `anyOf` with no `type`. The Claude desktop app refused the whole
+    `tools/list` (`outputSchema.type: expected "object"`), so no kglite MCP
+    server started there. The Claude Code CLI and Codex accepted it.
+  - Now: kglite's own route schemas carry the root type, and mcp-methods
+    <version with the fix> adds it to the response-budget union it wraps
+    around each schema.
+
 ## [0.19.6] - 2026-10-09
 
 ### Breaking changes and migration
