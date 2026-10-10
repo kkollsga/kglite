@@ -9,6 +9,14 @@ before upgrading.
 
 ## [Unreleased]
 
+### Breaking changes and migration
+
+- **`date()`, `datetime()`, `localdatetime()`, `time()` and `localtime()` raise on an unparsable string.**
+  - Before: `date('2009-02-30')` and `datetime('not-a-date')` returned NULL. Written as a validity bound, the NULL silently became an open-ended interval.
+  - Now: the call fails with `cannot parse '<text>'`. The map forms and `valid_at` already raised.
+  - A NULL argument still returns NULL.
+  - Migration: validate input before the call, or wrap the query and handle the error. To keep NULL for dirty rows, filter them out in a `WHERE` first.
+
 ### Added
 
 - **`--version` on `kglite-mcp-server` and `kglite-bolt-server`.** Prints the kglite version and exits; the pip `kglite-mcp-server` entry point shares the flag.
