@@ -1061,32 +1061,7 @@ pub fn add_nodes(
 
     let (stats, metrics) = batch.execute(graph)?;
 
-    // Fold this call's creations into the type's id_index. The batch adds rows
-    // to type_indices but deliberately does not touch id_indices, so the entry
-    // is stale until one of these two runs.
-    //
-    // The index must end up *present*, not merely valid: `lookup_by_id_readonly`
-    // — `MATCH (n {id:X})` and the `MERGE` match — does not build it, and an
-    // absent entry sent every id-equality read down an O(node-position) scan
-    // (issue #20). Folding keeps it present at O(created); the rebuild is the
-    // fallback for the cases the fold declines (see
-    // `fold_appended_ids_into_index`), and is what the whole call used to pay
-    // unconditionally.
-    if !graph.fold_appended_ids_into_index(&node_type, stats.creates) {
-        graph.id_indices.remove(&node_type);
-        graph.build_id_index(&node_type);
-    }
-
-    // Same staleness hazard for the *secondary* indexes: the batch path skips
-    // the per-write incremental maintenance the Cypher executor runs, and
-    // `try_index_lookup` trusts `property_indices` unconditionally, so a stale
-    // index silently hides every row this call loaded. Creates get the
-    // per-node maintenance a `CREATE` gives them; updates move buckets and
-    // re-claim tuples from `UpdateFold`'s pre-images; the rebuild stays the
-    // fallback (see `fold_batch_into_user_indexes` for which cases take it).
-    update_fold.fold_or_rebuild(graph, &node_type, stats);
-
-    graph.stamp_ontology_closure_on_tail(&node_type, stats.creates);
+    refresh_type_indexes_after_load(graph, &node_type, stats, update_fold);
 
     let mut report = NodeOperationReport::new(
         "add_nodes".to_string(),
@@ -1107,6 +1082,42 @@ pub fn add_nodes(
     );
     graph.bump_version();
     Ok(report)
+}
+
+/// Bring a type's indexes up to date after an `add_nodes` batch, which writes
+/// rows without the per-write index maintenance a Cypher `CREATE` runs.
+fn refresh_type_indexes_after_load(
+    graph: &mut DirGraph,
+    node_type: &str,
+    stats: BatchStats,
+    update_fold: UpdateFold,
+) {
+    // Fold this call's creations into the type's id_index. The batch adds rows
+    // to type_indices but deliberately does not touch id_indices, so the entry
+    // is stale until one of these two runs.
+    //
+    // The index must end up *present*, not merely valid: `lookup_by_id_readonly`
+    // — `MATCH (n {id:X})` and the `MERGE` match — does not build it, and an
+    // absent entry sent every id-equality read down an O(node-position) scan
+    // (issue #20). Folding keeps it present at O(created); the rebuild is the
+    // fallback for the cases the fold declines (see
+    // `fold_appended_ids_into_index`), and is what the whole call used to pay
+    // unconditionally.
+    if !graph.fold_appended_ids_into_index(node_type, stats.creates) {
+        graph.id_indices.remove(node_type);
+        graph.build_id_index(node_type);
+    }
+
+    // Same staleness hazard for the *secondary* indexes: the batch path skips
+    // the per-write incremental maintenance the Cypher executor runs, and
+    // `try_index_lookup` trusts `property_indices` unconditionally, so a stale
+    // index silently hides every row this call loaded. Creates get the
+    // per-node maintenance a `CREATE` gives them; updates move buckets and
+    // re-claim tuples from `UpdateFold`'s pre-images; the rebuild stays the
+    // fallback (see `fold_batch_into_user_indexes` for which cases take it).
+    update_fold.fold_or_rebuild(graph, node_type, stats);
+
+    graph.stamp_ontology_closure_on_tail(node_type, stats.creates);
 }
 
 /// The report for one connection batch: its created and updated counts, the
