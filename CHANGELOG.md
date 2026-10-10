@@ -30,6 +30,8 @@ before upgrading.
 
 ### Changed
 
+- **Fluent traversal results come back in a fixed order.** `traverse()` and the accessors over a selection (`titles()`, `collect()`, `to_df()` and the rest) list each parent's children in node creation order and the parents in creation order. The order used to follow a per-process hash seed: two fresh processes over one graph listed the same nodes differently. A `sort_by` or a `max_nodes` limit applies on top as before.
+
 - **`durability: full` no longer makes readers wait for a commit's fsync.**
   - Before: a durable commit held the session lock across the log append and
     the fsync, so every reader waited for every writer's flush. In the

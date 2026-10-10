@@ -10,7 +10,7 @@ use crate::graph::storage::{GraphRead, NodeView};
 use geo::geometry::Geometry;
 use petgraph::graph::NodeIndex;
 use petgraph::Direction;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 // ── Comparison-based traversal types ─────────────────────────────────────────
 
@@ -279,7 +279,7 @@ fn make_traversal_fast(
     let g = &graph.graph;
     // Process each source node
     for &source_node in &source_nodes {
-        let mut targets: HashSet<NodeIndex> = HashSet::new();
+        let mut targets: Vec<NodeIndex> = Vec::new();
 
         // Helper: check if a target node passes the type filter
         let type_ok = |idx: petgraph::graph::NodeIndex| -> bool {
@@ -304,7 +304,7 @@ fn make_traversal_fast(
                     if edge.connection_type() == conn_key {
                         let t = edge.target();
                         if type_ok(t) {
-                            targets.insert(t);
+                            targets.push(t);
                         }
                     }
                 }
@@ -316,7 +316,7 @@ fn make_traversal_fast(
                     if edge.connection_type() == conn_key {
                         let t = edge.source();
                         if type_ok(t) {
-                            targets.insert(t);
+                            targets.push(t);
                         }
                     }
                 }
@@ -329,7 +329,7 @@ fn make_traversal_fast(
                     if edge.connection_type() == conn_key {
                         let t = edge.target();
                         if type_ok(t) {
-                            targets.insert(t);
+                            targets.push(t);
                         }
                     }
                 }
@@ -339,7 +339,7 @@ fn make_traversal_fast(
                     if edge.connection_type() == conn_key {
                         let t = edge.source();
                         if type_ok(t) {
-                            targets.insert(t);
+                            targets.push(t);
                         }
                     }
                 }
@@ -348,7 +348,11 @@ fn make_traversal_fast(
 
         // Store targets for this parent
         if !targets.is_empty() {
-            all_targets_per_parent.insert(source_node, targets.into_iter().collect());
+            // Ascending node index, duplicates (parallel edges) folded: the
+            // fixed order the selection accessors rely on.
+            targets.sort_unstable();
+            targets.dedup();
+            all_targets_per_parent.insert(source_node, targets);
         }
     }
 
@@ -404,7 +408,7 @@ fn make_traversal_full(
     let parents: Vec<NodeIndex> = if create_new_level {
         source_level.iter_node_indices().collect()
     } else {
-        source_level.selections.keys().filter_map(|k| *k).collect()
+        source_level.iter_groups().filter_map(|(k, _)| *k).collect()
     };
 
     // Create a mapping of parent nodes to their source nodes
@@ -466,7 +470,7 @@ fn make_traversal_full(
         }
 
         // Collect all targets for this parent in one pass
-        let mut targets = HashSet::new();
+        let mut targets: Vec<NodeIndex> = Vec::new();
 
         // Pre-intern connection type for fast u64 == u64 comparison
         let conn_key = InternedKey::from_str(&connection_type);
@@ -497,7 +501,7 @@ fn make_traversal_full(
                         if edge.connection_type() == conn_key {
                             let t = edge.target();
                             if type_ok(t) && hop_passes(&edge, t)? {
-                                targets.insert(t);
+                                targets.push(t);
                             }
                         }
                     }
@@ -509,7 +513,7 @@ fn make_traversal_full(
                         if edge.connection_type() == conn_key {
                             let t = edge.source();
                             if type_ok(t) && hop_passes(&edge, t)? {
-                                targets.insert(t);
+                                targets.push(t);
                             }
                         }
                     }
@@ -522,7 +526,7 @@ fn make_traversal_full(
                         if edge.connection_type() == conn_key {
                             let t = edge.target();
                             if type_ok(t) && hop_passes(&edge, t)? {
-                                targets.insert(t);
+                                targets.push(t);
                             }
                         }
                     }
@@ -532,7 +536,7 @@ fn make_traversal_full(
                         if edge.connection_type() == conn_key {
                             let t = edge.source();
                             if type_ok(t) && hop_passes(&edge, t)? {
-                                targets.insert(t);
+                                targets.push(t);
                             }
                         }
                     }
@@ -541,7 +545,9 @@ fn make_traversal_full(
         }
 
         // Convert to Vec for processing
-        let target_vec: Vec<NodeIndex> = targets.into_iter().collect();
+        targets.sort_unstable();
+        targets.dedup();
+        let target_vec = targets;
 
         // Apply filtering and sorting in one pass
         let processed_nodes = crate::graph::core::filtering::process_nodes(
@@ -1670,7 +1676,7 @@ pub fn get_children_properties(
 
     // Get all parents with their children
     if let Some(level) = selection.get_level(level_index) {
-        for (&parent_opt, children) in &level.selections {
+        for (&parent_opt, children) in level.iter_groups() {
             if let Some(parent) = parent_opt {
                 // Get parent title
                 let parent_title = if let Some(node) = graph.node_view(parent) {

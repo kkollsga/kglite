@@ -675,10 +675,24 @@ impl SelectionLevel {
         self.selections.insert(parent, children);
     }
 
+    /// The groups in a fixed order: the parentless group first, then parents by
+    /// ascending node index (creation order). `selections` is a hash map, so
+    /// its own iteration order changes between processes; every accessor that
+    /// lists groups or nodes goes through here, and the children of each group
+    /// are already in ascending node index order from the traversal that built
+    /// them.
+    fn ordered_groups(&self) -> Vec<(&Option<NodeIndex>, &Vec<NodeIndex>)> {
+        let mut groups: Vec<_> = self.selections.iter().collect();
+        if groups.len() > 1 {
+            groups.sort_unstable_by_key(|(parent, _)| **parent);
+        }
+        groups
+    }
+
     pub fn get_all_nodes(&self) -> Vec<NodeIndex> {
-        self.selections
-            .values()
-            .flat_map(|children| children.iter().copied())
+        self.ordered_groups()
+            .into_iter()
+            .flat_map(|(_, children)| children.iter().copied())
             .collect()
     }
 
@@ -687,14 +701,14 @@ impl SelectionLevel {
     }
 
     pub fn iter_groups(&self) -> impl Iterator<Item = (&Option<NodeIndex>, &Vec<NodeIndex>)> {
-        self.selections.iter()
+        self.ordered_groups().into_iter()
     }
 
     /// Non-allocating alternative to `get_all_nodes()` for iterating or counting.
     pub fn iter_node_indices(&self) -> impl Iterator<Item = NodeIndex> + '_ {
-        self.selections
-            .values()
-            .flat_map(|children| children.iter().copied())
+        self.ordered_groups()
+            .into_iter()
+            .flat_map(|(_, children)| children.iter().copied())
     }
 
     pub fn node_count(&self) -> usize {
