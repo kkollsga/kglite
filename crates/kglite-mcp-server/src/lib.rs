@@ -46,6 +46,7 @@ mod explore;
 mod extensions;
 mod fetch_images;
 mod modes;
+mod output_schema;
 mod raw_query_routes;
 mod raw_stdio;
 mod recipe_queries;

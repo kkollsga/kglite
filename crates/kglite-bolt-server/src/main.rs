@@ -1514,6 +1514,12 @@ mod tests {
         .expect("a durable memory graph");
         let session = Arc::new(started.session);
         let lease = started.writer_lease;
+        // A fresh log is its header alone. The checkpoint policy measures the
+        // frames after it, so the settled bound below adds it back: a log whose
+        // frames sit just under the threshold is within policy, not untrimmed.
+        let wal_header =
+            std::fs::metadata(kglite::api::durable::wal_path(&path)).map_or(0, |m| m.len());
+        assert!(wal_header > 0, "a durable open writes the log header");
         let state: CheckpointState = Arc::default();
         let stop = Arc::new(AtomicBool::new(false));
         let progress = Arc::new(AtomicU64::new(0));
@@ -1575,7 +1581,7 @@ mod tests {
         // `Session::needs_checkpoint`); the load-independent proof that trimming happened is that
         // far more than the threshold was acknowledged.
         let deadline = Instant::now() + Duration::from_secs(60);
-        let bound = || (8 * 1024).max(std::fs::metadata(&path).map_or(0, |m| m.len()));
+        let bound = || (8 * 1024).max(std::fs::metadata(&path).map_or(0, |m| m.len())) + wal_header;
         while wal_len() > bound() && Instant::now() < deadline {
             tokio::time::sleep(poll).await;
         }

@@ -578,6 +578,7 @@ impl KnowledgeGraph {
     ) -> PyResult<Py<PyAny>> {
         use std::collections::HashSet;
 
+        self.check_durable_owner()?;
         if let Some(ref cb) = progress {
             if !cb.bind(py).is_callable() {
                 return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
@@ -635,6 +636,19 @@ impl KnowledgeGraph {
                     PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e)
                 }
             })?;
+
+        // A durable graph checkpoints instead of logging the load. The loader
+        // is a bulk build: auto-typing renames node types behind the capture
+        // layer, so replaying its captured ops can name endpoints that no
+        // longer exist ("WAL v4 group ... has missing endpoints" on reopen),
+        // and a dump-sized load would put millions of ops in the log. `save()`
+        // writes the checkpoint and truncates the log. Other graphs only need
+        // the capture buffer drained for CDC.
+        if self.lifecycle.durable.is_some() {
+            self.save(py, None, true)?;
+        } else {
+            self.commit_wal()?;
+        }
 
         Python::attach(|py| {
             for message in &stats.warnings {

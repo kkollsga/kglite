@@ -239,4 +239,45 @@ class DurableSessionTest {
         }
         return HexFormat.of().formatHex(digest.digest());
     }
+
+    @Test
+    @DisplayName("concurrent cypher() writers on one durable graph all commit while readers run")
+    void concurrentDurableWritersAllCommit(@TempDir Path dir) throws Exception {
+        // Each durable write commits a fork optimistically; without the
+        // session write gate, live reader snapshots made racing writers fail
+        // with a transaction conflict (0.19.6).
+        try (KnowledgeGraph graph = KnowledgeGraph.open(
+                dir.resolve("g.kgl"), create().durability(Durability.NORMAL))) {
+            java.util.concurrent.atomic.AtomicBoolean done = new java.util.concurrent.atomic.AtomicBoolean();
+            List<Thread> readers = new ArrayList<>();
+            for (int r = 0; r < 8; r++) {
+                Thread reader = new Thread(() -> {
+                    while (!done.get()) {
+                        count(graph);
+                    }
+                });
+                reader.start();
+                readers.add(reader);
+            }
+            java.util.concurrent.ExecutorService writers = java.util.concurrent.Executors.newFixedThreadPool(16);
+            List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
+            for (int w = 0; w < 16; w++) {
+                long writer = w;
+                futures.add(writers.submit(() -> {
+                    for (long i = 0; i < 25; i++) {
+                        graph.cypher("CREATE (:Person {w: $w, i: $i})", Map.of("w", writer, "i", i));
+                    }
+                }));
+            }
+            for (java.util.concurrent.Future<?> future : futures) {
+                future.get();
+            }
+            writers.shutdown();
+            done.set(true);
+            for (Thread reader : readers) {
+                reader.join();
+            }
+            assertEquals(400, count(graph));
+        }
+    }
 }

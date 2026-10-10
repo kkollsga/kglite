@@ -123,14 +123,18 @@ pub(crate) fn auto_checkpoint(session: &Session) {
 /// the write-ahead log, as one transaction. An error from the operation drops
 /// the fork, so nothing it wrote is published.
 pub(crate) fn durable_transaction<T, E>(
-    session: &Session,
+    state: &crate::session::SessionState,
     operation: impl FnOnce(&mut DirGraph) -> Result<T, E>,
     commit_error: impl Fn(KgError) -> E,
 ) -> Result<T, E> {
+    let session = &state.inner;
+    let gate = state.write_gate();
     let mut tx = session.begin();
     let working = tx.working_mut().map_err(&commit_error)?;
     let value = operation(working)?;
-    match session.commit(tx, true) {
+    let outcome = session.commit(tx, true);
+    drop(gate);
+    match outcome {
         CommitOutcome::Committed { .. } | CommitOutcome::NoWritesNoOp => {
             auto_checkpoint(session);
             Ok(value)

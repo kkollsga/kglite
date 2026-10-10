@@ -10,6 +10,7 @@
 //! Query languages, runner protocols, and graph-engine error shapes remain
 //! at this boundary rather than entering the framework.
 
+use crate::output_schema::ObjectOutputSchema;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -99,7 +100,7 @@ pub fn register_cypher_tools(
                 .map(|s| std::borrow::Cow::Owned(s.to_string())),
             Arc::new(schema),
         )
-        .with_output_schema::<crate::tools::CypherResultEnvelope>();
+        .with_object_output_schema::<crate::tools::CypherResultEnvelope>();
         let route_name = spec.name.clone();
         let template = spec.cypher.clone();
         let runner = runner.clone();

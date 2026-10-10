@@ -1,5 +1,6 @@
 //! Fixed MCP route registration for the boot-validated recipe catalog.
 
+use crate::output_schema::ObjectOutputSchema;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -158,7 +159,7 @@ pub(crate) fn register_recipe_query_routes(
             Some(entry.description.clone().into()),
             Arc::new(schema),
         )
-        .with_output_schema::<RunRecipeQueryOutput>()
+        .with_object_output_schema::<RunRecipeQueryOutput>()
         .with_annotations(safe_annotations());
         let handler_state = state.clone();
         let handler_catalog = catalog.clone();
@@ -341,7 +342,7 @@ where
 {
     Tool::new_with_raw(name, Some(description.into()), Arc::new(Map::new()))
         .with_input_schema::<I>()
-        .with_output_schema::<O>()
+        .with_object_output_schema::<O>()
         .with_annotations(safe_annotations())
 }
 
@@ -429,7 +430,10 @@ mod tests {
         assert_eq!(annotations.idempotent_hint, Some(true));
         assert_eq!(annotations.open_world_hint, Some(false));
         assert_eq!(tool.input_schema.get("type"), Some(&json!("object")));
-        assert!(tool.output_schema.is_some(), "declared output schema");
+        let output = tool.output_schema.as_ref().expect("declared output schema");
+        // MCP requires an object schema at the root; these outputs are untagged
+        // Success | Error unions, which schemars renders as a bare anyOf.
+        assert_eq!(output.get("type"), Some(&json!("object")));
     }
 
     fn structured_json(result: &CallToolResult) -> Value {

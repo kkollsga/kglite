@@ -565,9 +565,14 @@ fn probe_recipe_catalog(rpc: &mut Rpc) -> Check {
         Ok(text) => text,
         Err(e) => return Check::Fail(e),
     };
-    let recipes = serde_json::from_str::<Value>(&text)
-        .ok()
-        .and_then(|payload| payload.get("recipes").and_then(Value::as_array).cloned());
+    // The structured result is the contract; the text blocks may carry a
+    // lazy-skill footer after the JSON mirror (mcp-methods >= 0.4.13).
+    let payload = result
+        .get("structuredContent")
+        .cloned()
+        .or_else(|| serde_json::from_str::<Value>(&text).ok());
+    let recipes =
+        payload.and_then(|payload| payload.get("recipes").and_then(Value::as_array).cloned());
     let Some(recipes) = recipes else {
         return Check::Fail(format!(
             "list_recipe_queries returned no `recipes` array: {}",

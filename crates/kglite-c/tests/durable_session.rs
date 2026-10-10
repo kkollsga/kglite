@@ -729,3 +729,49 @@ fn auto_checkpoint_bounds_the_log_and_zero_disables_it() {
         free(second.session);
     }
 }
+
+/// Concurrent writers on one durable handle must all commit. A durable write
+/// runs on a fork and commits optimistically; before the session write gate,
+/// readers holding snapshots pushed writers onto that path and racing commits
+/// came back `TransactionConflict` (the 0.19.6 Java shootout: 1 in ~7k).
+#[test]
+fn concurrent_durable_writers_with_readers_all_commit() {
+    let dir = TestDir::new("concurrent-writers");
+    let opened = open_ok(&dir.graph(), create("normal"));
+    let session = opened.session as usize;
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let readers: Vec<_> = (0..4)
+        .map(|_| {
+            let done = done.clone();
+            std::thread::spawn(move || {
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    count(session as *const KgliteSession);
+                }
+            })
+        })
+        .collect();
+    let writers: Vec<_> = (0..8)
+        .map(|w| {
+            std::thread::spawn(move || {
+                (0..50)
+                    .map(|i| {
+                        write(
+                            session as *mut KgliteSession,
+                            &format!("CREATE (:T {{w: {w}, i: {i}}})"),
+                        )
+                    })
+                    .filter(|status| *status != KgliteStatusCode::Ok)
+                    .count()
+            })
+        })
+        .collect();
+    let failed: usize = writers.into_iter().map(|w| w.join().unwrap()).sum();
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    for reader in readers {
+        reader.join().unwrap();
+    }
+    assert_eq!(failed, 0, "writes refused under concurrency");
+    assert_eq!(count(opened.session), 400);
+    assert_eq!(close(opened.session), KgliteStatusCode::Ok);
+    free(opened.session);
+}

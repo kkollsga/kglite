@@ -51,6 +51,15 @@ pub(crate) struct SessionState {
     /// when a result is created, so a result keeps the encoding in force at
     /// its own execution.
     pub(crate) tagged_results: AtomicBool,
+    /// Serializes this handle's writers: auto-commit statements, batches,
+    /// relationship batches, ontology changes and explicit-transaction commits.
+    /// A durable write runs on a fork and commits optimistically, so two C-ABI
+    /// writers racing on one session could otherwise lose a commit to
+    /// `TransactionConflict` (the Java and C contracts promise that writes
+    /// serialize). Lock order: `write_gate` → session graph → durable log; it
+    /// is released before the inline checkpoint so readers and the next writer
+    /// do not wait on a log fold.
+    pub(crate) write_gate: Mutex<()>,
     /// Path, read-only flag and writer lease of a session opened through
     /// [`kglite_open_session`](crate::kglite_open_session); inert for a
     /// session wrapped around a graph handle. Declared last so the session
@@ -68,8 +77,15 @@ impl SessionState {
             inner: session,
             embedder: Mutex::new(None),
             tagged_results: AtomicBool::new(false),
+            write_gate: Mutex::new(()),
             life,
         }
+    }
+
+    /// Hold [`Self::write_gate`] for one write. A panic inside a write that
+    /// held it leaves no state the gate protects, so poisoning is ignored.
+    pub(crate) fn write_gate(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.write_gate.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     pub(crate) fn into_handle_boxed(self) -> *mut KgliteSession {
@@ -663,11 +679,14 @@ unsafe fn run_mut(
                 // A durable session's mutations must reach its write-ahead
                 // log, which only `begin`/`commit` writes; the direct write
                 // guard below would latch the log as diverged.
-                let outcome = session_state.inner.execute_auto_commit(
-                    query_str,
-                    &opts,
-                    DURABLE_WRITE_ATTEMPTS,
-                );
+                let outcome = {
+                    let _gate = session_state.write_gate();
+                    session_state.inner.execute_auto_commit(
+                        query_str,
+                        &opts,
+                        DURABLE_WRITE_ATTEMPTS,
+                    )
+                };
                 if outcome.is_ok() {
                     crate::lifecycle::auto_checkpoint(&session_state.inner);
                 }
@@ -679,6 +698,7 @@ unsafe fn run_mut(
                 // redundant working-copy clone. `execute_mut` rolls its own
                 // statement checkpoint back on error, so the graph under the
                 // guard is unmutated on failure.
+                let _gate = session_state.write_gate();
                 let mut working = session_state.inner.write();
                 execute_mut(&mut working, query_str, &opts)
             };
@@ -821,8 +841,9 @@ pub unsafe extern "C" fn kglite_session_execute_mut_batch(
             };
             let transaction: Result<Vec<serde_json::Value>, Box<kglite::api::KgError>> =
                 if session_state.inner.durability().is_some() {
-                    crate::lifecycle::durable_transaction(&session_state.inner, run_all, Box::new)
+                    crate::lifecycle::durable_transaction(session_state, run_all, Box::new)
                 } else {
+                    let _gate = session_state.write_gate();
                     session_state.inner.transact(run_all)
                 };
             let results = match transaction {
@@ -926,10 +947,11 @@ pub unsafe extern "C" fn kglite_create_edges_batch(
             let transaction: Result<_, (String, Option<Box<kglite::api::KgError>>)> =
                 if session_state.inner.durability().is_some() {
                     // Logged: a durable session's edges must reach its log.
-                    crate::lifecycle::durable_transaction(&session_state.inner, add_edges, |e| {
+                    crate::lifecycle::durable_transaction(session_state, add_edges, |e| {
                         (e.to_string(), Some(Box::new(e)))
                     })
                 } else {
+                    let _gate = session_state.write_gate();
                     session_state.inner.transact(add_edges)
                 };
             match transaction {

@@ -2073,7 +2073,10 @@ class TestYamlManifest:
             client.shutdown()
 
         for envelope in (listing, result):
-            assert envelope["structuredContent"] == json.loads(_text_content(envelope))
+            # The first text block mirrors the structured result; a lazy-skill
+            # footer, when present, follows in its own block.
+            mirror = next(p["text"] for p in envelope["content"] if p.get("type") == "text")
+            assert envelope["structuredContent"] == json.loads(mirror)
         assert listing["structuredContent"]["recipes"][0]["query_count"] == 1
         elapsed = result["structuredContent"]["result"]["diagnostics"]["elapsed_ms"]
         assert isinstance(elapsed, int) and elapsed >= 0
@@ -2703,18 +2706,13 @@ class TestGraphCarriedSkills:
         assert "KgliteSkill" not in overview, overview
 
     def test_the_lazy_flow_nudges_once_then_hands_over_the_body(self, tmp_path: Path):
-        """End-to-end lazy delivery: the agent is told the skill exists on its
-        first call to the tool that advertises it, fetches the body with
-        `skill(name)`, and is not told again.
+        """End-to-end lazy delivery: every tool that advertises the skill tells
+        the agent it exists until the agent fetches the body with
+        `skill(name)`, and none tells it again afterwards.
 
-        The nudge is asserted on `graph_overview`, not `cypher_query`, and the
-        difference is an **upstream gap, not a choice**: mcp-methods composes
-        the footer inside its own typed-tool dispatch, and `cypher_query` is
-        the one kglite tool registered as a raw `ToolRoute` (it needs a custom
-        output schema). The framework exposes no way for a raw route to ask
-        for the notice, so a lazy skill targeting only `cypher_query` never
-        nudges. The two negative assertions below pin that gap: when upstream
-        closes it they go red, which is the signal to delete them."""
+        `cypher_query` is a raw `ToolRoute` (it needs a custom output schema);
+        since mcp-methods 0.4.13 raw routes get the same footer as typed tools,
+        so it nudges too."""
         kgl = tmp_path / "nudged.kgl"
         g = kglite.KnowledgeGraph()
         g.add_nodes(pd.DataFrame({"id": [1], "title": ["A"]}), "Well", "id", "title")
@@ -2746,8 +2744,8 @@ class TestGraphCarriedSkills:
         # own bundled lazy skill too, which is still unfetched and still
         # nudges — assert the skill by name, not the shared footer wording.
         assert 'skill("wells")' not in second, second[-600:]
-        # The pinned upstream gap.
-        assert 'skill("wells")' not in raw_route, raw_route[-600:]
+        # The raw route nudges before the skill is loaded.
+        assert 'skill("wells")' in raw_route, raw_route[-600:]
 
     def test_an_eager_graph_skill_ships_its_body_and_never_nudges(self, tmp_path: Path):
         kgl = tmp_path / "eager.kgl"
@@ -2774,7 +2772,8 @@ class TestGraphCarriedSkills:
 
         assert "EAGER-SKILL-MARKER" in tools["cypher_query"], tools["cypher_query"][:600]
         assert 'skill("wells")' not in tools["cypher_query"], tools["cypher_query"][:600]
-        assert "not been loaded" not in result, result[-600:]
+        # An eager skill never nudges (bundled lazy skills still may).
+        assert 'skill("wells")' not in result, result[-600:]
         assert "wells [eager] \u2014 " in overview, overview
 
     def test_reload_graph_swaps_the_skill_layer_and_announces_it(self, skill_graph: Path):
