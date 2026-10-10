@@ -1501,5 +1501,17 @@
   },
   "tests/test_temporal_bound_coercion.py::test_closed_timestamp_from_within_a_date_to_day_is_valid[disk]": {
     "owner": "storage-parity"
+  },
+  "tests/test_index_listing_parity.py::test_an_index_is_reported_by_has_index_and_list_indexes[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_index_listing_parity.py::test_an_index_is_reported_by_has_index_and_list_indexes[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_index_listing_parity.py::test_an_index_is_reported_by_has_index_and_list_indexes[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_index_listing_parity.py::test_an_index_is_reported_by_has_index_and_list_indexes[disk_reopened]": {
+    "owner": "storage-parity"
   }
 }

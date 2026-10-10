@@ -676,6 +676,7 @@ fn open(
     let mut kg = KnowledgeGraph::from_arc(opened.graph);
     kg.lifecycle.source_path = Some(std::path::PathBuf::from(&path));
     kg.lifecycle.writer_lease = writer_lease;
+    kg.lifecycle.lease_opt_out = !lock;
     // Resolved after the graph exists, because the mode of an *existing* path
     // comes from the file, not from the `storage` argument.
     let level = match durable.as_ref() {

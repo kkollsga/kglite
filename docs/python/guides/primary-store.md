@@ -448,23 +448,27 @@ The lease files work as follows:
 - `open(..., lock=False)` opts out for callers that coordinate writers some other
   way.
 
-**The lease is taken by the entry points that claim a path, not by `save()`.**
+**`save()` checks the lease; it does not take it.**
 
 - These take it: `kglite.open()`, the CLI's eager save paths,
   `kglite-bolt-server` and `kglite-mcp-server`.
-- These do not: `KnowledgeGraph.save()`, and its Rust and C counterparts,
-  `kglite::api::io::save_graph` and the C ABI save entries.
+- `KnowledgeGraph.save()` probes the target's lease. While another process holds
+  it, the save raises `WriterLeaseHeldError` naming the holder and writes nothing.
+  A lease held by this process is not foreign.
+- `open(..., lock=False)` opts out of the probe as well.
+- The Rust `kglite::api::io::save_graph` and the C ABI save entries do not probe.
 
-A graph obtained from `kglite.load(path)`, mutated in memory and saved back,
-therefore publishes straight over a path a lease holder is mid-write on. The file
-that results is a complete, valid graph. It is just the loader's, and whatever the
-holder had not saved is not in it. A serving MCP server then refuses its own
-`save_graph` because the file changed under it, so the loss is the agent's unsaved
-work, not the file.
+A graph obtained from `kglite.load(path)`, mutated in memory and saved back to a
+path a lease holder is mid-write on, therefore fails in Python. Through the Rust
+and C entries it publishes straight over the holder's work: the file that results
+is a complete, valid graph, but whatever the holder had not saved is not in it. A
+serving MCP server then refuses its own `save_graph` because the file changed
+under it.
 
 The rule the lease encodes: **any caller that may save to a path holds the lease
 across the whole read-modify-save interval.** That is exactly what `open(path)` is
-for. `load()` + `save(path)` is a write that opted out of it.
+for. `load()` + `save(path)` takes no lease, so it can still write a path
+between the probe and the rename; the probe catches the holder who is already there.
 
 Taking the lease is also when `open()` cleans up after a writer that died
 mid-`save()`. A save writes a sibling `<name>.tmp.<pid>.<n>` and renames it into

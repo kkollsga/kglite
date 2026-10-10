@@ -5266,9 +5266,15 @@ class KnowledgeGraph:
         writes committed before the handoff. A failed save leaves the original
         home, lease and log attached.
 
-        Handles from :func:`kglite.load`, in-memory constructors, or
-        ``open(..., lock=False)`` continue to opt out of writer leases.
-        Their caller must coordinate writers across the read-modify-save
+        **A path another process holds open for writing is refused.** A
+        handle from :func:`kglite.load` or an in-memory constructor takes no
+        lease of its own, but ``save()`` checks the target's: while another
+        process holds the lease, the save raises
+        :class:`~kglite.WriterLeaseHeldError` naming the holder, and writes
+        nothing. A holder in this process is not foreign.
+
+        ``open(..., lock=False)`` opts out of every lease check, this one
+        included. Its caller must coordinate writers across the read-modify-save
         interval; an unlocked save can replace another writer's checkpoint.
 
         Args:
@@ -7767,11 +7773,13 @@ class KnowledgeGraph:
         ...
 
     def list_indexes(self) -> list[dict[str, Any]]:
-        """List the in-memory equality indexes.
+        """List the equality indexes, in-memory and persistent disk-backed.
 
-        Each dict has ``node_type``, ``property``, ``state`` and
-        ``serves_lookups``. Range, composite and disk-backed persistent indexes
-        are not included.
+        Each dict has ``node_type``, ``property``, ``state``,
+        ``serves_lookups`` and ``persistent``. ``persistent`` is ``True`` for
+        an index stored with a disk graph (one :meth:`create_index` reported as
+        ``persistent``) and ``False`` for an in-memory one. Range and
+        composite indexes are not included.
 
         ``serves_lookups`` is ``False`` for an entry queries will not read: a
         ``DEFERRED`` one, which is not built yet, and one on ``type``,
@@ -7790,10 +7798,11 @@ class KnowledgeGraph:
         ...
 
     def has_index(self, node_type: str, property: str) -> bool:
-        """Check if an in-memory equality index exists.
+        """Check if an equality index exists, in-memory or persistent disk-backed.
 
-        A disk-backed persistent index (one ``create_index`` reported as
-        ``persistent``) reports ``False``.
+        Answers ``True`` for a disk-backed persistent index (one
+        :meth:`create_index` reported as ``persistent``). :meth:`index_stats`
+        has no statistics for it and returns ``None``.
         """
         ...
 

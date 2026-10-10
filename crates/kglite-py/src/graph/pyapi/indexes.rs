@@ -172,12 +172,7 @@ impl KnowledgeGraph {
         Ok(result_list.into_any().unbind())
     }
 
-    /// List the in-memory equality indexes. Disk-backed persistent indexes,
-    /// range indexes and composite indexes are not included.
-    ///
-    /// Returns:
-    ///     List of dictionaries with 'node_type', 'property', 'state' and
-    ///     'serves_lookups' keys
+    /// List the equality indexes, in-memory and persistent disk-backed.
     ///
     /// Example:
     ///     ```python
@@ -205,23 +200,26 @@ impl KnowledgeGraph {
             idx_dict.set_item("property", property)?;
             idx_dict.set_item("state", state.as_str())?;
             idx_dict.set_item("serves_lookups", serves)?;
+            idx_dict.set_item("persistent", false)?;
+            result_list.append(idx_dict)?;
+        }
+        for (node_type, property) in self.inner.list_persistent_indexes() {
+            let idx_dict = PyDict::new(py);
+            let serves = self.inner.index_serves_lookups(&node_type, &property);
+            idx_dict.set_item("node_type", node_type)?;
+            idx_dict.set_item("property", property)?;
+            idx_dict.set_item("state", "ONLINE")?;
+            idx_dict.set_item("serves_lookups", serves)?;
+            idx_dict.set_item("persistent", true)?;
             result_list.append(idx_dict)?;
         }
 
         Ok(result_list.into())
     }
 
-    /// Check if an in-memory equality index exists. A disk-backed persistent
-    /// index (one ``create_index`` reported as ``persistent``) reports False.
-    ///
-    /// Args:
-    ///     node_type: The type of nodes
-    ///     property: The property name
-    ///
-    /// Returns:
-    ///     True if index exists, False otherwise
+    /// Check if an equality index exists, in-memory or persistent disk-backed.
     fn has_index(&self, node_type: &str, property: &str) -> bool {
-        self.inner.has_index(node_type, property)
+        self.inner.has_any_index(node_type, property)
     }
 
     /// Get statistics about an index.

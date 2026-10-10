@@ -1438,3 +1438,19 @@ fn a_demotion_to_mixed_counts_as_a_column_copy() {
     assert_eq!(store.get_id(0), Some(Value::Int64(1)));
     assert_eq!(store.get_title(1), Some(Value::String("two".into())));
 }
+
+/// A tag no writer emits is refused instead of decoding its bytes as a mixed
+/// column.
+#[test]
+fn unpack_column_refuses_an_unknown_type_tag() {
+    use crate::serde_codec::CURRENT_CODEC;
+    let err = ColumnStore::unpack_column("quaternion", &[0u8; 16], 2, None, "w", CURRENT_CODEC)
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    let message = err.to_string();
+    assert!(
+        message.contains("'w'") && message.contains("'quaternion'"),
+        "{message}"
+    );
+}

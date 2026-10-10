@@ -163,6 +163,40 @@ impl GraphWriterLease {
     }
 }
 
+/// Refuse a save that would land over a graph another process holds open for
+/// writing.
+///
+/// A probe, never an acquisition: it takes a shared lock on `<path>.lock` and
+/// releases it at once, creates nothing, and does not wait. No lock file, an
+/// uncontended one, or one this process holds itself (`flock` locks belong to
+/// an open file description, so this probe would contend with the process's
+/// own lease) is not foreign. A probe that cannot run — the lock file is
+/// unreadable — does not block a save that worked before the lease existed.
+pub fn refuse_foreign_writer(graph_path: &Path) -> Result<(), LeaseRefusal> {
+    let lock_path = writer_lease_path(graph_path);
+    let Ok(file) = OpenOptions::new().read(true).open(&lock_path) else {
+        return Ok(());
+    };
+    match FileExt::try_lock_shared(&file) {
+        Ok(()) => {
+            let _ = FileExt::unlock(&file);
+            Ok(())
+        }
+        Err(error) if is_lock_contended(&error) => {
+            let holder = LeaseHolder::read(&writer_owner_path(graph_path));
+            if holder.pid == Some(std::process::id()) {
+                return Ok(());
+            }
+            let message = contended_message(graph_path, &lock_path, &holder);
+            Err(LeaseRefusal {
+                holder: Some(holder),
+                error: io::Error::new(io::ErrorKind::WouldBlock, message),
+            })
+        }
+        Err(_) => Ok(()),
+    }
+}
+
 impl LeaseRefusal {
     /// A refusal that is a genuine I/O failure — nobody holds anything, so
     /// there is no holder to report.
@@ -1194,6 +1228,42 @@ mod tests {
              not recognised and the retry loop was skipped ({error})",
             started.elapsed()
         );
+    }
+
+    /// A save probes the lease without taking it: no lock file and a free one
+    /// pass and leave nothing behind, this process's own lease is not foreign,
+    /// and another process's record refuses the save naming its pid.
+    #[test]
+    fn a_save_probe_refuses_only_a_foreign_live_holder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph = tmp.path().join("probed.kgl");
+
+        refuse_foreign_writer(&graph).unwrap();
+        assert!(
+            !writer_lease_path(&graph).exists(),
+            "the probe must not create the lock file"
+        );
+
+        let lease = GraphWriterLease::acquire(&graph, Duration::ZERO).unwrap();
+        refuse_foreign_writer(&graph).expect("this process's own lease is not foreign");
+
+        // The same lock, recorded as held by another process.
+        std::fs::write(
+            writer_owner_path(&graph),
+            "pid=1\nsince=2026-01-01T00:00:00Z\n",
+        )
+        .unwrap();
+        let refusal = refuse_foreign_writer(&graph).expect_err("a foreign holder refuses");
+        assert_eq!(refusal.holder.as_ref().and_then(|h| h.pid), Some(1));
+        assert_eq!(refusal.error.kind(), io::ErrorKind::WouldBlock);
+        assert!(
+            refusal.error.to_string().contains("pid 1"),
+            "{}",
+            refusal.error
+        );
+
+        drop(lease);
+        refuse_foreign_writer(&graph).expect("a released lease is free");
     }
 
     /// The property whose platform split broke this: the owner record must be

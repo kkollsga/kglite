@@ -2106,7 +2106,13 @@ impl ColumnStore {
                 Ok(TypedColumn::Timestamp { data, nulls })
             }
             "string" => Self::unpack_string_column(data_blob, rc, temp_dir, col_name),
-            _ => Self::unpack_mixed_column(codec, data_blob, col_name),
+            "mixed" => Self::unpack_mixed_column(codec, data_blob, col_name),
+            // A tag no writer emits is a newer or damaged file: decoding its
+            // bytes as a mixed column would read garbage as values.
+            other => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("column '{col_name}' has an unknown type tag '{other}'; the file was written by a newer or incompatible kglite, or is damaged"),
+            )),
         }
     }
 

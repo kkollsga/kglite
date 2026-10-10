@@ -24,11 +24,19 @@ before upgrading.
   - Saved graphs are unaffected: a stored Float64 column reads as before.
   - Migration: write `toFloat(...)` or a float literal where a float is meant, or declare the column.
 
+- **`save()` refuses a path another process holds open for writing.**
+  - Before: `kglite.load(path)` followed by `save(path)` renamed the loader's bytes over a graph a `kglite.open(path)` holder was writing, and the holder's unsaved work was lost.
+  - Now: the save raises `WriterLeaseHeldError` naming the holder's pid and writes nothing. A lease held by this process is not foreign. `open(path, lock=False)` opts out of the check.
+  - The Rust `save_graph` and the C ABI save entries do not run the check. `kglite::api::io::refuse_foreign_writer` is the probe a Rust caller can run first.
+  - Migration: take the lease for the whole read-modify-save interval with `kglite.open(path)`, or stop the other writer.
+
 ### Added
 
 - **`--version` on `kglite-mcp-server` and `kglite-bolt-server`.** Prints the kglite version and exits; the pip `kglite-mcp-server` entry point shares the flag.
 
 ### Changed
+
+- **`has_index()` and `list_indexes()` report a disk graph's persistent indexes.** Before, both answered as though no index existed after `create_index` returned `persistent: True`. Each `list_indexes()` entry now carries `persistent`. `index_stats()` still returns `None` for a persistent index.
 
 - **Fluent traversal results come back in a fixed order.** `traverse()` and the accessors over a selection (`titles()`, `collect()`, `to_df()` and the rest) list each parent's children in node creation order and the parents in creation order. The order used to follow a per-process hash seed: two fresh processes over one graph listed the same nodes differently. A `sort_by` or a `max_nodes` limit applies on top as before.
 
@@ -86,6 +94,8 @@ before upgrading.
 
 ### Rust API
 
+- `kglite::api::io::refuse_foreign_writer(path)` probes a graph path's writer lease without taking it, and returns the structured `LeaseRefusal` when another process holds it.
+- `DirGraph::list_persistent_indexes()` lists the persistent disk-backed equality indexes as `(node_type, property)`.
 - `Session::auto_commit_is_grouped(query, opts)` reports whether
   `execute_auto_commit` routes a statement through the group-commit queue, for
   a binding that serializes its own writers ahead of the session.
@@ -102,6 +112,8 @@ before upgrading.
 - `Session::next_lsn()` and `Session::last_lsn()` report the log position.
 
 ### Fixed
+
+- **A `.kgl` column with an unknown type tag is refused.** The loader decoded its bytes as a mixed column, reading garbage as values. It now fails with `InvalidData` naming the column and the tag.
 
 - **A declared bound loaded as text is stored as a date.** `add_nodes` and `add_relationships` coerce a declared `valid_from`/`valid_to` column of ISO strings to dates (datetimes when a cell has a time part). Before, a reload without `column_types` wrote `String` cells beside the stored dates and re-recorded the property as `String`. A cell that does not parse is still refused. A Cypher `SET` or `CREATE` of an ISO string onto a bound still stores the string.
 

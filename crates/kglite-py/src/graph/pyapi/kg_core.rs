@@ -743,6 +743,20 @@ impl KnowledgeGraph {
             } else {
                 effective.into()
             };
+            // A process that holds the target's lease owns it; any other holder
+            // refuses the save before the write-ahead-log guard below, which
+            // would otherwise answer a foreign holder's sidecar with a recovery
+            // instruction. `open(..., lock=False)` opted out of lease checks.
+            if !self.lifecycle.lease_opt_out {
+                if let Err(refusal) = io::refuse_foreign_writer(&target) {
+                    let error = crate::error::KgError::from(refusal);
+                    let message = error.to_string();
+                    if matches!(error, crate::error::KgError::WriterLeaseHeld { .. }) {
+                        lease_contention = Some(error);
+                    }
+                    return Err(io::SaveError::Io(message));
+                }
+            }
             let target_lease = if !same_target && self.lifecycle.writer_lease.is_some() {
                 match io::GraphWriterLease::acquire_ex(&target, std::time::Duration::ZERO) {
                     Ok(lease) => Some(lease),
