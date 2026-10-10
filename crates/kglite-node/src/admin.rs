@@ -7,7 +7,7 @@
 //! through a session transaction like any other write.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, PoisonError};
+use std::sync::Arc;
 
 use kglite::api::session::{BackupOptions, BackupReport, CommitOutcome, Session};
 use kglite::api::{
@@ -86,10 +86,7 @@ fn commit_change<T>(
     session: &Session,
     mut change: impl FnMut(&mut DirGraph) -> Result<T, JsErr>,
 ) -> JsRes<T> {
-    let _serial = inner
-        .write_lock
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let _serial = inner.exclusive();
     let mut attempt = 1;
     loop {
         let mut tx = session.begin();

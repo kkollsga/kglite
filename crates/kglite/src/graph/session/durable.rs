@@ -700,9 +700,11 @@ impl Session {
         }
     }
 
-    /// Barriers the log has taken. Test-only.
-    #[cfg(test)]
-    pub(super) fn wal_barrier_count(&self) -> u64 {
+    /// Log barriers (fsyncs) taken through staged frames, for tests that count
+    /// how many commits shared one. Present only under the `test-seam` feature.
+    #[cfg(any(test, feature = "test-seam"))]
+    #[doc(hidden)]
+    pub fn wal_barrier_count(&self) -> u64 {
         self.durable
             .lock()
             .unwrap_or_else(|p| p.into_inner())

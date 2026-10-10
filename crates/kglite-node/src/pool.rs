@@ -14,6 +14,15 @@
 //! commit free memory another thread's heap owned, which measured 25-30 %
 //! slower on a 1M-node delete and 20-30 % on a 100k-node relationship write.
 //!
+//! A third lane runs the auto-commit writes the engine's group-commit queue
+//! takes (`Session::auto_commit_is_grouped`: plain data writes on a graph
+//! durable at `full`). Those serialise inside the session and share one log
+//! barrier per batch, but only when several are in flight at once, which one
+//! writer thread cannot offer. The lane grows a thread per queued job up to
+//! [`GROUP_THREADS`], so a lone writer costs one thread and a burst of 64 can
+//! share a barrier. The writer thread still runs every other write; the two
+//! are kept apart by `Inner::exclusive` / `Inner::grouped`.
+//!
 //! Each lane's queue holds [`QUEUE_CAPACITY`] jobs. A call that finds it full is
 //! rejected `QueueFull` ([`FullPolicy::Reject`], the default) or parked in a FIFO
 //! waiting list ([`FullPolicy::Wait`], `onQueueFull: 'wait'`) that feeds the
@@ -72,6 +81,8 @@ enum Lane {
     Read,
     /// Jobs that take the write lock, on the single writer thread.
     Write,
+    /// Grouped auto-commit writes, on a pool that grows with the burst.
+    Group,
 }
 
 type Job = Box<dyn FnOnce() + Send>;
@@ -79,6 +90,8 @@ type Job = Box<dyn FnOnce() + Send>;
 struct Queue {
     state: Mutex<LaneState>,
     ready: Condvar,
+    /// Thread ceiling and name prefix, for a lane that starts threads on demand.
+    grow: Option<(usize, &'static str)>,
 }
 
 struct LaneState {
@@ -88,33 +101,61 @@ struct LaneState {
     /// capacity: a worker moves the oldest one in under the same lock that
     /// frees the slot, so arrival order is preserved.
     waiting: VecDeque<Job>,
+    /// Workers started, and how many of them wait for a job.
+    threads: usize,
+    idle: usize,
 }
 
-fn start_lane(threads: usize, name: &str) -> Arc<Queue> {
+fn spawn_worker(queue: &Arc<Queue>, name: &str, n: usize) -> std::io::Result<()> {
+    let q = Arc::clone(queue);
+    thread::Builder::new()
+        .name(format!("{name}-{n}"))
+        .stack_size(worker_stack_size())
+        .spawn(move || worker(&q))
+        .map(|_| ())
+}
+
+fn start_lane(threads: usize, name: &'static str, grow: Option<usize>) -> Arc<Queue> {
     let queue = Arc::new(Queue {
         state: Mutex::new(LaneState {
             jobs: VecDeque::new(),
             waiting: VecDeque::new(),
+            threads,
+            idle: 0,
         }),
         ready: Condvar::new(),
+        grow: grow.map(|max| (max, name)),
     });
     for n in 0..threads {
-        let q = Arc::clone(&queue);
-        thread::Builder::new()
-            .name(format!("{name}-{n}"))
-            .stack_size(worker_stack_size())
-            .spawn(move || worker(&q))
-            .expect("spawn kglite-node worker");
+        spawn_worker(&queue, name, n).expect("spawn kglite-node worker");
     }
     queue
 }
 
+/// Ceiling on the grouped-write lane: `KGLITE_NODE_GROUP_WRITERS`, else 64.
+///
+/// Each thread parks inside the engine's queue until its batch's barrier
+/// completes, so the ceiling is the largest batch the binding can offer.
+fn group_threads() -> usize {
+    std::env::var("KGLITE_NODE_GROUP_WRITERS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(GROUP_THREADS)
+}
+
+const GROUP_THREADS: usize = 64;
+
 fn lane_queue(lane: Lane) -> &'static Arc<Queue> {
     static READ: OnceLock<Arc<Queue>> = OnceLock::new();
     static WRITE: OnceLock<Arc<Queue>> = OnceLock::new();
+    static GROUP: OnceLock<Arc<Queue>> = OnceLock::new();
     match lane {
-        Lane::Read => READ.get_or_init(|| start_lane(worker_count(), "kglite-node")),
-        Lane::Write => WRITE.get_or_init(|| start_lane(1, "kglite-node-writer")),
+        Lane::Read => READ.get_or_init(|| start_lane(worker_count(), "kglite-node", None)),
+        Lane::Write => WRITE.get_or_init(|| start_lane(1, "kglite-node-writer", None)),
+        Lane::Group => {
+            GROUP.get_or_init(|| start_lane(0, "kglite-node-group", Some(group_threads())))
+        }
     }
 }
 
@@ -152,10 +193,12 @@ fn worker_loop(queue: &Queue) {
                     }
                     break job;
                 }
+                state.idle += 1;
                 state = queue
                     .ready
                     .wait(state)
                     .unwrap_or_else(PoisonError::into_inner);
+                state.idle -= 1;
             }
         };
         job();
@@ -164,6 +207,7 @@ fn worker_loop(queue: &Queue) {
 
 fn enqueue(lane: Lane, policy: FullPolicy, job: Job) -> Result<(), Job> {
     let queue = lane_queue(lane);
+    let queue: &Arc<Queue> = queue;
     let mut state = queue.state.lock().unwrap_or_else(PoisonError::into_inner);
     if state.jobs.len() >= QUEUE_CAPACITY {
         if policy == FullPolicy::Reject {
@@ -173,6 +217,15 @@ fn enqueue(lane: Lane, policy: FullPolicy, job: Job) -> Result<(), Job> {
         return Ok(());
     }
     state.jobs.push_back(job);
+    // A growing lane starts a worker when the jobs outnumber the idle ones.
+    if let Some((max, name)) = queue.grow {
+        if state.jobs.len() > state.idle && state.threads < max {
+            let n = state.threads;
+            if spawn_worker(queue, name, n).is_ok() {
+                state.threads += 1;
+            }
+        }
+    }
     drop(state);
     queue.ready.notify_one();
     Ok(())
@@ -219,6 +272,15 @@ pub fn spawn_write<'e>(
     work: impl FnOnce() -> Settle + Send + 'static,
 ) -> napi::Result<napi::bindgen_prelude::Object<'e>> {
     spawn_on(Lane::Write, policy, env, work)
+}
+
+/// [`spawn`] on the grouped-write lane: auto-commit writes the engine batches.
+pub fn spawn_group<'e>(
+    policy: FullPolicy,
+    env: &'e Env,
+    work: impl FnOnce() -> Settle + Send + 'static,
+) -> napi::Result<napi::bindgen_prelude::Object<'e>> {
+    spawn_on(Lane::Group, policy, env, work)
 }
 
 /// [`spawn_write`] when `write`, else [`spawn`] with the same full-queue `policy`.

@@ -39,6 +39,9 @@ required-features = ["parallel-bz2"]
 
 [features]
 default = []
+# Exposes `Session::wal_barrier_count` so a binding's tests can assert that
+# concurrent writers shared log barriers. Enabled only by test builds.
+test-seam = []
 # Rust-native embedder backend behind the `fastembed` Cargo feature.
 # Downloads ONNX model weights on first use (cached at
 # `~/.cache/fastembed/`). Off by default — the Python wheel relies

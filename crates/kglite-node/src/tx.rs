@@ -174,11 +174,7 @@ fn run_in_tx(
 fn commit_tx(shared: &TxShared) -> JsRes<()> {
     // Serialised with auto-commit writes, checkpoints and `close`, so a commit
     // cannot publish into a graph that is already being closed.
-    let _serial = shared
-        .graph
-        .write_lock
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let _serial = shared.graph.exclusive();
     let mut state = shared.state();
     match std::mem::replace(&mut *state, State::Finished(Finish::Committed)) {
         State::Open(tx) => {

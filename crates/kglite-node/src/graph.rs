@@ -26,7 +26,9 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
+use std::sync::{
+    Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak,
+};
 use std::time::Duration as StdDuration;
 
 use kglite::api::durable::DurabilityLevel;
@@ -76,8 +78,13 @@ pub(crate) struct Inner {
     pub(crate) info: OpenInfo,
     pub(crate) defaults: QueryDefaults,
     pub(crate) ints: IntegerMode,
-    /// Serialises auto-commit writes, checkpoints and `close` so none races another.
-    pub(crate) write_lock: Mutex<()>,
+    /// Serialises the writer thread's work: ungrouped auto-commit writes,
+    /// checkpoints, transaction commits, ontology changes and `close`.
+    write_lock: Mutex<()>,
+    /// Held shared by grouped auto-commit writes (see [`Inner::grouped`]) and
+    /// exclusively by everything that holds `write_lock`, so the two kinds
+    /// never overlap while grouped writes overlap each other.
+    group_gate: RwLock<()>,
     /// Open transactions, so `close` can roll them back.
     pub(crate) txs: Mutex<Vec<Weak<TxShared>>>,
     /// The JavaScript embedder from `setEmbedder`, handed to every query.
@@ -89,7 +96,52 @@ pub(crate) struct Inner {
     pub(crate) queue_policy: FullPolicy,
 }
 
+/// [`Inner::exclusive`]'s guard: the write lock and the group gate, exclusive.
+pub(crate) struct Exclusive<'a> {
+    _serial: MutexGuard<'a, ()>,
+    _gate: RwLockWriteGuard<'a, ()>,
+}
+
 impl Inner {
+    /// Serialise with every other write: the writer-thread lock, plus the gate
+    /// that keeps grouped writes out. Held by ungrouped auto-commit writes,
+    /// checkpoints, transaction commits, ontology changes and `close`.
+    pub(crate) fn exclusive(&self) -> Exclusive<'_> {
+        let _serial = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let _gate = self
+            .group_gate
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        Exclusive { _serial, _gate }
+    }
+
+    /// Whether the session's group-commit queue takes this write. Parsed on the
+    /// calling thread, and only for a graph durable at `full`, the one level
+    /// whose barrier is worth sharing.
+    fn is_grouped(&self, args: &QueryArgs) -> bool {
+        if self.read_only || self.durability != DurabilityLevel::Full {
+            return false;
+        }
+        match self.session() {
+            Ok(session) => {
+                session.auto_commit_is_grouped(&args.cypher, &self.execute_options(args))
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Hold the gate shared for a statement the engine's group-commit queue
+    /// serialises itself: it may run beside other grouped writes, so that
+    /// concurrent ones share a log barrier, but never beside an exclusive holder.
+    fn grouped(&self) -> RwLockReadGuard<'_, ()> {
+        self.group_gate
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// After a commit: when the log has outgrown `autoCheckpointWalMib`, fold it
     /// into the checkpoint on a thread of its own.
     ///
@@ -657,16 +709,15 @@ impl Graph {
         }
         let handle = args.cancel.clone();
         let inner = Arc::clone(&self.inner);
-        let promise = pool::spawn_for(write, self.inner.queue_policy, env, move || {
+        let grouped = write && inner.is_grouped(&args);
+        let work = move || {
             if args.cancel.as_ref().is_some_and(|c| !c.begin()) {
                 return failed(cancelled_error());
             }
             let opts = inner.execute_options(&args);
             let outcome = if write {
-                let _serial = inner
-                    .write_lock
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
+                let _serial = (!grouped).then(|| inner.exclusive());
+                let _shared = grouped.then(|| inner.grouped());
                 match inner.session() {
                     Ok(session) => session.execute_auto_commit(&args.cypher, &opts, WRITE_ATTEMPTS),
                     Err(e) => return failed(e),
@@ -688,7 +739,13 @@ impl Graph {
                 Ok(outcome) => Box::new(move |env: Env| build_result(env.raw(), &outcome, ints)),
                 Err(e) => failed(JsErr::from_kg(&e)),
             }
-        });
+        };
+        let queue_policy = self.inner.queue_policy;
+        let promise = if grouped {
+            pool::spawn_group(queue_policy, env, work)
+        } else {
+            pool::spawn_for(write, queue_policy, env, work)
+        };
         let promise = promise.map_err(|e| to_sync_error(JsErr::from(e)))?;
         wire_signal(env, signal.as_ref(), handle.as_ref(), promise)
     }
@@ -769,10 +826,7 @@ impl Graph {
                 return err_promise(env, read_only_error("checkpoint()"));
             }
             self.lifecycle(env, |inner| {
-                let _serial = inner
-                    .write_lock
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
+                let _serial = inner.exclusive();
                 let session = match inner.session() {
                     Ok(s) => s,
                     Err(e) => return failed(e),
@@ -820,10 +874,7 @@ impl Graph {
     pub fn close<'e>(&self, env: &'e Env) -> napi::Result<Object<'e>, &'static str> {
         contain(|| {
             self.lifecycle(env, |inner| {
-                let _serial = inner
-                    .write_lock
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
+                let _serial = inner.exclusive();
                 if inner.closed.load(Ordering::Acquire) {
                     return done();
                 }
@@ -860,6 +911,19 @@ impl Graph {
                 );
                 done()
             })
+        })
+    }
+
+    /// Test-only: log barriers (fsyncs) the write-ahead log has taken, to show concurrent writes share them.
+    #[cfg(feature = "test-hooks")]
+    #[napi(js_name = "__walBarriers")]
+    pub fn wal_barriers(&self) -> napi::Result<f64, &'static str> {
+        contain(|| {
+            Ok(self
+                .inner
+                .session()
+                .map_err(to_sync_error)?
+                .wal_barrier_count() as f64)
         })
     }
 
@@ -966,6 +1030,7 @@ fn open_writer(path: &str, config: OpenConfig) -> Result<Inner, JsErr> {
         defaults: config.defaults,
         ints: config.ints,
         write_lock: Mutex::new(()),
+        group_gate: RwLock::new(()),
         txs: Mutex::new(Vec::new()),
         embedder: Mutex::new(None),
         background: Mutex::new(0),
@@ -1009,6 +1074,7 @@ fn open_reader(path: &str, config: OpenConfig) -> Result<Inner, JsErr> {
         defaults: config.defaults,
         ints: config.ints,
         write_lock: Mutex::new(()),
+        group_gate: RwLock::new(()),
         txs: Mutex::new(Vec::new()),
         embedder: Mutex::new(None),
         background: Mutex::new(0),

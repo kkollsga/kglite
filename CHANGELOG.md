@@ -48,6 +48,15 @@ before upgrading.
   - C ABI and Java: a durable auto-commit statement at `full` that the queue
     takes now holds the session's write gate shared, so concurrent threads can
     reach the queue. Every other write still holds it exclusively.
+  - Node: plain data writes on a graph opened at `durability: 'full'` now run
+    on a pool of up to 64 threads (`KGLITE_NODE_GROUP_WRITERS` sets the cap)
+    instead of the single writer thread, so concurrent `executeWrite` calls
+    share an fsync. Writes awaited one after another still commit in call
+    order. Writes started without awaiting may now commit in any order when
+    they are plain data writes; schema commands, ontology changes, checkpoints,
+    transaction commits and `close()` still run one at a time on the writer
+    thread, ahead of or behind grouped writes in no fixed order. `onQueueFull`,
+    `timeoutMs` and `AbortSignal` apply to both lanes unchanged.
 
 ### Rust API
 

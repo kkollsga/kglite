@@ -19,7 +19,7 @@ doctest = false
 default = []
 # Exposes `__panic()` so the smoke test can prove panic containment. Must never
 # be enabled in a published build: the npm packaging job builds without it.
-test-hooks = []
+test-hooks = ["kglite/test-seam"]
 
 [dependencies]
 kglite = { path = "../kglite", default-features = false }
