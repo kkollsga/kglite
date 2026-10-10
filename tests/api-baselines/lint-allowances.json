@@ -637,6 +637,22 @@
       "classification": "api-shape"
     },
     {
+      "identity": "crates/kglite/src/graph/session/group_commit.rs::fn:execute_grouped:pub(super) fn execute_grouped( &self, query: &str, opts: &ExecuteOptions<'_>, ) -> Option<Result<ExecuteOutcome, KgError>>::clippy::result_large_err",
+      "classification": "api-shape"
+    },
+    {
+      "identity": "crates/kglite/src/graph/session/group_commit.rs::fn:follow_batch:fn follow_batch( &self, me: &Arc<Parker>, batch: &Arc<Batch>, query: &str, opts: &ExecuteOptions<'_>, ) -> Result<ExecuteOutcome, KgError>::clippy::result_large_err",
+      "classification": "api-shape"
+    },
+    {
+      "identity": "crates/kglite/src/graph/session/group_commit.rs::fn:lead_batch:fn lead_batch( &self, me: &Arc<Parker>, query: &str, opts: &ExecuteOptions<'_>, ) -> Result<ExecuteOutcome, KgError>::clippy::result_large_err",
+      "classification": "api-shape"
+    },
+    {
+      "identity": "crates/kglite/src/graph/session/group_commit.rs::fn:run_in_batch:fn run_in_batch( &self, batch: &Batch, query: &str, opts: &ExecuteOptions<'_>, ) -> Result<ExecuteOutcome, KgError>::clippy::result_large_err",
+      "classification": "api-shape"
+    },
+    {
       "identity": "crates/kglite/src/graph/session/in_place_tests.rs::fn:run_then_linger:fn run_then_linger( graph: &mut DirGraph, query: &str, opts: &ExecuteOptions<'_>, held: &mut StatementCheckpoint, keep_undo: bool, ) -> Result<ExecuteOutcome, KgError>::clippy::result_large_err",
       "classification": "api-shape"
     },
