@@ -51,6 +51,7 @@ enum AuthScheme {
 #[derive(Parser, Debug)]
 #[command(
     name = "kglite-bolt-server",
+    version,
     about = "Bolt v5.x protocol server for kglite knowledge graphs.",
     long_about = "Loads a .kgl file and serves it over the Neo4j Bolt wire protocol. \
                   The official Python driver path is regression-tested; other Bolt v5 \
@@ -1328,6 +1329,14 @@ async fn finish_shutdown(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_flag_displays_version() {
+        let error = Cli::try_parse_from(["kglite-bolt-server", "--version"])
+            .expect_err("--version exits through clap");
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+        assert!(error.to_string().contains(env!("CARGO_PKG_VERSION")));
+    }
 
     /// Process id + nanosecond clock so parallel test threads (and parallel
     /// `cargo test` invocations) cannot collide.

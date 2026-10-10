@@ -9,6 +9,10 @@ before upgrading.
 
 ## [Unreleased]
 
+### Added
+
+- **`--version` on `kglite-mcp-server` and `kglite-bolt-server`.** Prints the kglite version and exits; the pip `kglite-mcp-server` entry point shares the flag.
+
 ### Changed
 
 - **`durability: full` no longer makes readers wait for a commit's fsync.**

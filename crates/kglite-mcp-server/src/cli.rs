@@ -30,6 +30,7 @@ pub(crate) fn manifest_relative_path(
 #[derive(Parser, Debug)]
 #[command(
     name = "kglite-mcp-server",
+    version,
     about = "MCP server for KGLite knowledge graphs (Rust-native)"
 )]
 pub(crate) struct Cli {
@@ -386,6 +387,14 @@ pub(crate) fn resolve_env_start_dir(mode: &Mode) -> PathBuf {
 mod cli_contract_tests {
     use super::{parse_write_scope_flag, Cli};
     use clap::Parser;
+
+    #[test]
+    fn version_flag_displays_version() {
+        let error = Cli::try_parse_from(["kglite-mcp-server", "--version"])
+            .expect_err("--version exits through clap");
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+        assert!(error.to_string().contains(env!("CARGO_PKG_VERSION")));
+    }
 
     #[test]
     fn retired_trust_tools_flag_is_rejected() {
