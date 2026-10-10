@@ -1078,3 +1078,56 @@ def test_self_gate_does_not_suppress_a_blocked_range(ecosystem: Path) -> None:
     _, out = run(ecosystem, "--upstream-version", "0.16.0", "--notify", "--dry-run")
     assert "NOTIFY downstream" in out, out
     assert "BLOCKED" in out, out
+
+
+# --------------------------------------------------------------------------
+# 11. Citations vs declarations in the note; the correctness-fix arm (0.19.7 P4)
+# --------------------------------------------------------------------------
+
+CITATION_PROSE = "# Parity\n\nThe kglite 0.14.1 → 0.14.5 engine move left every digest byte-identical.\n"
+
+
+def test_a_mixed_notes_citations_are_labelled_do_not_change(ecosystem: Path) -> None:
+    """A repo notified for a declaration also carries citation prose: the note
+    lists the citation, but under a block that says not to move it."""
+    _docs_only_drift(ecosystem)
+    _write(ecosystem / "downstream" / "PARITY.md", CITATION_PROSE)
+    _, out = run(ecosystem, "--upstream-version", "0.15.1", "--notify", "--dry-run")
+    assert "NOTIFY downstream" in out, out
+    note = out[out.index("note body") :]
+    info = note.index("Informational — do NOT change")
+    assert "README.md:3" in note[:info], note
+    assert "PARITY.md" not in note[:info], note
+    assert "PARITY.md" in note[info:], note
+    assert "README.md" not in note[info : note.index("## Ask")], note
+
+
+def _fix_changelog(ecosystem: Path, marker: str) -> None:
+    _write(
+        ecosystem / "KGLite" / "CHANGELOG.md",
+        f"# Changelog\n\n## [0.15.1] - 2026-08-20\n\n### Fixed\n\n- {marker}ORDER BY top-K returned 4 rows\n"
+        f"  for LIMIT 25 on a mixed-type id column.\n\n- **Unrelated crash** on empty input.\n\n"
+        f"## [0.15.0] - 2026-07-27\n\n### Added\n\n- **Durability rungs.**\n",
+    )
+
+
+def test_a_marked_fix_notifies_a_consumer_whose_range_admits_it(ecosystem: Path) -> None:
+    _fix_changelog(ecosystem, "**Silent wrong answer:** ")
+    _, out = run(ecosystem, "--upstream-version", "0.15.1", "--notify", "--dry-run")
+    assert "NOTIFY downstream" in out, out
+    assert "BLOCKED" not in out, out
+    assert "[0.15.1] ORDER BY top-K returned 4 rows for LIMIT 25 on a mixed-type id column." in out, out
+    assert "Unrelated crash" not in out.split("Silent-wrong-answer fixes")[1].split("## Ask")[0], out
+
+
+def test_an_unmarked_release_does_not_notify(ecosystem: Path) -> None:
+    _fix_changelog(ecosystem, "**ORDER BY top-K is right now.** ")
+    _, out = run(ecosystem, "--upstream-version", "0.15.1", "--notify", "--dry-run")
+    assert "NOTIFY" not in out, out
+
+
+def test_a_consumer_already_on_the_fixed_release_is_not_notified(ecosystem: Path) -> None:
+    _fix_changelog(ecosystem, "**Silent wrong answer:** ")
+    _move_downstream_to(ecosystem, "0.15.1")
+    _, out = run(ecosystem, "--upstream-version", "0.15.1", "--notify", "--dry-run")
+    assert "NOTIFY" not in out, out
