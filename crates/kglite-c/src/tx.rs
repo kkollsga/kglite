@@ -263,7 +263,11 @@ pub unsafe extern "C" fn kglite_tx_commit(
                     return crate::lifecycle::refuse(out_error_msg, refusal);
                 }
             }
-            match session.inner.commit(inner, true) {
+            let outcome = {
+                let _gate = session.write_gate();
+                session.inner.commit(inner, true)
+            };
+            match outcome {
                 CommitOutcome::NoWritesNoOp | CommitOutcome::Committed { .. } => {
                     crate::lifecycle::auto_checkpoint(&session.inner);
                     KgliteStatusCode::Ok

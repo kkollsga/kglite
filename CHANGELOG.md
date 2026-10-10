@@ -9,6 +9,19 @@ before upgrading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **C ABI and Java: concurrent writes on one durable session no longer fail
+  with `TransactionConflict`.**
+  - Before: when several threads wrote through one handle while reads ran, a
+    write could exhaust its retries and fail. A test with 8 writers and 4
+    readers lost 179 of 400 writes.
+  - Now: each session serializes its writers, as the Java threading contract
+    states. That covers auto-commit statements, batches, relationship
+    batches, ontology changes and explicit-transaction commits.
+  - Explicit transactions still fail with `TransactionConflict` when the graph
+    changed since `begin()`; that is their contract.
+
 ## [0.19.6] - 2026-10-09
 
 ### Breaking changes and migration
