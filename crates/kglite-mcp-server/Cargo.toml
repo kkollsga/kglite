@@ -67,7 +67,7 @@ path = "src/main.rs"
 # 0.4.10 filters filesystem access events before the watcher debounce, so a
 # source *read* (the tools' own `read_source`, an editor open) no longer
 # replaces a built graph on Linux; only real mutations rebuild.
-mcp-methods = { version = "0.4.12", default-features = false, features = ["server"] }
+mcp-methods = { version = "0.4.13", default-features = false, features = ["server"] }
 
 # kglite (pure-Rust core) — no pyo3 in the resulting binary, no
 # libpython link. The 0.10.1 lift moved KnowledgeGraph +

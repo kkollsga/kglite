@@ -18,8 +18,11 @@ before upgrading.
     `tools/list` (`outputSchema.type: expected "object"`), so no kglite MCP
     server started there. The Claude Code CLI and Codex accepted it.
   - Now: kglite's own route schemas carry the root type, and mcp-methods
-    <version with the fix> adds it to the response-budget union it wraps
-    around each schema.
+    0.4.13 adds it to the response-budget union it wraps around each schema.
+- **MCP server: `cypher_query` and the recipe tools now announce an unloaded
+  lazy skill**, as typed tools already did (mcp-methods 0.4.13). The notice is
+  a separate text block after the JSON mirror, so the mirror still parses on
+  its own.
 
 - **C ABI and Java: concurrent writes on one durable session no longer fail
   with `TransactionConflict`.**
