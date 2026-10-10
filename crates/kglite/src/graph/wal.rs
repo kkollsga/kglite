@@ -1526,6 +1526,59 @@ pub struct Wal {
     saved_tail: Option<WalSavedTail>,
     #[cfg(test)]
     fault: Option<AppendFault>,
+    #[cfg(test)]
+    park: Option<std::sync::Arc<ParkHook>>,
+}
+
+/// Test seam that blocks a committing thread inside its barrier, so a test can
+/// hold a commit between "frame written" and "commit acknowledged" for as long
+/// as it needs. One-shot: once released, later commits pass straight through.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct ParkHook {
+    /// `(entered, released)`.
+    state: std::sync::Mutex<(bool, bool)>,
+    changed: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl ParkHook {
+    pub(crate) fn new() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self::default())
+    }
+
+    /// Called by the barrier: announce arrival, then wait for [`Self::release`].
+    pub(crate) fn enter(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.0 = true;
+        self.changed.notify_all();
+        while !state.1 {
+            state = self.changed.wait(state).unwrap_or_else(|p| p.into_inner());
+        }
+    }
+
+    /// Wait until a commit is parked; `false` on timeout.
+    pub(crate) fn wait_entered(&self, timeout: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        while !state.0 {
+            let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                return false;
+            };
+            state = self
+                .changed
+                .wait_timeout(state, left)
+                .unwrap_or_else(|p| p.into_inner())
+                .0;
+        }
+        true
+    }
+
+    pub(crate) fn release(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.1 = true;
+        self.changed.notify_all();
+    }
 }
 
 /// An injected failure for the append path, standing in for a full device or
@@ -1608,6 +1661,8 @@ impl Wal {
             saved_tail,
             #[cfg(test)]
             fault: None,
+            #[cfg(test)]
+            park: None,
         })
     }
 
@@ -1701,6 +1756,10 @@ impl Wal {
     fn commit_point(&mut self) -> io::Result<()> {
         self.file.flush()?;
         #[cfg(test)]
+        if let Some(park) = &self.park {
+            park.enter();
+        }
+        #[cfg(test)]
         if let Some(AppendFault::SyncError) = self.fault {
             return Err(io::Error::other("injected barrier failure"));
         }
@@ -1709,6 +1768,18 @@ impl Wal {
             self.file.sync_data()?;
         }
         Ok(())
+    }
+
+    /// Test seam: fail every later append the given way (`None` clears it).
+    #[cfg(test)]
+    pub(crate) fn set_fault(&mut self, fault: Option<AppendFault>) {
+        self.fault = fault;
+    }
+
+    /// Test seam: park the next commit inside its barrier.
+    #[cfg(test)]
+    pub(crate) fn set_park(&mut self, park: Option<std::sync::Arc<ParkHook>>) {
+        self.park = park;
     }
 
     /// Flush every frame appended so far to stable storage — the barrier

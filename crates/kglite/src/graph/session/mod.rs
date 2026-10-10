@@ -82,6 +82,8 @@ mod checkpoint_order_tests;
 #[cfg(test)]
 mod column_reclaim_tests;
 #[cfg(test)]
+mod commit_gate_tests;
+#[cfg(test)]
 mod compaction_tests;
 mod cursor;
 #[cfg(test)]

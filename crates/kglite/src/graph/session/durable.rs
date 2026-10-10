@@ -525,6 +525,34 @@ impl Session {
         }
     }
 
+    /// Park the next commit inside its barrier. Test-only.
+    #[cfg(test)]
+    pub(super) fn park_next_commit(&self) -> Arc<crate::graph::wal::ParkHook> {
+        let hook = crate::graph::wal::ParkHook::new();
+        if let Some(ds) = self
+            .durable
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_mut()
+        {
+            ds.wal.set_park(Some(Arc::clone(&hook)));
+        }
+        hook
+    }
+
+    /// Make every later barrier fail (or stop failing). Test-only.
+    #[cfg(test)]
+    pub(super) fn set_wal_fault(&self, fault: Option<crate::graph::wal::AppendFault>) {
+        if let Some(ds) = self
+            .durable
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_mut()
+        {
+            ds.wal.set_fault(fault);
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn next_lsn(&self) -> Option<u64> {
         self.durable
