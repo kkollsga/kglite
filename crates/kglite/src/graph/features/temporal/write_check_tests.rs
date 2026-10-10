@@ -288,3 +288,125 @@ fn a_create_is_judged_before_it_inserts() {
     let err = run(&mut graph, "MATCH (o:Other {id: 4}) SET o:Status").unwrap_err();
     assert!(err.contains("node '4'"), "{err}");
 }
+
+fn stamp(text: &str) -> Value {
+    Value::Timestamp(chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S").unwrap())
+}
+
+#[test]
+fn a_half_open_timestamp_from_after_a_date_to_midnight_is_inverted_not_empty() {
+    // [2011-01-01T12:00, 2011-01-01): the `to` day is the first day no longer
+    // valid, so the interval ends at its midnight, before the `from`.
+    let mut graph = statuses(HalfOpen);
+    let rows = frame(
+        &["id", "vf", "vt"],
+        vec![vec![
+            Value::Int64(2),
+            stamp("2011-01-01T12:00:00"),
+            day("2011-01-01"),
+        ]],
+    );
+    let err = load(&mut graph, rows, None).unwrap_err();
+    assert!(err.contains("is after the to bound"), "{err}");
+    assert_eq!(status_count(&mut graph), 1, "nothing written");
+}
+
+#[test]
+fn a_half_open_timestamp_from_at_a_date_to_midnight_is_empty() {
+    let mut graph = statuses(HalfOpen);
+    let rows = frame(
+        &["id", "vf", "vt"],
+        vec![vec![
+            Value::Int64(2),
+            stamp("2011-01-01T00:00:00"),
+            day("2011-01-01"),
+        ]],
+    );
+    load(&mut graph, rows, None).unwrap();
+    assert_eq!(list(&graph)[0].empty_rows, Some(1));
+}
+
+#[test]
+fn a_closed_timestamp_from_within_a_date_to_day_is_neither_inverted_nor_empty() {
+    // Closed: the `to` day is the last valid day, so T12:00 of it is valid.
+    let mut graph = statuses(Closed);
+    let rows = frame(
+        &["id", "vf", "vt"],
+        vec![vec![
+            Value::Int64(2),
+            stamp("2011-01-01T12:00:00"),
+            day("2011-01-01"),
+        ]],
+    );
+    load(&mut graph, rows, None).unwrap();
+    assert_eq!(list(&graph)[0].empty_rows, Some(0));
+}
+
+#[test]
+fn a_half_open_date_from_with_a_same_day_timestamp_to_is_not_empty() {
+    let mut graph = statuses(HalfOpen);
+    let rows = frame(
+        &["id", "vf", "vt"],
+        vec![vec![
+            Value::Int64(2),
+            day("2011-01-01"),
+            stamp("2011-01-01T06:00:00"),
+        ]],
+    );
+    load(&mut graph, rows, None).unwrap();
+    assert_eq!(list(&graph)[0].empty_rows, Some(0));
+}
+
+#[test]
+fn iso_text_bounds_of_a_declared_type_are_stored_as_dates() {
+    let mut graph = statuses(Closed);
+    let rows = frame(
+        &["id", "vf", "vt"],
+        vec![
+            vec![
+                Value::Int64(2),
+                Value::String("2011-01-01".into()),
+                Value::String("2012-01-01".into()),
+            ],
+            vec![
+                Value::Int64(3),
+                Value::String("2011-06-01".into()),
+                Value::Null,
+            ],
+        ],
+    );
+    load(&mut graph, rows, None).unwrap();
+    let bounds = |id: i64| {
+        let idx = graph
+            .id_indices
+            .lookup("Status", &Value::Int64(id))
+            .unwrap();
+        (
+            crate::graph::features::temporal::node_bound(&graph, idx, "vf"),
+            crate::graph::features::temporal::node_bound(&graph, idx, "vt"),
+        )
+    };
+    assert_eq!(bounds(2), (day("2011-01-01"), day("2012-01-01")));
+    assert_eq!(bounds(3), (day("2011-06-01"), Value::Null));
+    let recorded = graph.get_node_type_metadata("Status").unwrap();
+    assert!(
+        !recorded.get("vf").unwrap().eq_ignore_ascii_case("string"),
+        "{recorded:?}"
+    );
+}
+
+#[test]
+fn an_unparsable_text_bound_is_still_refused() {
+    let mut graph = statuses(Closed);
+    let rows = frame(
+        &["id", "vf", "vt"],
+        vec![vec![
+            Value::Int64(2),
+            Value::String("not a date".into()),
+            Value::Null,
+        ]],
+    );
+    let err = load(&mut graph, rows, None).unwrap_err();
+    assert!(err.contains("row 0"), "{err}");
+    assert_eq!(status_count(&mut graph), 1);
+}

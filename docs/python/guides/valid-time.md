@@ -819,6 +819,15 @@ valid at no instant, and is kept.
   Cypher puts it in `result.warnings`.
 - `db.temporal.declarations()` counts them in `empty_rows`.
 - No as-of question returns such a row.
+- A timestamp `valid_from` later than a date `valid_to`'s midnight is inverted
+  and refused, not empty: `[2011-01-01T12:00, 2011-01-01)` ends before it starts.
+
+### Text bounds are stored as dates
+
+An `add_nodes` or `add_relationships` load coerces a declared bound column
+that arrives as ISO text. A column of date strings is stored as dates, and one
+with a time part as datetimes. A column with a cell that does not parse is left
+as text and the row check refuses it.
 
 ### A closed register's empty row
 

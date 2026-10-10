@@ -1447,5 +1447,59 @@
   },
   "tests/test_mixed_kind_column_save_parity.py::test_a_declared_float_column_still_converts_integers": {
     "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_text_bounds_of_a_reload_are_stored_as_dates[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_text_bounds_of_a_reload_are_stored_as_dates[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_text_bounds_of_a_reload_are_stored_as_dates[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_text_bounds_with_a_time_part_are_stored_as_timestamps[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_text_bounds_with_a_time_part_are_stored_as_timestamps[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_text_bounds_with_a_time_part_are_stored_as_timestamps[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_an_unparsable_text_bound_is_still_refused[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_an_unparsable_text_bound_is_still_refused[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_an_unparsable_text_bound_is_still_refused[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_text_edge_bounds_are_stored_as_dates[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_text_edge_bounds_are_stored_as_dates[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_text_edge_bounds_are_stored_as_dates[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_half_open_timestamp_from_after_a_date_to_midnight_is_refused_as_inverted[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_half_open_timestamp_from_after_a_date_to_midnight_is_refused_as_inverted[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_half_open_timestamp_from_after_a_date_to_midnight_is_refused_as_inverted[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_closed_timestamp_from_within_a_date_to_day_is_valid[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_closed_timestamp_from_within_a_date_to_day_is_valid[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_temporal_bound_coercion.py::test_closed_timestamp_from_within_a_date_to_day_is_valid[disk]": {
+    "owner": "storage-parity"
   }
 }

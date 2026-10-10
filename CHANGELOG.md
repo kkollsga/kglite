@@ -90,6 +90,10 @@ before upgrading.
 
 ### Fixed
 
+- **A declared bound loaded as text is stored as a date.** `add_nodes` and `add_relationships` coerce a declared `valid_from`/`valid_to` column of ISO strings to dates (datetimes when a cell has a time part). Before, a reload without `column_types` wrote `String` cells beside the stored dates and re-recorded the property as `String`. A cell that does not parse is still refused. A Cypher `SET` or `CREATE` of an ISO string onto a bound still stores the string.
+
+- **A `half_open` interval from a timestamp after a date `to`'s midnight is refused as inverted.** `[2011-01-01T12:00, 2011-01-01)` was counted as an empty row with a warning that the bounds are equal. Answers do not change, and the `closed` convention is unaffected.
+
 - **C ABI and Java: concurrent writes on one durable session no longer fail
   with `TransactionConflict`.**
   - Before: when several threads wrote through one handle while reads ran, a

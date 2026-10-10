@@ -2,7 +2,8 @@ use crate::datatypes::{DataFrame, Value};
 use crate::graph::constraints::{ConstraintResult, UniqueConstraintKey};
 use crate::graph::diagnostics::Diagnostic;
 use crate::graph::features::temporal::{
-    check_edge_load, check_node_load, merge_start_key, EmptyIntervals,
+    check_edge_load, check_node_load, coerce_edge_bounds, coerce_node_bounds, merge_start_key,
+    EmptyIntervals,
 };
 use crate::graph::introspection::reporting::{ConnectionOperationReport, NodeOperationReport};
 use crate::graph::mutation::batch::{
@@ -969,6 +970,10 @@ pub fn add_nodes(
             derived_titles: derived_titles.as_deref(),
         },
     )?;
+
+    // A declared bound that arrived as ISO text is stored as a date, so a
+    // reload without `column_types` does not re-record the property as text.
+    coerce_node_bounds(graph, &node_type, &mut df_data);
 
     install_node_type_metadata(
         graph,
@@ -1991,7 +1996,7 @@ pub(crate) fn detach_delete_nodes<S: BuildHasher>(
 #[allow(clippy::too_many_arguments)]
 pub fn replace_connections(
     graph: &mut DirGraph,
-    df_data: DataFrame,
+    mut df_data: DataFrame,
     connection_type: String,
     source_type: String,
     source_id_field: String,
@@ -2070,6 +2075,7 @@ pub fn replace_connections(
     // A declared validity interval judges the rows before the delete, as
     // `add_connections` judges them before its writes; that call reports
     // the empty ones.
+    coerce_edge_bounds(graph, &connection_type, &source_type, &mut df_data);
     check_edge_load(graph, &connection_type, &source_type, &df_data)?;
     // 3. Declared relationship constraints. `add_connections` gates them too,
     //    but that gate runs *after* the delete below — so the frame is judged

@@ -3,7 +3,7 @@
 use crate::datatypes::{DataFrame, Value};
 use crate::graph::constraints::UniqueConstraintKey;
 use crate::graph::diagnostics::{Diagnostic, DiagnosticGroup};
-use crate::graph::features::temporal::{check_edge_load, EmptyIntervals};
+use crate::graph::features::temporal::{check_edge_load, coerce_edge_bounds, EmptyIntervals};
 use crate::graph::mutation::endpoints::{
     resolve_endpoints, title_column_indices, ResolvedEndpoints,
 };
@@ -230,6 +230,7 @@ pub(super) fn prepare_connection_admission(
     frame: &mut DataFrame,
     fields: ConnectionAdmissionFields<'_>,
 ) -> Result<(ResolvedEndpoints, ConnectionTitles, EmptyIntervals), String> {
+    coerce_edge_bounds(graph, fields.connection_type, fields.source_type, frame);
     let empty = check_edge_load(graph, fields.connection_type, fields.source_type, frame)?;
     let source_id_idx = frame
         .get_column_index(fields.source_id)
