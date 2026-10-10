@@ -17,10 +17,15 @@ before upgrading.
   - A NULL argument still returns NULL.
   - Migration: validate input before the call, or wrap the query and handle the error. To keep NULL for dirty rows, filter them out in a `WHERE` first.
 
+- **A float column no longer converts a later integer.**
+  - Before: `CREATE (:T {x: 1.5})` then `CREATE (:T {x: 9})` stored `9.0`, in memory, mapped and disk graphs alike. `n.x / 2` then gave `4.5`. The mirror (`7`, then `1.5`) kept `7` as an integer.
+  - Now: the integer stays an integer, so both orders keep every value as written. The column holds both kinds, and `schema()` and the load report record `mixed` (they recorded `Int64` while the column held floats).
+  - A column declared float (`column_types={'x': 'float'}`, or a blueprint `float` property) is coerced by its loader and keeps converting.
+  - Saved graphs are unaffected: a stored Float64 column reads as before.
+  - Migration: write `toFloat(...)` or a float literal where a float is meant, or declare the column.
+
 ### Added
 
-- **Java: `exportCsv`, `exportRdf` and `loadRdf`.** `KnowledgeGraph.exportCsv(dir)` and `exportRdf(file[, RdfExportOptions])` return an `ExportReport`; `KnowledgeGraph.loadRdf(file[, RdfLoadOptions])` loads Turtle, N-Triples, N-Quads or TriG, with `languageMaps` support. The RDF calls need a native library built with `kglite-c`'s `rdf` feature.
-- **C ABI: `kglite_session_export_csv` and `kglite_session_export_rdf`.** The session-scoped twins of `kglite_export_csv` / `kglite_export_rdf` for a binding that holds only a session; they export a consistent snapshot of the committed state. Additive.
 - **`--version` on `kglite-mcp-server` and `kglite-bolt-server`.** Prints the kglite version and exits; the pip `kglite-mcp-server` entry point shares the flag.
 
 ### Changed

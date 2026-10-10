@@ -638,18 +638,6 @@
   "tests/test_temporal_empty_intervals.py::test_a_load_keeps_an_empty_row_with_one_warning[memory_guards]": {
     "owner": "storage-parity"
   },
-  "tests/test_mixed_kind_column_save_parity.py::test_a_float_column_reports_the_type_it_stores_after_an_int_batch[memory]": {
-    "owner": "storage-parity"
-  },
-  "tests/test_mixed_kind_column_save_parity.py::test_a_float_column_reports_the_type_it_stores_after_an_int_batch[mapped]": {
-    "owner": "storage-parity"
-  },
-  "tests/test_mixed_kind_column_save_parity.py::test_a_float_column_reports_the_type_it_stores_after_an_int_batch[disk]": {
-    "owner": "storage-parity"
-  },
-  "tests/test_mixed_kind_column_save_parity.py::test_a_float_column_reports_the_type_it_stores_after_an_int_batch[disk_reopened]": {
-    "owner": "storage-parity"
-  },
   "tests/test_timestamp_column_parity.py::test_microsecond_timestamps_round_trip_with_nulls_and_set[memory]": {
     "owner": "storage-parity"
   },
@@ -1431,6 +1419,33 @@
     "owner": "storage-parity"
   },
   "tests/test_valid_time_peer_hist.py::test_a_write_between_two_counts_moves_the_answer[with_contractor_peer-1-all-disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_mixed_kind_column_save_parity.py::test_a_float_first_column_keeps_a_later_integer_an_integer[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_mixed_kind_column_save_parity.py::test_a_float_first_column_keeps_a_later_integer_an_integer[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_mixed_kind_column_save_parity.py::test_a_float_first_column_keeps_a_later_integer_an_integer[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_mixed_kind_column_save_parity.py::test_a_float_first_column_keeps_a_later_integer_an_integer[disk_reopened]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_mixed_kind_column_save_parity.py::test_an_integer_first_column_keeps_a_later_float_and_records_mixed[memory]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_mixed_kind_column_save_parity.py::test_an_integer_first_column_keeps_a_later_float_and_records_mixed[mapped]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_mixed_kind_column_save_parity.py::test_an_integer_first_column_keeps_a_later_float_and_records_mixed[disk]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_mixed_kind_column_save_parity.py::test_an_integer_first_column_keeps_a_later_float_and_records_mixed[disk_reopened]": {
+    "owner": "storage-parity"
+  },
+  "tests/test_mixed_kind_column_save_parity.py::test_a_declared_float_column_still_converts_integers": {
     "owner": "storage-parity"
   }
 }

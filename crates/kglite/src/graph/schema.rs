@@ -1049,6 +1049,25 @@ impl ConnectionTypeInfo {
     }
 }
 
+/// The record a numeric write leaves when it disagrees with the recorded
+/// kind: `mixed` for an `Int64` against `Float64` (either order) or against an
+/// already-`mixed` record. A float column no longer converts an integer, so the
+/// column holds both kinds and a bare `Int64` or `Float64` record would
+/// contradict a value read back. `None` leaves the incoming kind as it is.
+pub(crate) fn numeric_record_after(recorded: &str, incoming: &str) -> Option<&'static str> {
+    use crate::graph::storage::column_store::TypedColumn;
+    let numeric = |kind| matches!(kind, Some("int64" | "float64"));
+    let recorded_mixed = recorded.eq_ignore_ascii_case("mixed");
+    let (recorded, incoming) = (
+        TypedColumn::canonical_type_str(recorded),
+        TypedColumn::canonical_type_str(incoming),
+    );
+    let diverges = (recorded == Some("float64") && incoming == Some("int64"))
+        || (recorded == Some("int64") && incoming == Some("float64"))
+        || (recorded_mixed && numeric(incoming));
+    diverges.then_some("mixed")
+}
+
 /// What a recorded property type becomes when a write observes `observed` —
 /// `None` when `prior` already says it.
 pub(crate) fn merged_property_type(prior: &str, observed: &str) -> Option<String> {
