@@ -3113,9 +3113,15 @@ def test_auto_checkpoint_runs_off_the_committing_call(tmp_path):
     g.save()
     g.close()
     g = kglite.open(str(path), durable="normal", auto_checkpoint_wal_mib=1)
-    started = time.perf_counter()
-    g.save()  # the cost an inline checkpoint of this graph would add to a commit
-    save_seconds = time.perf_counter() - started
+    # The cost an inline checkpoint of this graph would add to a commit: at
+    # least one whole save. The fastest of three is a floor scheduler jitter
+    # cannot inflate; comparing against half of one save failed on a loaded CI
+    # runner (a 20 ms commit hiccup against a 24 ms save).
+    save_seconds = float("inf")
+    for _ in range(3):
+        started = time.perf_counter()
+        g.save()
+        save_seconds = min(save_seconds, time.perf_counter() - started)
     before = path.stat().st_mtime_ns
     slowest = 0.0
     i = 0
@@ -3127,7 +3133,7 @@ def test_auto_checkpoint_runs_off_the_committing_call(tmp_path):
         i += 1
         time.sleep(0.01)
     assert path.stat().st_mtime_ns != before, "a background checkpoint was published"
-    assert slowest < save_seconds / 2, f"a commit took {slowest:.3f}s against a {save_seconds:.3f}s save()"
+    assert slowest < save_seconds, f"a commit took {slowest:.3f}s against a {save_seconds:.3f}s save()"
     # Published but not yet trimmed: the log still holds the frames it covers.
     end = _commit_until(g, lambda: _wal_bytes(path) < 1024 * 1024, start=i)
     assert _wal_bytes(path) < 1024 * 1024
