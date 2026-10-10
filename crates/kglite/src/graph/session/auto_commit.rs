@@ -26,7 +26,9 @@ impl Session {
     /// `attempts` tries (minimum one) while the commit loses an optimistic
     /// race.
     ///
-    /// **In place when nothing else holds the graph.** Under the session lock,
+    /// **In place when nothing else holds the graph** (never at `full`
+    /// durability, which always forks so readers are not held off while the
+    /// write's log frame is flushed). Under the session lock,
     /// a published graph with no other owner (no reader snapshot, cursor,
     /// backup or checkpoint image, open transaction or held result) is
     /// mutated directly instead of forked: no whole-graph copy, no free of the
@@ -88,6 +90,7 @@ impl Session {
     ///   also under the durable capture wrapper). Disk graphs fork: their
     ///   fork is a remap of immutable bases, and the in-place alternative is a
     ///   whole-graph clone checkpoint per statement;
+    /// - the session is not durable at `full` (see the comment in the body);
     /// - `Arc::get_mut` succeeds on the published graph while the lock is
     ///   held, i.e. no snapshot exists. A snapshot taken earlier owns a clone
     ///   of the `Arc`, so it can never observe the write — such a statement
@@ -132,6 +135,15 @@ impl Session {
             || !cypher::is_mutation_query(&parsed)
             || !parsed.clauses.iter().all(is_plain_data_clause)
         {
+            return None;
+        }
+        // At `full` the statement's graph is the one readers receive, so it
+        // would have to hold them off until the flush finishes (one fsync per
+        // write, ~4 ms on macOS) to keep an unflushed write invisible. The fork
+        // path flushes with readers unblocked, and costs a few hundred
+        // microseconds more per write on a 550,000-node graph, so `full`
+        // always forks. `normal` has no flush to wait for.
+        if self.durability() == Some(crate::graph::wal::DurabilityLevel::Full) {
             return None;
         }
         // The gate keeps a fork-path committer's check-to-swap window free of

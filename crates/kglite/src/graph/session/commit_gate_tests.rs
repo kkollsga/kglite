@@ -317,3 +317,49 @@ fn a_committer_queued_behind_a_parked_commit_sees_its_version() {
     ));
     assert_eq!(ids(&session.snapshot()), vec![1]);
 }
+
+/// An auto-commit statement at `full` must not run in place: its graph is the
+/// one readers receive, so holding them off until the flush is the only way an
+/// in-place write could stay invisible until durable. At `normal` there is no
+/// flush to wait for and in-place stays.
+#[test]
+fn an_auto_commit_at_full_forks_and_never_stalls_a_reader() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = Arc::new(open(&dir.path().join("g.kgl"), DurabilityLevel::Full));
+    let params = HashMap::new();
+    let opts = ExecuteOptions::eager(&params);
+    session
+        .execute_auto_commit("CREATE (:N {id: 1})", &opts, 3)
+        .unwrap();
+    let hook = session.park_next_commit();
+    let _release = ReleaseOnDrop(Arc::clone(&hook));
+    let writer = {
+        let session = Arc::clone(&session);
+        thread::spawn(move || {
+            let params = HashMap::new();
+            let opts = ExecuteOptions::eager(&params);
+            session
+                .execute_auto_commit("CREATE (:N {id: 2})", &opts, 3)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+    };
+    assert!(hook.wait_entered(WAIT));
+    let reader = Arc::clone(&session);
+    assert_eq!(
+        within(move || ids(&reader.snapshot())),
+        Some(vec![1]),
+        "a reader must not wait for the flush nor see the unflushed write"
+    );
+    hook.release();
+    writer.join().unwrap().unwrap();
+    assert_eq!(ids(&session.snapshot()), vec![1, 2]);
+    assert_eq!(session.in_place_commit_count(), 0);
+
+    let dir = tempfile::tempdir().unwrap();
+    let normal = open(&dir.path().join("g.kgl"), DurabilityLevel::Normal);
+    normal
+        .execute_auto_commit("CREATE (:N {id: 1})", &opts, 3)
+        .unwrap();
+    assert_eq!(normal.in_place_commit_count(), 1);
+}

@@ -311,7 +311,7 @@ fn a_refused_log_append_restores_the_graph_in_place() {
         let session = Session::open_durable(
             Arc::new(DirGraph::new()),
             &path.to_string_lossy(),
-            DurabilityLevel::Full,
+            DurabilityLevel::Normal,
         )
         .unwrap();
         write(&session, "CREATE INDEX FOR (n:Item) ON (n.tag)");
@@ -326,7 +326,7 @@ fn a_refused_log_append_restores_the_graph_in_place() {
         let before = digest_of(&session);
         let version = session.version();
         let in_place = session.in_place_commit_count();
-        assert!(in_place >= 2, "durable sessions run in place");
+        assert!(in_place >= 2, "durable sessions at normal run in place");
 
         session.set_fail_append(true);
         let params = HashMap::new();
@@ -353,7 +353,7 @@ fn an_in_place_durable_statement_survives_a_crash_and_a_refused_one_does_not() {
     let path = dir.path().join("g.kgl");
     let p = path.to_string_lossy().into_owned();
     let session =
-        Session::open_durable(Arc::new(DirGraph::new()), &p, DurabilityLevel::Full).unwrap();
+        Session::open_durable(Arc::new(DirGraph::new()), &p, DurabilityLevel::Normal).unwrap();
     write(&session, "CREATE (:N {id: 1})");
     write(&session, "CREATE (:N {id: 2})-[:R]->(:N {id: 3})");
     assert_eq!(session.in_place_commit_count(), 2);

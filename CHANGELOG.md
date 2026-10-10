@@ -19,6 +19,10 @@ before upgrading.
   - Now: the commit flushes the log with no reader-facing lock held, then
     publishes. Readers keep reading the previous graph meanwhile and never see
     a commit before it is durable. Change events follow the publish.
+  - At `full`, auto-commit statements always take the copy-on-write path, so
+    no statement runs on the graph readers are using while its log frame is
+    flushed. A lone writer pays about 0.3-0.5 ms more per write on a
+    550,000-node graph, against a flush of about 4 ms. `normal` is unchanged.
   - `save`, backup, the online checkpoint and `sync` wait for a commit that is
     mid-flush, so a checkpoint cannot pair a graph with a log position that
     includes a frame the graph lacks.
