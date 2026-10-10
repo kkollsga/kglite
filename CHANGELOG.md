@@ -11,6 +11,14 @@ before upgrading.
 
 ### Fixed
 
+- **`load_ntriples()` on a durable graph (`kglite.open(path, durable=...)`) is
+  now written to the write-ahead log.**
+  - Before: the load was never logged. After a crash or hard exit without
+    `save()`, the reopened graph held none of the loaded entities or edges.
+  - Now: the load ends in a checkpoint, as `save()` does, so it survives a
+    crash and the log stays small after a dump-sized load. A handle derived
+    from a durable graph refuses `load_ntriples()` as it does other writes.
+
 - **MCP server: every tool's `outputSchema` declares `"type": "object"` at its
   root, so the server starts in clients that validate strictly.**
   - Before: `cypher_query`, manifest Cypher tools and the recipe tools sent a

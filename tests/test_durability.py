@@ -3198,3 +3198,41 @@ def test_auto_checkpoint_default_is_sixteen_mib(tmp_path):
 def test_auto_checkpoint_rejects_a_negative_bound(tmp_path):
     with pytest.raises((OverflowError, ValueError, TypeError)):
         kglite.open(str(tmp_path / "app.kgl"), auto_checkpoint_wal_mib=-1)
+
+
+# ── load_ntriples is a logged write ──────────────────────────────────
+
+_NT = (
+    '<http://www.wikidata.org/entity/Q1> <http://www.w3.org/2000/01/rdf-schema#label> "Alpha"@en .\n'
+    '<http://www.wikidata.org/entity/Q2> <http://www.w3.org/2000/01/rdf-schema#label> "Beta"@en .\n'
+    "<http://www.wikidata.org/entity/Q1> <http://www.wikidata.org/prop/direct/P31> "
+    "<http://www.wikidata.org/entity/Q2> .\n"
+)
+
+
+def test_load_ntriples_survives_hard_crash(tmp_path):
+    """A durable `load_ntriples` reaches the log: every loaded entity and edge
+    is back after a hard exit with no save or close."""
+    nt = tmp_path / "data.nt"
+    nt.write_text(_NT, encoding="utf-8")
+    _crash_child(tmp_path, f"g = open_durable()\ng.load_ntriples({str(nt)!r}, languages=['en'])\n", durable="full")
+
+    expected = kglite.KnowledgeGraph()
+    expected.load_ntriples(str(nt), languages=["en"])
+    nodes = "MATCH (n) RETURN labels(n) AS l, n.id AS i, n.title AS t ORDER BY l, i"
+    edges = "MATCH (a)-[r]->(b) RETURN type(r) AS r, a.id AS a, b.id AS b ORDER BY r, a, b"
+    g = _open(tmp_path / "app.kgl", "memory", durable="full")
+    assert g.cypher(nodes).to_list() == expected.cypher(nodes).to_list()
+    assert g.cypher(edges).to_list() == expected.cypher(edges).to_list()
+    assert expected.cypher(edges).to_list(), "fixture must load at least one edge"
+
+
+def test_a_derived_view_refuses_load_ntriples(tmp_path):
+    nt = tmp_path / "data.nt"
+    nt.write_text(_NT, encoding="utf-8")
+    g = _open(tmp_path / "view.kgl", "memory", durable="full")
+    g.cypher("CREATE (:Row {id: 1})")
+    view = g.select("Row")
+    with pytest.raises(ValueError, match="derived from a durable graph"):
+        view.load_ntriples(str(nt), languages=["en"])
+    assert g.cypher("MATCH (n) RETURN count(n) AS c").scalar() == 1
