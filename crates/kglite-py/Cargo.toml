@@ -6,9 +6,9 @@ name = "kglite-py"
 version.workspace = true
 edition = "2021"
 # Inherited from the `kglite-cli` path dependency below, which needs
-# 1.89.0 for rustyline. Not published to crates.io, but the wheel is
+# 1.95.0 for rustyline. Not published to crates.io, but the wheel is
 # built from source, so the floor is real for anyone building it.
-rust-version = "1.89.0"
+rust-version = "1.95.0"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 description = "PyO3 wrapper for kglite — Python bindings around the pure-Rust kglite knowledge graph engine."
 readme = "../../README.md"
@@ -129,7 +129,7 @@ mimalloc = { version = "0.1.49", default-features = false, features = ["v2"] }
 # flips an AtomicBool the engine polls.
 [target.'cfg(unix)'.dependencies]
 # 0.2.191 is the tight floor for the workspace-unified tree, not a
-# guess: mcp-methods 0.6.1 (via kglite-cli) requires ^0.2.191, rustyline 18
+# guess: mcp-methods 0.6.1 (via kglite-cli) requires ^0.2.191, rustyline 19
 # ^0.2.182 and nix 0.31 ^0.2.181, and cargo unifies libc across all members. It is
 # higher than the `kglite` engine alone needs -- overstating is the
 # benign direction (a clear resolution error, not a mystery compile

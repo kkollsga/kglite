@@ -9,6 +9,10 @@ before upgrading.
 
 ## [Unreleased]
 
+### Changed
+
+- **Building `kglite-cli` or the Python package from source needs Rust 1.95 or newer** (was 1.89). The CLI's line editor, `rustyline`, moved to 19, which uses `cfg_select!` (stable in 1.95). The `kglite`, `kglite-c` and `kglite-mcp-server` crates keep 1.88 and `kglite-bolt-server` keeps 1.91. Wheels and the `kglite` and `kglite-cli` binaries from PyPI and GitHub are not affected. **Do:** run `rustup update` before `cargo install kglite-cli` or `maturin develop`.
+
 ### Fixed
 
 - **An embedder's MCP server reports its own name.** A binary built on `with_identity` (for example `sonagram-mcp-server`) told clients it was `KGLite (single-graph)`. With no `name:` in the manifest it now reports `<identity> (<mode>)`, such as `sonagram (single-graph)`. A manifest `name:` and `--name` still win, and the `kglite-mcp-server` binary keeps `KGLite (<mode>)`.

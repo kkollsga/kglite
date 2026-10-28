@@ -144,7 +144,7 @@ flate2 = "1.1"
 zstd = "0.14.3"
 memmap2 = "0.9"
 # 0.2.191 is the tight floor for the workspace-unified tree, not a
-# guess: mcp-methods 0.6.1 (via kglite-cli) requires ^0.2.191, rustyline 18
+# guess: mcp-methods 0.6.1 (via kglite-cli) requires ^0.2.191, rustyline 19
 # ^0.2.182 and nix 0.31 ^0.2.181, and cargo unifies libc across all members. It is
 # higher than the `kglite` engine alone needs -- overstating is the
 # benign direction (a clear resolution error, not a mystery compile

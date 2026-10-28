@@ -2,11 +2,12 @@
 name = "kglite-cli"
 version.workspace = true
 edition = "2021"
-# Above the 1.88.0 workspace floor: `rustyline 18` declares no
-# `rust-version` of its own but calls `File::lock_shared`, stabilized in
-# 1.89.0. On 1.88 it fails with E0658 `use of unstable library feature
-# 'file_lock'`, so the metadata floor understates the real one.
-rust-version = "1.89.0"
+# Above the 1.88.0 workspace floor: `rustyline 19` declares no
+# `rust-version` of its own but uses `cfg_select!`, stabilized in 1.95.0. On
+# 1.93 and 1.94 it fails with E0658 `use of unstable library feature
+# 'cfg_select'` (bisected: 1.95.0 is the first release that compiles it), so
+# the metadata floor understates the real one.
+rust-version = "1.95.0"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 license = "MIT"
 description = "Pure-Rust KGLite CLI: an interactive Cypher shell for .kgl knowledge graphs"
@@ -30,11 +31,7 @@ kglite = { version = "0.21.3", path = "../kglite", default-features = false, fea
 
 # Line editor: prompt, history, Emacs/Vi keybindings, Ctrl-C/Ctrl-D handling.
 # The standard Rust REPL choice; not otherwise a workspace dep.
-# Held at 18: rustyline 19.0.0 uses `cfg_select!`, which fails E0658 on Rust
-# 1.89 through 1.92 and compiles on 1.98 (the first compiling release between
-# 1.93 and 1.98 was not bisected). Taking it means raising this crate, and
-# kglite-py through it, past the 1.89.0 floor.
-rustyline = "18"
+rustyline = "19"
 
 # SIGINT → cancel the in-flight query (sets the flag execute_mut polls).
 # rustyline keeps the prompt in raw mode, so Ctrl-C only raises SIGINT while

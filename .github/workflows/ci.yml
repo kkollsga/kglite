@@ -234,7 +234,7 @@ jobs:
     # "package X requires rustc 1.88" from cargo.
     #
     # The floors are NOT uniform and deliberately so: `kglite-cli` needs
-    # 1.89 (rustyline 18 calls `File::lock_shared` while declaring no
+    # 1.95 (rustyline 19 uses `cfg_select!` while declaring no
     # `rust-version` of its own) and `kglite-bolt-server` needs 1.91 (boltr).
     # Forcing one number would have raised the engine's floor to 1.91 for no
     # reason.

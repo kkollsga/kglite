@@ -33,13 +33,13 @@ version = "0.21.3"
 # `cargo +1.88.0 check` on those three members passes.
 #
 # The two members that need more, and why:
-#   - kglite-cli  → 1.89.0. `rustyline 18` declares NO `rust-version` at all
-#     but calls `File::lock_shared`, stabilized in 1.89. Nothing in the
-#     metadata says so; only compiling on 1.88 does (it fails with E0658
-#     `use of unstable library feature 'file_lock'`).
+#   - kglite-cli  → 1.95.0. `rustyline 19` declares NO `rust-version` at all
+#     but uses `cfg_select!`, stabilized in 1.95. Nothing in the metadata
+#     says so; only compiling does (1.93 and 1.94 fail with E0658
+#     `use of unstable library feature 'cfg_select'`).
 #   - kglite-bolt-server → 1.91.0. `boltr 0.3.0` declares `rust-version =
 #     "1.91.0"`.
-# kglite-py depends on kglite-cli, so it inherits the 1.89.0 floor.
+# kglite-py depends on kglite-cli, so it inherits the 1.95.0 floor.
 #
 # `.github/workflows/ci.yml`'s `msrv` job builds each member on exactly the
 # version declared here, with the matrix derived from these manifests by
