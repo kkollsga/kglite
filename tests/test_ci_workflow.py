@@ -669,6 +669,13 @@ def test_every_ci_job_has_a_wall_clock_timeout() -> None:
     jobs = CI["jobs"]
     assert jobs
     for name, job in jobs.items():
+        if "uses" in job:
+            # A job that calls a reusable workflow cannot carry a timeout of its
+            # own; the called workflow's jobs must.
+            called = yaml.safe_load((REPO_ROOT / job["uses"]).read_text(encoding="utf-8"))
+            for called_name, called_job in called["jobs"].items():
+                assert "timeout-minutes" in called_job, f"{job['uses']} job has no timeout: {called_name}"
+            continue
         assert "timeout-minutes" in job, f"CI job has no timeout: {name}"
 
 

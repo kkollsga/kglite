@@ -308,19 +308,45 @@ def test_wheel_license_gate_covers_every_published_wheel_family() -> None:
 
 
 def test_free_threaded_wheel_is_built_checked_and_required_at_publish() -> None:
+    import yaml
+
     cargo = (REPO_ROOT / "crates" / "kglite-py" / "Cargo.toml").read_text(encoding="utf-8")
-    release = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
-    ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+    release_text = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+    ci_text = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+    shared = (WORKFLOWS / "abi3t-wheels.yml").read_text(encoding="utf-8")
     support = (REPO_ROOT / "docs" / "python" / "platform-support.md").read_text(encoding="utf-8")
     assert 'abi3t = ["pyo3/abi3t-py315"]' in cargo
-    # Release: native legs and the Linux leg build it, and publish waits on it.
-    assert "--features abi3t,python-extension,mcp-server" in release
-    assert "wheels-linux-abi3t" in release
-    assert "needs.wheels-linux-abi3t.result == 'success'" in release
-    assert "python scripts/check_wheel_set.py dist" in release
-    # CI: the built wheel, not a develop install, runs the free-threaded tests.
-    assert "abi3t-wheel" in ci
-    assert "tests/test_freethreading.py" in ci.split("abi3t-wheel:", 1)[1].split("perf-regression:", 1)[0]
+
+    # One definition of the legs, called by both the release and branch CI, so
+    # the two cannot drift: the release uploads, CI only builds and checks.
+    release = yaml.safe_load(release_text)["jobs"]
+    ci = yaml.safe_load(ci_text)["jobs"]
+    assert release["wheels-abi3t"]["uses"] == "./.github/workflows/abi3t-wheels.yml"
+    assert release["wheels-abi3t"]["with"] == {"upload": True}
+    assert ci["abi3t-release-legs"]["uses"] == "./.github/workflows/abi3t-wheels.yml"
+    assert ci["abi3t-release-legs"]["with"] == {"upload": False}
+    # The release builds nothing free-threaded outside the shared file.
+    assert "features abi3t" not in release_text
+    assert "cp315-cp315t" not in release_text
+
+    legs = yaml.safe_load(shared)["jobs"]["abi3t"]["strategy"]["matrix"]["include"]
+    assert [leg["target"] for leg in legs] == [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-apple-darwin",
+        "x86_64-pc-windows-msvc",
+    ]
+    assert "--interpreter /opt/python/cp315-cp315t/bin/python" in shared
+    assert "manylinux: '2_28'" in shared
+    assert "--features abi3t,python-extension,mcp-server" in shared
+    assert "_is_gil_enabled" in shared
+
+    # Publish waits on the legs and checks the set before uploading.
+    assert "needs.wheels-abi3t.result == 'success'" in release_text
+    assert "python scripts/check_wheel_set.py dist" in release_text
+
+    # CI also runs the free-threaded suites against the BUILT wheel.
+    wheel_job = ci_text.split("abi3t-wheel:", 1)[1].split("perf-regression:", 1)[0]
+    assert "tests/test_freethreading.py" in wheel_job
     assert "cp315-abi3.abi3t" in support
 
 

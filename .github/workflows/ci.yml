@@ -703,6 +703,16 @@ jobs:
           ./.ftvenv/bin/python -c "import sys, kglite; assert not sys._is_gil_enabled(), 'GIL unexpectedly enabled'; print('no-GIL OK')"
           ./.ftvenv/bin/python -m pytest tests/test_freethreading.py tests/test_concurrency.py tests/test_session.py -v --tb=short
 
+  # The release's three free-threaded wheel legs (Linux manylinux_2_28, macOS
+  # arm64, Windows), built exactly as release.yml builds them: build, tag
+  # assertion, install on free-threaded 3.15, smoke, GIL-off. No upload.
+  abi3t-release-legs:
+    needs: [dedup]
+    if: needs.dedup.outputs.fresh == 'true'
+    uses: ./.github/workflows/abi3t-wheels.yml
+    with:
+      upload: false
+
   abi3t-wheel:
     needs: [dedup]
     if: needs.dedup.outputs.fresh == 'true'
@@ -741,7 +751,7 @@ jobs:
       - name: Inventory the wheel and assert its tags
         run: |
           python scripts/check_wheel_artifact.py "abi3t-wheels/*.whl"
-          ls abi3t-wheels | grep -E 'cp315-abi3\.abi3t-'
+          compgen -G 'abi3t-wheels/*-cp315-abi3.abi3t-*.whl' > /dev/null
 
       - name: Install the BUILT wheel and run the free-threaded tests against it
         # Run from outside the checkout so the repo's `kglite/` source package
@@ -1557,6 +1567,7 @@ jobs:
       - bolt-driver-conformance
       - free-threading
       - abi3t-wheel
+      - abi3t-release-legs
       - perf-regression
       - public-api
       - storage-parity

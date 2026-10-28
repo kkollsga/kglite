@@ -1,0 +1,127 @@
+# The free-threaded (cp315-abi3.abi3t) wheel legs, defined once.
+#
+# `release.yml` builds and uploads these wheels (`upload: true`) and `ci.yml`
+# builds the same three legs on every branch (`upload: false`), so a leg that
+# cannot build fails the pull request and not the release, which publishes
+# crates.io before PyPI. Both callers reach the same steps through this file;
+# there is no second copy to drift.
+#
+# Each leg builds the wheel, asserts its tag, installs it on free-threaded
+# Python 3.15 and checks that the GIL stays off.
+name: abi3t wheels
+
+on:
+  workflow_call:
+    inputs:
+      upload:
+        description: Upload the wheels as artifacts (release) or only build and check them (CI).
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  RUST_STABLE: "stable"
+
+jobs:
+  abi3t:
+    name: abi3t wheel - ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux builds in the manylinux_2_28 image, which ships
+          # /opt/python/cp315-cp315t; the 2014 image used for the abi3 wheel is
+          # no longer rebuilt with new CPython versions, so this wheel's floor
+          # is glibc 2.28. musl and aarch64 are not built.
+          - name: linux-x86_64-gnu
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            container: 'true'
+          - name: macos-arm64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            container: 'false'
+          # macOS x86_64 is not built: it cross-compiles on the arm64 runner,
+          # which has no x86_64 free-threaded interpreter.
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            container: 'false'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build abi3t wheel (manylinux_2_28 container)
+        if: matrix.container == 'true'
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          rust-toolchain: ${{ env.RUST_STABLE }}
+          target: ${{ matrix.target }}
+          manylinux: '2_28'
+          args: >-
+            --release --out wheels-abi3t
+            --interpreter /opt/python/cp315-cp315t/bin/python
+            --no-default-features --features abi3t,python-extension,mcp-server
+
+      - name: Install Rust
+        if: matrix.container == 'false'
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_STABLE }}
+          targets: ${{ matrix.target }}
+      - name: Force cargo PATH precedence (macOS rustup-init shim workaround)
+        if: matrix.os == 'macos-latest'
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        shell: bash
+      - name: Cache cargo registry + target
+        if: matrix.container == 'false'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: ". -> target"
+          shared-key: "abi3t-${{ matrix.target }}"
+
+      - name: Set up free-threaded Python 3.15t
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.15t'
+
+      - name: Build abi3t wheel (native)
+        if: matrix.container == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install maturin
+          python -m maturin build --release --target ${{ matrix.target }} --out wheels-abi3t \
+            --no-default-features --features abi3t,python-extension,mcp-server
+
+      - name: Inventory the wheel and assert its tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/check_wheel_artifact.py "wheels-abi3t/*.whl"
+          compgen -G 'wheels-abi3t/*-cp315-abi3.abi3t-*.whl' > /dev/null
+
+      - name: Install the wheel on free-threaded 3.15 and smoke-test it
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv .abi3t-smoke
+          if [ -d .abi3t-smoke/Scripts ]; then VPY=.abi3t-smoke/Scripts/python; else VPY=.abi3t-smoke/bin/python; fi
+          "$VPY" -m pip install wheels-abi3t/*.whl
+          "$VPY" scripts/smoke_installed_wheel.py
+          "$VPY" -P -c "import sys, kglite; assert not sys._is_gil_enabled(), 'GIL unexpectedly enabled'"
+
+      - name: Upload abi3t wheel as artifact
+        if: inputs.upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          # `wheels-` prefix: the publish job collects `pattern: wheels-*`.
+          name: wheels-abi3t-${{ matrix.name }}
+          path: wheels-abi3t/*.whl
+          # `error`, not the default `warn`: a leg that exits 0 with no wheel
+          # would otherwise upload nothing and let a platform go missing.
+          if-no-files-found: error
