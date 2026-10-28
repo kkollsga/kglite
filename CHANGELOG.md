@@ -9,6 +9,8 @@ before upgrading.
 
 ## [Unreleased]
 
+## [0.21.4] - 2026-10-29
+
 ### Added
 
 - **A free-threaded wheel: `kglite-<version>-cp315-abi3.abi3t-<platform>`.** The `cp312-abi3` wheel does not load on a free-threaded interpreter. This wheel uses the free-threaded stable ABI (PEP 803), so `pip install kglite` works on free-threaded Python 3.15 and newer for Windows x86_64, macOS arm64 and Linux x86_64 (glibc 2.28+), and it also loads on GIL-enabled 3.15. Free-threaded 3.14t, macOS x86_64, musl and aarch64 Linux have no such wheel: build those from source. The release now fails before upload when any required wheel (abi3 or abi3t) or the sdist is missing from the set.

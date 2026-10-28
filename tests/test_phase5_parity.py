@@ -97,11 +97,11 @@ def test_graph_copy_cow_correctness_mapped():
 #: Linux from the `kglite/kglite.abi3.so` member of the newest manylinux2014
 #: x86_64 wheel already on PyPI, whose file name and SHA-256 follow the table.
 BINARY_SIZE_BASELINES = {
-    "darwin": (32_160_448, "0.21.3"),  # host release build
-    "linux": (39_647_160, "0.21.2"),  # published manylinux2014 x86_64 wheel member
+    "darwin": (32_160_448, "0.21.4"),  # host release build
+    "linux": (39_802_488, "0.21.3"),  # published manylinux2014 x86_64 wheel member
 }
-LINUX_SIZE_WHEEL = "kglite-0.21.2-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
-LINUX_SIZE_WHEEL_SHA256 = "f163f17f7ef91f732a52e06b47cfdc19d75f6b431edd7c3f46b7600cc2059154"
+LINUX_SIZE_WHEEL = "kglite-0.21.3-cp312-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+LINUX_SIZE_WHEEL_SHA256 = "c498497fda81660a69488c990806115b34ca096c4e2e8590e8ef9f39f4e5c643"
 
 
 @pytest.mark.binary_size
@@ -679,6 +679,11 @@ def test_binary_size_regression():
         standardization) with rmcp 3.8, pyo3 0.30, the full lockfile
         refresh and the Bolt handshake deadline; the deleted boltr 0.2
         guards offset part of it.
+
+
+      - 0.21.4:       32,160,448 bytes, unchanged in total. `__TEXT`
+        grew 16 KiB against the published 0.21.3 wheel (rustyline 19,
+        mcp-methods 0.6.2) and still fit the host build's page padding.
 
     Raising the baseline is a deliberate act — every bump should
     be accompanied by an updated growth note above. For a precise

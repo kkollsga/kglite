@@ -240,11 +240,17 @@
       "sha256": "3728a1a0e6a224a2bd3f3e1aa521de9da3884902a864633911e91328053415e1",
       "status": "accepted"
     },
-    "current.json": {
-      "evidence": "Release 0.21.3, 2026-10-28: capture under load avg 7.4/5.6/4.0 (other agent sessions active, no concurrent native build). Not inflated: bench-anchor vs ~3 releases back worst +9.6% with most cells -1%..-2%, and two independent release-mode bench-check runs on the same code both passed the 20% gate (worst cell +11.5% then +4.4%).",
+    "0_21_4.json": {
+      "evidence": "Release 0.21.4, 2026-10-29 00:35-00:46, load 2.8-4.3 (other agent sessions, no concurrent native build). Environmentally inflated, not a code change: capture and a release-mode bench-check repeat agree (median 0.5% apart) but both read high vs accepted 0_21_3 (median min +8.4% / +6.8%; return_id_10k +22.3%/+29.6%, return_node_10k +22.0%/+24.3%). No Rust source on those paths changed (diff: MCP server name, rustyline 19, mcp-methods 0.6.2, wheel build wiring; default build still abi3-py312). An interleaved same-interpreter (3.14.3) A/B of the published kglite==0.21.3 wheel vs this build, 8 process pairs x 200 rounds, put per-process min medians within +1.6% (RETURN id(n) 0.938 vs 0.953 ms) and +1.6% (RETURN n 2.255 vs 2.292 ms), matching the RETURN n.name control (+2%). Reference stays 0_21_3.json.",
       "platform": "Darwin/arm64",
-      "sha256": "3728a1a0e6a224a2bd3f3e1aa521de9da3884902a864633911e91328053415e1",
-      "status": "accepted"
+      "sha256": "d68433f55afc09d62b18a73dd493091f9b3c4cfd6ac2bc796e29460f1490a4a6",
+      "status": "rejected"
+    },
+    "current.json": {
+      "evidence": "Release 0.21.4, 2026-10-29 00:35-00:46, load 2.8-4.3 (other agent sessions, no concurrent native build). Environmentally inflated, not a code change: capture and a release-mode bench-check repeat agree (median 0.5% apart) but both read high vs accepted 0_21_3 (median min +8.4% / +6.8%; return_id_10k +22.3%/+29.6%, return_node_10k +22.0%/+24.3%). No Rust source on those paths changed (diff: MCP server name, rustyline 19, mcp-methods 0.6.2, wheel build wiring; default build still abi3-py312). An interleaved same-interpreter (3.14.3) A/B of the published kglite==0.21.3 wheel vs this build, 8 process pairs x 200 rounds, put per-process min medians within +1.6% (RETURN id(n) 0.938 vs 0.953 ms) and +1.6% (RETURN n 2.255 vs 2.292 ms), matching the RETURN n.name control (+2%). Reference stays 0_21_3.json.",
+      "platform": "Darwin/arm64",
+      "sha256": "d68433f55afc09d62b18a73dd493091f9b3c4cfd6ac2bc796e29460f1490a4a6",
+      "status": "rejected"
     },
     "current.linux.json": {
       "evidence": "Verified released kglite==0.13.2 Linux/Python3.12 wheel and complete workload; provenance retained in kglite_baseline.",

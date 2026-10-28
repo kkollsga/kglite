@@ -89,7 +89,7 @@ mcp-methods = { version = "0.6.2", default-features = false, features = ["server
 # is a first-party mode, and `cargo install kglite-mcp-server` shipping a
 # binary whose `--vault` flag exists but refuses at runtime would be the worst
 # of both. `okf` pulls only `yaml-rust2` (pure Rust, already in the tree).
-kglite = { version = "0.21.3", path = "../kglite", default-features = false, features = ["okf", "iana-zones"] }
+kglite = { version = "0.21.4", path = "../kglite", default-features = false, features = ["okf", "iana-zones"] }
 
 # Reads the manifest back to tell "`skills:` declared" from "absent" (see
 # `skills::manifest_declares_skills`). The parser `okf` already pulls in, at the
