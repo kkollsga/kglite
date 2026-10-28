@@ -38,6 +38,10 @@ python-extension = ["pyo3/extension-module"]
 # Diagnostic builds can disable abi3 with
 # `--no-default-features --features python-extension` for a per-interpreter build.
 abi3 = ["pyo3/abi3-py312"]
+# The free-threaded stable ABI (PEP 803): one cdylib for every free-threaded
+# CPython from 3.15 on, built on a 3.15+ free-threaded interpreter in place of
+# `abi3` (`--no-default-features --features abi3t,python-extension,mcp-server`).
+abi3t = ["pyo3/abi3t-py315"]
 # Bundled in-process MCP server (`_run_mcp_server` + the `kglite-mcp-server`
 # console script). On by default; a diagnostic build drops it.
 mcp-server = ["dep:kglite-mcp-server"]

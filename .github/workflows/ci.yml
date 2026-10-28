@@ -703,6 +703,61 @@ jobs:
           ./.ftvenv/bin/python -c "import sys, kglite; assert not sys._is_gil_enabled(), 'GIL unexpectedly enabled'; print('no-GIL OK')"
           ./.ftvenv/bin/python -m pytest tests/test_freethreading.py tests/test_concurrency.py tests/test_session.py -v --tb=short
 
+  abi3t-wheel:
+    needs: [dedup]
+    if: needs.dedup.outputs.fresh == 'true'
+    name: Free-threaded wheel (cp315-abi3t) on 3.15t
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_STABLE }}
+
+      - name: Set up free-threaded Python 3.15t
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.15t'
+
+      - name: Cache cargo registry & target
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: abi3t-wheel
+          workspaces: ". -> target"
+
+      - name: Build the abi3t wheel
+        # The wheel the release publishes, built the way the release builds it
+        # (`abi3t` replaces the default `abi3`; the interpreter is a 3.15+
+        # free-threaded one). A runner-host build is tagged with the runner's
+        # glibc, which is fine here: this job tests the wheel, it does not ship it.
+        run: |
+          python -m pip install -q maturin
+          python -m maturin build --release --no-default-features \
+            --features abi3t,python-extension,mcp-server --out abi3t-wheels
+
+      - name: Inventory the wheel and assert its tags
+        run: |
+          python scripts/check_wheel_artifact.py "abi3t-wheels/*.whl"
+          ls abi3t-wheels | grep -E 'cp315-abi3\.abi3t-'
+
+      - name: Install the BUILT wheel and run the free-threaded tests against it
+        # Run from outside the checkout so the repo's `kglite/` source package
+        # cannot shadow the installed wheel (`tests/` is copied, not imported
+        # from the checkout), and assert the GIL stays off.
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/abi3t-venv"
+          "$RUNNER_TEMP/abi3t-venv/bin/pip" install -q abi3t-wheels/*.whl pytest pytest-timeout pandas
+          mkdir "$RUNNER_TEMP/abi3t-tests"
+          cp -R tests "$RUNNER_TEMP/abi3t-tests/tests"
+          cd "$RUNNER_TEMP/abi3t-tests"
+          PYTHONNOUSERSITE=1 "$RUNNER_TEMP/abi3t-venv/bin/python" "$GITHUB_WORKSPACE/scripts/smoke_installed_wheel.py"
+          "$RUNNER_TEMP/abi3t-venv/bin/python" -c "import sys, kglite; assert 'site-packages' in kglite.__file__, kglite.__file__; assert not sys._is_gil_enabled(), 'GIL unexpectedly enabled'; print('no-GIL OK from the built wheel')"
+          PYTHONNOUSERSITE=1 "$RUNNER_TEMP/abi3t-venv/bin/python" -m pytest tests/test_freethreading.py tests/test_concurrency.py tests/test_session.py -v --tb=short
+
   perf-regression:
     needs: [dedup]
     if: needs.dedup.outputs.fresh == 'true'
@@ -1501,6 +1556,7 @@ jobs:
       - python-tests
       - bolt-driver-conformance
       - free-threading
+      - abi3t-wheel
       - perf-regression
       - public-api
       - storage-parity

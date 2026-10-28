@@ -13,7 +13,13 @@ are the machine-readable authority.
 
 Published extension wheels use CPython's stable ABI with a Python 3.12 floor
 (`cp312-abi3`). One platform wheel therefore serves CPython 3.12 and newer on
-the same OS/architecture/libc target. Normal installation is:
+the same OS/architecture/libc target. That wheel does not load on a
+free-threaded interpreter.
+
+Free-threaded CPython 3.15 and newer use a separate wheel (`cp315-abi3.abi3t`,
+PEP 803). It loads on free-threaded and on GIL-enabled 3.15 and newer. On 3.15,
+`pip` may therefore choose it over the `cp312-abi3` wheel. Free-threaded 3.14t
+has no wheel: build from source. Normal installation is:
 
 ```bash
 pip install kglite
@@ -32,9 +38,11 @@ their own dependencies:
 
 - Linux x86_64 source builds on CPython 3.12, 3.13, 3.14, and 3.15 run the
   Python suite.
-- Linux x86_64 CPython 3.14t and 3.15t build without abi3 and runs the dedicated
+- Linux x86_64 CPython 3.14t and 3.15t build without abi3 and run the dedicated
   free-threading concurrency suite. This proves a source-build configuration.
-  A free-threaded wheel is not currently published.
+- A Linux x86_64 job builds the `cp315-abi3.abi3t` wheel with CPython 3.15t.
+  It installs the wheel outside the checkout and runs the free-threading,
+  concurrency and session suites against it. The GIL must stay off.
 - A Linux x86_64 CPython 3.12 job builds a wheel, installs its `networkx` extra
   into a clean environment outside the checkout, and executes a bridge
   round-trip.
@@ -57,6 +65,20 @@ These artifacts must build before publication can proceed:
 | `x86_64-apple-darwin` | macOS 11+ x86_64 |
 | `x86_64-unknown-linux-gnu` | manylinux2014 / glibc 2.17+ |
 | `x86_64-unknown-linux-musl` | musllinux 1.2+ |
+
+The free-threaded wheel (`cp315-abi3.abi3t`) is release-blocking on three
+targets. Each is installed on free-threaded 3.15 and smoke-tested before upload:
+
+| Target | Compatibility floor |
+|---|---|
+| `x86_64-pc-windows-msvc` | 64-bit Windows |
+| `aarch64-apple-darwin` | macOS 11+ arm64 |
+| `x86_64-unknown-linux-gnu` | manylinux_2_28 / glibc 2.28+ |
+
+macOS x86_64 is cross-built on an arm64 runner with no x86_64 free-threaded
+interpreter. The musl and aarch64 Linux targets are not built for this wheel.
+The publish job fails when any of these, or any abi3 wheel above, is missing
+(`scripts/check_wheel_set.py`).
 
 A release-blocking build is not a full runtime test on that target. Windows and
 cross-built macOS x86_64 artifacts are build-verified unless a separate smoke

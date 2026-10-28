@@ -265,12 +265,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `abi3t` marks the cells that also build the free-threaded
+          # cp315-abi3t wheel. macOS x86_64 does not: it cross-builds on the
+          # arm64 runner, which has no x86_64 free-threaded interpreter to
+          # build against.
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            abi3t: 'true'
           - os: macos-latest
             target: aarch64-apple-darwin
+            abi3t: 'true'
           - os: macos-latest
             target: x86_64-apple-darwin
+            abi3t: 'false'
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -331,6 +338,43 @@ jobs:
           python -m venv .wheel-smoke
           ./.wheel-smoke/bin/python -m pip install wheels/*.whl
           ./.wheel-smoke/bin/python scripts/smoke_installed_wheel.py
+      # ---- free-threaded wheel (cp315-abi3t) ----
+      # The same crate, built against a free-threaded 3.15 interpreter with the
+      # `abi3t` feature in place of `abi3`. It lives in its own directory and
+      # artifact so the abi3 steps above and the canary below keep seeing
+      # exactly one wheel. Windows and macOS arm64 only (see the matrix).
+      - name: Set up free-threaded Python 3.15t (abi3t)
+        if: matrix.abi3t == 'true'
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.15t'
+      - name: Build abi3t wheel
+        if: matrix.abi3t == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install maturin
+          python -m maturin build --release --target ${{ matrix.target }} --out wheels-abi3t \
+            --no-default-features --features abi3t,python-extension,mcp-server
+          python scripts/check_wheel_artifact.py "wheels-abi3t/*.whl"
+          ls wheels-abi3t | grep -E 'cp315-abi3\.abi3t-'
+      - name: Smoke-test installed abi3t wheel (free-threaded 3.15)
+        if: matrix.abi3t == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv .abi3t-smoke
+          if [ -d .abi3t-smoke/Scripts ]; then VPY=.abi3t-smoke/Scripts/python; else VPY=.abi3t-smoke/bin/python; fi
+          "$VPY" -m pip install wheels-abi3t/*.whl
+          "$VPY" scripts/smoke_installed_wheel.py
+          "$VPY" -P -c "import sys, kglite; assert not sys._is_gil_enabled(), 'GIL unexpectedly enabled'"
+      - name: Upload abi3t wheel as artifact
+        if: matrix.abi3t == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wheels-abi3t-${{ matrix.os }}-${{ matrix.target }}
+          path: wheels-abi3t/*.whl
+          if-no-files-found: error
       - name: Upload wheels as artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -437,6 +481,54 @@ jobs:
   # build uploads its wheel and gets published; a broken one is simply
   # absent until the next release fixes it. Entry + compensating check:
   # .github/workflows/doctrine-allowlist.txt.
+  # Free-threaded wheel for Linux x86_64 glibc only, from the manylinux_2_28
+  # image: that image ships `/opt/python/cp315-cp315t` (the 2014 image used for
+  # the abi3 wheel is no longer rebuilt with new CPython versions). The floor
+  # is therefore glibc 2.28 for this wheel, not 2.17; pip falls back to the
+  # abi3 wheel on older systems that run a GIL-enabled Python. musl and aarch64
+  # are not built: no free-threaded musllinux wheel has an audience yet, and the
+  # aarch64 cell is already best-effort.
+  wheels-linux-abi3t:
+    name: Build wheel - linux - x86_64-unknown-linux-gnu (abi3t, manylinux_2_28)
+    needs: [version-check]
+    if: needs.version-check.outputs.should_publish_wheels == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build abi3t wheel (manylinux_2_28 container)
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          rust-toolchain: ${{ env.RUST_STABLE }}
+          target: x86_64-unknown-linux-gnu
+          manylinux: '2_28'
+          args: >-
+            --release --out wheels-abi3t
+            --interpreter /opt/python/cp315-cp315t/bin/python
+            --no-default-features --features abi3t,python-extension,mcp-server
+      - name: Inventory the wheel and assert its tags
+        run: |
+          python scripts/check_wheel_artifact.py "wheels-abi3t/*.whl"
+          ls wheels-abi3t | grep -E 'cp315-abi3\.abi3t-manylinux'
+      - name: Set up free-threaded Python 3.15t
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.15t'
+      - name: Smoke-test installed abi3t wheel (free-threaded 3.15)
+        run: |
+          set -euo pipefail
+          python -m venv .abi3t-smoke
+          ./.abi3t-smoke/bin/python -m pip install wheels-abi3t/*.whl
+          ./.abi3t-smoke/bin/python scripts/smoke_installed_wheel.py
+          ./.abi3t-smoke/bin/python -P -c "import sys, kglite; assert not sys._is_gil_enabled(), 'GIL unexpectedly enabled'"
+      - name: Upload abi3t wheel as artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wheels-abi3t-linux-x86_64-unknown-linux-gnu
+          path: wheels-abi3t/*.whl
+          if-no-files-found: error
+
   wheels-linux-arm:
     name: Build wheel - linux - ${{ matrix.target }} (${{ matrix.manylinux }})
     needs: [version-check]
@@ -894,7 +986,7 @@ jobs:
   publish-pypi:
     # No `timeout-minutes` — see publish-crates.
     name: Publish kglite to PyPI
-    needs: [version-check, ci-gate, wheels-native, wheels-linux, wheels-linux-arm, wheels-sdist]
+    needs: [version-check, ci-gate, wheels-native, wheels-linux, wheels-linux-abi3t, wheels-linux-arm, wheels-sdist]
     # Run once CI has passed (ci-gate) AND the must-pass builds are green,
     # regardless of the best-effort aarch64 job's result — a `continue-on-error`
     # job that fails still counts as a failed dependency, which would otherwise
@@ -908,12 +1000,16 @@ jobs:
       needs.version-check.outputs.should_publish_wheels == 'true' &&
       needs.ci-gate.result == 'success' &&
       needs.wheels-native.result == 'success' &&
-      needs.wheels-linux.result == 'success'
+      needs.wheels-linux.result == 'success' &&
+      needs.wheels-linux-abi3t.result == 'success'
       && needs.wheels-sdist.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       id-token: write  # Required for Trusted Publishing
     steps:
+      # Before the download: checkout cleans untracked files, `dist` included.
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Download all wheel artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -922,6 +1018,12 @@ jobs:
           merge-multiple: true
       - name: Display structure of downloaded files
         run: find dist -type f
+      - name: Verify the wheel set is complete
+        # `skip-existing` lets a partial set publish without complaint, so the
+        # set is checked here, before anything is uploaded: every must-pass
+        # platform's abi3 wheel, every free-threaded cp315-abi3t wheel and the
+        # sdist (scripts/check_wheel_set.py holds the list).
+        run: python scripts/check_wheel_set.py dist
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:

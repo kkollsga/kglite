@@ -9,6 +9,10 @@ before upgrading.
 
 ## [Unreleased]
 
+### Added
+
+- **A free-threaded wheel: `kglite-<version>-cp315-abi3.abi3t-<platform>`.** The `cp312-abi3` wheel does not load on a free-threaded interpreter. This wheel uses the free-threaded stable ABI (PEP 803), so `pip install kglite` works on free-threaded Python 3.15 and newer for Windows x86_64, macOS arm64 and Linux x86_64 (glibc 2.28+), and it also loads on GIL-enabled 3.15. Free-threaded 3.14t, macOS x86_64, musl and aarch64 Linux have no such wheel: build those from source. The release now fails before upload when any required wheel (abi3 or abi3t) or the sdist is missing from the set.
+
 ### Changed
 
 - **Building `kglite-cli` or the Python package from source needs Rust 1.95 or newer** (was 1.89). The CLI's line editor, `rustyline`, moved to 19, which uses `cfg_select!` (stable in 1.95). The `kglite`, `kglite-c` and `kglite-mcp-server` crates keep 1.88 and `kglite-bolt-server` keeps 1.91. Wheels and the `kglite` and `kglite-cli` binaries from PyPI and GitHub are not affected. **Do:** run `rustup update` before `cargo install kglite-cli` or `maturin develop`.

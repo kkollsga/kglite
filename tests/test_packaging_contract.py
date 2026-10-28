@@ -305,3 +305,27 @@ def test_wheel_license_gate_covers_every_published_wheel_family() -> None:
     # enforced the other, and both passed because they read different files.
     assert "does not generate SBOMs" in " ".join(documentation.split())
     assert "not** licence-verified" in " ".join(documentation.split())
+
+
+def test_free_threaded_wheel_is_built_checked_and_required_at_publish() -> None:
+    cargo = (REPO_ROOT / "crates" / "kglite-py" / "Cargo.toml").read_text(encoding="utf-8")
+    release = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+    ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+    support = (REPO_ROOT / "docs" / "python" / "platform-support.md").read_text(encoding="utf-8")
+    assert 'abi3t = ["pyo3/abi3t-py315"]' in cargo
+    # Release: native legs and the Linux leg build it, and publish waits on it.
+    assert "--features abi3t,python-extension,mcp-server" in release
+    assert "wheels-linux-abi3t" in release
+    assert "needs.wheels-linux-abi3t.result == 'success'" in release
+    assert "python scripts/check_wheel_set.py dist" in release
+    # CI: the built wheel, not a develop install, runs the free-threaded tests.
+    assert "abi3t-wheel" in ci
+    assert "tests/test_freethreading.py" in ci.split("abi3t-wheel:", 1)[1].split("perf-regression:", 1)[0]
+    assert "cp315-abi3.abi3t" in support
+
+
+def test_the_abi3t_wheel_check_requires_every_published_free_threaded_platform() -> None:
+    from scripts.check_wheel_set import REQUIRED
+
+    labels = [label for label, _ in REQUIRED if label.startswith("free-threaded")]
+    assert len(labels) == 3
