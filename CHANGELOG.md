@@ -9,6 +9,10 @@ before upgrading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An embedder's MCP server reports its own name.** A binary built on `with_identity` (for example `sonagram-mcp-server`) told clients it was `KGLite (single-graph)`. With no `name:` in the manifest it now reports `<identity> (<mode>)`, such as `sonagram (single-graph)`. A manifest `name:` and `--name` still win, and the `kglite-mcp-server` binary keeps `KGLite (<mode>)`.
+
 ## [0.21.3] - 2026-10-28
 
 ### Breaking changes and migration

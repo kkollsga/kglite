@@ -1030,7 +1030,11 @@ thread_local! {
     static PREFIX_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-fn boot_prefix(cli: &Cli, read_only_pin: bool) -> Result<BootPrefix> {
+fn boot_prefix(
+    cli: &Cli,
+    read_only_pin: bool,
+    identity: &crate::self_update::Identity,
+) -> Result<BootPrefix> {
     #[cfg(test)]
     PREFIX_RUNS.with(|runs| runs.set(runs.get() + 1));
     let mode = pick_mode(cli);
@@ -1053,7 +1057,8 @@ fn boot_prefix(cli: &Cli, read_only_pin: bool) -> Result<BootPrefix> {
     let env_file_loaded = load_env_for_mode(manifest.as_ref(), &env_start_dir)
         .context("manifest env_file load failed")?;
 
-    let mut options = ServerOptions::from_manifest(manifest.as_ref(), fallback_name(&mode));
+    let mut options =
+        ServerOptions::from_manifest(manifest.as_ref(), &fallback_name(&mode, identity));
     if cli.name.is_some() {
         options.name = cli.name.clone();
     }
@@ -1088,7 +1093,7 @@ fn boot_prefix(cli: &Cli, read_only_pin: bool) -> Result<BootPrefix> {
 /// `--reload-preflight`: the exit status says whether this build can boot with
 /// these flags as far as the side-effect-free prefix can tell.
 pub(crate) fn run_reload_preflight(cli: &Cli, read_only_pin: bool) -> Result<()> {
-    boot_prefix(cli, read_only_pin).map(|_| ())
+    boot_prefix(cli, read_only_pin, &crate::self_update::Identity::default()).map(|_| ())
 }
 
 fn boot_graph(
@@ -1096,6 +1101,7 @@ fn boot_graph(
     workspace_graph: Option<WorkspaceGraphHooks>,
     producer_recipes: Option<recipe_queries::RecipeCatalog>,
     read_only_pin: bool,
+    identity: &crate::self_update::Identity,
     py_embedder_factory: Option<&SharedEmbedderFactory>,
 ) -> Result<BootedGraph> {
     init_tracing();
@@ -1120,7 +1126,7 @@ fn boot_graph(
         topology_policy,
         write_budget,
         ontology,
-    } = boot_prefix(cli, read_only_pin)?;
+    } = boot_prefix(cli, read_only_pin, identity)?;
 
     // `--vault`'s producer is this binary's own (decision D5): built here and
     // installed on the state directly, not injected through
@@ -1293,6 +1299,7 @@ pub(crate) async fn run_async(
         workspace_graph,
         producer_recipes,
         read_only_pin,
+        &identity,
         shared_embedder_factory.as_ref(),
     )?;
 
@@ -1480,7 +1487,15 @@ mod boot_manifest_tests {
         let before = runs();
         run_reload_preflight(&cli, false).expect("preflight passes");
         assert_eq!(runs(), before + 1, "--reload-preflight runs boot_prefix");
-        boot_graph(&cli, None, None, false, None).expect("boot passes");
+        boot_graph(
+            &cli,
+            None,
+            None,
+            false,
+            &crate::self_update::Identity::default(),
+            None,
+        )
+        .expect("boot passes");
         assert_eq!(runs(), before + 2, "boot_graph runs boot_prefix");
     }
 

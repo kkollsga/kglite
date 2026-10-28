@@ -440,8 +440,32 @@ mod tests {
         let extensions = crate::ServerExtensions::new().with_identity("codingest", "9.8.7");
         assert_eq!(extensions.identity.name, "codingest");
         let check = build_self_check(&extensions.identity, None).expect("watched file");
-        let options = mcp_methods::server::ServerOptions::default().with_self_check(check);
+        let mode = crate::cli::Mode::Graph {
+            path: std::path::PathBuf::from("g.kgl"),
+        };
+        let options = mcp_methods::server::ServerOptions::from_manifest(
+            None,
+            &crate::cli::fallback_name(&mode, &extensions.identity),
+        )
+        .with_self_check(check);
         let info = mcp_methods::server::McpServer::new(options).get_info();
         assert_eq!(info.server_info.version, "9.8.7");
+        assert_eq!(info.server_info.name, "codingest (single-graph)");
+    }
+
+    #[test]
+    fn the_default_identity_keeps_the_kglite_server_name() {
+        let identity = Identity::default();
+        let graph = crate::cli::Mode::Graph {
+            path: std::path::PathBuf::from("g.kgl"),
+        };
+        assert_eq!(
+            crate::cli::fallback_name(&graph, &identity),
+            "KGLite (single-graph)"
+        );
+        assert_eq!(
+            crate::cli::fallback_name(&crate::cli::Mode::Bare, &identity),
+            "KGLite"
+        );
     }
 }

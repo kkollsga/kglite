@@ -326,16 +326,24 @@ pub(crate) fn vault_cache_policy(cli: &Cli) -> CachePolicy {
     }
 }
 
-pub(crate) fn fallback_name(mode: &Mode) -> &'static str {
-    match mode {
-        Mode::Graph { .. } => "KGLite (single-graph)",
-        Mode::SourceRoot { .. } => "KGLite (source-root)",
-        Mode::Workspace { .. } => "KGLite (workspace)",
-        Mode::LocalWorkspace { .. } => "KGLite (local-workspace)",
-        Mode::Watch { .. } => "KGLite (watch)",
-        Mode::Vault { .. } => "KGLite (vault)",
-        Mode::Bare => "KGLite",
-    }
+/// The server name a client sees when the manifest sets no `name:`: the
+/// embedder's identity (or `KGLite` for this crate's own binary) and the mode.
+pub(crate) fn fallback_name(mode: &Mode, identity: &crate::self_update::Identity) -> String {
+    let base = if identity.name == crate::self_update::Identity::default().name {
+        "KGLite"
+    } else {
+        identity.name.as_str()
+    };
+    let label = match mode {
+        Mode::Graph { .. } => "single-graph",
+        Mode::SourceRoot { .. } => "source-root",
+        Mode::Workspace { .. } => "workspace",
+        Mode::LocalWorkspace { .. } => "local-workspace",
+        Mode::Watch { .. } => "watch",
+        Mode::Vault { .. } => "vault",
+        Mode::Bare => return base.to_string(),
+    };
+    format!("{base} ({label})")
 }
 
 pub(crate) fn workspace_graph_mode(mode: &Mode) -> Option<WorkspaceGraphMode> {
