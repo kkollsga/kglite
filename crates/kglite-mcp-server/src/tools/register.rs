@@ -33,7 +33,7 @@ fn register_cypher_tool<A>(
         Some(description.into()),
         Arc::new(serde_json::Map::new()),
     )
-    .with_portable_input_schema::<A>()
+    .with_input_schema::<A>()
     .with_object_output_schema::<CypherResultEnvelope>()
     .with_annotations(
         ToolAnnotations::new()

@@ -341,7 +341,7 @@ where
     O: schemars::JsonSchema + 'static,
 {
     Tool::new_with_raw(name, Some(description.into()), Arc::new(Map::new()))
-        .with_portable_input_schema::<I>()
+        .with_input_schema::<I>()
         .with_object_output_schema::<O>()
         .with_annotations(safe_annotations())
 }

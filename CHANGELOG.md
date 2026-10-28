@@ -15,6 +15,7 @@ before upgrading.
 
 ### Changed
 
+- **`mcp-methods` 0.6.2.** The framework now standardizes every MCP tool schema, so KGLite's own copy of that cleanup is removed. Two edge cases are fixed by the move: a `format` key inside `default`, `examples`, `const` or `enum` is data and is kept, and a property literally named `default` or `enum` is cleaned like any other.
 - **Building `kglite-cli` or the Python package from source needs Rust 1.95 or newer** (was 1.89). The CLI's line editor, `rustyline`, moved to 19, which uses `cfg_select!` (stable in 1.95). The `kglite`, `kglite-c` and `kglite-mcp-server` crates keep 1.88 and `kglite-bolt-server` keeps 1.91. Wheels and the `kglite` and `kglite-cli` binaries from PyPI and GitHub are not affected. **Do:** run `rustup update` before `cargo install kglite-cli` or `maturin develop`.
 
 ### Fixed

@@ -70,10 +70,11 @@ path = "src/main.rs"
 # 0.6.0 is the behavioural floor for 2026-07-28 clients: below it such a client
 # (no `initialize`) fails every `tools/call`, and `announce_list_changed` (the
 # only way to reach its `subscriptions/listen` stream) does not exist. 0.6.1
-# fixes a listen race and emits only standard JSON Schema formats from the
-# framework tools (`grep`, `read_source`, `list_source`), which
-# tests/tool_schema_formats.rs now requires.
-mcp-methods = { version = "0.6.1", default-features = false, features = ["server"] }
+# fixes a listen race. 0.6.2 is the floor because `McpServer` standardizes every
+# tool schema it lists (`format` values outside JSON Schema 2020-12 dropped,
+# instance data and properties named `default`/`enum` handled correctly), which
+# tests/tool_schema_formats.rs requires of every tool.
+mcp-methods = { version = "0.6.2", default-features = false, features = ["server"] }
 
 # kglite (pure-Rust core) — no pyo3 in the resulting binary, no
 # libpython link. The 0.10.1 lift moved KnowledgeGraph +
