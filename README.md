@@ -337,7 +337,8 @@ versioned on its own cadence. Three build graphs it serves; one looks at them:
 | **Install**                                | `pip install kglite`              | `pip install ladybug`                               | `pip install networkx` | `pip install rustworkx` | JVM + Java deps  |
 | **Query language**                         | Cypher ([supported dialect](CYPHER.md#feature-coverage)) | Cypher                              | Python API         | Python API         | Cypher                 |
 | **Storage**                                | in-mem · mmap · disk (tested to 861M edges) | in-mem · disk (columnar)                            | in-mem             | in-mem             | disk-backed + page cache (JVM) |
-| **Memory, medium / large graph**           | 16 / 17 MB mapped · 252 / 511 MB in-memory | 83 / 93 MB                                 | 3.9 / 7.7 GB       | 611 MB / 1.1 GB    | 506 / 571 MB (default config) |
+| **Memory use** (medium / large graph)      | 16 / 17 MB mapped · 252 / 511 MB in-memory | 83 / 93 MB                                 | 3.9 / 7.7 GB       | 611 MB / 1.1 GB    | 506 / 571 MB (default config) |
+| **Performance** (medium / large graph)     | 10 / 18 ms mapped · 9.6 / 17 ms in-memory  | 4.5 / 5.4 ms                               | 22 / 44 ms         | 21 / 43 ms         | 83 / 148 ms            |
 | **Bulk-load from pandas**                  | one-liner                         | via Arrow                                           | manual             | manual             | via driver             |
 | **MCP server for LLM agents**              | bundled in the `kglite` wheel     | [separate `mcp-server-ladybug` install](https://github.com/LadybugDB/mcp-server-ladybug) | no | no | [separate official server](https://neo4j.com/developer/genai-ecosystem/model-context-protocol-mcp/) |
 | **`describe()` schema for LLM prompts**    | ✅                                 | no                                                  | no                 | no                 | no                     |
@@ -351,9 +352,13 @@ primitive. The KGLite row refers specifically to its class-forest ontology,
 audit scorecard, and build gate. The other engines have their own schema and
 constraint capabilities.)
 
-The memory row shows each process's private memory after it loads the graph and
-runs a fixed query mix. Private memory is macOS `phys_footprint`.
+The memory use and performance rows run the same test in a fresh process per
+engine. Each process loads the graph and runs a fixed query mix six times.
 
+- **Memory use** is the process's private memory after the first pass. Private
+  memory is macOS `phys_footprint`.
+- **Performance** is the end-to-end time of one warm pass over the whole mix,
+  best of passes two to six. It includes building the result each API returns.
 - **Graphs:** each paper has an id, a title and three other properties.
 
   | size   | `Paper` | `Author` | `CITES` | `WROTE` |
@@ -375,9 +380,18 @@ runs a fixed query mix. Private memory is macOS `phys_footprint`.
   KGLite shows 150 / 257 MB RSS and LadybugDB 101 / 111 MB.
 - **NetworkX on the large graph** does not fit in RAM on the test machine.
   macOS compresses part of it, so only 3.8 GB of the 7.7 GB is resident.
+- **The filtered count dominates the time.** KGLite answers the 110 lookups and
+  expansions in about 0.4 ms and spends the rest on the count. LadybugDB's
+  columnar scan runs the count in 1.4 / 2.0 ms, and its lookups and expansions
+  take 3.1-3.5 ms.
+- **The first pass is slower.** Right after loading, Neo4j takes 0.8 / 1.1 s
+  while it compiles the queries. The other engines take 15-125 ms.
 - **Versions:** KGLite 0.21.4, LadybugDB 0.22.1, NetworkX 3.7, rustworkx 0.18.1,
-  and Neo4j 2026.02.3 on JDK 21. Python 3.14 on an Apple M4 with 16 GB. Each
-  cell is the higher of two runs, which agreed within 12 MB.
+  and Neo4j 2026.02.3 on JDK 21. Python 3.14 on an Apple M4 with 16 GB, with
+  other work running (load average about 6).
+- **Repeats:** every configuration ran twice. A memory cell is the higher of the
+  two runs, which agreed within 12 MB. A performance cell is the faster run;
+  the two runs agreed within 16 %.
 
 **Pick KGLite** when you want:
 
