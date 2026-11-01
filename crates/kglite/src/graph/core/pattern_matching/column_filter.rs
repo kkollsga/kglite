@@ -799,6 +799,148 @@ mod differential_tests {
         sweep(&graph, "after delete-then-create");
     }
 
+    /// Numeric edge fixture: an Int64 column (`big`) and a Float64 column
+    /// (`fl`) holding the values where a cast-to-f64 compare, a `-0.0 == 0.0`
+    /// shortcut or a NaN-as-equal shortcut would disagree with `compare_values`.
+    /// Row 15 carries a Null in both columns.
+    fn edge_fixture(columnar: bool) -> DirGraph {
+        const TWO53: i64 = 1 << 53;
+        let ints: [Value; 16] = [
+            Value::Int64(0),
+            Value::Int64(1),
+            Value::Int64(-1),
+            Value::Int64(TWO53 - 1),
+            Value::Int64(TWO53),
+            Value::Int64(TWO53 + 1),
+            Value::Int64(-TWO53),
+            Value::Int64(-TWO53 - 1),
+            Value::Int64(i64::MAX),
+            Value::Int64(i64::MIN),
+            Value::Int64(i64::MAX - 1),
+            Value::Int64(42),
+            Value::Int64(-42),
+            Value::Int64(2),
+            Value::Int64(TWO53 + 3),
+            Value::Null,
+        ];
+        let floats: [Value; 16] = [
+            Value::Float64(0.0),
+            Value::Float64(-0.0),
+            Value::Float64(f64::NAN),
+            Value::Float64(f64::INFINITY),
+            Value::Float64(f64::NEG_INFINITY),
+            Value::Float64(0.5),
+            Value::Float64(-0.5),
+            Value::Float64(1.0),
+            Value::Float64(TWO53 as f64),
+            Value::Float64(TWO53 as f64 + 2.0),
+            Value::Float64(9.223372036854775807e18),
+            Value::Float64(-9.223372036854775808e18),
+            Value::Float64(1e300),
+            Value::Float64(2.0),
+            Value::Float64(42.0),
+            Value::Null,
+        ];
+        let mut graph = DirGraph::new();
+        let columns: Vec<String> = ["key", "label", "big", "fl"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let rows: Vec<Vec<Value>> = (0..16usize)
+            .map(|i| {
+                vec![
+                    Value::Int64(i as i64),
+                    Value::String(format!("Edge_{i}")),
+                    ints[i].clone(),
+                    floats[i].clone(),
+                ]
+            })
+            .collect();
+        let df = DataFrame::from_cypher_rows(columns, rows).unwrap();
+        crate::graph::mutation::maintain::add_nodes(
+            &mut graph,
+            df,
+            "Edge".to_string(),
+            "key".to_string(),
+            Some("label".to_string()),
+            None,
+        )
+        .unwrap();
+        if columnar {
+            graph.enable_columnar();
+        }
+        graph
+    }
+
+    /// Every comparison operator, over int and float literals chosen at the
+    /// 2^53 boundary, the i64 extremes, signed zero and infinity, against both
+    /// the Int64 and the Float64 column (so int literals meet Float64 cells and
+    /// float literals meet Int64 cells). The column route must agree with the
+    /// row route on all of them.
+    #[test]
+    fn column_filter_agrees_on_numeric_edge_values() {
+        let literals = [
+            "0",
+            "1",
+            "-1",
+            "2",
+            "42",
+            "9007199254740991",
+            "9007199254740992",
+            "9007199254740993",
+            "-9007199254740992",
+            "-9007199254740993",
+            "9223372036854775807",
+            "-9223372036854775807",
+            "0.0",
+            "-0.0",
+            "0.5",
+            "-0.5",
+            "1.0",
+            "2.0",
+            "42.0",
+            "9007199254740992.0",
+            "9007199254740994.0",
+            "9.223372036854775807e18",
+            "-9.223372036854775808e18",
+            "1e300",
+            "1e309",
+            "-1e309",
+        ];
+        let ops = ["<", "<=", ">", ">=", "=", "<>"];
+        for columnar in [true, false] {
+            let graph = edge_fixture(columnar);
+            let mut engaged = 0usize;
+            let mut total = 0usize;
+            for col in ["big", "fl"] {
+                for op in ops {
+                    for lit in literals {
+                        let query = format!(
+                            "MATCH (n:Edge) WHERE n.{col} {op} {lit} RETURN n.key ORDER BY n.key"
+                        );
+                        super::reset_rows_filtered();
+                        let column = rows_of(&graph, &query);
+                        let filtered = super::rows_filtered();
+                        let row = with_row_scan(|| rows_of(&graph, &query));
+                        assert_eq!(
+                            column, row,
+                            "column filter diverged from the row route on [columnar={columnar}] {query}"
+                        );
+                        total += 1;
+                        if filtered > 0 {
+                            engaged += 1;
+                        }
+                    }
+                }
+            }
+            assert!(
+                engaged * 2 >= total,
+                "[columnar={columnar}] only {engaged} of {total} edge queries reached a \
+                 compiled filter — the rest compare the row route with itself"
+            );
+        }
+    }
+
     /// The sweep is only a test if the fixture actually compiles a filter.
     /// Proven by the compiled shape existing, and by the decline hook being able
     /// to turn it off.
