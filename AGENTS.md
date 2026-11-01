@@ -17,7 +17,11 @@ Follow `../doctrine/learn-from-us.md` → Doctrine sync procedure at planning or
 release entry. Versioned corrections apply to KGLite even when made in doctrine
 first. Merge into `AGENTS.md`; preserve local improvements. A missing marker
 requires an adoption audit. Planned or deferred work does not advance
-`dev-docs/.doctrine-synced`. Snapshotting never performs sync.
+`dev-docs/.doctrine-synced`. Snapshotting never performs sync. Every
+behavioural difference from `../doctrine/reference/AGENTS.baseline.md` is
+recorded with its reason in `AGENTS.deviations.md` and re-justified at each
+sync; KGLite's own commands, paths and thresholds are adaptations and stay out
+of it.
 
 ## Build & test
 
@@ -63,6 +67,11 @@ target dirs filled the 228 GB system disk mid-build; the volume measured
 - Never override `CARGO_TARGET_DIR` or `SCCACHE_DIR`, and never switch target
   or profile paths mid-plan because a build is slow.
 - A fresh clone has no symlink; recreate it before the first build.
+- Never run `make prune-target` while other agents build against the shared
+  cache: the gate cannot tell whose artifacts are live, and a per-phase prune
+  under running workers wiped 75.6 GiB (2026-09-19) and 108 GiB (2026-09-24).
+  Prune at an idle point (`pgrep -fl 'cargo|rustc'` empty), at the end, or when
+  `check-free-space` refuses a build.
 - Cargo never garbage-collects the target dir. `make prune-target` runs
   `cargo clean` when the build volume drops below 40 GB free or the dir meters
   40+ GB. Every building target has a `check-free-space` prerequisite that warns
@@ -162,6 +171,11 @@ boundaries; otherwise let GitHub CI parallelize them.
   Ask "can this green go red?" and prove it. Prefer an expected-failure contract
   (tolerate one named failure; red on anything else, including that failure
   disappearing) over a blanket `continue-on-error`.
+- **A gate you would regenerate to get green is not a gate.** A red API
+  baseline, golden digest or parity capture after a deliberate change is
+  refreshed in the same commit with the delta reviewed and the reason stated.
+  Never claim a gate passed that did not run: a skipped test, an absent dataset
+  or a missing command is not a pass.
 - **When a committed claim is retracted, grep for every place it was
   written.** The 2026-07-28 minimal-versions claim lived in three files; two
   were corrected, and `dev-docs/todos.md`, which briefs fresh agents, stayed
@@ -497,7 +511,9 @@ passes on and off); those need absolute golden expected-value tests.
 Before any perf-related change:
 
 1. **Baseline first.** Write or extend a benchmark covering the touched paths,
-   run it, and record the numbers.
+   run it, and record the numbers. Before measuring, write down the result that
+   would cancel the change; a measurement that can only say "proceed" was never
+   a decision point.
 2. **Build only the changed working tree, always in release mode.** Use
    `uv run --no-sync maturin develop --release` or a release-building `make
    bench*` target. Discard debug-profile results. This is the perf-only
@@ -798,6 +814,17 @@ with a resolving `cargo metadata`. The internal requirement carries the full
 changes in patch bumps, so `^0.15` would falsely advertise that
 `kglite-cli 0.15.3` builds against `kglite 0.15.0`. `make gate` fails if any of
 the five drifts.
+
+**Verify the artifact set, not the version.** A version that appears on a
+registry proves only that something published. The release skill's verify step
+checks every crate, both PyPI projects and every platform wheel, plus the gated
+Java and npm artifacts.
+
+**A version declaration moves; a version citation must not.** When a
+requirement moves, update every declaration of it (dependency pins, documented
+floors, install snippets, user-facing "install X ≥ …" messages); a CHANGELOG or
+history entry citing a version stays as written. A dependency floor is verified
+by running at that floor (see the `anyhow` example in "Testing discipline").
 
 **The bump size is always patch unless the release command said otherwise.**
 `/release` with no size means `x.y.Z+1`, with no clarification prompt. A breaking
