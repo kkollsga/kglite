@@ -54,6 +54,7 @@ use crate::graph::storage::column_store::{
 use crate::graph::storage::StrField;
 
 use super::matcher::{str_field_test, value_matches};
+use super::numeric_cell_test::NumericTest;
 use super::pattern::PropertyMatcher;
 
 /// The column a compiled predicate reads, with the per-element dispatch of
@@ -153,6 +154,24 @@ impl<'a> ColumnData<'a> {
         }
     }
 
+    /// `test` on the row's raw cell, or `None` for a null or out-of-range row
+    /// (the caller then applies `accepts_absent`, as for `value()`'s `None`).
+    #[inline]
+    fn numeric_verdict(&self, row: u32, test: Option<NumericTest>) -> Option<bool> {
+        let (idx, test) = (row as usize, test?);
+        match self {
+            ColumnData::Int64 { data, nulls } => match (nulls.get(idx), data.get(idx)) {
+                (Some(0), Some(cell)) => Some(test.holds_int(*cell)),
+                _ => None,
+            },
+            ColumnData::Float64 { data, nulls } => match (nulls.get(idx), data.get(idx)) {
+                (Some(0), Some(cell)) => Some(test.holds_float(*cell)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// The row's borrowed string — `TypedColumn::get_str`'s contract. Only
     /// [`Kind::StrColumn`] calls it, and only a `Str` column compiles to that
     /// kind, so the fall-through can never be reached in practice; it answers
@@ -222,6 +241,9 @@ struct ColumnPredicate<'a> {
     /// The matcher decided on the raw cells of a hoisted `Timestamp` column,
     /// so no row is decoded to a `NaiveDateTime`.
     micros: Option<MicrosTest>,
+    /// The matcher decided on the raw cells of a hoisted `Int64`/`Float64`
+    /// column, so no row is built into a `Value`.
+    numeric: Option<NumericTest>,
 }
 
 /// A comparison against exact-microsecond `Timestamp` thresholds, answered on
@@ -362,12 +384,19 @@ impl<'a> ColumnFilter<'a> {
                 (ColumnData::Timestamp { .. }, Kind::Value) => MicrosTest::of(matcher),
                 _ => None,
             };
+            let numeric = match (&column, kind) {
+                (ColumnData::Int64 { .. } | ColumnData::Float64 { .. }, Kind::Value) => {
+                    NumericTest::of(matcher)
+                }
+                _ => None,
+            };
             preds.push(ColumnPredicate {
                 column,
                 source,
                 matcher,
                 kind,
                 micros,
+                numeric,
             });
         }
         Some(ColumnFilter {
@@ -432,6 +461,13 @@ impl<'a> ColumnFilter<'a> {
                         pred.column.str_field(row).is(test)
                     }
                     Kind::Value => match (&pred.micros, &pred.column) {
+                        _ if pred.numeric.is_some() => {
+                            #[cfg(test)]
+                            RAW_NUMERIC_ROWS.set(RAW_NUMERIC_ROWS.get() + 1);
+                            pred.column
+                                .numeric_verdict(row, pred.numeric)
+                                .unwrap_or_else(|| pred.matcher.accepts_absent())
+                        }
                         (Some(test), ColumnData::Timestamp { data, nulls }) => {
                             let idx = row as usize;
                             match (nulls.get(idx), data.get(idx)) {
@@ -489,6 +525,24 @@ thread_local! {
     /// together. Folding deltas keeps the meter worker-visible *and* every
     /// reading attributable to one thread.
     static ROWS_FILTERED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Rows a numeric predicate decided on raw cells, on this thread: the
+    /// non-vacuity meter for the `Int64`/`Float64` fast path. Not folded from
+    /// parallel workers; its readers run small fixtures that never fan out.
+    static RAW_NUMERIC_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn raw_numeric_rows() -> usize {
+    RAW_NUMERIC_ROWS.get()
+}
+
+#[cfg(test)]
+pub(crate) fn reset_raw_numeric_rows() {
+    RAW_NUMERIC_ROWS.set(0);
 }
 
 /// Rows answered by a compiled filter on this thread since the last reset.
@@ -912,6 +966,7 @@ mod differential_tests {
             let graph = edge_fixture(columnar);
             let mut engaged = 0usize;
             let mut total = 0usize;
+            let mut raw = 0usize;
             for col in ["big", "fl"] {
                 for op in ops {
                     for lit in literals {
@@ -919,8 +974,10 @@ mod differential_tests {
                             "MATCH (n:Edge) WHERE n.{col} {op} {lit} RETURN n.key ORDER BY n.key"
                         );
                         super::reset_rows_filtered();
+                        super::reset_raw_numeric_rows();
                         let column = rows_of(&graph, &query);
                         let filtered = super::rows_filtered();
+                        let raw_rows = super::raw_numeric_rows();
                         let row = with_row_scan(|| rows_of(&graph, &query));
                         assert_eq!(
                             column, row,
@@ -930,15 +987,70 @@ mod differential_tests {
                         if filtered > 0 {
                             engaged += 1;
                         }
+                        if raw_rows > 0 {
+                            raw += 1;
+                        }
                     }
                 }
             }
+            // The raw-cell path must carry the comparisons it replaced
+            // `value_matches` for, or the agreement above proves nothing
+            // about it.
+            assert!(
+                raw * 2 >= total,
+                "[columnar={columnar}] only {raw} of {total} edge queries reached the raw-cell numeric test"
+            );
             assert!(
                 engaged * 2 >= total,
                 "[columnar={columnar}] only {engaged} of {total} edge queries reached a \
                  compiled filter — the rest compare the row route with itself"
             );
         }
+    }
+
+    /// A matcher the raw-cell test does not decide stays on `Kind::Value`, and
+    /// an unhoisted compile never takes the raw path.
+    #[test]
+    fn non_numeric_matchers_on_numeric_columns_keep_the_value_path() {
+        let graph = edge_fixture(true);
+        let store = graph
+            .graph
+            .column_store(crate::graph::schema::InternedKey::from_str("Edge"))
+            .expect("fixture must be columnar");
+        let key = crate::graph::schema::InternedKey::from_str("big");
+        let compile = |matcher: &super::PropertyMatcher| {
+            let props = [("big", key, matcher)];
+            let filter = super::ColumnFilter::compile(Some(store), props.iter().copied())
+                .expect("a plain int property compiles");
+            let pred = &filter.preds[0];
+            (pred.kind == super::Kind::Value, pred.numeric.is_some())
+        };
+        use super::PropertyMatcher as M;
+        assert_eq!(compile(&M::Equals(Value::Int64(1))), (true, true));
+        assert_eq!(compile(&M::LessThan(Value::Float64(1.5))), (true, true));
+        assert_eq!(
+            compile(&M::Equals(Value::String("1".into()))),
+            (false, false),
+            "a string test is the string form's, not the numeric one's"
+        );
+        assert_eq!(compile(&M::Equals(Value::UniqueId(1))), (true, false));
+        assert_eq!(compile(&M::EqualsParam("p".into())), (true, false));
+        assert_eq!(compile(&M::Equals(Value::Null)), (true, false));
+        assert_eq!(
+            compile(&M::In(Default::default())),
+            (true, false),
+            "IN keeps the value path"
+        );
+        let hoistless = super::without_slice_hoist(|| {
+            let m = M::Equals(Value::Int64(1));
+            let props = [("big", key, &m)];
+            super::ColumnFilter::compile(Some(store), props.iter().copied())
+                .expect("compiles")
+                .preds[0]
+                .numeric
+                .is_some()
+        });
+        assert!(!hoistless, "no hoisted slice, no raw cells");
     }
 
     /// The sweep is only a test if the fixture actually compiles a filter.

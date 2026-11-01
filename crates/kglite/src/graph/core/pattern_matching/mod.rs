@@ -15,6 +15,7 @@
 pub(crate) mod closure_probe;
 pub(crate) mod column_filter;
 pub mod matcher;
+mod numeric_cell_test;
 pub mod parser;
 pub mod pattern;
 
