@@ -9,6 +9,8 @@ before upgrading.
 
 ## [Unreleased]
 
+## [0.21.5] - 2026-11-01
+
 ### Changed
 
 - **Filtered counts and `sum`/`avg`/`min`/`max` over a typed numeric property run 35 to 75 times faster.** The query is a single-label `MATCH (n:T)` with comparison filters (`=`, `<`, `<=`, `>`, `>=`) against `Int64` or `Float64` literals or parameters, returning only `count`, `sum`, `avg`, `min` or `max` with no grouping. Measured on 1M nodes in memory and mapped mode (release build, minimum of 20 runs, against 0.21.4; results identical):
