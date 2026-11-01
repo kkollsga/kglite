@@ -678,6 +678,13 @@ impl ColumnStore {
             .unwrap_or(false)
     }
 
+    /// The base part's tombstone flags, one per row it holds (shorter when the
+    /// trailing rows were never tombstoned): a column-major reader's mask.
+    #[inline]
+    pub(crate) fn base_tombstones(&self) -> &[bool] {
+        &self.tombstones
+    }
+
     /// The sealed segments' heap and spillable bytes, summed once per change.
     pub(super) fn sealed_totals(&self) -> (usize, usize) {
         use std::sync::atomic::Ordering::Relaxed;
