@@ -101,6 +101,11 @@ pub(super) const GUARD_SAFE_PASSES: &[(&str, &str)] = &[
         "its candidates come from the matcher's guarded node scan",
     ),
     (
+        "columnar_scan_aggregate",
+        "a marker only; the executor declines when the statement's filter may hide the \
+         label, so a guarded query runs the matcher's guarded scan",
+    ),
+    (
         "fuse_node_scan_top_k",
         "its candidates come from the matcher's guarded node scan",
     ),

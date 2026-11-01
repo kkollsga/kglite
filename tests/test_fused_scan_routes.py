@@ -804,7 +804,8 @@ def _fused_op(graph: KnowledgeGraph, query: str) -> str:
         if row["operation"].startswith("FusedNodeScan")
     ]
     assert len(ops) == 1, f"expected one fused node-scan operator for `{query}`, got {ops}"
-    return ops[0]
+    # The column-kernel marker is orthogonal to the route under test here.
+    return ops[0].removesuffix(" +columnar")
 
 
 def test_fully_pushed_where_leaves_no_per_row_filter(sparse_graph):

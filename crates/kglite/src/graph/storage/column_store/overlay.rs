@@ -138,6 +138,11 @@ impl ColumnStore {
         owned
     }
 
+    /// Whether any explicit null clear is recorded over an immutable base.
+    pub(crate) fn has_null_overrides(&self) -> bool {
+        self.null_overrides.is_some()
+    }
+
     pub(super) fn is_null_override(&self, row: u32, key: InternedKey) -> bool {
         self.null_overrides.as_ref().is_some_and(|clears| {
             self.schema

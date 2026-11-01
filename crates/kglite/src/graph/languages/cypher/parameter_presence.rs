@@ -181,6 +181,7 @@ fn visit_clause(clause: &Clause, names: &mut impl AstSink) {
             match_clause,
             where_predicate,
             return_clause,
+            ..
         }
         | Clause::FusedNodeScanTopK {
             match_clause,

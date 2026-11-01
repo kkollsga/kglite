@@ -115,7 +115,7 @@ class TestExplainOptimizations:
                 "EXPLAIN MATCH (n:Person {age: 30}) RETURN n.name AS name ORDER BY n.name LIMIT 1"
             ).to_list()
         }
-        assert "FusedNodeScanAggregate" in aggregate_ops
+        assert any(operation.startswith("FusedNodeScanAggregate") for operation in aggregate_ops)
         assert any(operation.startswith("FusedNodeScanTopK") for operation in top_k_ops)
 
     def test_explain_reports_only_applied_optimizer_passes(self, graph):

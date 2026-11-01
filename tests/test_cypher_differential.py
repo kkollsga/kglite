@@ -3061,6 +3061,35 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         None,
     ),
     ("trigger_node_scan_aggregate", "social_graph", "MATCH (p:Person) RETURN sum(p.age) AS total", None),
+    # ── column kernel (`columnar_scan_aggregate`) ──
+    #
+    # Numeric-comparison counts the kernel answers; the single-pass-disabled
+    # run takes the generic fused scan, so any divergence shows up here.
+    (
+        "trigger_columnar_scan_aggregate",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.age > 25 AND p.age <= 35 RETURN count(p) AS c",
+        None,
+    ),
+    ("columnar_count_inline_equals", "social_graph", "MATCH (p:Person {age: 30}) RETURN count(*) AS c", None),
+    (
+        "columnar_count_float_literal_over_int_column",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.age >= 30.5 RETURN count(p.age) AS c, count(p) AS d",
+        None,
+    ),
+    (
+        "columnar_count_empty_selection",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.age > 1000 RETURN count(p) AS c",
+        None,
+    ),
+    (
+        "columnar_count_secondary_label_bails",
+        "multi_label_graph",
+        "MATCH (p:Person) WHERE p.age > 22 RETURN count(p) AS c",
+        None,
+    ),
     (
         "fused_property_node_scan_aggregate",
         "social_graph",
@@ -9358,6 +9387,7 @@ PASS_TRIGGER_CASES: dict[str, tuple[str, str]] = {
     "fuse_match_with_aggregate": ("differential", "trigger_match_with_aggregate"),
     "fuse_match_with_aggregate_top_k": ("differential", "trigger_match_with_top_k"),
     "fuse_node_scan_aggregate": ("differential", "trigger_node_scan_aggregate"),
+    "columnar_scan_aggregate": ("differential", "trigger_columnar_scan_aggregate"),
     "fuse_node_scan_top_k": ("differential", "trigger_node_scan_top_k"),
     "fuse_vector_score_order_limit": ("specialized", "vector_score_top_k"),
     "fuse_order_by_top_k": ("differential", "trigger_generic_top_k"),

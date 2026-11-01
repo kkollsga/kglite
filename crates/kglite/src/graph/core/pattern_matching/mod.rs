@@ -14,9 +14,10 @@
 
 pub(crate) mod closure_probe;
 pub(crate) mod column_filter;
-// Unwired spike: only its tests and the release probe call it so far.
-#[allow(dead_code)]
 mod column_kernel;
+pub(crate) mod column_scan;
+#[cfg(test)]
+mod column_scan_tests;
 pub mod matcher;
 mod numeric_cell_test;
 pub mod parser;

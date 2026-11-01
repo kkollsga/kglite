@@ -950,9 +950,17 @@ impl<'a> CypherExecutor<'a> {
                 match_clause,
                 where_predicate,
                 return_clause,
+                columnar,
             } => {
                 self.budget
                     .check_work(self.graph.graph.node_count(), "fused node-scan aggregate")?;
+                if *columnar {
+                    if let Some(answer) =
+                        self.try_columnar_count_scan(match_clause, return_clause)?
+                    {
+                        return Ok(answer);
+                    }
+                }
                 self.execute_fused_node_scan_aggregate(
                     match_clause,
                     where_predicate.as_ref(),

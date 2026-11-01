@@ -437,8 +437,14 @@ pub fn clause_display_name(clause: &Clause) -> String {
         | Clause::FusedCountTypedEdge { .. }
         | Clause::FusedCountAnchoredEdges { .. } => fused_count_display_name(clause),
         Clause::FusedNodeScanAggregate {
-            where_predicate, ..
-        } => format!("FusedNodeScanAggregate{}", filter_suffix(where_predicate)),
+            where_predicate,
+            columnar,
+            ..
+        } => format!(
+            "FusedNodeScanAggregate{}{}",
+            filter_suffix(where_predicate),
+            if *columnar { " +columnar" } else { "" }
+        ),
         Clause::FusedNodeScanTopK {
             limit,
             where_predicate,

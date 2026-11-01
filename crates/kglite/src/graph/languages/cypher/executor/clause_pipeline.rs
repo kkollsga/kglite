@@ -1,6 +1,7 @@
 //! Read-only clause-pipeline orchestration.
 
 use super::*;
+use crate::graph::core::pattern_matching::column_scan;
 use std::collections::HashSet;
 use std::time::Instant;
 
@@ -347,6 +348,7 @@ impl CypherExecutor<'_> {
 
             let rows_in = profiling.then_some(result_set.rows.len());
             let started = profiling.then(Instant::now);
+            column_scan::take_route();
             result_set = self.execute_pipeline_clause(
                 query,
                 i,
@@ -362,11 +364,7 @@ impl CypherExecutor<'_> {
 
             let elapsed = started.map(|start| start.elapsed());
             if let (Some(elapsed), Some(rows_in)) = (elapsed, rows_in) {
-                let name = if inline_where.is_some() {
-                    format!("{} + Where (fused)", clause_display_name(clause))
-                } else {
-                    clause_display_name(clause)
-                };
+                let name = profiled_clause_name(clause, inline_where.is_some());
                 if let Some(stats) = profile.as_deref_mut() {
                     stats.push(ClauseStats {
                         clause_name: name,
@@ -588,4 +586,18 @@ fn declared_scope_before(
         declared.extend(names.iter().cloned());
     }
     declared
+}
+
+/// The PROFILE label of `clause`: its plan name, the fused-WHERE note, and the
+/// route a fused scan reported (`[column kernel]` or the reason it declined).
+fn profiled_clause_name(clause: &Clause, fused_where: bool) -> String {
+    let name = if fused_where {
+        format!("{} + Where (fused)", clause_display_name(clause))
+    } else {
+        clause_display_name(clause)
+    };
+    match column_scan::take_route() {
+        Some(route) => format!("{name} [{route}]"),
+        None => name,
+    }
 }

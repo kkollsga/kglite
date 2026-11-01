@@ -255,6 +255,7 @@ GUARD_SAFE_PASSES = {
     "push_limit_into_aggregate",
     "fuse_count_short_circuits",
     "fuse_node_scan_aggregate",
+    "columnar_scan_aggregate",
     "fuse_node_scan_top_k",
     "fuse_chain_path_count",
     "fuse_match_return_aggregate",

@@ -1639,6 +1639,8 @@ impl<'a> CypherExecutor<'a> {
     }
 }
 
+mod columnar_count;
+
 include!("match_clause/fused_match.rs");
 include!("match_clause/fused_scan_aggregate.rs");
 

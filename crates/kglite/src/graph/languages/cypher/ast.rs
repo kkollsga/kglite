@@ -429,6 +429,11 @@ pub enum Clause {
         match_clause: MatchClause,
         where_predicate: Option<Predicate>,
         return_clause: ReturnClause,
+        /// Set by the `columnar_scan_aggregate` pass when the shape is a
+        /// numeric-comparison count the column kernel may answer; the
+        /// executor still declines at runtime on any store state the kernel
+        /// does not model.
+        columnar: bool,
     },
     /// Optimizer-generated: MATCH (n:Type) [WHERE ...] RETURN expressions ORDER BY expr LIMIT k
     /// → single-pass node scan with inline top-K selection. Avoids materializing all rows —

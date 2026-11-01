@@ -26,6 +26,29 @@ from kglite import KnowledgeGraph
 
 MODES = ("memory", "mapped", "disk")
 
+KERNEL_PASS = "columnar_scan_aggregate"
+
+
+@pytest.fixture(autouse=True, params=["kernel_on", "kernel_off"])
+def kernel_pass(request, monkeypatch):
+    """Run every golden with the column-kernel pass on and then off.
+
+    The expectations are computed in plain Python, so both runs must hit the
+    same numbers. The off run proves the goldens still describe the generic
+    fused scan; the on run is the kernel answering (see the route tests below,
+    which assert it did).
+    """
+    if request.param == "kernel_off":
+        original = KnowledgeGraph.cypher
+
+        def cypher(self, query, *args, **kwargs):
+            kwargs["disabled_passes"] = [*(kwargs.get("disabled_passes") or []), KERNEL_PASS]
+            return original(self, query, *args, **kwargs)
+
+        monkeypatch.setattr(KnowledgeGraph, "cypher", cypher)
+    return request.param
+
+
 TWO53 = 2**53
 # Int64 column: exact-int edges around 2**53 and the i64 extremes, one Null.
 INTS = [0, 5, -3, TWO53 - 1, TWO53, TWO53 + 1, TWO53 + 3, -TWO53 - 1, 2**62, 2**63 - 1, -(2**63) + 1, None]
@@ -470,3 +493,102 @@ def test_valid_at_filtered_count_and_sum(mode, tmp_path):
         assert one(graph, q) == expect(instant, 15), instant
     q_all = "FOR VALID_TIME ALL MATCH (n:E) WHERE n.x > 15 RETURN count(n) AS c, sum(n.x) AS s"
     assert one(graph, q_all) == {"c": 4, "s": 140}
+
+
+# --- which route answered (PROFILE names it) --------------------------------------------------
+
+
+def route_of(graph, query: str) -> str:
+    """The profiled clause label, which carries `[column kernel]` or `[<decline reason>]`."""
+    profile = graph.cypher("PROFILE " + query).profile
+    return profile[0]["clause"]
+
+
+COUNT_QUERIES = [
+    "MATCH (n:T) WHERE n.i > 0 RETURN count(n) AS c",
+    "MATCH (n:T) WHERE n.f < 2.0 AND n.i >= 0 RETURN count(*) AS c",
+    "MATCH (n:T) WHERE n.i > 0 RETURN count(n.i) AS c",
+]
+
+
+def test_the_kernel_answers_count_shapes_in_memory_and_mapped(tg, kernel_pass, request):
+    mode = request.node.callspec.params["tg"]
+    for q in COUNT_QUERIES:
+        label = route_of(tg, q)
+        if kernel_pass == "kernel_off":
+            assert "columnar" not in label and "[" not in label, label
+        elif mode == "disk":
+            assert label.endswith("+columnar [disk]"), label
+        else:
+            assert label.endswith("+columnar [column kernel]"), label
+
+
+def test_the_declining_shapes_name_their_reason(mixed_graph, kernel_pass, request):
+    label = route_of(mixed_graph, "MATCH (n:M) WHERE n.x > 1 RETURN count(n) AS c")
+    if kernel_pass == "kernel_on":
+        disk = request.node.callspec.params["mixed_graph"] == "disk"
+        assert label.endswith("[disk]" if disk else "[non-numeric column]"), label
+
+
+@pytest.mark.parametrize("mode", ["memory", "mapped"])
+def test_the_kernel_stays_correct_through_deletes_and_recreates(mode, tmp_path, kernel_pass):
+    graph = make_graph(mode, tmp_path)
+    graph.cypher("UNWIND range(1, 30) AS i CREATE (:K {id: i, x: i * 2, y: i / 4.0})")
+    q = "MATCH (n:K) WHERE n.x > 20 RETURN count(n) AS c"
+    live = {i: i * 2 for i in range(1, 31)}
+
+    def check():
+        assert one(graph, q)["c"] == sum(1 for v in live.values() if v > 20)
+        if kernel_pass == "kernel_on":
+            assert route_of(graph, q).endswith("[column kernel]")
+
+    check()
+    graph.cypher("MATCH (n:K) WHERE n.id >= 25 DETACH DELETE n")
+    live = {i: v for i, v in live.items() if i < 25}
+    check()
+    graph.cypher("CREATE (:K {id: 99, x: 500, y: 1.0}), (:K {id: 98, x: 1, y: 2.0})")
+    live[99], live[98] = 500, 1
+    check()
+    graph.cypher("MATCH (n:K {id: 99}) DETACH DELETE n")
+    del live[99]
+    check()
+
+
+def test_secondary_label_carriers_decline_and_still_count_them(kernel_pass):
+    graph = KnowledgeGraph()
+    graph.cypher("CREATE (:A {id: 1, x: 5}), (:A {id: 2, x: 1}), (:B {id: 3, x: 9})")
+    graph.cypher("MATCH (n:B {id: 3}) SET n:A")
+    q = "MATCH (n:A) WHERE n.x > 2 RETURN count(n) AS c"
+    assert one(graph, q)["c"] == 2
+    if kernel_pass == "kernel_on":
+        assert route_of(graph, q).endswith("[secondary-label carriers]")
+
+
+def test_parallel_requests_keep_the_partitioned_scan(tg, kernel_pass, request):
+    if request.node.callspec.params["tg"] == "disk":
+        pytest.skip("disk ignores parallel")
+    q = "MATCH (n:T) WHERE n.i > 0 RETURN count(n) AS c"
+    assert tg.cypher(q, parallel=True).to_list() == tg.cypher(q).to_list()
+    if kernel_pass == "kernel_on":
+        label = tg.cypher("PROFILE " + q, parallel=True).profile[0]["clause"]
+        assert label.endswith("[parallel requested]"), label
+
+
+def test_valid_time_declared_types_decline_but_others_use_the_kernel(tmp_path, kernel_pass):
+    graph = KnowledgeGraph()
+    graph.cypher(
+        "CREATE (:Well {id: 1, x: 5, vf: '2000-01-01', vt: '2010-01-01'}), "
+        "(:Well {id: 2, x: 9, vf: '2005-01-01', vt: null}), (:Plain {id: 1, x: 5}), (:Plain {id: 2, x: 9})"
+    )
+    graph.cypher(
+        "CALL db.temporal.declare({node: 'Well', from: 'vf', to: 'vt', convention: 'closed'}) "
+        "YIELD declared RETURN declared"
+    )
+    as_of = "FOR VALID_TIME AS OF date('2012-01-01') "
+    well = as_of + "MATCH (n:Well) WHERE n.x > 1 RETURN count(n) AS c"
+    plain = as_of + "MATCH (n:Plain) WHERE n.x > 1 RETURN count(n) AS c"
+    assert one(graph, well)["c"] == 1
+    assert one(graph, plain)["c"] == 2
+    if kernel_pass == "kernel_on":
+        assert route_of(graph, well).endswith("[valid-time filter]")
+        assert route_of(graph, plain).endswith("[column kernel]")

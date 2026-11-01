@@ -6,6 +6,7 @@ use super::*;
 use crate::datatypes::values::Value;
 use crate::graph::core::pattern_matching::PatternElement;
 use crate::graph::languages::cypher::ast::*;
+use crate::graph::languages::cypher::planner::PassCtx;
 use crate::graph::schema::DirGraph;
 
 /// Fuse `OPTIONAL MATCH` followed by an aggregate into a single pass.
@@ -1057,10 +1058,20 @@ fn where_is_id_anchorable(pred: &Predicate) -> bool {
     }
 }
 
+/// **Pass:** `fuse_node_scan_aggregate` — Untyped `MATCH (n) RETURN
+/// <agg>` → specialized scan-only aggregate that walks the node store
+/// once without producing intermediate row tuples.
+pub(in crate::graph::languages::cypher::planner) fn pass_fuse_node_scan_aggregate(
+    query: &mut CypherQuery,
+    ctx: &PassCtx,
+) {
+    fuse_node_scan_aggregate(query, ctx.params)
+}
+
 /// Fuse `MATCH (n:Type) [WHERE pred] RETURN group_keys, agg_funcs(…)` into a
 /// single-pass node scan with inline aggregation, instead of materialising a
 /// ResultRow per node and grouping those afterwards.
-pub(crate) fn fuse_node_scan_aggregate(
+fn fuse_node_scan_aggregate(
     query: &mut CypherQuery,
     params: &std::collections::HashMap<String, Value>,
 ) {
@@ -1222,6 +1233,7 @@ pub(crate) fn fuse_node_scan_aggregate(
                 match_clause,
                 where_predicate,
                 return_clause,
+                columnar: false,
             },
         );
 

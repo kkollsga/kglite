@@ -37,9 +37,9 @@ use cost_model::reorder_predicates_by_cost;
 use fusion::{
     fuse_anchored_edge_count, fuse_chain_path_count, fuse_count_short_circuits,
     fuse_match_return_aggregate, fuse_match_with_aggregate, fuse_match_with_aggregate_top_k,
-    fuse_node_scan_aggregate, fuse_node_scan_top_k, fuse_optional_match_aggregate,
-    fuse_order_by_top_k, fuse_spatial_join, fuse_text_bm25_order_limit,
-    fuse_vector_score_order_limit, mark_return_lazy_eligible, pass_fuse_unwind_valid_at,
+    fuse_node_scan_top_k, fuse_optional_match_aggregate, fuse_order_by_top_k, fuse_spatial_join,
+    fuse_text_bm25_order_limit, fuse_vector_score_order_limit, mark_return_lazy_eligible,
+    pass_columnar_scan_aggregate, pass_fuse_node_scan_aggregate, pass_fuse_unwind_valid_at,
     pass_fuse_with_top_k,
 };
 use index_selection::push_where_into_match;
@@ -237,6 +237,7 @@ pub const PASSES: &[(&str, PassFn)] = &[
         pass_fuse_match_with_aggregate_top_k,
     ),
     ("fuse_node_scan_aggregate", pass_fuse_node_scan_aggregate),
+    ("columnar_scan_aggregate", pass_columnar_scan_aggregate),
     ("fuse_node_scan_top_k", pass_fuse_node_scan_top_k),
     (
         "fuse_vector_score_order_limit",
@@ -669,13 +670,6 @@ fn pass_fuse_match_with_aggregate(query: &mut CypherQuery, ctx: &PassCtx) {
 /// top-K (O(n log k) instead of O(n log n)).
 fn pass_fuse_match_with_aggregate_top_k(query: &mut CypherQuery, _ctx: &PassCtx) {
     fuse_match_with_aggregate_top_k(query)
-}
-
-/// **Pass:** `fuse_node_scan_aggregate` — Untyped `MATCH (n) RETURN
-/// <agg>` → specialized scan-only aggregate that walks the node store
-/// once without producing intermediate row tuples.
-fn pass_fuse_node_scan_aggregate(query: &mut CypherQuery, ctx: &PassCtx) {
-    fuse_node_scan_aggregate(query, ctx.params)
 }
 
 /// **Pass:** `fuse_node_scan_top_k` — `MATCH (n:Type) RETURN n LIMIT k`
