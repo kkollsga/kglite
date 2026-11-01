@@ -20,6 +20,8 @@ or [Rust guide](../rust/index.md).
   conformance harness.
 - **[Concurrency](concurrency.md)** — direct graph ownership, shared sessions,
   optimistic commits, snapshots, and disk-backed generation semantics.
+- **[Comparison benchmark](comparison-benchmark.md)** — how the README's memory
+  use and performance rows are measured.
 - **[Generated project facts](../_generated/project-facts.md)** — workspace,
   package, CI, storage, format, and benchmark facts derived from source.
 
@@ -38,6 +40,7 @@ architecture
 design-decisions
 multi-label-rationale
 cypher-conformance
+comparison-benchmark
 concurrency
 adding-a-storage-backend
 adding-a-query-language
