@@ -9,6 +9,34 @@ before upgrading.
 
 ## [Unreleased]
 
+### Changed
+
+- **Filtered counts and `sum`/`avg`/`min`/`max` over a typed numeric property run 35 to 75 times faster.** The query is a single-label `MATCH (n:T)` with comparison filters (`=`, `<`, `<=`, `>`, `>=`) against `Int64` or `Float64` literals or parameters, returning only `count`, `sum`, `avg`, `min` or `max` with no grouping. Measured on 1M nodes in memory and mapped mode (release build, minimum of 20 runs, against 0.21.4; results identical):
+
+  | Query | 0.21.4 | now |
+  |---|---|---|
+  | `WHERE year > 2000 AND score < 0.5 RETURN count(p)` | 16.5-18.6 ms | 0.52-0.56 ms |
+  | `WHERE year > 2000 RETURN count(p)` | 15.2-15.5 ms | 0.25-0.26 ms |
+  | `RETURN sum(year)` | 28.1-28.7 ms | 0.38-0.41 ms |
+  | `RETURN min(score), max(score)` | 47-49 ms | 0.95-0.99 ms |
+  | `RETURN count(p), sum(year), min(score), max(score)` | 80-85 ms | 1.2-1.3 ms |
+
+  A 100k-node in-memory graph gains 27x to 70x on the same shapes.
+- **Float `sum` over the same shape is 2.7 times faster** (27 ms to 10 ms on 1M nodes). It keeps its sequential accumulation order, so its result does not change.
+- **`PROFILE` names the route of a fused scan.** The clause label ends in `[column kernel]` when the kernel answered, or in the reason it declined, such as `[float accumulation order]`, `[signed-zero extreme]`, `[disk]`, `[valid-time filter]` or `[indexed predicate]`.
+- **A new planner pass, `columnar_scan_aggregate`, selects the kernel.** Pass it to `cypher(disabled_passes=["columnar_scan_aggregate"])` to take the previous path.
+- **Negative numeric literals in a node pattern's `WHERE` are pushed into the pattern matcher.** `WHERE p.year > -1 AND p.score < 0.5` now takes the same fast path as `WHERE p.year > 1 AND p.score < 0.5` (31.7 ms to 0.52 ms on 1M nodes).
+
+The old path still answers these queries, with identical results:
+
+- grouped aggregates, `DISTINCT` aggregates, and aggregates over expressions
+- string, `IN`, `OR`, `NOT` and function filters (string equality is unchanged)
+- an indexed predicate
+- disk-mode graphs
+- a graph with a valid-time filter that may hide nodes of the type
+- `min` or `max` whose extreme value is a zero (`-0.0` and `0.0` order differently)
+- queries run with `parallel=True`
+
 ## [0.21.4] - 2026-10-29
 
 ### Added
