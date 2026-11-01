@@ -462,6 +462,55 @@ fn test_comparison_range_merge() {
 }
 
 #[test]
+fn test_negated_numeric_literals_are_pushed() {
+    let pushed = |cypher: &str, prop: &str| {
+        let mut query = parse_cypher(cypher).unwrap();
+        optimize(&mut query, &DirGraph::new(), &HashMap::new());
+        first_node_props(&query).and_then(|props| props.get(prop).cloned())
+    };
+    assert!(matches!(
+        pushed("MATCH (n:T) WHERE n.f > -10 RETURN n", "f"),
+        Some(PropertyMatcher::GreaterThan(Value::Int64(-10)))
+    ));
+    assert!(matches!(
+        pushed("MATCH (n:T) WHERE -2.5 >= n.f RETURN n", "f"),
+        Some(PropertyMatcher::LessOrEqual(Value::Float64(v))) if v == -2.5
+    ));
+    assert!(matches!(
+        pushed("MATCH (n:T) WHERE n.f > -10 AND n.f < -1 RETURN n", "f"),
+        Some(PropertyMatcher::Range {
+            lower: Value::Int64(-10),
+            upper: Value::Int64(-1),
+            ..
+        })
+    ));
+    assert!(matches!(
+        pushed("MATCH (n:T) WHERE n.f IN [-1, -2] RETURN n", "f"),
+        Some(PropertyMatcher::In(_))
+    ));
+    assert!(matches!(
+        pushed("MATCH (n:T) WHERE n.f = - -3 RETURN n", "f"),
+        Some(PropertyMatcher::Equals(Value::Int64(3)))
+    ));
+}
+
+#[test]
+fn test_unfoldable_negation_is_not_pushed() {
+    for cypher in [
+        "MATCH (n:T) WHERE n.f > -(-9223372036854775807 - 1) RETURN n",
+        "MATCH (n:T) WHERE n.f > -'a' RETURN n",
+        "MATCH (n:T) WHERE n.f > -n.g RETURN n",
+    ] {
+        let mut query = parse_cypher(cypher).unwrap();
+        optimize(&mut query, &DirGraph::new(), &HashMap::new());
+        assert!(
+            first_node_props(&query).and_then(|p| p.get("f")).is_none(),
+            "{cypher}"
+        );
+    }
+}
+
+#[test]
 fn test_correlated_nodeprop_pushdown() {
     // The classic shape from the large proposal build: a correlated equality
     // across two separate MATCH clauses.

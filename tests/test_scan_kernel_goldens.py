@@ -714,3 +714,34 @@ def test_multi_aggregate_scan_through_deletes_and_recreates(mode, tmp_path, kern
     graph.cypher("MATCH (n:K {id: 99}) DETACH DELETE n")
     del live[99]
     check()
+
+
+# --- negated numeric literals reach the kernel ------------------------------------------------
+
+NEG_VALUES = [-50.0 + i for i in range(1, 101)]  # -49.0 .. 50.0
+
+
+@pytest.mark.parametrize("mode", ["memory", "mapped"])
+def test_negative_literal_thresholds_are_served_by_the_kernel(mode, tmp_path, kernel_pass):
+    graph = make_graph(mode, tmp_path)
+    graph.cypher("UNWIND range(1, 100) AS i CREATE (:NG {f: toFloat(i) - 50.0, k: i - 50})")
+    ks = [int(v) for v in NEG_VALUES]
+    cases = [
+        ("n.f > -10", lambda f, k: f > -10),
+        ("-10 < n.f", lambda f, k: f > -10),
+        ("n.k >= -10", lambda f, k: k >= -10),
+        ("-10.5 >= n.k", lambda f, k: k <= -10.5),
+        ("n.f > -10 AND n.f < -1", lambda f, k: -10 < f < -1),
+        ("n.k > - -10", lambda f, k: k > 10),
+        ("n.k = -3", lambda f, k: k == -3),
+        ("n.k IN [-1, -2, 7]", lambda f, k: k in (-1, -2, 7)),
+    ]
+    for pred, fn in cases:
+        q = f"MATCH (n:NG) WHERE {pred} RETURN count(n) AS c"
+        assert one(graph, q)["c"] == sum(1 for f, k in zip(NEG_VALUES, ks) if fn(f, k)), pred
+        if kernel_pass == "kernel_on" and "IN" not in pred:
+            label = route_of(graph, q)
+            assert "+filter" not in label and label.endswith("[column kernel]"), (pred, label)
+    sel = [f for f in NEG_VALUES if f > -10]
+    q = "MATCH (n:NG) WHERE n.f > -10 RETURN count(n) AS c, sum(n.f) AS s, min(n.f) AS lo, max(n.f) AS hi"
+    assert one(graph, q) == {"c": len(sel), "s": sum(sel), "lo": min(sel), "hi": max(sel)}

@@ -3078,6 +3078,31 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) WHERE p.age >= 30.5 RETURN count(p.age) AS c, count(p) AS d",
         None,
     ),
+    # Negated numeric literals fold into the pattern matcher (`push_where_into_match`).
+    (
+        "trigger_push_where_negative_literal",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.age > -10 RETURN count(p) AS c, sum(p.age) AS s",
+        None,
+    ),
+    (
+        "push_where_negative_literal_flipped",
+        "social_graph",
+        "MATCH (p:Person) WHERE -30.5 < p.salary RETURN count(p) AS c, max(p.salary) AS m",
+        None,
+    ),
+    (
+        "push_where_negative_literal_range",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.age > -10 AND p.age < -1 RETURN count(p) AS c",
+        None,
+    ),
+    (
+        "push_where_negative_literal_in_list",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.age IN [-1, 30, -2] RETURN count(p) AS c",
+        None,
+    ),
     (
         "columnar_count_empty_selection",
         "social_graph",

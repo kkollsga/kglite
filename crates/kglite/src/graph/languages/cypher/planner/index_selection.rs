@@ -531,16 +531,8 @@ fn extract_from_predicate(
         Predicate::In { expr, list } => {
             if let Expression::PropertyAccess { variable, property } = expr {
                 if match_vars.iter().any(|(v, _)| v == variable) {
-                    let all_literals: Option<Vec<Value>> = list
-                        .iter()
-                        .map(|item| {
-                            if let Expression::Literal(val) = item {
-                                Some(val.clone())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
+                    let all_literals: Option<Vec<Value>> =
+                        list.iter().map(|item| folded_literal(item)).collect();
                     if let Some(values) = all_literals {
                         if reserve_exclusive(reservations, variable, property) {
                             out.in_lists
@@ -810,6 +802,23 @@ pub(super) fn coalesce_default_matches(
     super::super::executor::helpers::evaluate_comparison_tristate(&default, &op, value).ok()
 }
 
+/// A literal operand, with a negated Int64/Float64 literal folded to its
+/// value (`-10` parses as `Negate(Literal(10))`). `None` for anything else,
+/// including a negation that overflows (`-(i64::MIN)`), which stays in WHERE
+/// where the executor raises its own error.
+fn folded_literal(expr: &Expression) -> Option<Value> {
+    match expr {
+        Expression::Literal(v) => Some(v.clone()),
+        Expression::Negate(inner) => match folded_literal(inner)? {
+            v @ (Value::Int64(_) | Value::Float64(_)) => {
+                crate::graph::core::value_operations::arithmetic_negate_checked(&v).ok()
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn plan_time_value(expr: &Expression, params: &HashMap<String, Value>) -> Option<Value> {
     match expr {
         Expression::Literal(value) => Some(value.clone()),
@@ -863,19 +872,19 @@ pub(super) fn try_extract_equality(
     match_vars: &[(String, Option<String>)],
     params: &HashMap<String, Value>,
 ) -> Option<(String, String, Value)> {
-    if let (Expression::PropertyAccess { variable, property }, Expression::Literal(val)) =
-        (left, right)
+    if let (Expression::PropertyAccess { variable, property }, Some(val)) =
+        (left, folded_literal(right))
     {
         if match_vars.iter().any(|(v, _)| v == variable) {
-            return Some((variable.clone(), property.clone(), val.clone()));
+            return Some((variable.clone(), property.clone(), val));
         }
     }
 
-    if let (Expression::Literal(val), Expression::PropertyAccess { variable, property }) =
-        (left, right)
+    if let (Some(val), Expression::PropertyAccess { variable, property }) =
+        (folded_literal(left), right)
     {
         if match_vars.iter().any(|(v, _)| v == variable) {
-            return Some((variable.clone(), property.clone(), val.clone()));
+            return Some((variable.clone(), property.clone(), val));
         }
     }
 
@@ -1046,24 +1055,19 @@ fn comparison_operands(
     match_vars: &[(String, Option<String>)],
     params: &HashMap<String, Value>,
 ) -> Option<(String, String, ComparisonOp, Value)> {
-    if let (Expression::PropertyAccess { variable, property }, Expression::Literal(val)) =
-        (left, right)
+    if let (Expression::PropertyAccess { variable, property }, Some(val)) =
+        (left, folded_literal(right))
     {
         if match_vars.iter().any(|(v, _)| v == variable) {
-            return Some((variable.clone(), property.clone(), op, val.clone()));
+            return Some((variable.clone(), property.clone(), op, val));
         }
     }
 
-    if let (Expression::Literal(val), Expression::PropertyAccess { variable, property }) =
-        (left, right)
+    if let (Some(val), Expression::PropertyAccess { variable, property }) =
+        (folded_literal(left), right)
     {
         if match_vars.iter().any(|(v, _)| v == variable) {
-            return Some((
-                variable.clone(),
-                property.clone(),
-                flip_comparison(op),
-                val.clone(),
-            ));
+            return Some((variable.clone(), property.clone(), flip_comparison(op), val));
         }
     }
 
