@@ -1,5 +1,5 @@
 //! Store-level driver of the column kernel for `MATCH (n:T) [{…}] RETURN
-//! count(…)`: decides whether the type's column store can answer for every
+//! count/sum/avg/min/max(…)`: decides whether the type's column store can answer for every
 //! node the matcher would visit, runs [`column_kernel`](super::column_kernel),
 //! and verifies the walk against the type's node count.
 //!
@@ -16,13 +16,16 @@
 
 use std::collections::HashMap;
 
+use crate::datatypes::Value;
+use crate::graph::core::numeric_sum::IntegerSum;
 use crate::graph::core::pattern_matching::closure_probe::live_closure_members;
 use crate::graph::schema::{DirGraph, InternedKey};
 use crate::graph::storage::column_store::{ColumnStore, TypedColumn};
 use crate::graph::storage::GraphRead;
 
+use super::column_agg::{StatCol, Want};
 use super::column_kernel::{cardinality_matches, scan, Cells, KernelOut, Pred};
-use super::numeric_cell_test::{Lit, NumericTest};
+use super::numeric_cell_test::NumericTest;
 use super::pattern::PropertyMatcher;
 
 /// Why the kernel did not answer. The label is what PROFILE and the test
@@ -45,6 +48,8 @@ pub(crate) enum Decline {
     MissingColumn,
     NonNumericColumn,
     FloatCountTarget,
+    FloatOrder,
+    SignedZero,
     ShortColumn,
     Cardinality,
 }
@@ -68,6 +73,8 @@ impl Decline {
             Decline::MissingColumn => "missing column",
             Decline::NonNumericColumn => "non-numeric column",
             Decline::FloatCountTarget => "float count target",
+            Decline::FloatOrder => "float accumulation order",
+            Decline::SignedZero => "signed-zero extreme",
             Decline::ShortColumn => "short column",
             Decline::Cardinality => "cardinality mismatch",
         }
@@ -234,18 +241,66 @@ fn props_are_indexed(
     }
 }
 
-/// Counts for `MATCH (n:node_type {props}) RETURN <targets>`: one count per
-/// target, where `None` counts matched nodes and `Some(key)` counts matched
-/// nodes whose `key` is non-null.
+/// The aggregate functions the kernel models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AggFn {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+
+/// One RETURN item: a function over matched nodes (`key` `None`, `Count`
+/// only) or over their property `key`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AggTarget<'a> {
+    pub func: AggFn,
+    pub key: Option<&'a str>,
+}
+
+/// One answer, before emission.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum AggAnswer {
+    Value(Value),
+    /// Exact integer total; emission raises the engine's overflow error when
+    /// it does not fit `Int64`.
+    IntSum(i128),
+}
+
+impl AggAnswer {
+    pub(crate) fn into_value(self) -> Result<Value, String> {
+        match self {
+            AggAnswer::Value(v) => Ok(v),
+            AggAnswer::IntSum(total) => IntegerSum::Wide(total).finish().map(Value::Int64),
+        }
+    }
+}
+
+/// Above this, a sum of absolute values may exceed what an `f64` holds
+/// exactly, and the generic scan's bucket-order `f64` accumulation of an
+/// Int64 column can round differently from an exact total.
+const F64_EXACT_LIMIT: u128 = 1 << 53;
+
+/// One statistics column the scan folds, keyed by its store slot.
+struct StatPlan<'a> {
+    slot: u16,
+    cells: Cells<'a>,
+    want: Want,
+}
+
+/// Answers for `MATCH (n:node_type {props}) RETURN <targets>`, one per
+/// target: counts of matched nodes (or of those with `key` non-null), and
+/// `sum`/`avg`/`min`/`max` over a numeric property of the matched nodes.
 ///
 /// The valid-time and `parallel` declines are the caller's: they depend on
-/// executor state, not on the store.
-pub(crate) fn count_targets(
+/// executor state, not on the store. Any decline discards every answer.
+pub(crate) fn aggregate_targets(
     graph: &DirGraph,
     node_type: &str,
     props: Option<&HashMap<String, PropertyMatcher>>,
-    targets: &[Option<&str>],
-) -> Result<Vec<u64>, Decline> {
+    targets: &[AggTarget<'_>],
+) -> Result<Vec<AggAnswer>, Decline> {
     let store = eligible_store(graph, node_type)?;
     // The matcher answers an indexed predicate from the index in time
     // proportional to its hits; a column walk is proportional to the type.
@@ -265,53 +320,133 @@ pub(crate) fn count_targets(
         preds.push(Pred { cells, test });
     }
 
-    let rows = store.column_rows() as usize;
-    let tombstones = store.base_tombstones();
-    let type_count = graph.type_indices.get(node_type).map_or(0, |n| n.len());
-    let run = |preds: &[Pred<'_>]| -> Result<KernelOut, Decline> {
-        let out = scan(rows, tombstones, preds, None).ok_or(Decline::ShortColumn)?;
-        if !cardinality_matches(&out, type_count) {
-            return Err(Decline::Cardinality);
-        }
-        Ok(out)
-    };
-
-    let base = run(&preds)?;
-    let mut counts = Vec::with_capacity(targets.len());
+    // Where each target reads its answer: `None` is the matched-row count.
+    let mut plans: Vec<StatPlan<'_>> = Vec::new();
+    let mut target_stat: Vec<Option<usize>> = Vec::with_capacity(targets.len());
     for target in targets {
-        let Some(key) = target else {
-            counts.push(base.count);
+        let Some(key) = target.key else {
+            target_stat.push(None);
             continue;
         };
         let field = graph.resolve_alias(node_type, key);
-        if field != *key {
+        if field != key {
             return Err(Decline::Predicate);
         }
         let cells = numeric_cells(graph, store, node_type, key)?;
         let slot = store
             .slot(InternedKey::from_str(field))
             .ok_or(Decline::MissingColumn)?;
-        if predicate_slots.contains(&slot) {
-            counts.push(base.count);
-            continue;
-        }
-        // Not read by any predicate: add "is non-null" as one more predicate.
-        // An Int column reaches every value with `>= i64::MIN`; a Float column
-        // has no such compare (NaN fails them all), so it declines.
-        let Cells::Int { .. } = cells else {
-            return Err(Decline::FloatCountTarget);
+        let want = match (target.func, cells) {
+            (AggFn::Count, _) if predicate_slots.contains(&slot) => {
+                target_stat.push(None);
+                continue;
+            }
+            // An Int column counts its non-nulls from the kernel's own
+            // statistic; a Float one is left to the generic scan.
+            (AggFn::Count, Cells::Float { .. }) => return Err(Decline::FloatCountTarget),
+            (AggFn::Count, Cells::Int { .. }) => Want::default(),
+            // A float total depends on the order rows are added in, and the
+            // generic scan adds them in bucket order, which is not row order.
+            (AggFn::Sum | AggFn::Avg, Cells::Float { .. }) => return Err(Decline::FloatOrder),
+            (AggFn::Sum, Cells::Int { .. }) => Want {
+                sum: true,
+                ..Want::default()
+            },
+            (AggFn::Avg, Cells::Int { .. }) => Want {
+                sum: true,
+                abs_sum: true,
+                ..Want::default()
+            },
+            (AggFn::Min | AggFn::Max, _) => Want {
+                min_max: true,
+                ..Want::default()
+            },
         };
-        let mut with_target = preds.clone();
-        with_target.push(Pred {
-            cells,
-            test: NumericTest::GreaterOrEqual(Lit::Int(i64::MIN)),
-        });
-        counts.push(run(&with_target)?.count);
+        match plans.iter().position(|p| p.slot == slot) {
+            Some(i) => plans[i].want = plans[i].want.union(want),
+            None => plans.push(StatPlan { slot, cells, want }),
+        }
+        target_stat.push(plans.iter().position(|p| p.slot == slot));
     }
+
+    let rows = store.column_rows() as usize;
+    let stat_cols: Vec<StatCol<'_>> = plans
+        .iter()
+        .map(|p| StatCol {
+            cells: p.cells,
+            want: p.want,
+        })
+        .collect();
+    let out =
+        scan(rows, store.base_tombstones(), &preds, &stat_cols).ok_or(Decline::ShortColumn)?;
+    let type_count = graph.type_indices.get(node_type).map_or(0, |n| n.len());
+    if !cardinality_matches(&out, type_count) {
+        return Err(Decline::Cardinality);
+    }
+    let answers = emit_answers(targets, &target_stat, &plans, &out)?;
 
     #[cfg(debug_assertions)]
     assert_row_node_bijection(graph, node_type, store);
-    Ok(counts)
+    Ok(answers)
+}
+
+/// Turn the kernel's statistics into one answer per target, applying the
+/// generic scan's emission rules.
+fn emit_answers(
+    targets: &[AggTarget<'_>],
+    target_stat: &[Option<usize>],
+    plans: &[StatPlan<'_>],
+    out: &KernelOut,
+) -> Result<Vec<AggAnswer>, Decline> {
+    let int = |n: i64| AggAnswer::Value(Value::Int64(n));
+    let float = |f: f64| AggAnswer::Value(Value::Float64(f));
+    let null = || AggAnswer::Value(Value::Null);
+    let mut answers = Vec::with_capacity(targets.len());
+    for (target, stat) in targets.iter().zip(target_stat) {
+        let Some(i) = *stat else {
+            answers.push(int(out.count as i64));
+            continue;
+        };
+        let stats = &out.stats[i];
+        let is_int = matches!(plans[i].cells, Cells::Int { .. });
+        answers.push(match target.func {
+            AggFn::Count => int(stats.non_null as i64),
+            // No numeric value sums to Int64(0), as the generic scan emits.
+            AggFn::Sum if stats.non_null == 0 => int(0),
+            AggFn::Sum => AggAnswer::IntSum(stats.sum),
+            AggFn::Avg if stats.non_null == 0 => null(),
+            AggFn::Avg => {
+                if stats.abs_sum > F64_EXACT_LIMIT {
+                    return Err(Decline::FloatOrder);
+                }
+                float(stats.sum as f64 / stats.non_null as f64)
+            }
+            AggFn::Min | AggFn::Max if is_int => {
+                if stats.non_null == 0 {
+                    null()
+                } else if target.func == AggFn::Min {
+                    int(stats.int_min)
+                } else {
+                    int(stats.int_max)
+                }
+            }
+            AggFn::Min | AggFn::Max => {
+                let extreme = if target.func == AggFn::Min {
+                    stats.float_min_value()
+                } else {
+                    stats.float_max_value()
+                };
+                match extreme {
+                    None => null(),
+                    // -0.0 and 0.0 compare equal, so which one the generic
+                    // scan keeps is the first seen in bucket order.
+                    Some(0.0) => return Err(Decline::SignedZero),
+                    Some(f) => float(f),
+                }
+            }
+        });
+    }
+    Ok(answers)
 }
 
 /// Debug builds: every live row has exactly one node of the type pointing at

@@ -13,6 +13,7 @@
 //! typed, then matched.
 
 pub(crate) mod closure_probe;
+mod column_agg;
 pub(crate) mod column_filter;
 mod column_kernel;
 pub(crate) mod column_scan;

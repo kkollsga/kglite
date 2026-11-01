@@ -3085,6 +3085,44 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         None,
     ),
     (
+        "trigger_columnar_scan_aggregate_multi",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.age > 25 AND p.salary < 120000 "
+        "RETURN count(p) AS c, sum(p.age) AS s, min(p.salary) AS lo, max(p.salary) AS hi, avg(p.age) AS a",
+        None,
+    ),
+    (
+        "columnar_aggregate_no_filter",
+        "social_graph",
+        "MATCH (p:Person) RETURN sum(p.salary) AS s, min(p.age) AS lo, max(p.age) AS hi, count(p.salary) AS k",
+        None,
+    ),
+    (
+        "columnar_aggregate_inline_equals",
+        "social_graph",
+        "MATCH (p:Person {age: 30}) RETURN sum(p.salary) AS s, max(p.salary) AS m",
+        None,
+    ),
+    (
+        "columnar_aggregate_empty_selection",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.age > 1000 "
+        "RETURN count(p) AS c, sum(p.age) AS s, min(p.age) AS lo, max(p.age) AS hi, avg(p.age) AS a",
+        None,
+    ),
+    (
+        "columnar_aggregate_distinct_bails",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.age > 25 RETURN sum(DISTINCT p.age) AS s, count(p) AS c",
+        None,
+    ),
+    (
+        "columnar_aggregate_string_min_bails",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.age > 25 RETURN min(p.city) AS lo, max(p.age) AS hi",
+        None,
+    ),
+    (
         "columnar_count_secondary_label_bails",
         "multi_label_graph",
         "MATCH (p:Person) WHERE p.age > 22 RETURN count(p) AS c",

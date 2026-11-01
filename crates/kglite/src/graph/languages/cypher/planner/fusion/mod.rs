@@ -23,7 +23,7 @@ mod with_top_k_tests;
 
 pub(super) use aggregate::*;
 pub(super) use chain_count::*;
-pub(crate) use columnar_scan::columnar_count_shape;
+pub(crate) use columnar_scan::columnar_scan_shape;
 pub(super) use columnar_scan::pass_columnar_scan_aggregate;
 pub(super) use count::*;
 pub(super) use spatial::*;

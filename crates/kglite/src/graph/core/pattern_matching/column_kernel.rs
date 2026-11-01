@@ -1,9 +1,11 @@
 //! Stateless column kernel for ungrouped numeric scans of one node type.
 //!
 //! Walks the type's `Int64`/`Float64` column slices in row order, in chunks,
-//! and produces a count and an exact integer sum over the rows that are live
+//! over the rows that are live
 //! (not tombstoned), non-null in every referenced column, and satisfy a
-//! conjunction of [`NumericTest`]s. It keeps no state between calls.
+//! conjunction of [`NumericTest`]s, and folds those rows into per-column
+//! statistics ([`column_agg`](super::column_agg)). It keeps no state between
+//! calls.
 //!
 //! The kernel does not know which nodes the rows belong to. It reports
 //! `live_rows_visited`; the caller compares that with the type's node count
@@ -15,6 +17,9 @@
 //! compile to branch-free range compares. Mixed pairings keep the scalar
 //! [`NumericTest`], the reference the differential test checks both against.
 
+#[cfg(test)]
+use super::column_agg::Want;
+use super::column_agg::{ColStats, StatCol};
 use super::numeric_cell_test::{Lit, NumericTest};
 
 const CHUNK: usize = 1024;
@@ -27,7 +32,7 @@ pub(super) enum Cells<'a> {
 }
 
 impl Cells<'_> {
-    fn len(&self) -> usize {
+    pub(super) fn len(&self) -> usize {
         match self {
             Cells::Int { data, nulls } => data.len().min(nulls.len()),
             Cells::Float { data, nulls } => data.len().min(nulls.len()),
@@ -43,12 +48,12 @@ pub(super) struct Pred<'a> {
 }
 
 /// What the kernel found.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(super) struct KernelOut {
     /// Live rows satisfying every predicate.
     pub count: u64,
-    /// Exact sum of the sum column over those rows (nulls skipped).
-    pub sum: i128,
+    /// One entry per requested [`StatCol`], over the same rows.
+    pub stats: Vec<ColStats>,
     /// Non-tombstoned rows walked, regardless of nulls or predicates.
     pub live_rows_visited: u64,
 }
@@ -233,15 +238,15 @@ pub(super) fn scan(
     rows: usize,
     tombstones: &[bool],
     preds: &[Pred<'_>],
-    sum_col: Option<(&[i64], &[u8])>,
+    stat_cols: &[StatCol<'_>],
 ) -> Option<KernelOut> {
-    if preds.iter().any(|p| p.cells.len() < rows)
-        || sum_col.is_some_and(|(d, n)| d.len() < rows || n.len() < rows)
+    if preds.iter().any(|p| p.cells.len() < rows) || stat_cols.iter().any(|c| c.cells.len() < rows)
     {
         return None;
     }
     let lowered: Vec<Lowered<'_>> = preds.iter().map(lower).collect();
-    let (mut count, mut live, mut sum) = (0u64, 0u64, 0i128);
+    let mut stats = vec![ColStats::new(); stat_cols.len()];
+    let (mut count, mut live) = (0u64, 0u64);
     let mut mask = [0u8; CHUNK];
     let mut start = 0;
     while start < rows {
@@ -263,28 +268,14 @@ pub(super) fn scan(
             p.apply(start, n, &mut mask);
         }
         count += mask[..n].iter().map(|&m| m as u64).sum::<u64>();
-        if let Some((data, nulls)) = sum_col {
-            // x = hi * 2^32 + lo with 0 <= lo < 2^32: both partial sums stay
-            // far inside i64 for a 1024-row chunk, and the vectorised loop
-            // needs no 128-bit lane.
-            let (mut hi, mut lo) = (0i64, 0i64);
-            for ((&m, &x), &z) in mask[..n]
-                .iter()
-                .zip(&data[start..start + n])
-                .zip(&nulls[start..start + n])
-            {
-                let keep = -((m & (z == 0) as u8) as i64);
-                let v = x & keep;
-                hi += v >> 32;
-                lo += v & 0xffff_ffff;
-            }
-            sum += ((hi as i128) << 32) + lo as i128;
+        for (acc, col) in stats.iter_mut().zip(stat_cols) {
+            acc.fold(col, start, &mask[..n]);
         }
         start += n;
     }
     Some(KernelOut {
         count,
-        sum,
+        stats,
         live_rows_visited: live,
     })
 }
@@ -335,18 +326,28 @@ mod tests {
                 test: NumericTest::Less(Lit::Float(0.5)),
             },
         ];
-        let out = scan(8, &tomb, &preds, Some((&year, &ynull))).unwrap();
+        let sum_year = [StatCol {
+            cells: Cells::Int {
+                data: &year,
+                nulls: &ynull,
+            },
+            want: Want {
+                sum: true,
+                ..Want::default()
+            },
+        }];
+        let out = scan(8, &tomb, &preds, &sum_year).unwrap();
         assert_eq!(out.count, 3);
-        assert_eq!(out.sum, 2010 + 2005 + 2001);
+        assert_eq!(out.stats[0].sum, 2010 + 2005 + 2001);
         assert_eq!(out.live_rows_visited, 7);
         // The cardinality comparison is evaluated, and can fail.
         assert!(cardinality_matches(&out, 7));
         assert!(!cardinality_matches(&out, 8));
         // A shorter tombstone slice leaves the trailing rows live.
-        let out = scan(8, &tomb[..2], &preds, None).unwrap();
+        let out = scan(8, &tomb[..2], &preds, &[]).unwrap();
         assert_eq!(out.live_rows_visited, 7);
         // A column shorter than the walk declines.
-        assert!(scan(9, &tomb, &preds, None).is_none());
+        assert!(scan(9, &tomb, &preds, &[]).is_none());
     }
 
     /// The lowered range forms agree with the scalar `NumericTest` on edge
@@ -414,7 +415,7 @@ mod tests {
                 test: t,
             }];
             let want = ints.iter().filter(|&&x| t.holds_int(x)).count() as u64;
-            assert_eq!(scan(ints.len(), &none, &pi, None).unwrap().count, want);
+            assert_eq!(scan(ints.len(), &none, &pi, &[]).unwrap().count, want);
             let pf = [Pred {
                 cells: Cells::Float {
                     data: &floats,
@@ -423,7 +424,7 @@ mod tests {
                 test: t,
             }];
             let want = floats.iter().filter(|&&x| t.holds_float(x)).count() as u64;
-            assert_eq!(scan(floats.len(), &none, &pf, None).unwrap().count, want);
+            assert_eq!(scan(floats.len(), &none, &pf, &[]).unwrap().count, want);
         }
     }
 
@@ -431,9 +432,19 @@ mod tests {
     fn int_sum_is_exact_past_i64() {
         let data = [i64::MAX, i64::MAX, i64::MIN, 7];
         let nulls = [0u8; 4];
-        let out = scan(4, &[], &[], Some((&data, &nulls))).unwrap();
+        let cols = [StatCol {
+            cells: Cells::Int {
+                data: &data,
+                nulls: &nulls,
+            },
+            want: Want {
+                sum: true,
+                ..Want::default()
+            },
+        }];
+        let out = scan(4, &[], &[], &cols).unwrap();
         assert_eq!(
-            out.sum,
+            out.stats[0].sum,
             i64::MAX as i128 * 2 + i64::MIN as i128 + 7,
             "sum must not wrap"
         );
@@ -568,8 +579,18 @@ mod kernel_probe {
         let type_count = graph.type_indices.get("Paper").unwrap().len();
         assert_eq!(rows, N as usize);
 
-        let k_count = scan(rows, tomb, &preds, None).unwrap();
-        let k_sum = scan(rows, tomb, &[], Some((yd, yn))).unwrap();
+        let k_count = scan(rows, tomb, &preds, &[]).unwrap();
+        let year_cols = [StatCol {
+            cells: Cells::Int {
+                data: yd,
+                nulls: yn,
+            },
+            want: Want {
+                sum: true,
+                ..Want::default()
+            },
+        }];
+        let k_sum = scan(rows, tomb, &[], &year_cols).unwrap();
         assert!(
             cardinality_matches(&k_count, type_count),
             "{k_count:?} vs {type_count}"
@@ -581,7 +602,7 @@ mod kernel_probe {
         let e_count = cypher_i64(&graph, q_count);
         let e_sum = cypher_i64(&graph, q_sum);
         assert_eq!(k_count.count as i64, e_count, "count equality");
-        assert_eq!(k_sum.sum, e_sum as i128, "sum equality");
+        assert_eq!(k_sum.stats[0].sum, e_sum as i128, "sum equality");
         println!(
             "answers: count={e_count} sum={e_sum} live={}",
             k_count.live_rows_visited
@@ -590,10 +611,10 @@ mod kernel_probe {
         let rounds = 25;
         let per_row = |ns: f64| ns / rows as f64;
         let kc = min_ns(rounds, || {
-            std::hint::black_box(scan(rows, tomb, std::hint::black_box(&preds), None));
+            std::hint::black_box(scan(rows, tomb, std::hint::black_box(&preds), &[]));
         });
         let ks = min_ns(rounds, || {
-            std::hint::black_box(scan(rows, tomb, &[], Some((yd, yn))));
+            std::hint::black_box(scan(rows, tomb, &[], &year_cols));
         });
         let ec = min_ns(rounds, || {
             std::hint::black_box(cypher_i64(&graph, q_count));

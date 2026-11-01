@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use crate::graph::core::pattern_matching::column_scan::is_kernel_comparison;
+use crate::graph::core::pattern_matching::column_scan::{is_kernel_comparison, AggFn, AggTarget};
 use crate::graph::core::pattern_matching::{PatternElement, PropertyMatcher};
 use crate::graph::languages::cypher::ast::{
     is_aggregate_expression, Clause, CypherQuery, Expression, MatchClause, ReturnClause,
@@ -16,21 +16,42 @@ use crate::graph::languages::cypher::ast::{
 use crate::graph::languages::cypher::planner::PassCtx;
 
 /// A fused scan the kernel can serve: `MATCH (n:T {numeric compares}) RETURN
-/// count(*) | count(n) | count(n.k), …`.
-pub(crate) struct CountShape<'a> {
+/// count(*) | count(n) | count/sum/avg/min/max(n.k), …`.
+pub(crate) struct ScanShape<'a> {
     pub node_type: &'a str,
     pub props: Option<&'a HashMap<String, PropertyMatcher>>,
-    /// One per RETURN item, in order: `None` counts matched nodes,
-    /// `Some(k)` counts matched nodes whose property `k` is non-null.
-    pub targets: Vec<Option<&'a str>>,
+    /// One per RETURN item, in order.
+    pub targets: Vec<AggTarget<'a>>,
+}
+
+fn is_plain_key(property: &str) -> bool {
+    !matches!(
+        property,
+        "id" | "title" | "name" | "type" | "node_type" | "label"
+    )
+}
+
+/// The aggregate a function name denotes. The spellings are exactly those the
+/// fused scan's emission recognises; `count` is the parser's case-folded form.
+fn agg_fn(name: &str) -> Option<AggFn> {
+    if name.eq_ignore_ascii_case("count") {
+        return Some(AggFn::Count);
+    }
+    match name {
+        "sum" => Some(AggFn::Sum),
+        "avg" | "mean" | "average" => Some(AggFn::Avg),
+        "min" => Some(AggFn::Min),
+        "max" => Some(AggFn::Max),
+        _ => None,
+    }
 }
 
 /// The shape of `match_clause` + `return_clause`, or `None` when anything
 /// about them is outside what the kernel models.
-pub(crate) fn columnar_count_shape<'a>(
+pub(crate) fn columnar_scan_shape<'a>(
     match_clause: &'a MatchClause,
     return_clause: &'a ReturnClause,
-) -> Option<CountShape<'a>> {
+) -> Option<ScanShape<'a>> {
     let [pattern] = match_clause.patterns.as_slice() else {
         return None;
     };
@@ -48,15 +69,9 @@ pub(crate) fn columnar_count_shape<'a>(
     }
     let node_type = node.node_type.as_deref()?;
     if let Some(props) = &node.properties {
-        let plain = |key: &str| {
-            !matches!(
-                key,
-                "id" | "title" | "name" | "type" | "node_type" | "label"
-            )
-        };
         if !props
             .iter()
-            .all(|(key, matcher)| plain(key) && is_kernel_comparison(matcher))
+            .all(|(key, matcher)| is_plain_key(key) && is_kernel_comparison(matcher))
         {
             return None;
         }
@@ -78,25 +93,20 @@ pub(crate) fn columnar_count_shape<'a>(
         else {
             return None;
         };
-        if !name.eq_ignore_ascii_case("count") {
-            return None;
-        }
-        targets.push(match args.as_slice() {
-            [] | [Expression::Star] => None,
-            [Expression::Variable(v)] if Some(v.as_str()) == var => None,
+        let func = agg_fn(name)?;
+        let key = match args.as_slice() {
+            [] | [Expression::Star] if func == AggFn::Count => None,
+            [Expression::Variable(v)] if func == AggFn::Count && Some(v.as_str()) == var => None,
             [Expression::PropertyAccess { variable, property }]
-                if Some(variable.as_str()) == var
-                    && !matches!(
-                        property.as_str(),
-                        "id" | "title" | "name" | "type" | "node_type" | "label"
-                    ) =>
+                if Some(variable.as_str()) == var && is_plain_key(property) =>
             {
                 Some(property.as_str())
             }
             _ => return None,
-        });
+        };
+        targets.push(AggTarget { func, key });
     }
-    Some(CountShape {
+    Some(ScanShape {
         node_type,
         props: node.properties.as_ref(),
         targets,
@@ -104,7 +114,7 @@ pub(crate) fn columnar_count_shape<'a>(
 }
 
 /// Set `columnar` on every `FusedNodeScanAggregate` whose clause matches
-/// [`columnar_count_shape`] and whose WHERE the pattern fully subsumed.
+/// [`columnar_scan_shape`] and whose WHERE the pattern fully subsumed.
 fn mark_columnar_scan_aggregate(query: &mut CypherQuery) {
     for clause in &mut query.clauses {
         if let Clause::FusedNodeScanAggregate {
@@ -114,7 +124,7 @@ fn mark_columnar_scan_aggregate(query: &mut CypherQuery) {
             columnar,
         } = clause
         {
-            *columnar = columnar_count_shape(match_clause, return_clause).is_some();
+            *columnar = columnar_scan_shape(match_clause, return_clause).is_some();
         }
     }
 }
@@ -127,7 +137,8 @@ fn mark_columnar_scan_aggregate(query: &mut CypherQuery) {
 /// Pattern: one node with a single primary label, inline matchers that are all
 /// `=`/`<`/`<=`/`>`/`>=`/range comparisons against `Int64`/`Float64` literals
 /// on plain property keys, and a RETURN of only non-DISTINCT `count(*)`,
-/// `count(n)` and `count(n.k)` with no grouping, HAVING or DISTINCT.
+/// `count(n)`, `count(n.k)` and non-DISTINCT `sum`/`avg`/`min`/`max(n.k)` with
+/// no grouping, HAVING or DISTINCT.
 /// Rewrite: sets `columnar` on the clause; the plan shape is otherwise
 /// unchanged. The executor then walks the type's `Int64`/`Float64` column
 /// slices instead of visiting nodes.

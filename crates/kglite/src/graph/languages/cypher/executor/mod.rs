@@ -956,7 +956,7 @@ impl<'a> CypherExecutor<'a> {
                     .check_work(self.graph.graph.node_count(), "fused node-scan aggregate")?;
                 if *columnar {
                     if let Some(answer) =
-                        self.try_columnar_count_scan(match_clause, return_clause)?
+                        self.try_columnar_aggregate_scan(match_clause, return_clause)?
                     {
                         return Ok(answer);
                     }

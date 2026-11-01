@@ -592,3 +592,125 @@ def test_valid_time_declared_types_decline_but_others_use_the_kernel(tmp_path, k
     if kernel_pass == "kernel_on":
         assert route_of(graph, well).endswith("[valid-time filter]")
         assert route_of(graph, plain).endswith("[column kernel]")
+
+
+# --- sum / avg / min / max through the kernel ---------------------------------------------------
+
+
+def assert_route(graph, query: str, kernel_pass: str, mode: str, decline: str | None = None) -> None:
+    """Pass off: no kernel label. Pass on: the kernel in memory/mapped unless `decline` names why not."""
+    label = route_of(graph, query)
+    if kernel_pass == "kernel_off":
+        assert "columnar" not in label and "[" not in label, label
+    elif mode == "disk":
+        assert label.endswith("[disk]"), label
+    elif decline is None:
+        assert label.endswith("[column kernel]"), label
+    else:
+        assert label.endswith(f"[{decline}]"), label
+
+
+def test_multi_aggregate_scans_are_served_and_exact(tg, kernel_pass, request):
+    mode = request.node.callspec.params["tg"]
+    sel = [v for v in INTS if v is not None and 0 < v < 2**62]
+    q = (
+        "MATCH (n:T) WHERE n.i > 0 AND n.i < 4611686018427387904 "
+        "RETURN count(n) AS c, sum(n.i) AS s, min(n.i) AS mn, max(n.i) AS mx, count(n.i) AS k"
+    )
+    assert one(tg, q) == {"c": len(sel), "s": sum(sel), "mn": min(sel), "mx": max(sel), "k": len(sel)}
+    assert_route(tg, q, kernel_pass, mode)
+
+    present = [v for v in INTS if v is not None]
+    q = "MATCH (n:T) RETURN count(n.i) AS c, max(n.i) AS mx, min(n.i) AS mn"
+    assert one(tg, q) == {"c": len(present), "mx": max(present), "mn": min(present)}
+    assert_route(tg, q, kernel_pass, mode)
+
+
+def test_int_avg_is_served_when_f64_is_exact_and_declines_past_2_53(tg, kernel_pass, request):
+    mode = request.node.callspec.params["tg"]
+    q = "MATCH (n:T) WHERE n.i >= 0 AND n.i < 100 RETURN avg(n.i) AS a, sum(n.i) AS s"
+    assert one(tg, q) == {"a": 2.5, "s": 5}
+    assert_route(tg, q, kernel_pass, mode)
+
+    sel = [v for v in INTS if v is not None and TWO53 - 2 < v < 2**62]
+    q = "MATCH (n:T) WHERE n.i > 9007199254740990 AND n.i < 4611686018427387904 RETURN avg(n.i) AS a"
+    assert one(tg, q)["a"] == pytest.approx(sum(sel) / len(sel), rel=1e-12)
+    assert_route(tg, q, kernel_pass, mode, decline="float accumulation order")
+
+
+def test_float_extremes_are_served_float_sums_and_zero_extremes_decline(tg, kernel_pass, request):
+    mode = request.node.callspec.params["tg"]
+    sel = [v for v in FLOATS if v is not None and 0.25 < v < 100]
+    q = "MATCH (n:T) WHERE n.f > 0.25 AND n.f < 100 RETURN count(n) AS c, min(n.f) AS mn, max(n.f) AS mx"
+    assert one(tg, q) == {"c": len(sel), "mn": min(sel), "mx": max(sel)}
+    assert_route(tg, q, kernel_pass, mode)
+
+    # A float total depends on the order rows are added in.
+    q = "MATCH (n:T) WHERE n.f > 0.25 AND n.f < 100 RETURN count(n) AS c, sum(n.f) AS s, avg(n.f) AS a"
+    row = one(tg, q)
+    assert row["c"] == len(sel) and row["s"] == sum(sel)
+    assert_route(tg, q, kernel_pass, mode, decline="float accumulation order")
+
+    # The extreme is 0.0 or -0.0 and its sign depends on which was seen first.
+    q = "MATCH (n:T) WHERE n.f >= 0.0 AND n.f < 0.4 RETURN min(n.f) AS mn, max(n.f) AS mx"
+    row = one(tg, q)
+    assert row["mn"] == 0.0 and row["mx"] == 0.0
+    assert_route(tg, q, kernel_pass, mode, decline="signed-zero extreme")
+
+
+def test_empty_selection_through_the_kernel(tg, kernel_pass, request):
+    mode = request.node.callspec.params["tg"]
+    q = (
+        "MATCH (n:T) WHERE n.i > 9223372036854775807 "
+        "RETURN count(n) AS c, sum(n.i) AS s, min(n.i) AS mn, max(n.f) AS mx, avg(n.i) AS a"
+    )
+    assert one(tg, q) == {"c": 0, "s": 0, "mn": None, "mx": None, "a": None}
+    assert_route(tg, q, kernel_pass, mode)
+
+
+def test_nan_extremes_through_the_kernel(nan_graph, kernel_pass, request):
+    mode = request.node.callspec.params["nan_graph"]
+    q = "MATCH (n:Q) RETURN count(n) AS c, min(n.f) AS mn, max(n.f) AS mx"
+    row = one(nan_graph, q)
+    assert row["c"] == 4 and row["mn"] == 1.5 and math.isnan(row["mx"])
+    assert_route(nan_graph, q, kernel_pass, mode)
+    q = "MATCH (n:Q) WHERE n.k = 2 RETURN min(n.f) AS mn, max(n.f) AS mx"
+    row = one(nan_graph, q)
+    assert math.isnan(row["mn"]) and math.isnan(row["mx"])
+    assert_route(nan_graph, q, kernel_pass, mode)
+
+
+def test_int_sum_overflow_raises_with_other_aggregates_beside_it(tg):
+    q = "MATCH (n:T) WHERE n.i > 4611686018427387903 RETURN count(n) AS c, sum(n.i) AS s"
+    with pytest.raises(kglite.CypherExecutionError, match="Integer overflow in sum"):
+        tg.cypher(q)
+
+
+@pytest.mark.parametrize("mode", ["memory", "mapped"])
+def test_multi_aggregate_scan_through_deletes_and_recreates(mode, tmp_path, kernel_pass):
+    graph = make_graph(mode, tmp_path)
+    graph.cypher("UNWIND range(1, 30) AS i CREATE (:K {id: i, x: i * 2, y: i / 4.0})")
+    q = "MATCH (n:K) WHERE n.x > 10 RETURN count(n) AS c, sum(n.x) AS s, min(n.x) AS mn, max(n.x) AS mx, max(n.y) AS my"
+    live = {i: (i * 2, i / 4.0) for i in range(1, 31)}
+
+    def check():
+        sel = [(x, y) for x, y in live.values() if x > 10]
+        assert one(graph, q) == {
+            "c": len(sel),
+            "s": sum(x for x, _ in sel),
+            "mn": min(x for x, _ in sel),
+            "mx": max(x for x, _ in sel),
+            "my": max(y for _, y in sel),
+        }
+        assert_route(graph, q, kernel_pass, mode)
+
+    check()
+    graph.cypher("MATCH (n:K) WHERE n.id >= 25 DETACH DELETE n")
+    live = {i: v for i, v in live.items() if i < 25}
+    check()
+    graph.cypher("CREATE (:K {id: 99, x: 500, y: 1.0}), (:K {id: 98, x: 11, y: 2.0})")
+    live[99], live[98] = (500, 1.0), (11, 2.0)
+    check()
+    graph.cypher("MATCH (n:K {id: 99}) DETACH DELETE n")
+    del live[99]
+    check()
