@@ -61,7 +61,7 @@ jobs:
       matrix:
         include:
           - platform: darwin-aarch64
-            runner: macos-14
+            runner: macos-15
             library: libkglite_c.dylib
           - platform: linux-x86_64
             runner: ubuntu-22.04
