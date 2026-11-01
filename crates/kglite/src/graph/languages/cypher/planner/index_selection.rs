@@ -532,7 +532,7 @@ fn extract_from_predicate(
             if let Expression::PropertyAccess { variable, property } = expr {
                 if match_vars.iter().any(|(v, _)| v == variable) {
                     let all_literals: Option<Vec<Value>> =
-                        list.iter().map(|item| folded_literal(item)).collect();
+                        list.iter().map(folded_literal).collect();
                     if let Some(values) = all_literals {
                         if reserve_exclusive(reservations, variable, property) {
                             out.in_lists
