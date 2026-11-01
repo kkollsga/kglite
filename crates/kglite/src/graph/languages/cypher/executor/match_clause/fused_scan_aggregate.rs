@@ -45,7 +45,7 @@ struct ScanPartitionCtx<'c, 'q> {
     compiled_where: Option<&'c ScanPred<'q>>,
     compiled_group: &'c [ScanExpr<'q>],
     compiled_agg: &'c [Option<ScanExpr<'q>>],
-    agg_is_distinct: &'c [bool],
+    agg_needs: &'c [AggNeed],
     needs_node: bool,
 }
 
@@ -95,26 +95,32 @@ impl<'g> CypherExecutor<'g> {
         'g: 'r,
     {
         // One reusable ResultRow for the whole partition — no per-node alloc.
+        // Only an interpreter fallback reads it, so a fully compiled scan
+        // skips the per-row String-keyed binding write.
         let mut eval_row = ResultRow::new();
-        eval_row
-            .node_bindings
-            .insert(ctx.node_var.to_string(), NodeIndex::new(0));
+        let bind_row = ctx.cost_class() != parallel::CostClass::Compiled;
+        if bind_row {
+            eval_row
+                .node_bindings
+                .insert(ctx.node_var.to_string(), NodeIndex::new(0));
+        }
+        let ungrouped = ctx.compiled_group.is_empty();
 
         let mut partial = ScanPartial::default();
         // Perf: reusable per-row scratch buffers — avoids a heap allocation per
-        // passing row for the group key and aggregate-input vectors (the inner
+        // passing row for the group key vector (the inner
         // loop's dominant cost on scan-heavy filters/aggregates).
         let mut key_values: Vec<Value> = Vec::with_capacity(ctx.compiled_group.len());
-        let mut agg_vals: Vec<Value> = Vec::with_capacity(ctx.compiled_agg.len());
 
         for (scan_count, &node_idx) in nodes.iter().enumerate() {
             interrupt.check(scan_count)?;
-            // Set the node binding for expression evaluation
-            *eval_row
-                .node_bindings
-                .get_mut(ctx.node_var)
-                .expect("invariant: node_var binding inserted upstream by pattern match") =
-                node_idx;
+            if bind_row {
+                *eval_row
+                    .node_bindings
+                    .get_mut(ctx.node_var)
+                    .expect("invariant: node_var binding inserted upstream by pattern match") =
+                    node_idx;
+            }
 
             // One view per node — the store handle and the property routes are
             // memoised by node type.
@@ -140,35 +146,45 @@ impl<'g> CypherExecutor<'g> {
                 key_values.push(expr.eval(self, runtime, node, &eval_row)?);
             }
 
-            // Evaluate all aggregate inputs for this node (reuse buffer).
-            // Errors propagate — same contract as the group keys above and the
+            // With no group keys there is exactly one group: skip the
+            // key-vector hash probe once it exists.
+            let group_idx = match (ungrouped, partial.groups.is_empty()) {
+                (true, false) => 0,
+                _ => match partial.index.get(&key_values) {
+                    Some(&group_idx) => group_idx,
+                    None => {
+                        let group_idx = partial.groups.len();
+                        partial.index.insert(key_values.clone(), group_idx);
+                        partial.groups.push((key_values.clone(), node_idx));
+                        partial
+                            .accumulators
+                            .push(InlineAccumulators::new(ctx.agg_needs));
+                        group_idx
+                    }
+                },
+            };
+            let acc = &mut partial.accumulators[group_idx];
+
+            // Aggregate inputs go straight into the accumulator. Errors
+            // propagate — same contract as the group keys above and the
             // materialized aggregation path: a null argument arrives as
             // Ok(Null) and is skipped by the accumulators; an Err is a genuine
             // error (missing parameter, overflow, …).
-            agg_vals.clear();
-            for compiled in ctx.compiled_agg {
-                agg_vals.push(match compiled {
+            for (ai, compiled) in ctx.compiled_agg.iter().enumerate() {
+                let need = ctx.agg_needs[ai];
+                match compiled {
                     // count(*) / count(<bound var>) marker — always counted.
-                    None => Value::Boolean(true),
-                    Some(expr) => expr.eval(self, runtime, node, &eval_row)?,
-                });
-            }
-
-            let group_idx = match partial.index.get(&key_values) {
-                Some(&group_idx) => group_idx,
-                None => {
-                    let group_idx = partial.groups.len();
-                    partial.index.insert(key_values.clone(), group_idx);
-                    partial.groups.push((key_values.clone(), node_idx));
-                    partial
-                        .accumulators
-                        .push(InlineAccumulators::new(ctx.agg_is_distinct));
-                    group_idx
+                    None => acc.absorb(ai, &Value::Boolean(true), need),
+                    Some(expr) => {
+                        if let Some(cell) = expr.raw_numeric_cell(runtime, node) {
+                            if acc.absorb_cell(ai, cell, need) {
+                                continue;
+                            }
+                        }
+                        let val = expr.eval(self, runtime, node, &eval_row)?;
+                        acc.absorb(ai, &val, need);
+                    }
                 }
-            };
-            let acc = &mut partial.accumulators[group_idx];
-            for (ai, val) in agg_vals.iter().enumerate() {
-                acc.absorb(ai, val, ctx.agg_is_distinct[ai]);
             }
         }
         Ok(partial)
@@ -297,9 +313,51 @@ struct InlineAccumulators {
     distinct_sets: Vec<Option<FxHashSet<Value>>>,
 }
 
+/// Which running values one aggregate reads at emission
+/// (`inline_accumulator_value`), decided once per query so `absorb` touches
+/// nothing else. The name match mirrors that function's exactly; anything it
+/// sends to the interpreter fallback keeps every field live.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AggNeed {
+    /// `count(x)` — non-null count only.
+    Count,
+    /// `sum` / `avg`: numeric count, float sum, exact integer sum.
+    Numeric,
+    Min,
+    Max,
+    /// `count(DISTINCT x)` — the value set only.
+    Distinct,
+    /// Unmodelled aggregate: update everything.
+    All,
+}
+
+impl AggNeed {
+    fn of(expr: &Expression) -> AggNeed {
+        match expr {
+            Expression::FunctionCall { name, distinct, .. } => {
+                if *distinct {
+                    return if name.eq_ignore_ascii_case("count") {
+                        AggNeed::Distinct
+                    } else {
+                        AggNeed::All
+                    };
+                }
+                match name.as_str() {
+                    "count" => AggNeed::Count,
+                    "sum" | "avg" | "mean" | "average" => AggNeed::Numeric,
+                    "min" => AggNeed::Min,
+                    "max" => AggNeed::Max,
+                    _ => AggNeed::All,
+                }
+            }
+            _ => AggNeed::All,
+        }
+    }
+}
+
 impl InlineAccumulators {
-    fn new(agg_is_distinct: &[bool]) -> Self {
-        let width = agg_is_distinct.len();
+    fn new(agg_needs: &[AggNeed]) -> Self {
+        let width = agg_needs.len();
         InlineAccumulators {
             counts: vec![0i64; width],
             numeric_counts: vec![0i64; width],
@@ -308,9 +366,9 @@ impl InlineAccumulators {
             integer_sums: vec![crate::graph::core::numeric_sum::IntegerSum::default(); width],
             mins: vec![None; width],
             maxs: vec![None; width],
-            distinct_sets: agg_is_distinct
+            distinct_sets: agg_needs
                 .iter()
-                .map(|&distinct| distinct.then(FxHashSet::default))
+                .map(|&need| (need == AggNeed::Distinct).then(FxHashSet::default))
                 .collect(),
         }
     }
@@ -378,8 +436,8 @@ impl InlineAccumulators {
     ///
     /// `count(*)` and `count(<bound var>)` arrive as a non-null `Boolean`
     /// marker, so they count without materialising a node value.
-    fn absorb(&mut self, ai: usize, val: &Value, distinct: bool) {
-        if distinct {
+    fn absorb(&mut self, ai: usize, val: &Value, need: AggNeed) {
+        if need == AggNeed::Distinct {
             // count(DISTINCT …): dedup non-null values in the per-agg set.
             if !matches!(val, Value::Null) {
                 self.distinct_sets[ai]
@@ -391,41 +449,74 @@ impl InlineAccumulators {
         if matches!(val, Value::Null) {
             return;
         }
-        self.counts[ai] += 1;
-        if let Some(f) = value_to_f64(val) {
-            self.numeric_counts[ai] += 1;
-            self.sums[ai] += f;
-            if let Value::Int64(integer) = val {
-                self.integer_sums[ai].add(*integer);
+        let all = need == AggNeed::All;
+        if all || need == AggNeed::Count {
+            self.counts[ai] += 1;
+        }
+        if all || need == AggNeed::Numeric {
+            if let Some(f) = value_to_f64(val) {
+                self.numeric_counts[ai] += 1;
+                self.sums[ai] += f;
+                if let Value::Int64(integer) = val {
+                    self.integer_sums[ai].add(*integer);
+                }
+                // UniqueId and Float64 both force a Float64 sum, as they do on
+                // the streaming path.
+                if !matches!(val, Value::Int64(_)) {
+                    self.sum_was_int[ai] = false;
+                }
             }
-            // UniqueId and Float64 both force a Float64 sum, as they do on the
-            // streaming path.
-            if !matches!(val, Value::Int64(_)) {
-                self.sum_was_int[ai] = false;
+        }
+        if all || need == AggNeed::Min {
+            let replace = match &self.mins[ai] {
+                None => true,
+                Some(cur) => {
+                    crate::graph::core::filtering::total_order(val, cur)
+                        == std::cmp::Ordering::Less
+                }
+            };
+            if replace {
+                self.mins[ai] = Some(val.clone());
             }
         }
-        // The is_none() short-circuit guarantees the unwrap can't fire, but
-        // the .expect() makes the invariant explicit if a future refactor
-        // reorders the conditions.
-        if self.mins[ai].is_none()
-            || crate::graph::core::filtering::total_order(
-                val,
-                self.mins[ai]
-                    .as_ref()
-                    .expect("invariant: is_none() short-circuited above"),
-            ) == std::cmp::Ordering::Less
-        {
-            self.mins[ai] = Some(val.clone());
+        if all || need == AggNeed::Max {
+            let replace = match &self.maxs[ai] {
+                None => true,
+                Some(cur) => {
+                    crate::graph::core::filtering::total_order(val, cur)
+                        == std::cmp::Ordering::Greater
+                }
+            };
+            if replace {
+                self.maxs[ai] = Some(val.clone());
+            }
         }
-        if self.maxs[ai].is_none()
-            || crate::graph::core::filtering::total_order(
-                val,
-                self.maxs[ai]
-                    .as_ref()
-                    .expect("invariant: is_none() short-circuited above"),
-            ) == std::cmp::Ordering::Greater
-        {
-            self.maxs[ai] = Some(val.clone());
+    }
+
+    /// [`Self::absorb`] for a present numeric cell read straight from its
+    /// column, without building a `Value`. Handles only the aggregates that
+    /// need no value (`count`, `sum`/`avg`) and reports whether it did; the
+    /// caller falls back to `absorb` otherwise, so min/max keep their one
+    /// `total_order` path.
+    #[inline]
+    fn absorb_cell(&mut self, ai: usize, cell: NumericCell, need: AggNeed) -> bool {
+        match need {
+            AggNeed::Count => self.counts[ai] += 1,
+            AggNeed::Numeric => {
+                self.numeric_counts[ai] += 1;
+                match cell {
+                    NumericCell::Int(integer) => {
+                        self.sums[ai] += integer as f64;
+                        self.integer_sums[ai].add(integer);
+                    }
+                    NumericCell::Float(f) => {
+                        self.sums[ai] += f;
+                        self.sum_was_int[ai] = false;
+                    }
+                }
+            }
+            _ => return false,
         }
+        true
     }
 }

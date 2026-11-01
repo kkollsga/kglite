@@ -41,6 +41,7 @@ use crate::graph::core::filtering::str_values_equal;
 use crate::graph::core::membership::MembershipSet;
 use crate::graph::languages::cypher::result::ResultRow;
 use crate::graph::schema::{soft_alias_fallback, DirGraph, InternedKey, SoftAliasFallback};
+use crate::graph::storage::column_store::{NumericCell, NumericCells};
 use crate::graph::storage::{ColumnStore, GraphRead, NodeView, StrField};
 use petgraph::graph::NodeIndex;
 use std::borrow::Cow;
@@ -141,6 +142,10 @@ pub(super) struct ScanRuntime<'g> {
     names: Vec<&'g str>,
     /// Parallel to `names`; valid for `current_type`.
     routes: Vec<PropRoute>,
+    /// Parallel to `routes`: the raw column of a stored property whose column
+    /// is a plain `Int64`/`Float64` one, with its slot looked up once per
+    /// type instead of hashed on every read.
+    cells: Vec<Option<NumericCells<'g>>>,
     current_type: Option<InternedKey>,
     type_str: &'g str,
     /// One column-store handle per node **type**. [`GraphRead::node_view`]
@@ -160,6 +165,7 @@ impl<'g> ScanRuntime<'g> {
         ScanRuntime {
             names: self.names.clone(),
             routes: Vec::with_capacity(self.names.len()),
+            cells: Vec::with_capacity(self.names.len()),
             current_type: None,
             type_str: "",
             store: None,
@@ -188,7 +194,7 @@ impl<'g> ScanRuntime<'g> {
             }
         };
         if self.current_type != Some(type_key) {
-            self.retarget(graph, type_key);
+            self.retarget(graph, type_key, store.map(|store| &**store));
         }
         let resolved = data
             .properties
@@ -198,12 +204,22 @@ impl<'g> ScanRuntime<'g> {
     }
 
     #[cold]
-    fn retarget(&mut self, graph: &'g DirGraph, type_key: InternedKey) {
+    fn retarget(
+        &mut self,
+        graph: &'g DirGraph,
+        type_key: InternedKey,
+        store: Option<&'g ColumnStore>,
+    ) {
         self.type_str = graph.interner.try_resolve(type_key).unwrap_or("");
         self.routes.clear();
+        self.cells.clear();
         for slot in 0..self.names.len() {
-            self.routes
-                .push(PropRoute::resolve(graph, self.type_str, self.names[slot]));
+            let route = PropRoute::resolve(graph, self.type_str, self.names[slot]);
+            self.cells.push(match (route, store) {
+                (PropRoute::Stored(key), Some(store)) => store.numeric_cells(key),
+                _ => None,
+            });
+            self.routes.push(route);
         }
         self.current_type = Some(type_key);
     }
@@ -217,6 +233,16 @@ impl<'g> ScanRuntime<'g> {
             PropRoute::Stored(key) => node?.timestamp_micros(key),
             _ => None,
         }
+    }
+
+    /// The raw numeric cell of `slot` for this row, when its column is a plain
+    /// `Int64`/`Float64` one and the cell is present. `None` means "ask
+    /// [`Self::read`]" — NULL, a non-numeric column and a non-columnar node all
+    /// land there, so the answer never differs from the owned read.
+    #[inline]
+    fn numeric_cell(&self, node: Option<NodeView<'_>>, slot: usize) -> Option<NumericCell> {
+        let (_, row_id) = node?.column_row()?;
+        self.cells.get(slot)?.as_ref()?.value(row_id)
     }
 
     #[inline]
@@ -420,6 +446,7 @@ impl<'q> ScanCompiler<'q> {
     pub(super) fn finish(self) -> ScanRuntime<'q> {
         ScanRuntime {
             routes: Vec::with_capacity(self.names.len()),
+            cells: Vec::with_capacity(self.names.len()),
             names: self.names,
             current_type: None,
             type_str: "",
@@ -624,6 +651,21 @@ impl<'q> ScanCompiler<'q> {
 impl ScanExpr<'_> {
     fn is_generic(&self) -> bool {
         matches!(self, ScanExpr::Generic(_))
+    }
+
+    /// The raw numeric cell this expression reads, when it is a bare property
+    /// of a plain numeric column; the aggregate tail takes it without building
+    /// a `Value`.
+    #[inline]
+    pub(super) fn raw_numeric_cell(
+        &self,
+        runtime: &ScanRuntime<'_>,
+        node: Option<NodeView<'_>>,
+    ) -> Option<NumericCell> {
+        match self {
+            ScanExpr::Prop(slot) => runtime.numeric_cell(node, *slot),
+            _ => None,
+        }
     }
 
     pub(super) fn eval(

@@ -11,6 +11,7 @@
 
 mod exact_values;
 mod fixed_cells;
+pub(crate) use fixed_cells::{NumericCell, NumericCells};
 mod gather;
 #[cfg(test)]
 mod null_overlay_tests;

@@ -11,6 +11,7 @@ use crate::graph::core::pattern_matching::{
 use crate::graph::core::relationship_property::edge_ref_property;
 use crate::graph::parallel::{self, ParallelInterrupt};
 use crate::graph::schema::InternedKey;
+use crate::graph::storage::column_store::NumericCell;
 use crate::graph::storage::{ColumnStore, GraphRead, NodeView};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::Direction;

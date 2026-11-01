@@ -1242,15 +1242,11 @@ impl<'a> CypherExecutor<'a> {
             .map(|&i| self.fold_constants_expr(&return_clause.items[i].expression))
             .collect();
 
-        // Which aggregates are count(DISTINCT …) — tracked per group via a value
-        // set rather than a running count.
-        let agg_is_distinct: Vec<bool> = agg_indices
+        // Which accumulator fields each aggregate reads (count(DISTINCT …)
+        // keeps a value set instead of running values).
+        let agg_needs: Vec<AggNeed> = agg_indices
             .iter()
-            .map(|&i| {
-                matches!(&return_clause.items[i].expression,
-                    Expression::FunctionCall { name, distinct: true, .. }
-                        if name.eq_ignore_ascii_case("count"))
-            })
+            .map(|&i| AggNeed::of(&return_clause.items[i].expression))
             .collect();
 
         // Pre-fold WHERE predicate once (converts In → InLiteralSet with HashSet, etc.)
@@ -1318,7 +1314,7 @@ impl<'a> CypherExecutor<'a> {
             compiled_where: compiled_where.as_ref(),
             compiled_group: &compiled_group,
             compiled_agg: &compiled_agg,
-            agg_is_distinct: &agg_is_distinct,
+            agg_needs: &agg_needs,
             needs_node,
         };
 

@@ -35,6 +35,24 @@ impl ColumnStore {
         })
     }
 
+    /// `key`'s column when it is a typed `Int64` or `Float64` column that alone
+    /// answers for a row (see [`Self::date_cells`]). The slot lookup happens
+    /// here, once, so a scan reading the same column per row never hashes the
+    /// key again.
+    pub(crate) fn numeric_cells(&self, key: InternedKey) -> Option<NumericCells<'_>> {
+        if let Some(cells) = self.fixed_cells(key, |column| match column {
+            TypedColumn::Int64 { data, nulls } => Some((data, nulls)),
+            _ => None,
+        }) {
+            return Some(NumericCells::Int(cells));
+        }
+        self.fixed_cells(key, |column| match column {
+            TypedColumn::Float64 { data, nulls } => Some((data, nulls)),
+            _ => None,
+        })
+        .map(NumericCells::Float)
+    }
+
     fn fixed_cells<T: MmapPod>(
         &self,
         key: InternedKey,
@@ -76,5 +94,30 @@ impl<T: MmapPod> FixedCells<'_, T> {
             return None;
         }
         Some(self.data.get(idx))
+    }
+}
+
+/// One present cell of a numeric column, in its stored type.
+#[derive(Clone, Copy)]
+pub(crate) enum NumericCell {
+    Int(i64),
+    Float(f64),
+}
+
+/// [`FixedCells`] over an `Int64` or a `Float64` column.
+pub(crate) enum NumericCells<'a> {
+    Int(FixedCells<'a, i64>),
+    Float(FixedCells<'a, f64>),
+}
+
+impl NumericCells<'_> {
+    /// The row's cell; `None` for NULL, a tombstone or a row past the end,
+    /// which the caller's general read then resolves.
+    #[inline]
+    pub(crate) fn value(&self, row_id: u32) -> Option<NumericCell> {
+        match self {
+            NumericCells::Int(cells) => cells.value(row_id).map(NumericCell::Int),
+            NumericCells::Float(cells) => cells.value(row_id).map(NumericCell::Float),
+        }
     }
 }
