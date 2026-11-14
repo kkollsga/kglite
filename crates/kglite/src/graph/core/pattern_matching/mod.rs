@@ -23,6 +23,11 @@ pub mod matcher;
 mod numeric_cell_test;
 pub mod parser;
 pub mod pattern;
+pub(crate) mod text_column_scan;
+#[cfg(test)]
+mod text_column_scan_cases;
+#[cfg(test)]
+mod text_column_scan_tests;
 
 pub use matcher::PatternExecutor;
 pub use parser::parse_pattern;

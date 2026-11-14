@@ -815,6 +815,8 @@ use storage_mode::recorded_storage_mode_tag;
 pub(crate) mod embedding_sections;
 mod fast_load_sidecars;
 mod index_sections;
+#[cfg(test)]
+pub(crate) use index_sections::with_floors;
 mod integrity;
 pub(crate) mod mappable;
 mod quantized_sections;

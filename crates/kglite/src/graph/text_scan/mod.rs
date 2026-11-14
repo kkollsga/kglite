@@ -16,7 +16,9 @@
 //! chunks, scoped range scans) is an optimisation that must reproduce that
 //! answer; the tests compare each against it.
 
-// No caller exists until the layer that supplies a column's arrays is built.
+// The one caller, the text column driver, has no route into a query yet, so
+// everything reachable only through it reads as dead until the Cypher layer
+// calls it.
 #![allow(dead_code)]
 
 pub(crate) mod layout;

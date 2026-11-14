@@ -263,6 +263,24 @@ impl ColumnStore {
         self.sealed_tails.iter().chain(self.tail.iter())
     }
 
+    /// The store's row ranges as separately columned parts, oldest first:
+    /// `(first row id, store)`. Part 0 is the store itself, whose columns,
+    /// schema and tombstones describe its base rows only; each tail part is an
+    /// ordinary store addressed from its own row 0. A store without a tail is
+    /// one part. For readers that walk columns directly (the text scan): a row
+    /// id `first + local` of part `store` is read at `local` in that store.
+    // Its only caller is the text column driver, which has no query route yet.
+    #[allow(dead_code)]
+    pub(crate) fn row_parts(&self) -> Vec<(u32, &ColumnStore)> {
+        let mut parts = vec![(0u32, self)];
+        let mut first = self.row_count;
+        for part in self.tail_parts() {
+            parts.push((first, &**part));
+            first += part.column_rows();
+        }
+        parts
+    }
+
     /// The tail part with index `part - 1`, mutable. Part 0 is the store's own.
     pub(super) fn part_mut(&mut self, part: u32) -> Option<&mut ColumnStore> {
         let index = part.checked_sub(1)? as usize;
