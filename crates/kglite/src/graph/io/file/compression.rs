@@ -13,31 +13,18 @@ pub(super) fn zstd_compress(data: &[u8]) -> io::Result<Vec<u8>> {
     encoder.finish()
 }
 
-thread_local! {
-    /// The `max_load_bytes` ceiling of the load running on this thread: no
-    /// single decompressed section may exceed it, since a section is held in
-    /// memory whole. The metadata-side estimate cannot bound this, because a
-    /// crafted file chooses the sizes the estimate reads.
-    static LOAD_CEILING: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
-}
-
-/// Holds [`LOAD_CEILING`] for the length of one load.
-pub(super) struct LoadCeilingGuard(Option<u64>);
-
-impl LoadCeilingGuard {
-    pub(super) fn set(ceiling: Option<u64>) -> Self {
-        LoadCeilingGuard(LOAD_CEILING.with(|cell| cell.replace(ceiling)))
-    }
-}
-
-impl Drop for LoadCeilingGuard {
-    fn drop(&mut self) {
-        LOAD_CEILING.with(|cell| cell.set(self.0));
-    }
-}
-
+/// [`zstd_decompress_within`] with no ceiling beyond the fixed section cap, for
+/// callers that are not on a load carrying `max_load_bytes`.
 pub(super) fn zstd_decompress(data: &[u8]) -> io::Result<Vec<u8>> {
-    match LOAD_CEILING.with(|cell| cell.get()) {
+    zstd_decompress_within(data, None)
+}
+
+/// Decompress `data`, refusing a result past `ceiling` (the load's
+/// `max_load_bytes`) when one is set. A section is held in memory whole, and
+/// the metadata-side estimate cannot bound it, because a crafted file chooses
+/// the sizes the estimate reads.
+pub(super) fn zstd_decompress_within(data: &[u8], ceiling: Option<u64>) -> io::Result<Vec<u8>> {
+    match ceiling {
         Some(ceiling) if ceiling < MAX_DECOMPRESSED_SECTION_BYTES => {
             zstd_decompress_limited(data, ceiling).map_err(|error| {
                 invalid_data(format!(

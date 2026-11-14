@@ -299,7 +299,7 @@ fn load_portable_column_section(
         section_meta.compressed_size,
         &column_section_key(&section_meta.type_name),
     )?;
-    let packed = zstd_decompress(compressed)?;
+    let packed = zstd_decompress_within(compressed, sections.ceiling())?;
     let expected_rows = dir_graph
         .type_indices
         .get(&section_meta.type_name)

@@ -2082,9 +2082,9 @@ fn load_portable_columnar(
             core_version, CURRENT_CORE_DATA_VERSION,
         )));
     }
-    let _ceiling = LoadCeilingGuard::set(options.max_load_bytes);
-    let (metadata, mut sections) =
+    let (metadata, sections) =
         parse_portable_metadata(buf, format_name, metadata_len, metadata_start)?;
+    let mut sections = sections.with_ceiling(options.max_load_bytes);
     if metadata.core_data_version != core_version {
         return Err(invalid_data(
             "portable header and metadata core-data versions disagree",
@@ -2241,7 +2241,8 @@ use columns::{attach_portable_column_stores, load_disk_column_stores};
 
 mod compression;
 use compression::{
-    codec_deser, codec_ser, corrupt_sidecar_error, zstd_compress, zstd_decompress, LoadCeilingGuard,
+    codec_deser, codec_ser, corrupt_sidecar_error, zstd_compress, zstd_decompress,
+    zstd_decompress_within,
 };
 pub(crate) use compression::{decode_disk_serde, encode_disk_serde};
 #[cfg(test)]

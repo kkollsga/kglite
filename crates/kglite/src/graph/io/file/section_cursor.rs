@@ -24,6 +24,9 @@ pub(super) struct SectionCursor<'a> {
     /// Ranges handed out by [`Self::take`]: the compressed payloads this load
     /// read and decoded, which a load that keeps the mapping alive then drops.
     taken: Vec<(usize, usize)>,
+    /// The load's `max_load_bytes`, which bounds each section it decompresses;
+    /// see [`zstd_decompress_within`].
+    ceiling: Option<u64>,
 }
 
 impl<'a> SectionCursor<'a> {
@@ -40,7 +43,18 @@ impl<'a> SectionCursor<'a> {
             offset,
             digests,
             taken: Vec::new(),
+            ceiling: None,
         })
+    }
+
+    /// This cursor's sections are decompressed within `ceiling`.
+    pub(super) fn with_ceiling(mut self, ceiling: Option<u64>) -> Self {
+        self.ceiling = ceiling;
+        self
+    }
+
+    pub(super) fn ceiling(&self) -> Option<u64> {
+        self.ceiling
     }
 
     /// Release the resident pages of every compressed payload [`Self::take`]

@@ -680,6 +680,7 @@ impl TopologySections {
         self,
         codec: serde_codec::CodecVersion,
         interner: &mut StringInterner,
+        ceiling: Option<u64>,
     ) -> io::Result<FrozenGraph> {
         self.meta.verify()?;
         let meta: Meta = serde_json::from_slice(self.meta.as_bytes())
@@ -710,7 +711,7 @@ impl TopologySections {
                 section.verify()?;
                 let inflated;
                 let bytes = if *compressed {
-                    inflated = zstd_decompress(section.as_bytes())?;
+                    inflated = zstd_decompress_within(section.as_bytes(), ceiling)?;
                     inflated.as_slice()
                 } else {
                     section.as_bytes()

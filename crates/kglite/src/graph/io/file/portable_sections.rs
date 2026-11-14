@@ -62,12 +62,16 @@ pub(super) fn decode_portable_topology(
         // copy of it is stepped over, unread.
         Some(raw) => {
             sections.skip(metadata.topology_compressed_size, TOPOLOGY_SECTION)?;
-            crate::graph::schema::GraphBackend::from_frozen(raw.build(codec, &mut interner)?)
+            crate::graph::schema::GraphBackend::from_frozen(raw.build(
+                codec,
+                &mut interner,
+                sections.ceiling(),
+            )?)
         }
         None => {
             let topology_compressed =
                 sections.take(metadata.topology_compressed_size, TOPOLOGY_SECTION)?;
-            let topology_raw = zstd_decompress(topology_compressed)?;
+            let topology_raw = zstd_decompress_within(topology_compressed, sections.ceiling())?;
             let _guard = SerdeDeserializeGuard::new(&mut interner);
             codec_deser(codec, &topology_raw, topology_raw.capacity() as u64)?
         }
@@ -127,7 +131,7 @@ pub(super) fn load_portable_optional_sections(
             return Err(invalid_data(EMBED_FORMAT_BREAK_MSG));
         }
         let compressed = sections.take(plan.embeddings, EMBEDDINGS_SECTION)?;
-        let raw = zstd_decompress(compressed)?;
+        let raw = zstd_decompress_within(compressed, sections.ceiling())?;
         let mut embeddings: HashMap<(String, String), EmbeddingStore> =
             codec_deser(codec, &raw, raw.capacity() as u64)?;
         // The decompressed payload is as large as the stores it decoded into.
@@ -141,7 +145,7 @@ pub(super) fn load_portable_optional_sections(
     }
     if plan.edge_embeddings > 0 {
         let compressed = sections.take(plan.edge_embeddings, EDGE_EMBEDDINGS_SECTION)?;
-        let raw = zstd_decompress(compressed)?;
+        let raw = zstd_decompress_within(compressed, sections.ceiling())?;
         let decoded: std::collections::BTreeMap<
             crate::graph::edge_embeddings::EdgeEmbeddingKey,
             crate::graph::edge_embeddings::PersistedEdgeEmbeddingStore,
@@ -166,12 +170,12 @@ pub(super) fn load_portable_optional_sections(
     }
     if plan.timeseries > 0 {
         let compressed = sections.take(plan.timeseries, TIMESERIES_SECTION)?;
-        let raw = zstd_decompress(compressed)?;
+        let raw = zstd_decompress_within(compressed, sections.ceiling())?;
         dir_graph.timeseries_store = codec_deser(codec, &raw, raw.capacity() as u64)?;
     }
     if plan.secondary_labels > 0 {
         let compressed = sections.take(plan.secondary_labels, SECONDARY_LABELS_SECTION)?;
-        let raw = zstd_decompress(compressed)?;
+        let raw = zstd_decompress_within(compressed, sections.ceiling())?;
         decode_secondary_label_index(&raw, dir_graph)?;
     }
     if plan.vector_index > 0 {
@@ -182,7 +186,7 @@ pub(super) fn load_portable_optional_sections(
         // index this build does not recognise is still skipped silently (see
         // `decode_vector_indexes`).
         let compressed = sections.take(plan.vector_index, VECTOR_INDEX_SECTION)?;
-        if let Ok(raw) = zstd_decompress(compressed) {
+        if let Ok(raw) = zstd_decompress_within(compressed, sections.ceiling()) {
             decode_vector_indexes(&raw, dir_graph);
         }
     }
@@ -192,7 +196,7 @@ pub(super) fn load_portable_optional_sections(
         // an unreadable one is skipped silently (see
         // `decode_text_indexes_after_normalization`).
         let compressed = sections.take(plan.text_index, TEXT_INDEX_SECTION)?;
-        if let Ok(raw) = zstd_decompress(compressed) {
+        if let Ok(raw) = zstd_decompress_within(compressed, sections.ceiling()) {
             decode_text_indexes_after_normalization(&raw, dir_graph, normalization_effects);
         }
     }
@@ -200,7 +204,7 @@ pub(super) fn load_portable_optional_sections(
         // Same split again; runs after the relationship stores above are
         // installed with their norms, which attaching an index needs.
         let compressed = sections.take(plan.edge_vector_index, EDGE_VECTOR_INDEX_SECTION)?;
-        if let Ok(raw) = zstd_decompress(compressed) {
+        if let Ok(raw) = zstd_decompress_within(compressed, sections.ceiling()) {
             edge_vector_persistence::decode_edge_vector_indexes(&raw, dir_graph);
         }
     }
@@ -208,7 +212,7 @@ pub(super) fn load_portable_optional_sections(
         // The node text section's split: framing failures propagate, an
         // unreadable payload is skipped.
         let compressed = sections.take(plan.edge_text_index, EDGE_TEXT_INDEX_SECTION)?;
-        if let Ok(raw) = zstd_decompress(compressed) {
+        if let Ok(raw) = zstd_decompress_within(compressed, sections.ceiling()) {
             decode_edge_text_indexes(&raw, dir_graph, normalization_effects);
         }
     }

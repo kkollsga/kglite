@@ -856,18 +856,59 @@ mod atomic_save_tests {
             zstd_decompress(&compressed).unwrap().len(),
             32 * 1024 * 1024
         );
-        {
-            let _ceiling = LoadCeilingGuard::set(Some(8 * 1024 * 1024));
-            let error = zstd_decompress(&compressed).unwrap_err();
-            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-            assert!(error.to_string().contains("max_load_bytes"), "{error}");
-            let fits = zstd_compress(&vec![0u8; 1024 * 1024]).unwrap();
-            assert_eq!(zstd_decompress(&fits).unwrap().len(), 1024 * 1024);
-        }
+        let error = zstd_decompress_within(&compressed, Some(8 * 1024 * 1024)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("max_load_bytes"), "{error}");
+        let fits = zstd_compress(&vec![0u8; 1024 * 1024]).unwrap();
         assert_eq!(
-            zstd_decompress(&compressed).unwrap().len(),
+            zstd_decompress_within(&fits, Some(8 * 1024 * 1024))
+                .unwrap()
+                .len(),
+            1024 * 1024
+        );
+        assert_eq!(
+            zstd_decompress_within(&compressed, None).unwrap().len(),
             32 * 1024 * 1024,
-            "the guard restores"
+            "no ceiling, no refusal"
+        );
+    }
+
+    /// A graph of a few very long, repetitive strings: the metadata estimate
+    /// (rows and compressed sizes) is tiny while the column section decodes to
+    /// megabytes. The refusal can then only come from the decode, so a ceiling
+    /// dropped anywhere on the load path shows here.
+    #[test]
+    fn a_load_ceiling_reaches_the_section_decompression() {
+        let mut g = DirGraph::new();
+        let rows: Vec<Vec<Value>> = (1..=3)
+            .map(|i| vec![Value::Int64(i), Value::String("x".repeat(4 << 20))])
+            .collect();
+        let df =
+            DataFrame::from_cypher_rows(vec!["id".to_string(), "body".to_string()], rows).unwrap();
+        crate::graph::mutation::maintain::add_nodes(
+            &mut g,
+            df,
+            "Doc".to_string(),
+            "id".to_string(),
+            Some("body".to_string()),
+            None,
+        )
+        .unwrap();
+        let graph = ready_for_save(g);
+        let mut bytes = Vec::new();
+        write_kgl_to_layout(&graph, &mut bytes, None, mappable::SaveLayout::Compact).unwrap();
+        let metadata: FileMetadata = serde_json::from_slice(metadata_json(&bytes)).unwrap();
+        let ceiling = load_estimate::estimate_from_metadata(&metadata).projected_peak_bytes(false);
+        assert!(ceiling < 4 << 20, "the estimate must understate: {ceiling}");
+        let options = LoadOptions::new().with_max_load_bytes(Some(ceiling));
+        let error = load_kgl_bytes_with(&bytes, &options)
+            .err()
+            .expect("the decode must pass the ceiling");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert!(error.to_string().contains("max_load_bytes"), "{error}");
+        assert!(
+            load_kgl_bytes(&bytes).is_ok(),
+            "the same file loads without a ceiling"
         );
     }
 
