@@ -422,8 +422,8 @@ fn group_rows_by_target<'a>(
         TargetRouting::Single(_) => unreachable!("returned above"),
         TargetRouting::Column { column, .. } => {
             let col_idx = chunk.col_index(column).expect("caller checked presence");
-            for r in 0..chunk.row_count() {
-                let value = &chunk.rows[r][col_idx];
+            for (r, row) in chunk.rows.iter().enumerate().take(chunk.row_count()) {
+                let value = &row[col_idx];
                 match types.iter().position(|t| t == value) {
                     Some(i) => groups[i].push(r),
                     None => *unroutable.entry(value.clone()).or_default() += 1,

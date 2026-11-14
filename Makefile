@@ -375,7 +375,7 @@ check-toolchain-fresh:
 	  echo "toolchain: local rustc $$LOCAL matches CI's held $$PIN"; exit 0; fi; \
 	CHECK=$$(rustup check 2>/dev/null | grep '^stable'); \
 	if [ -z "$$CHECK" ]; then echo "toolchain: rustup check unavailable; local rustc $$LOCAL (warning only)"; \
-	elif echo "$$CHECK" | grep -q 'Update available'; then \
+	elif echo "$$CHECK" | grep -qi 'update available'; then \
 	  echo "toolchain: $$CHECK — run \`rustup update stable\` (CI uses the latest)"; exit 1; \
 	else echo "toolchain: local rustc $$LOCAL is the latest stable"; fi
 
