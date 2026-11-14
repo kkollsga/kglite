@@ -991,7 +991,8 @@ def load(
             mapped section's CRC32 on its first use (search, save, write); a
             section copied to the heap is always checked at load. ``"eager"``
             checks every mapped section at load, which reads the whole file
-            once.
+            once, and refuses a file whose mapped topology, indexes or column
+            flags are structurally inconsistent.
 
     Returns:
         A new KnowledgeGraph with the loaded data.
@@ -5663,7 +5664,9 @@ class KnowledgeGraph:
         A mapped load checks an embedding store when it is first searched and a
         string column at load; this checks every mapped section now, and also
         reports a source file whose modification time changed since it was
-        mapped. A graph with no mapped sections returns an empty, passing
+        mapped, and checks the structure of a mapped topology (edge endpoints,
+        adjacency, type mask, peer counts, id indexes) and of column flag
+        bytes. A graph with no mapped sections returns an empty, passing
         report.
 
         Returns:

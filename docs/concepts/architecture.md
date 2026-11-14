@@ -145,10 +145,10 @@ parsing.
 
 ## Persistence
 
-`.kgl` snapshots use the current RGF v8 container:
+`.kgl` snapshots use the RGF v9 container above the size floors and the RGF v8 container otherwise. This is the v8 layout; a v9 file adds a data region of raw sections after it, described in [The `.kgl` container](../rust/kgl-container.md):
 
 ```text
-magic RGF\x08
+magic RGF\x08 (RGF\x09 for a v9 file)
 codec tag (Postcard)
 core-data version (u32 LE)
 JSON metadata length + metadata + header/metadata CRC32 (v8)
@@ -160,7 +160,7 @@ optional rebuildable index sections: node and relationship HNSW, BM25 text
 ```
 
 Container, codec, and core-data versions are separate. The current reader
-accepts RGF v8, v7, v6 and v5. RGF v4/bincode and older containers are detected
+accepts RGF v9, v8, v7, v6 and v5. RGF v4/bincode and older containers are detected
 and refused with a 0.13.4 conversion or rebuild message. Within v5, metadata
 additions use serde defaults where compatible, while incompatible embedded
 cache layouts are detected explicitly. Index definitions are stored so

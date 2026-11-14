@@ -148,6 +148,7 @@ session
 implementing-a-binding
 building-on-kglite
 c-abi
+kgl-container
 api-reference
 boundary-principle
 structural-sharing

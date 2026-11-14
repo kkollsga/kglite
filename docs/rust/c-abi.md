@@ -205,12 +205,14 @@ The header exposes:
 - read and mutation batches, including atomic edge batches;
 - JSON result metadata/rows, memory statistics, and embedder binding.
 
-`.kgl` is the cross-binding handoff format. The current writer emits RGF
-v8/Postcard and the current reader accepts v8, v7, v6 and v5. RGF v4/bincode and
+`.kgl` is the cross-binding handoff format. The current writer emits RGF v9
+above the size floors and RGF v8 otherwise, both with the Postcard codec. The
+current reader accepts v9, v8, v7, v6 and v5. RGF v4/bincode and
 older containers are rejected with a clear migration/rebuild message; convert
-them with kglite 0.13.4 before crossing the C boundary. A v8 file cannot be
-read by kglite 0.19.x or earlier, so a prebuilt consumer must be rebuilt
-against this engine before it is handed one.
+them with kglite 0.13.4 before crossing the C boundary. A v9 file cannot be
+read by kglite 0.20.x or earlier, and a v8 file not by 0.19.x or earlier, so a
+prebuilt consumer must be rebuilt against this engine before it is handed one.
+The container's compatibility rules are on [The `.kgl` container](kgl-container.md).
 
 ## Sessions and transactions
 

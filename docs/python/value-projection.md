@@ -343,7 +343,7 @@ under the appended discriminant 16.
 Compatibility is explicit:
 
 - The container and codec tags make compatibility explicit. The current reader
-  selects v8, v7, v6 or v5/Postcard by header and refuses v4/bincode or older
+  selects v9, v8, v7, v6 or v5/Postcard by header and refuses v4/bincode or older
   containers rather than guessing.
 - Kglite 0.13.4 is the conversion bridge for pre-0.14 artifacts.
 

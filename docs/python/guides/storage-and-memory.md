@@ -228,6 +228,20 @@ The first write to a mapped embedding store, or to a mapped column, copies that 
 - Big-endian hosts.
 - `KGLITE_MMAP=0` forces the heap everywhere.
 
+## Opening a file you did not build
+
+Open a file from an untrusted source with both of these:
+
+```python
+g = kglite.load("received.kgl", storage="mapped", verify="eager", max_load_mb=2048)
+```
+
+- `verify="eager"` checks every section's checksum at load. It also refuses structural inconsistency, such as an edge that names a node outside the graph. A default load checks less and can return wrong rows from a file whose checksums are valid.
+- `max_load_mb` refuses a load estimated to peak above the ceiling. It also stops any one section from decompressing past the ceiling.
+- `g.verify_integrity()` runs the same checks on a graph that is already open.
+
+The mapping assumes nobody rewrites or truncates the file in place. KGLite's own saves replace the file atomically. See [The `.kgl` container](../../rust/kgl-container.md) for what a default open guarantees.
+
 ## Storage modes
 
 `mapped` storage and `disk` storage are separate addons for graphs that do not fit on the heap; see {doc}`/python/core-concepts`. Disk graphs do not carry quantized embedding copies and write no v9 sections. Quantization is described in {doc}`embedding-quantization`.
