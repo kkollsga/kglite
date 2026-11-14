@@ -530,3 +530,19 @@ fn a_heap_tail_is_scanned_beside_its_base() {
         CommitOutcome::Committed { .. }
     ));
 }
+
+#[test]
+fn a_shuffled_scope_with_repeats_gives_the_same_nodes_in_scope_order() {
+    let mut g = docs();
+    exec(&mut g, "MATCH (n:A {id: 3}) SET n.a = 'a longer alpha replacement'");
+    let all = g.type_indices.get("A").unwrap().to_vec();
+    let scope: Vec<NodeIndex> = [4usize, 0, 2, 4, 1, 0, 3, 2, 2]
+        .iter()
+        .map(|&i| all[i])
+        .collect();
+    let got = drive(&g, "A", "a", &lit("alpha"), Some(&scope), TextMode::Exists)
+        .unwrap()
+        .unwrap();
+    assert_eq!(got, TextAnswer::Nodes(vec![all[0], all[2]]));
+    assert_exact(&g, "A", "a", Some(&scope), &[], "shuffled scope");
+}

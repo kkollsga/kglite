@@ -463,6 +463,8 @@ fn sorted_unique_rows(pairs: &[ScopePair]) -> Vec<u32> {
 
 /// The scope's rows inside `part`, as the part's local row ids.
 fn local_rows(rows: &[u32], part: &Part<'_>) -> Vec<u32> {
+    // The partition points and the overlay's binary search assume order.
+    debug_assert!(rows.windows(2).all(|w| w[0] < w[1]));
     let lo = rows.partition_point(|&r| r < part.first_row);
     let hi = rows.partition_point(|&r| r < part.first_row + part.rows);
     rows[lo..hi].iter().map(|r| r - part.first_row).collect()
