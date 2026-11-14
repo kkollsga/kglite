@@ -1704,6 +1704,16 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (d:Doc) RETURN d.id AS id, text_bm25(d, 'body', 'alpha gamma') AS s ORDER BY s DESC LIMIT 3",
     ),
     *_text_context_pair(
+        "fulltext_call_trailing_limit",
+        "CALL db.index.fulltext.queryNodes('Doc.body', 'alpha gamma') YIELD node, score "
+        "RETURN node.id AS id, round(score, 9) AS s LIMIT 3",
+    ),
+    *_text_context_pair(
+        "fulltext_call_trailing_skip_limit",
+        "CALL db.index.fulltext.queryNodes('Doc.body', 'alpha gamma') YIELD node, score "
+        "RETURN node.id AS id, round(score, 9) AS s SKIP 2 LIMIT 3",
+    ),
+    *_text_context_pair(
         "text_bm25_rows",
         "MATCH (d:Doc) RETURN d.id AS id, text_bm25(d, 'body', 'beta delta') AS s",
     ),

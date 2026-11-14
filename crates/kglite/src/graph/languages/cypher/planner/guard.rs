@@ -71,6 +71,10 @@ pub(super) const GUARD_SAFE_PASSES: &[(&str, &str)] = &[
         "order only; guards on every element make the order irrelevant to the answer",
     ),
     (
+        "push_limit_into_fulltext_call",
+        "an early-stop cap on the procedure's own ranking, which still applies its valid-time filter",
+    ),
+    (
         "push_distinct_into_match",
         "a dedup hint inside the matcher, applied to rows it accepted",
     ),

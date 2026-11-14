@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 mod annotations;
 mod call_hoist;
+mod fulltext_limit;
 mod guard;
 #[cfg(test)]
 pub(crate) use guard::is_safe as guard_is_safe;
@@ -216,6 +217,7 @@ pub const PASSES: &[(&str, PassFn)] = &[
     ("reorder_match_patterns", pass_reorder_match_patterns),
     ("push_limit_into_match", pass_push_limit_into_match),
     ("push_limit_into_aggregate", pass_push_limit_into_aggregate),
+    ("push_limit_into_fulltext_call", fulltext_limit::pass),
     ("push_distinct_into_match", pass_push_distinct_into_match),
     ("fuse_anchored_edge_count", pass_fuse_anchored_edge_count),
     ("fuse_count_short_circuits", pass_fuse_count_short_circuits),

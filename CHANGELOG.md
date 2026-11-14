@@ -11,6 +11,7 @@ before upgrading.
 
 ### Changed
 
+- **`CALL db.index.fulltext.queryNodes(...) YIELD ... RETURN ... [SKIP s] LIMIT n` ranks only the rows it returns.** The trailing literal limit now reaches the procedure as its `limit` option; the rows, scores and order are unchanged. On a 60k-document graph (release, minimum of 25 runs): a common term matching 39k documents 16.8 ms to 0.79 ms, and a three-term query matching all 60k documents 29.6 ms to 3.4 ms. A query with `WHERE`, `ORDER BY` or `DISTINCT` after the call still ranks every match.
 - **A mapped open no longer walks the edge array of a file without edge properties.** Release build, minimum of 7 warm loads: 2.8M edges 12.7 ms to 2.0 ms and 40 MB to 7.5 MB resident after load; 12M edges 68.5 ms to 22.5 ms and 193 MB to 55 MB.
 
 ### Fixed

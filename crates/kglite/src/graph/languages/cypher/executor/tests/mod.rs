@@ -77,6 +77,7 @@ mod edge_vector_score;
 mod edge_vector_top_k;
 mod exists_witness;
 mod expressions;
+mod fulltext_limit;
 mod fused_aggregate_labels;
 mod identifiers;
 mod inline_map_expressions;
