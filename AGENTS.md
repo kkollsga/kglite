@@ -754,16 +754,21 @@ positioning, who or what a change targets, internal motivations or
 security-sensitive details. When a change touches something delicate, use the
 plainest accurate phrasing ("generalize benchmark wording", "tidy CHANGELOG").
 
-**Branch pushes need no approval; a push to `main` does.** Push a feature
+**Branch pushes and merges need no approval; a release does.** Push a feature
 branch whenever the plan reaches a checkpoint, always as
 `make gate-push > <log> 2>&1 && git push`; it starts CI on the draft PR and
-publishes nothing. A push to `main` starts the release pipeline and the docs
-rebuild, so it needs the user's explicit go-ahead in the same turn ("go ahead
-and push now", "push it"), except inside `/release` and the CI fix-and-push loop
-below. That approval is one-shot: it covers exactly one `git push` to `main` and
-does not carry over to a later commit or amend, and earlier phrasing ("ship
-it", "looks good", "we're ready") does not carry over either. When in doubt,
-prepare the commit, stop and ask.
+publishes nothing. Merging a finished PR to `main` is standard procedure once
+its full CI is green on the exact head being merged: fast-forward, push, and
+report. The merge carries no version bump, so the release workflow finds the
+version already published and publishes nothing; read its conclusion after the
+push instead of assuming that. What stays restricted is the release itself (a
+version bump, `/release`, anything that publishes to a registry): it happens
+only on the user's explicit request for that release. A push to `main` that is
+not such a merge (unreviewed work, a red or unfinished branch, a direct commit
+that skips the PR) still needs the user's explicit go-ahead in the same turn.
+The user set this on 2026-11-14 ("Merge is standard procedure. Release is
+what's restricted."), after a green PR sat unmerged waiting for a separate
+approval while `main` was red on its next run.
 
 **How this interacts with `/release`.** Invoking the skill authorizes the whole
 release run, including the `main` push that fires the publish, with no separate
@@ -775,14 +780,13 @@ on 2026-07-31: it fired after the decision was made, added nothing, and left
 the eleven `release-preflight` preconditions, refreshed constants, artifact-set
 verification, surgical staging and a clean ff-merge.
 
-**Exception — the CI fix-and-push loop.** When an approved push triggers a CI
+**Exception — the CI fix-and-push loop.** When a push to `main` triggers a CI
 failure that you diagnose as a bug in shipped code or test/CI infrastructure
 (not a feature gap), you may push `fix(...)` / `ci(...)` commits for that loop
 without re-asking, until CI on the latest push is fully green. The exception
 ends when:
 
-- all required workflows on the latest push reach `conclusion: success` (the
-  next push needs fresh approval);
+- all required workflows on the latest push reach `conclusion: success`;
 - a fix would change the release shape (new version, new feature, scope
   expansion, removed functionality) — ask instead;
 - about 3 fix-and-push iterations pass without progress — surface it and ask;
