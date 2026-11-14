@@ -5165,9 +5165,6 @@ pub fn kglite::api::DirGraph::maybe_spill_columns(&mut self)
 pub fn kglite::api::DirGraph::new() -> Self
 pub fn kglite::api::DirGraph::node_view(&self, petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::api::NodeView<'_>>
 pub fn kglite::api::DirGraph::rebuild_columns_to_heap(&mut self)
-pub fn kglite::api::DirGraph::rebuild_type_indices(&mut self)
-pub fn kglite::api::DirGraph::rebuild_type_indices_and_schemas(&mut self)
-pub fn kglite::api::DirGraph::rebuild_type_schemas(&mut self)
 pub fn kglite::api::DirGraph::register_connection_type(&mut self, alloc::string::String)
 pub fn kglite::api::DirGraph::reindex(&mut self)
 pub fn kglite::api::DirGraph::remove_node_property(&mut self, petgraph::graph_impl::NodeIndex, &str) -> core::option::Option<kglite::datatypes::values::Value>
@@ -5308,6 +5305,10 @@ impl kglite::api::DirGraph
 pub fn kglite::api::DirGraph::insert_node_routed(&mut self, kglite::datatypes::values::Value, kglite::datatypes::values::Value, &str, std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>) -> petgraph::graph_impl::NodeIndex
 impl kglite::api::DirGraph
 pub fn kglite::api::DirGraph::judge_transaction_end(&mut self) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, kglite::error::KgError>
+impl kglite::api::DirGraph
+pub fn kglite::api::DirGraph::rebuild_type_indices(&mut self)
+pub fn kglite::api::DirGraph::rebuild_type_indices_and_schemas(&mut self)
+pub fn kglite::api::DirGraph::rebuild_type_schemas(&mut self)
 impl kglite::api::DirGraph
 pub fn kglite::api::DirGraph::reject_owned_index_drop(&self, &str, &[alloc::string::String]) -> core::result::Result<(), alloc::string::String>
 impl kglite::api::DirGraph
