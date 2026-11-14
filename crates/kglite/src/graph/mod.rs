@@ -52,6 +52,7 @@ pub mod tables;
 #[cfg(test)]
 mod test_scope;
 pub mod text_indexes;
+pub(crate) mod text_scan;
 pub mod value_type;
 pub mod vector_buf;
 pub mod wal;

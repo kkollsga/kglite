@@ -951,6 +951,10 @@
       "classification": "dead-code"
     },
     {
+      "identity": "crates/kglite/src/graph/text_scan/mod.rs::module::dead_code",
+      "classification": "dead-code"
+    },
+    {
       "identity": "crates/kglite/src/graph/value_byte_identity_tests.rs::enum:Shipped::dead_code",
       "classification": "dead-code"
     },
