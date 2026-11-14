@@ -178,6 +178,9 @@ pub struct FrozenGraph {
     /// The key a record with an out-of-range type ordinal reads as; see
     /// [`Self::type_key`]. Unset (the default key) for a graph built outside a load.
     invalid_type: InternedKey,
+    /// The verdict of the one walk over the endpoint array; see
+    /// [`Self::validated_endpoints`].
+    endpoints_checked: OnceLock<Result<(), String>>,
 }
 
 impl FrozenGraph {
@@ -185,9 +188,11 @@ impl FrozenGraph {
     ///
     /// Every check is O(1) or one sequential pass over the offset and bitset
     /// arrays (never over the edge arrays); the node records were validated
-    /// when `parts.nodes` was built. The endpoint array is not walked here, so
-    /// a CRC-valid file whose adjacency arrays or endpoint records are
-    /// inconsistent can yield wrong answers or absent rows. The readers still
+    /// when `parts.nodes` was built. The endpoint array is not walked here:
+    /// [`Self::validated_endpoints`] checks it once, at the first whole-array
+    /// consumer that can refuse (a save). Until then a CRC-valid file whose
+    /// adjacency arrays or endpoint records are inconsistent can yield wrong
+    /// answers or absent rows. The readers still
     /// never panic (an unknown type ordinal reads as [`Self::invalid_type`],
     /// an unknown template as an empty one) and never index out of bounds
     /// (array reads use `get`).
@@ -296,6 +301,7 @@ impl FrozenGraph {
             type_index: RwLock::new(HashMap::new()),
             slot_mirror: OnceLock::new(),
             invalid_type: InternedKey::default(),
+            endpoints_checked: OnceLock::new(),
         })
     }
 
@@ -303,6 +309,47 @@ impl FrozenGraph {
     /// so a consumer that resolves the key of any edge gets a name, not a panic.
     pub(crate) fn set_invalid_type(&mut self, key: InternedKey) {
         self.invalid_type = key;
+    }
+
+    /// Check every live endpoint record once: both ends inside the node array
+    /// and a type ordinal inside the type list (vacant records skipped), and
+    /// as many live records as `edge_count` says. The verdict is kept, so only
+    /// the first caller pays the O(E) walk. A whole-array consumer that can
+    /// refuse (a save) calls this; per-edge readers stay unchecked and total.
+    pub(crate) fn validated_endpoints(&self) -> io::Result<()> {
+        self.endpoints_checked
+            .get_or_init(|| self.check_endpoints())
+            .clone()
+            .map_err(invalid)
+    }
+
+    fn check_endpoints(&self) -> Result<(), String> {
+        let (bound, ntypes) = (self.node_bound_len(), self.types.len());
+        let mut live = 0usize;
+        for (slot, ep) in self.endpoints.as_slice().iter().enumerate() {
+            if ep.src == VACANT {
+                continue;
+            }
+            live += 1;
+            if ep.src as usize >= bound || ep.dst as usize >= bound {
+                return Err(format!(
+                    "edge slot {slot} has an endpoint beyond the {bound} node slots"
+                ));
+            }
+            if ep.ty as usize >= ntypes {
+                return Err(format!(
+                    "edge slot {slot} has connection type ordinal {} but the file lists {ntypes}",
+                    ep.ty
+                ));
+            }
+        }
+        if live != self.edge_count {
+            return Err(format!(
+                "{live} edge records are live but the file counts {}",
+                self.edge_count
+            ));
+        }
+        Ok(())
     }
 
     /// The free lists petgraph's deserializer builds from this graph's vacancy
@@ -772,6 +819,7 @@ impl Clone for FrozenGraph {
             type_index: RwLock::new(HashMap::new()),
             slot_mirror: OnceLock::new(),
             invalid_type: self.invalid_type,
+            endpoints_checked: self.endpoints_checked.clone(),
         }
     }
 }
@@ -1054,6 +1102,50 @@ mod tests {
             listed.edge_data(0, 7).connection_type,
             InternedKey::from_str("E1"),
             "an ordinal past the list borrows the first template"
+        );
+    }
+
+    #[test]
+    fn the_endpoint_walk_refuses_each_inconsistency_once() {
+        let mutate = |change: &dyn Fn(&mut Vec<FrozenEndpoint>)| {
+            let mut p = parts();
+            let mut eps = p.endpoints.as_slice().to_vec();
+            change(&mut eps);
+            p.endpoints = FrozenArray::from_vec(eps);
+            FrozenGraph::new(p).unwrap().validated_endpoints()
+        };
+        FrozenGraph::new(parts())
+            .unwrap()
+            .validated_endpoints()
+            .expect("honest");
+        let vacant = FrozenEndpoint {
+            src: VACANT,
+            dst: 0,
+            ty: 0,
+            pad: 0,
+        };
+        for (what, message) in [
+            ("src past the nodes", mutate(&|e| e[0].src = 3)),
+            ("dst past the nodes", mutate(&|e| e[1].dst = 4)),
+            ("ordinal past the types", mutate(&|e| e[1].ty = 2)),
+            ("a live record counted vacant", mutate(&|e| e[1] = vacant)),
+        ] {
+            let error = message.expect_err(what);
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{what}");
+        }
+        let graph = FrozenGraph::new(typeless_parts()).unwrap();
+        let first = graph
+            .validated_endpoints()
+            .expect_err("live records, no types");
+        let again = graph
+            .validated_endpoints()
+            .expect_err("the verdict is kept");
+        assert_eq!(first.to_string(), again.to_string());
+        assert!(first.to_string().contains("ordinal"), "{first}");
+        let clone = graph.clone();
+        assert!(
+            clone.endpoints_checked.get().is_some(),
+            "a clone keeps the verdict"
         );
     }
 }

@@ -751,12 +751,29 @@ impl TopologySections {
             ));
         }
         let mut frozen = FrozenGraph::new(parts)?;
+        check_node_types(&frozen, &meta.node_types)?;
         let invalid_type = interner
             .try_get_or_intern(INVALID_TYPE)
             .map_err(|e| invalid_data(e.to_string()))?;
         frozen.set_invalid_type(invalid_type);
         Ok(frozen)
     }
+}
+
+/// Every live node record must name one of the `listed` types, which the load
+/// has interned. A record naming another would read as a node type with no
+/// name, so it is refused here whether or not the file's member lists are
+/// served. One pass over records the load has already read.
+fn check_node_types(frozen: &FrozenGraph, listed: &[String]) -> io::Result<()> {
+    let known: FxHashSet<InternedKey> = listed.iter().map(|n| InternedKey::from_str(n)).collect();
+    for (slot, node) in frozen.node_slice().iter().enumerate() {
+        if frozen.node_is_alive(slot) && !known.contains(&node.node_type) {
+            return Err(invalid_data(format!(
+                "topology node record {slot} names a type that the topology metadata does not list"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Check that a frozen graph's node records agree with the type indexes the

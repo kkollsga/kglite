@@ -44,12 +44,17 @@ fn compress_some(payload: Option<Vec<u8>>) -> io::Result<Option<Vec<u8>>> {
 
 /// The topology of a frozen graph, or of an overlay over one, is copied out
 /// of sections that were not checksummed at load; refuse to write a damaged
-/// one into a new file. Each section is checked once per mapping (the result
-/// is cached on the section), so a repeat call is free. The serializer repeats
+/// one, or one whose endpoint records are inconsistent, into a new file. Each
+/// check runs once per mapping (the result is cached), so a repeat call is free. The serializer repeats
 /// the check but can only report a generic error.
 fn verify_topology_sources(graph: &DirGraph) -> io::Result<()> {
     match graph.graph.frozen_base() {
-        Some(frozen) => frozen.verify_sections(),
+        Some(frozen) => {
+            frozen.verify_sections()?;
+            // A save writes every edge; an endpoint the file got wrong would
+            // otherwise be dropped from the copy without a word.
+            frozen.validated_endpoints()
+        }
         None => Ok(()),
     }
 }

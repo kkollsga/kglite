@@ -67,8 +67,17 @@ fn resaved(path: &std::path::Path) -> std::path::PathBuf {
     path.with_file_name("resaved.kgl")
 }
 
+/// The save of a graph opened from a file whose endpoint records are wrong:
+/// refused, naming the record, and no file is left behind.
+fn assert_save_refused(graph: &Arc<DirGraph>, path: &std::path::Path, needle: &str) {
+    let error = exercise(graph, &resaved(path)).expect_err("the save must refuse");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+    assert!(error.to_string().contains(needle), "{error}");
+    assert!(!resaved(path).exists(), "a refused save leaves no file");
+}
+
 #[test]
-fn an_edge_type_ordinal_past_the_type_list_reads_as_the_invalid_type() {
+fn an_edge_type_ordinal_past_the_type_list_opens_and_the_save_refuses() {
     let (_tmp, path) = saved_topo();
     let honest = rows(&open_ok(&path), BY_TYPE);
     patch_first_live_edge(&path, |r| r[8..10].copy_from_slice(&9999u16.to_le_bytes()));
@@ -76,11 +85,11 @@ fn an_edge_type_ordinal_past_the_type_list_reads_as_the_invalid_type() {
     let crafted = rows(&graph, BY_TYPE);
     assert_ne!(crafted, honest);
     assert!(crafted.contains("<invalid connection type>"), "{crafted}");
-    exercise(&graph, &resaved(&path)).expect("A1 leaves the save to succeed");
+    assert_save_refused(&graph, &path, "connection type ordinal 9999");
 }
 
 #[test]
-fn an_edge_endpoint_past_the_node_array_does_not_change_a_query() {
+fn an_edge_endpoint_past_the_node_array_opens_and_the_save_refuses() {
     for at in [0, 4] {
         let (_tmp, path) = saved_topo();
         let honest = rows(&open_ok(&path), BY_TYPE);
@@ -89,32 +98,62 @@ fn an_edge_endpoint_past_the_node_array_does_not_change_a_query() {
         });
         let graph = open_ok(&path);
         assert_eq!(rows(&graph, BY_TYPE), honest, "field at byte {at}");
-        exercise(&graph, &resaved(&path)).expect("A1 leaves the save to succeed");
+        assert_save_refused(&graph, &path, "beyond the");
     }
 }
 
 #[test]
-fn a_renamed_node_type_in_the_metadata_loads_and_the_save_fails() {
+fn a_renamed_node_type_in_the_metadata_is_refused_at_open() {
     let (_tmp, path) = saved_topo();
     patch_meta(&path, "\"A\"", "\"Z\"");
-    let graph = open_ok(&path);
-    let error = exercise(&graph, &resaved(&path)).expect_err("a record of an unnamed type");
+    let error = load_mapped(&path).err().expect("the open must refuse");
     assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+    assert!(error.to_string().contains("does not list"), "{error}");
 }
 
 #[test]
-fn a_record_naming_an_unlisted_type_without_member_lists_is_refused_at_open() {
-    let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("g.kgl");
-    // Topology sections (edges at the floor) but no node member lists
-    // (nodes below theirs): the load rebuilds the type index from the records.
-    with_floors(1_000_000, 10, || {
-        save(topo_graph(), &path, SaveLayout::Auto)
-    });
-    patch_section(&path, "topo:nodes", |bytes| {
-        let live = bytes.chunks_exact_mut(32).nth(100).unwrap();
-        live[..8].copy_from_slice(&0xDEAD_BEEF_1234_5678u64.to_le_bytes());
+fn a_record_naming_an_unlisted_type_is_refused_at_open_with_or_without_member_lists() {
+    for member_lists in [true, false] {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("g.kgl");
+        // Without member lists (nodes below their floor) the load rebuilds the
+        // type index from the records, which is the path that used to panic.
+        let node_floor = if member_lists { 10 } else { 1_000_000 };
+        with_floors(node_floor, 10, || {
+            save(topo_graph(), &path, SaveLayout::Auto)
+        });
+        patch_section(&path, "topo:nodes", |bytes| {
+            let live = bytes.chunks_exact_mut(32).nth(100).unwrap();
+            live[..8].copy_from_slice(&0xDEAD_BEEF_1234_5678u64.to_le_bytes());
+        });
+        let error = load_mapped(&path).err().expect("the open must refuse");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert!(error.to_string().contains("does not list"), "{error}");
+    }
+}
+
+#[test]
+fn an_honest_file_with_deleted_nodes_and_edges_loads_and_saves() {
+    let (_tmp, path) = saved_topo();
+    let graph = open_ok(&path);
+    assert!(graph.graph.node_bound() > graph.graph.node_count());
+    assert!(graph.graph.edge_bound() > graph.graph.edge_count());
+    exercise(&graph, &resaved(&path)).expect("vacant slots are skipped, not refused");
+    let again = load_mapped(&resaved(&path)).unwrap();
+    assert_eq!(rows(&again, BY_TYPE), rows(&graph, BY_TYPE));
+}
+
+#[test]
+fn a_file_that_lists_no_connection_types_but_counts_edges_is_refused_at_open() {
+    let (_tmp, path) = saved_topo();
+    patch_section(&path, "topo:meta", |bytes| {
+        let mut meta: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        meta["conn_types"] = serde_json::json!([]);
+        let mut text = serde_json::to_vec(&meta).unwrap();
+        text.resize(bytes.len(), b' ');
+        bytes.copy_from_slice(&text);
     });
     let error = load_mapped(&path).err().expect("the open must refuse");
     assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+    assert!(error.to_string().contains("connection types"), "{error}");
 }
