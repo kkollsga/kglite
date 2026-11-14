@@ -1323,7 +1323,7 @@ The scan serves a positive top-level `WHERE` conjunct of these forms, when the q
 - `text_match(n.p, q [, options])`;
 - `n.p CONTAINS 'literal'`;
 - `toLower(n.p) CONTAINS 'literal'` (the literal must already be lowercase);
-- `n.p =~ 'regex'` and `text_match_regex(n.p, 'regex')`, when the regex has a literal of at least three plain characters that every match must contain.
+- `n.p =~ 'regex'` and `text_match_regex(n.p, 'regex')`, when the regex has a literal of at least three plain characters that every match must contain. A leading or trailing `.*` and a bare `(?s)`, `(?m)`, `(?U)` or `(?R)` flag group keep the literal, so `n.p =~ '(?s).*word.*'` and `n.p =~ '(?s).*\\bword\\b.*'` are served. `(?i)` and `(?x)` are not: write `text_match(n.p, 'word', {ignore_case: true})` for a case-insensitive search.
 
 It applies when `n` is the first node of its pattern with exactly one label, no other property filter on `n`, and no index serving the pattern. It does not apply to `OPTIONAL MATCH`, to a predicate under `NOT`, `OR` or `XOR`, to `STARTS WITH`, `ENDS WITH` or `toUpper`, or to a node reached by expanding from a bound node.
 

@@ -159,6 +159,8 @@ pub(super) fn build(index: bool) -> Synth {
         keywords[k] = (k as i64, degree);
     }
     graph.upsert_connection_type_metadata("HAS_KEYWORD", "Decision", "Keyword", HashMap::new());
+    // Properties become column rows, as in a loaded or bulk-built graph.
+    graph.enable_columnar();
     if index {
         build_text_index(&mut graph, "Decision", "body", None).expect("build");
     }
@@ -245,12 +247,28 @@ fn synth_scope() {
             ("q".to_string(), Value::String(term.clone())),
             ("ql".to_string(), Value::String(term.to_lowercase())),
         ]);
-        let cells: [(&str, String); 12] = [
+        let cells: [(&str, String); 16] = [
             ("pattern only", format!("{anchor} RETURN count(d) AS c")),
             ("pattern+collect", format!("{anchor} WITH collect(d) AS ds RETURN size(ds) AS c")),
             (
                 "db.text.search within",
                 format!("{anchor} WITH collect(d) AS ds CALL db.text.search({{type: 'Decision', property: 'body', query: $q, within: ds}}) YIELD node RETURN count(DISTINCT node) AS c"),
+            ),
+            (
+                "collect then UNWIND (clone cost)",
+                format!("{anchor} WITH collect(d) AS ds UNWIND ds AS x RETURN count(x) AS c"),
+            ),
+            (
+                "collect, call with limit 0",
+                format!("{anchor} WITH collect(d) AS ds CALL db.text.search({{type: 'Decision', property: 'body', query: $q, within: ds, `limit`: 0}}) YIELD node RETURN count(*) AS c"),
+            ),
+            (
+                "collect, search count rows",
+                format!("{anchor} WITH collect(d) AS ds CALL db.text.search({{type: 'Decision', property: 'body', query: $q, within: ds}}) YIELD node RETURN count(*) AS c"),
+            ),
+            (
+                "collect, search with snippets",
+                format!("{anchor} WITH collect(d) AS ds CALL db.text.search({{type: 'Decision', property: 'body', query: $q, within: ds}}) YIELD node, offset, char_offset, snippet RETURN count(*) AS c, sum(offset + char_offset + size(snippet)) AS t"),
             ),
             (
                 "db.text.rank within top10",
@@ -280,6 +298,64 @@ fn synth_scope() {
                 "  {name:32} min {min:9.3} ms rows {n:5} route {:?}",
                 route.first()
             );
+        }
+    }
+}
+
+fn rows_without(
+    graph: &DirGraph,
+    query: &str,
+    params: &HashMap<String, Value>,
+    disabled: &std::collections::HashSet<String>,
+) -> Vec<Vec<Value>> {
+    let mut options = ExecuteOptions::eager(params);
+    options.disabled_passes = Some(disabled);
+    execute_read(graph, query, &options)
+        .unwrap_or_else(|e| panic!("{query}: {e}"))
+        .result
+        .rows
+}
+
+#[test]
+#[ignore = "release-mode timing"]
+fn synth_regex() {
+    use std::collections::HashSet;
+    let s = build(false);
+    println!("load {}", uptime());
+    let off: HashSet<String> = HashSet::from(["text_column_scan".to_string()]);
+    let none: HashSet<String> = HashSet::new();
+    let count = "MATCH (d:Decision) WHERE d.body =~ $p RETURN count(d) AS c";
+    let search = "MATCH (d:Decision) WHERE text_match_regex(d.body, $p) RETURN count(d) AS c";
+    for (tier, term) in [("rare", &s.rare), ("mid", &s.mid)] {
+        // `(?:)` after the last `.*` keeps the anchored automaton: the control.
+        let cells = [
+            (
+                format!("(?s).*{term}.*"),
+                format!("(?s).*{term}.*(?:)"),
+                term.to_string(),
+            ),
+            (
+                format!("(?s).*\\b{term}\\b.*"),
+                format!("(?s).*\\b{term}\\b.*(?:)"),
+                format!("\\b{term}\\b"),
+            ),
+        ];
+        for (rewritten, anchored, search_pattern) in cells {
+            let mut line = format!("{tier} {rewritten:28}");
+            for (label, query, pattern, disabled) in [
+                ("=~ anchored, pass off", count, &anchored, &off),
+                ("=~ rewritten, pass off", count, &rewritten, &off),
+                ("=~ rewritten, pass on", count, &rewritten, &none),
+                ("text_match_regex", search, &search_pattern, &off),
+            ] {
+                let p = HashMap::from([("p".to_string(), Value::String(pattern.clone()))]);
+                let n = rows_without(&s.graph, query, &p, disabled)[0][0].clone();
+                let (min, _) = time_ms(|| {
+                    std::hint::black_box(rows_without(&s.graph, query, &p, disabled));
+                });
+                line.push_str(&format!(" | {label} {min:.2} ms (n={n:?})"));
+            }
+            println!("{line}");
         }
     }
 }

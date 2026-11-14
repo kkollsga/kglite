@@ -135,6 +135,89 @@ fn anchor(pattern: &str) -> String {
     format!("^(?:{pattern})$")
 }
 
+/// `(?s).*X.*` read as a full match is "the subject contains an `X`", so
+/// `is_match` of the unanchored `(?s)X` answers it, and that search can start
+/// from a literal prefilter where the anchored automaton must read every byte
+/// (measured 5x to 60x slower on newline-bearing text with `\b`).
+///
+/// Equivalent, not approximate: `^(?:(?s).*X.*)$` matches a subject exactly
+/// when some span of it matches `X` in the context of the whole subject, which
+/// is what a search for `X` finds; assertions (`^`, `$`, `\b`) see the same
+/// subject in both. `(?s)` leads, so both `.*` take any character, newline
+/// included. Returns `None` (keep the anchored form) unless every step of that
+/// argument holds on the text: the leading flag group is exactly `(?s)`; the
+/// outer `.*` pair are real wildcards (the final `.` is not escaped); `X` is
+/// non-empty, starts with no quantifier, ends at depth 0 outside any class or
+/// escape, has no top-level `|` (an alternation would split the pattern, not
+/// `X`) and sets no flag (`(?-s)` would change what the trailing `.*` takes;
+/// only `(?:` groups are allowed).
+///
+/// The result is a search program: callers of [`with_compiled_anchored`] may
+/// ask only `is_match`.
+fn containment_search_form(pattern: &str) -> Option<String> {
+    let body = pattern.strip_prefix("(?s)")?;
+    let inner = body.strip_prefix(".*")?.strip_suffix(".*")?;
+    let dot = body.len() - 2;
+    let backslashes = body.as_bytes()[..dot]
+        .iter()
+        .rev()
+        .take_while(|b| **b == b'\\')
+        .count();
+    if backslashes % 2 == 1
+        || inner.is_empty()
+        || inner.starts_with(['*', '+', '?', '{'])
+        || !is_plain_sequence(inner)
+    {
+        return None;
+    }
+    Some(format!("(?s){inner}"))
+}
+
+/// Whether `text` is a balanced regex fragment with no top-level `|`, no
+/// group other than `(?:` and no nested class, ending outside any class or
+/// escape.
+fn is_plain_sequence(text: &str) -> bool {
+    let (mut depth, mut class, mut escaped) = (0usize, false, false);
+    // A `]` right after `[` or `[^` is a member, not the end of the class.
+    let mut class_head = false;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if escaped {
+            escaped = false;
+        } else if class {
+            if c == '\\' {
+                escaped = true;
+            } else if c == '[' {
+                // A nested class or `[:name:]` makes the class's end ambiguous.
+                return false;
+            } else if class_head && c == '^' {
+                continue;
+            } else if c == ']' && !class_head {
+                class = false;
+            }
+            class_head = false;
+        } else {
+            match c {
+                '\\' => escaped = true,
+                '[' => (class, class_head) = (true, true),
+                '(' => {
+                    depth += 1;
+                    if chars.next_if_eq(&'?').is_some() && chars.peek() != Some(&':') {
+                        return false;
+                    }
+                }
+                ')' => match depth.checked_sub(1) {
+                    Some(d) => depth = d,
+                    None => return false,
+                },
+                '|' if depth == 0 => return false,
+                _ => {}
+            }
+        }
+    }
+    depth == 0 && !class && !escaped
+}
+
 /// Compile the anchored form of `pattern`, reporting a failure against the
 /// pattern the *user* wrote.
 ///
@@ -144,6 +227,11 @@ fn anchor(pattern: &str) -> String {
 /// re-compile below supplies the message; if the wrapper alone is at fault
 /// (reachable only through the compiled-size limit), its own error stands.
 fn compile_anchored(pattern: &str) -> Result<Arc<Regex>, regex::Error> {
+    if let Some(search) = containment_search_form(pattern) {
+        if let Ok(compiled) = CACHE.get_or_compile(&search) {
+            return Ok(compiled);
+        }
+    }
     CACHE.get_or_compile(&anchor(pattern)).map_err(|wrapped| {
         RegexBuilder::new(pattern)
             .size_limit(REGEX_SIZE_LIMIT)
@@ -220,6 +308,9 @@ fn ensure_local(pattern: &str) -> Result<(), regex::Error> {
 /// cache line the front cache was added to escape, just moved. Removing the
 /// clone took the parallel `=~` scan from 0.48x to parity-and-above; keeping
 /// it capped the win at half of sequential.
+///
+/// `f` may ask only `is_match`: a `(?s).*X.*` pattern is served by an
+/// unanchored search program (see [`containment_search_form`]).
 ///
 /// `f` must not re-enter this module: the thread-local is borrowed across the
 /// call, so a nested lookup would panic. Every caller passes a leaf operation
@@ -330,6 +421,102 @@ mod tests {
     fn anchored_keeps_inline_flags() {
         assert!(with_compiled_anchored("(?i)active", |re| re.is_match("ACTIVE")).unwrap());
         assert!(!with_compiled_anchored("active", |re| re.is_match("ACTIVE")).unwrap());
+    }
+
+    /// Every pattern the containment rewrite accepts answers as the anchored
+    /// form does, on subjects with and without newlines at the edges.
+    #[test]
+    fn containment_rewrite_matches_the_anchored_form() {
+        let patterns = [
+            "(?s).*alpha.*",
+            "(?s).*\\balpha\\b.*",
+            "(?s).*^alpha.*",
+            "(?s).*alpha$.*",
+            "(?s).*al(?:ph|f)a.*",
+            "(?s).*(al|be)ta.*",
+            "(?s).*a.c.*",
+            "(?s).*al+pha.*",
+            "(?s).*[a-b]lpha.*",
+            "(?s).*alpha\\n.*",
+            "(?s).*(?:alpha)?.*",
+            "(?s).*a*.*",
+            "(?s).*\\bαλφα\\b.*",
+        ];
+        let subjects = [
+            "",
+            "alpha",
+            "xalphax",
+            "alpha beta",
+            "x alpha y",
+            "beta\nalpha\ngamma",
+            "\nalpha",
+            "alpha\n",
+            "alphabet",
+            "ALPHA",
+            "al\npha",
+            "alphaalpha",
+            "betta",
+            "blpha",
+            "a.c",
+            "abc",
+            "allpha",
+            "αλφα",
+            "x αλφα y",
+            "αλφαβ",
+        ];
+        for pattern in patterns {
+            let search = containment_search_form(pattern)
+                .unwrap_or_else(|| panic!("{pattern} should be rewritten"));
+            let rewritten = Regex::new(&search).unwrap();
+            let anchored = Regex::new(&anchor(pattern)).unwrap();
+            for subject in subjects {
+                assert_eq!(
+                    rewritten.is_match(subject),
+                    anchored.is_match(subject),
+                    "{pattern:?} on {subject:?}"
+                );
+                assert_eq!(
+                    with_compiled_anchored(pattern, |re| re.is_match(subject)).unwrap(),
+                    anchored.is_match(subject),
+                    "{pattern:?} on {subject:?} through the cache"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn containment_rewrite_declines_what_it_cannot_prove() {
+        for pattern in [
+            // not the (?s) form: `.` excludes a newline without it
+            ".*alpha.*",
+            "(?m).*alpha.*",
+            "(?is).*alpha.*",
+            "(?s:.*alpha.*)",
+            "(?s)alpha.*",
+            "(?s).*alpha",
+            "(?s).*",
+            "(?s).*.*",
+            // the trailing `.*` is an escaped dot repeated, not a wildcard
+            "(?s).*alpha\\.*",
+            // alternation splits the pattern; a flag group changes the tail
+            "(?s).*alpha|beta.*",
+            "(?s).*a(?-s)b.*",
+            "(?s).*(?i)alpha.*",
+            "(?s).*(?P<n>a)b.*",
+            // a quantifier cannot start `X`; groups and classes must close
+            "(?s).*?alpha.*",
+            "(?s).*+alpha.*",
+            "(?s).*(alpha.*",
+            "(?s).*alpha).*",
+            "(?s).*[alpha.*",
+        ] {
+            assert_eq!(containment_search_form(pattern), None, "{pattern:?}");
+        }
+        assert_eq!(
+            containment_search_form("(?s).*alpha\\\\.*").as_deref(),
+            Some("(?s)alpha\\\\"),
+            "an escaped backslash leaves the final dot a wildcard"
+        );
     }
 
     #[test]

@@ -123,12 +123,7 @@ pub(crate) fn document_text(value: &Value) -> Option<Cow<'_, str>> {
 
 /// Whether `text` holds a non-empty match.
 pub(crate) fn has_match(matcher: &Matcher, text: &str) -> bool {
-    let mut found = false;
-    matcher.find_in_record(text.as_bytes(), &mut |_, _| {
-        found = true;
-        false
-    });
-    found
+    matcher.is_match_in_record(text.as_bytes())
 }
 
 /// The matched bytes `offset..offset + len` of `text` with up to `context`

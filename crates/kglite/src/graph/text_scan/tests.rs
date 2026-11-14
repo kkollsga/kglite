@@ -454,6 +454,54 @@ fn a_prefilter_never_changes_the_answer() {
     }
 }
 
+/// The existence test every per-row caller uses agrees with the oracle's
+/// "some match" on every pattern kind, behind and without a prefilter.
+#[test]
+fn is_match_in_record_agrees_with_the_oracle() {
+    let mut records: Vec<String> = straddle_corpus(91, 300).into_iter().flatten().collect();
+    records.extend(
+        [
+            "alpha",
+            "xxalphaxx\nbeta",
+            "ALPHA",
+            "ål\nfa alpha",
+            "beta",
+            "",
+        ]
+        .map(String::from),
+    );
+    let patterns = [
+        lit("alpha", false),
+        lit("ALPHA", true),
+        phrase("alpha beta", false),
+        phrase("alpha beta", true),
+        rx("(?s).*alpha.*", false),
+        rx("(?s).*\\balpha\\b.*", false),
+        rx("(?i)alpha", false),
+        rx("al[a-z]+a", false),
+        rx("^alpha", false),
+        rx("ab+", false),
+        rx("aab\\s*a", false),
+    ];
+    for pattern in &patterns {
+        let Ok(matcher) = Matcher::compile(pattern) else {
+            continue;
+        };
+        for record in &records {
+            let mut oracle = false;
+            matcher.find_in_record(record.as_bytes(), &mut |_, _| {
+                oracle = true;
+                false
+            });
+            assert_eq!(
+                matcher.is_match_in_record(record.as_bytes()),
+                oracle,
+                "{pattern:?} on {record:?}"
+            );
+        }
+    }
+}
+
 // ── controls ────────────────────────────────────────────────────────────
 
 fn big_layout() -> OwnedLayout {

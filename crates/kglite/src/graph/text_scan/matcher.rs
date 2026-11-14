@@ -267,6 +267,21 @@ impl Matcher {
         }
     }
 
+    /// Whether `record` holds a (non-empty) match: [`Self::find_in_record`]
+    /// asked only for existence. Every pattern here is refused when it can
+    /// match the empty string, so "some match" and "some non-empty match"
+    /// agree, and the required-literal prefilter may stand in front of the
+    /// automaton.
+    pub(crate) fn is_match_in_record(&self, record: &[u8]) -> bool {
+        match &self.engine {
+            Engine::Memmem(f) => f.find(record).is_some(),
+            Engine::CiLiteral(re) => re.is_match(record),
+            Engine::Regex { re, prefilter } => {
+                prefilter.as_ref().is_none_or(|f| f.find(record).is_some()) && re.is_match(record)
+            }
+        }
+    }
+
     /// The matches in `text` as `(offset, length)`: the overlay matcher for a
     /// value that is not in the layout.
     pub(crate) fn overlay_hits(&self, text: &str) -> Vec<(usize, usize)> {
