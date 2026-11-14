@@ -2467,6 +2467,8 @@ mod load_release_tests;
 #[cfg(test)]
 mod mapped_report_tests;
 #[cfg(test)]
+mod mutation_tests;
+#[cfg(test)]
 mod rebase_policy_tests;
 #[cfg(test)]
 mod rollback_overlay_tests;

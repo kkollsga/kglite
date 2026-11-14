@@ -97,3 +97,29 @@ jobs:
       - name: Run bounded Bolt stress
         run: .venv/bin/pytest tests/test_bolt_server_concurrency.py -m bolt_stress -v --tb=short
 
+
+  scheduled-reader-mutation:
+    name: Scheduled mapped-reader mutation run
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_STABLE }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: scheduled-reader-mutation
+          workspaces: ". -> target"
+      # Debug profile on purpose: the reader's debug assertions are part of what
+      # the run looks for. The seed is random per run and printed first, so a
+      # red run is replayable with KGLITE_MUTATION_SEED and KGLITE_MUTATION_ONLY
+      # (the failure message prints the exact command).
+      - name: Mutate mapped files for twenty minutes
+        env:
+          KGLITE_MUTATION_ITERS: "100000000"
+          KGLITE_MUTATION_SECONDS: "1200"
+        run: |
+          export KGLITE_MUTATION_SEED=$(od -An -N6 -tu8 /dev/urandom | tr -d ' ')
+          echo "mutation seed: $KGLITE_MUTATION_SEED"
+          cargo test -p kglite --lib -- mutation_long --ignored --nocapture

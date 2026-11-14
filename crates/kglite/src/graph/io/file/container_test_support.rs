@@ -60,6 +60,17 @@ pub(crate) fn as_legacy_container(bytes: &[u8], magic: [u8; 4]) -> Vec<u8> {
 /// with a stale CRC cannot. The data region keeps its position: a longer CRC
 /// number in the metadata takes bytes from the padding in front of it.
 pub(crate) fn patch_section(path: &std::path::Path, name: &str, patch: impl FnOnce(&mut [u8])) {
+    try_patch_section(path, name, patch).unwrap_or_else(|why| panic!("{why}"));
+}
+
+/// [`patch_section`] that reports, instead of panicking, a patch the container
+/// cannot absorb: the re-sealed metadata would not fit in front of the data
+/// region. The file is left untouched in that case.
+pub(crate) fn try_patch_section(
+    path: &std::path::Path,
+    name: &str,
+    patch: impl FnOnce(&mut [u8]),
+) -> Result<(), &'static str> {
     let mut bytes = std::fs::read(path).unwrap();
     let metadata = super::metadata_head::read_metadata_head(&bytes, "test").unwrap();
     let json_end = 13 + declared_len(&bytes) - 4;
@@ -87,11 +98,9 @@ pub(crate) fn patch_section(path: &std::path::Path, name: &str, patch: impl FnOn
     let new_end = 13 + updated.len() + 4;
     let sealed = sealed_metadata(&bytes[..9], &updated);
     let moved = super::data_region_base(&metadata, new_end, bytes.len() as u64);
-    assert_eq!(
-        moved.ok(),
-        Some(base),
-        "no padding to absorb the CRC digits"
-    );
+    if moved.ok() != Some(base) {
+        return Err("no padding to absorb the CRC digits");
+    }
     let mut out = sealed;
     out.extend_from_slice(&bytes[json_end + 4..base as usize - grow]);
     // A shorter number leaves the gap as padding.
@@ -99,6 +108,7 @@ pub(crate) fn patch_section(path: &std::path::Path, name: &str, patch: impl FnOn
     out.extend_from_slice(&bytes[base as usize..]);
     assert_eq!(out.len(), bytes.len());
     std::fs::write(path, out).unwrap();
+    Ok(())
 }
 
 /// The bytes of the mappable section `name` of the v9 file at `path`.
