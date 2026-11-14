@@ -100,6 +100,7 @@ pub(super) fn drive(
             scope,
             mode,
             interrupt: Interrupt::default(),
+            serial: false,
         },
     )
 }

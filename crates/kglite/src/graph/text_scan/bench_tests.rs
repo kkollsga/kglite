@@ -56,11 +56,11 @@ fn load() -> Option<(Column, serde_json::Value)> {
     ))
 }
 
-fn word(terms: &serde_json::Value, key: &str) -> String {
+pub(crate) fn word(terms: &serde_json::Value, key: &str) -> String {
     terms[key][0].as_str().expect("a term").to_string()
 }
 
-fn uptime() -> String {
+pub(crate) fn uptime() -> String {
     let out = std::process::Command::new("uptime")
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
@@ -74,7 +74,7 @@ fn uptime() -> String {
 
 /// `(min ms, median ms)` of `f`, after 3 warm-ups: 15 runs, or 100 when the
 /// first run is under a millisecond.
-fn time_ms(mut f: impl FnMut()) -> (f64, f64) {
+pub(crate) fn time_ms(mut f: impl FnMut()) -> (f64, f64) {
     for _ in 0..3 {
         f();
     }
@@ -95,7 +95,7 @@ fn time_ms(mut f: impl FnMut()) -> (f64, f64) {
 
 /// The machine-drift meter: a fixed memmem of an absent needle over a fixed
 /// 100 MB synthetic buffer.
-fn control(buffer: &[u8]) -> f64 {
+pub(crate) fn control(buffer: &[u8]) -> f64 {
     let finder = memchr::memmem::Finder::new(b"\x01\x02\x03\x04\x05\x06\x07\x08");
     time_ms(|| {
         std::hint::black_box(finder.find(std::hint::black_box(buffer)));
@@ -103,7 +103,7 @@ fn control(buffer: &[u8]) -> f64 {
     .0
 }
 
-fn control_buffer() -> Vec<u8> {
+pub(crate) fn control_buffer() -> Vec<u8> {
     let mut x = 0x9E37_79B9_7F4A_7C15u64;
     (0..100_000_000)
         .map(|_| {
@@ -230,7 +230,7 @@ fn cells(terms: &serde_json::Value) -> Vec<Cell> {
     out
 }
 
-fn word_at(terms: &serde_json::Value, key: &str, i: usize) -> String {
+pub(crate) fn word_at(terms: &serde_json::Value, key: &str, i: usize) -> String {
     terms[key][i].as_str().expect("a term").to_string()
 }
 

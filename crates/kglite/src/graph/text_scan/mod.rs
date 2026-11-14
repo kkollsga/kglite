@@ -30,4 +30,4 @@ pub(crate) mod scope;
 mod tests;
 
 #[cfg(test)]
-mod bench_tests;
+pub(crate) mod bench_tests;

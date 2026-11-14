@@ -265,6 +265,7 @@ fn an_empty_scope_does_not_touch_the_column() {
                 scope,
                 mode: TextMode::Exists,
                 interrupt: expired,
+                serial: false,
             },
         )
     };
@@ -316,6 +317,7 @@ fn an_interrupt_reaches_the_engines_timeout_and_cancel_wording() {
                 scope: None,
                 mode: TextMode::Count,
                 interrupt,
+                serial: false,
             },
         )
         .unwrap_err();

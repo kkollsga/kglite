@@ -176,6 +176,8 @@ pub(crate) struct TextScanRequest<'a> {
     pub(crate) scope: Option<&'a [NodeIndex]>,
     pub(crate) mode: TextMode,
     pub(crate) interrupt: Interrupt,
+    /// Scan on the calling thread whatever the column's size.
+    pub(crate) serial: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -495,6 +497,7 @@ fn scan_part(
         interrupt: Some(&poll),
         record_filter: Some(&keep),
         scope,
+        parallel_min_bytes: req.serial.then_some(u64::MAX),
         ..ScanOptions::default()
     };
     let scanned = scan(&layout, req.matcher, &opts)?;

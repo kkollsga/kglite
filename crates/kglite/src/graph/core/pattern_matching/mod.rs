@@ -25,6 +25,8 @@ pub mod parser;
 pub mod pattern;
 pub(crate) mod text_column_scan;
 #[cfg(test)]
+mod text_column_scan_bench;
+#[cfg(test)]
 mod text_column_scan_cases;
 #[cfg(test)]
 mod text_column_scan_tests;
