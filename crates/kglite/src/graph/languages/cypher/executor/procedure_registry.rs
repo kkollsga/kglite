@@ -449,6 +449,12 @@ pub(super) const PROCEDURES: &[ProcedureSpec] = &[
         columns: &["node", "score", "search_method", "type"],
     },
     ProcedureSpec {
+        name: "db.text.rank",
+        aliases: &[],
+        description: "BM25 ranking over a graph-selected scope, no index needed. CALL db.text.rank({type, property, query, within: [nodes], limit}); the scope is the corpus (its own N, average length and document frequencies), one row per document sharing a term with the query, score descending then node order",
+        columns: &["node", "score"],
+    },
+    ProcedureSpec {
         name: "db.text.search",
         aliases: &[],
         description: "Exact text matches with positions, no index needed. CALL db.text.search({type, property, query, mode: 'literal'|'phrase'|'regex', ignore_case, within: [nodes], limit, snippet_chars}); one row per occurrence in node order, offset and length in bytes",

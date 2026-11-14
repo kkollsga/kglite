@@ -393,6 +393,23 @@ graph.cypher("""
 """)
 ```
 
+### Rank inside a scope
+
+`db.text.rank` ranks a set of nodes you select with a pattern, with no index. The scope is the corpus: the document count, average length and document frequencies all come from its nodes.
+
+```python
+rows = graph.cypher("""
+    MATCH (d:Doc {id: 1})-[:CONTAINS]->(p:Para)
+    WITH collect(p) AS ps
+    CALL db.text.rank({type: 'Para', property: 'text', query: 'rollback segment',
+                       within: ps, `limit`: 5})
+    YIELD node, score
+    RETURN node.id AS id, score
+""")
+```
+
+The scores equal those of a text index built over only those paragraphs. They are not comparable with `text_bm25()` scores, whose statistics come from the whole index. Each call tokenizes the scope's text, so it suits scopes. Rank a whole large type with `text_bm25()` and an index.
+
 Choose by what you need back:
 
 | You need | Use |
@@ -400,6 +417,7 @@ Choose by what you need back:
 | Rows that contain an exact string, phrase or pattern | `text_match()` |
 | The occurrences with offsets and snippets | `db.text.search` |
 | The best rows for a loose query, ranked | `text_bm25()` |
+| The best rows among a chosen part of the graph, no index | `db.text.rank` |
 
 ## Relationship text indexes
 

@@ -80,7 +80,7 @@ pub struct TextIndexReport {
 
 /// Strings stay borrowed; lists contribute one document with a separator
 /// between non-null members. Reject the entire list if any member is not text.
-fn document_text<'a>(
+pub(crate) fn document_text<'a>(
     view: &NodeView<'a>,
     node_type: &'a str,
     field: &str,

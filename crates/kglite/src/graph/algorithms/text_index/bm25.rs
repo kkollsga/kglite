@@ -43,6 +43,35 @@ pub fn idf(total_docs: usize, df: usize) -> f64 {
     (1.0 + (n - df + 0.5) / (df + 0.5)).ln()
 }
 
+/// The BM25 score of one document from explicit statistics: `avgdl` is the
+/// corpus's mean token count, `doc_len` the document's, and `terms` yields
+/// each query term's `(idf, tf)` in the order the query names them. A term
+/// with `tf == 0` adds nothing. The one place the formula lives: the heap
+/// index scores through it with its own statistics, and a ranking over a
+/// graph-selected scope scores through it with the scope's, so the two cannot
+/// drift in value or in summation order.
+pub(crate) fn score_document(
+    avgdl: f64,
+    doc_len: u32,
+    terms: impl Iterator<Item = (f64, u32)>,
+) -> f64 {
+    if avgdl <= 0.0 {
+        // Every document is empty, so every term frequency is 0 anyway;
+        // returning early keeps the 0/0 out of the normalization.
+        return 0.0;
+    }
+    let norm = K1 * (1.0 - B + B * (f64::from(doc_len) / avgdl));
+    let mut total = 0.0;
+    for (idf, tf) in terms {
+        if tf == 0 {
+            continue;
+        }
+        let tf = f64::from(tf);
+        total += idf * (tf * (K1 + 1.0)) / (tf + norm);
+    }
+    total
+}
+
 /// One resolved query term: its interned id and the IDF it carries for the
 /// corpus state the query was prepared against.
 #[derive(Clone, Copy, Debug)]
@@ -227,22 +256,14 @@ impl TextIndex {
             return 0.0;
         };
         let avgdl = query.avgdl.unwrap_or_else(|| self.avgdl());
-        if avgdl <= 0.0 {
-            // Every document is empty, so every term frequency is 0 anyway;
-            // returning early keeps the 0/0 out of the normalization.
-            return 0.0;
-        }
-        let norm = K1 * (1.0 - B + B * (f64::from(doc.len) / avgdl));
-        let mut total = 0.0;
-        for term in &query.terms {
-            let tf = doc.term_freq(term.term);
-            if tf == 0 {
-                continue;
-            }
-            let tf = f64::from(tf);
-            total += term.idf * (tf * (K1 + 1.0)) / (tf + norm);
-        }
-        total
+        score_document(
+            avgdl,
+            doc.len,
+            query
+                .terms
+                .iter()
+                .map(|term| (term.idf, doc.term_freq(term.term))),
+        )
     }
 
     /// The `k` best-scoring documents, best first.

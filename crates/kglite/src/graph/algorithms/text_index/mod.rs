@@ -65,6 +65,7 @@
 pub mod analyzer;
 mod batch;
 pub mod bm25;
+pub(crate) mod scoped;
 
 pub use analyzer::analyze;
 

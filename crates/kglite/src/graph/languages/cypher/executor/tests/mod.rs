@@ -48,6 +48,8 @@
 //! - [`valid_time_guard`] — the valid-time guard in the matcher: one matcher
 //!   constructor, and each guard site's answer under `FOR VALID_TIME AS OF`
 //! - [`text_bm25`] — the BM25 scalar's null/zero split, freshness policy, cache
+//! - [`text_rank`] — `db.text.rank`: a scope ranked as its own corpus, against
+//!   a heap index built over the scope alone
 //! - [`vector_score`] — the embedding-store scalar's per-query argument cache
 //! - [`vectors`] — `dot` / `cosine` / `norm` over list-valued data
 //! - [`with_scope`] — `WITH` as a scope barrier: which bindings a projection
@@ -104,6 +106,7 @@ mod temporal_time;
 mod temporal_zoned;
 mod temporal_zones;
 mod text_bm25;
+mod text_rank;
 mod valid_time_guard;
 mod value_kind_matrix;
 mod vector_score;

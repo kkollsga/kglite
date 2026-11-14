@@ -62,6 +62,9 @@ use crate::graph::text_scan::layout::BorrowedLayout;
 use crate::graph::text_scan::matcher::Matcher;
 use crate::graph::text_scan::scan::{scan, ScanError, ScanOptions};
 
+mod documents;
+pub(crate) use documents::for_each_document;
+
 /// Why the driver did not answer. The caller runs the per-row path, which
 /// answers identically by definition; a wrong bail only costs speed, but a
 /// missing one costs correctness, so each variant names the state it stands
@@ -267,7 +270,7 @@ type RowHit = (u32, u64, u64);
 
 pub(crate) fn text_column_scan(graph: &DirGraph, req: &TextScanRequest<'_>) -> TextOutcome {
     let type_key = InternedKey::from_str(req.node_type);
-    let parts = match eligible_parts(graph, req, type_key) {
+    let parts = match eligible_parts(graph, req.node_type, req.property, type_key) {
         Ok(parts) => parts,
         Err(decline) => return Ok(Err(decline)),
     };
@@ -335,7 +338,8 @@ fn exceeds_cap(req: &TextScanRequest<'_>, matched: usize) -> bool {
 /// scope: everything the per-row path would do that a column read does not.
 fn eligible_parts<'a>(
     graph: &'a DirGraph,
-    req: &TextScanRequest<'_>,
+    node_type: &str,
+    property: &str,
     type_key: InternedKey,
 ) -> Result<Vec<Part<'a>>, TextDecline> {
     if graph.graph.is_disk() {
@@ -349,10 +353,10 @@ fn eligible_parts<'a>(
     {
         return Err(TextDecline::SecondaryLabel);
     }
-    if live_closure_members(graph, req.node_type).len() > 1 {
+    if live_closure_members(graph, node_type).len() > 1 {
         return Err(TextDecline::Ontology);
     }
-    let field = graph.resolve_alias(req.node_type, req.property);
+    let field = graph.resolve_alias(node_type, property);
     if matches!(field, "id" | "title") {
         return Err(TextDecline::IdentityField);
     }

@@ -1362,13 +1362,48 @@ YIELD node, offset, snippet
 RETURN node.id, offset, snippet
 ```
 
+#### Ranking inside a scope: `db.text.rank`
+
+`db.text.rank` ranks a graph-selected set of nodes by BM25, with no index. The scope is the corpus: its own document count, average length and document frequencies decide every score.
+
+```cypher
+MATCH (d:Doc {id: 1})-[:CONTAINS]->(p:Para)
+WITH collect(p) AS ps
+CALL db.text.rank({type: 'Para', property: 'text', query: 'rollback segment', within: ps, `limit`: 5})
+YIELD node, score
+RETURN node.id, score
+```
+
+That ranks the paragraphs of one document against each other. The call yields `node` and `score`.
+
+| Parameter | Required | Meaning |
+|---|---|---|
+| `type`, `property`, `query` | yes | The label, the text property and the query. |
+| `within` | no | A list of nodes. Nodes of another label, deleted nodes and repeats are ignored. Without it, the corpus is every node of the type. |
+| `limit` | no | At most this many rows, best first. Write it `` `limit` ``. |
+
+- A document is a string, or a list of strings and nulls joined by one space. A null, absent or other value is not a document: it gets no row and is not counted.
+- The query is split into terms by the same tokenizer as `text_bm25`, and the score is the same Okapi BM25 function with the scope's statistics. A term counts in a document only as a whole word, not as a substring of one.
+- Rows come score descending, ties in node order. Only documents sharing a term with the query have a row, as for `text_bm25` through `db.index.fulltext.queryNodes`.
+- The result equals building a text index over only the scope's nodes and ranking with it: the same nodes, order and scores.
+- A type or property that nothing holds returns no rows, as `db.text.search` does.
+
+The cost is proportional to the scope's text, because every document in the scope is tokenized on each call. With no `within`, that is every document of the type, so ranking a whole large type belongs to `text_bm25` with a text index, which answers in milliseconds or less. Use `db.text.rank` for scopes.
+
+| You want | Use |
+|---|---|
+| The best documents in the whole corpus | `text_bm25` with a text index |
+| The best documents among a document's paragraphs, a tag, a region | `db.text.rank` |
+| Scores comparable across different scopes | `text_bm25` (its statistics come from the whole index) |
+
 #### Which lane to use
 
 | You want | Use |
 |---|---|
 | Every row that contains an exact string, phrase or pattern | `text_match` |
 | The matches with their positions or a snippet | `db.text.search` |
-| The best rows for a loose query, ranked | `text_bm25` |
+| The best rows for a loose query, ranked, over the whole corpus | `text_bm25` |
+| The best rows among a chosen part of the graph | `db.text.rank` |
 
 `text_match` answers yes or no per row and has no score. `text_bm25` ranks by word overlap and needs an index.
 
@@ -3618,6 +3653,7 @@ Parameters and examples are in the sections above and in
 | `db.embeddings.refresh_index` | `refreshed` | Router: entity:'node' (default) runs db.node_embeddings.refresh_index, entity:'relationship' runs db.relationship_embeddings.refresh_index |
 | `db.embeddings.drop_index` | `dropped` | Router: entity:'node' (default) runs db.node_embeddings.drop_index, entity:'relationship' runs db.relationship_embeddings.drop_index |
 | `db.embeddings.query` | `node`, `score`, `search_method`, `type` | Router: entity:'node' (default) runs db.node_embeddings.query, entity:'relationship' runs db.relationship_embeddings.query (the relationship route yields relationship in place of node) |
+| `db.text.rank` | `node`, `score` | BM25 ranking over a graph-selected scope, no index needed. |
 | `db.text.search` | `node`, `property`, `offset`, `length`, `char_offset`, `snippet` | Exact text matches with positions, no index needed. |
 | `db.text_index.build` | `indexed`, `skipped`, `terms` | Router: entity:'node' (default) runs db.node_text_index.build, entity:'relationship' runs db.relationship_text_index.build |
 | `db.text_index.refresh` | `refreshed` | Router: entity:'node' (default) runs db.node_text_index.refresh, entity:'relationship' runs db.relationship_text_index.refresh |
