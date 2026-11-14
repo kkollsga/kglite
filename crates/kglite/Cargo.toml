@@ -196,7 +196,7 @@ yaml-rust2 = { version = "0.13", optional = true, default-features = false }
 # crate is `forbid(unsafe_code)` without it.
 # 0.13.5: RUSTSEC-2026-0414 (exponential growth with ENABLE_WIKILINKS) is
 # fixed there; this crate leaves that option off, the floor protects consumers.
-pulldown-cmark = { version = "0.13.5", optional = true, default-features = false }
+pulldown-cmark = { version = "0.13.6", optional = true, default-features = false }
 
 # RDF loader deps — gated behind the `rdf` feature. `oxttl` is the
 # Oxigraph family's standalone Turtle/N-Triples/N-Quads/TriG parser;
@@ -215,7 +215,7 @@ oxrdf = { version = "0.3", optional = true, features = ["rdf-12"] }
 # costs no package. `picture` (embedded images) is deliberately off.
 # 0.37.0 is the floor: the first release on zip 9, which fixes the zip 8
 # extraction advisories (RUSTSEC-2026-0367/0368/0369); its MSRV is 1.88.
-calamine = { version = "0.37.0", default-features = false, features = ["dates"], optional = true }
+calamine = { version = "0.38.0", default-features = false, features = ["dates"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
 # 1.0.6, not "1": ignore 0.4.34 (via mcp-methods 0.6.1) requires same-file

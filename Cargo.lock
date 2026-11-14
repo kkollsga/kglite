@@ -322,9 +322,9 @@ dependencies = [
 
 [[package]]
 name = "calamine"
-version = "0.37.0"
+version = "0.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9ca341b94bc4b29e08970b1a03914fad2dfe177e2ecb67fcd6de9046004aafb"
+checksum = "f431b67cba6122a1f7d26b7adafc71bbdf07026095fe811f5efc025d8748e1d8"
 dependencies = [
  "atoi_simd",
  "byteorder",
@@ -2993,9 +2993,9 @@ dependencies = [
 
 [[package]]
 name = "pulldown-cmark"
-version = "0.13.5"
+version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "278e9268c93b9e498a2da46c34d90ba93a3255eb99009646398f34bc73ab36eb"
+checksum = "3db2be46835f013dd3f4fa7f5f7402c537787b54ebb6fe2b94bbdd7e2669bb7b"
 dependencies = [
  "bitflags",
  "memchr",
@@ -3310,9 +3310,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "3.8.0"
+version = "3.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8be15815186873ea063bf005011d16c356804973489e40c39116ae3a2878d1f"
+checksum = "b5949e504d5ab9944a168259afc0c39ac0230627b6ec5367ace194c59bcbe163"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -3325,6 +3325,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.21",
  "tokio",
  "tokio-stream",
@@ -3335,9 +3336,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp-macros"
-version = "3.8.0"
+version = "3.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b0748e054a5f5598b3213cf72099ae6b2745ba4d996c59ccf455150a7dbb839"
+checksum = "b98a686693ee91b665c6f89f182fca6e141c8a63dc113b11b38c1bf3491606b7"
 dependencies = [
  "darling 0.24.1",
  "proc-macro2",
