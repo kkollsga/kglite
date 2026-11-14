@@ -534,7 +534,10 @@ fn a_heap_tail_is_scanned_beside_its_base() {
 #[test]
 fn a_shuffled_scope_with_repeats_gives_the_same_nodes_in_scope_order() {
     let mut g = docs();
-    exec(&mut g, "MATCH (n:A {id: 3}) SET n.a = 'a longer alpha replacement'");
+    exec(
+        &mut g,
+        "MATCH (n:A {id: 3}) SET n.a = 'a longer alpha replacement'",
+    );
     let all = g.type_indices.get("A").unwrap().to_vec();
     let scope: Vec<NodeIndex> = [4usize, 0, 2, 4, 1, 0, 3, 2, 2]
         .iter()
@@ -545,4 +548,66 @@ fn a_shuffled_scope_with_repeats_gives_the_same_nodes_in_scope_order() {
         .unwrap();
     assert_eq!(got, TextAnswer::Nodes(vec![all[0], all[2]]));
     assert_exact(&g, "A", "a", Some(&scope), &[], "shuffled scope");
+}
+
+fn save_and_load_memory(g: &DirGraph, dir: &std::path::Path) -> Arc<DirGraph> {
+    let path = dir.join("g.kgl");
+    let mut arc = Arc::new(g.clone());
+    save_graph_with_layout(&mut arc, path.to_str().unwrap(), true, SaveLayout::Auto).unwrap();
+    load_file_with(
+        path.to_str().unwrap(),
+        &LoadOptions::new()
+            .with_storage(StorageMode::Memory)
+            .with_columns(MapPolicy::Memory),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_null_write_keeps_the_recorded_kind_and_the_column_reloads_as_strings() {
+    let mut g = docs();
+    exec(&mut g, "MATCH (n:A {id: 2}) SET n.a = null");
+    assert_eq!(
+        g.node_type_metadata
+            .get("A")
+            .and_then(|m| m.get("a"))
+            .map(String::as_str),
+        Some("String")
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let loaded = save_and_load_memory(&g, dir.path());
+    let store = loaded.column_store("A").unwrap();
+    let slot = store
+        .slot(crate::graph::schema::InternedKey::from_str("a"))
+        .unwrap();
+    assert_eq!(store.column(slot as usize).unwrap().type_tag(), "string");
+    assert_eq!(ids_of(&loaded, &found(&loaded, "A", "a", "alpha")), [1, 3]);
+    exact(&loaded, "A", "a");
+}
+
+#[test]
+fn a_file_that_recorded_null_for_a_string_column_still_loads_as_strings() {
+    let mut g = docs();
+    g.node_type_metadata_mut()
+        .get_mut("A")
+        .unwrap()
+        .insert("a".into(), "Null".into());
+    exec(&mut g, "MATCH (n:A {id: 2}) SET n.a = null");
+    // A tombstone makes the save rebuild the store from the recorded kinds.
+    exec(&mut g, "MATCH (n:A {id: 5}) DELETE n");
+    let dir = tempfile::tempdir().unwrap();
+    let loaded = save_and_load_memory(&g, dir.path());
+    assert_eq!(ids_of(&loaded, &found(&loaded, "A", "a", "alpha")), [1, 3]);
+}
+
+#[test]
+fn a_real_type_change_still_changes_the_recorded_kind() {
+    let mut g = docs();
+    exec(&mut g, "MATCH (n:A {id: 2}) SET n.a = 5");
+    let recorded = g
+        .node_type_metadata
+        .get("A")
+        .and_then(|m| m.get("a"))
+        .cloned();
+    assert_ne!(recorded.as_deref(), Some("String"), "{recorded:?}");
 }

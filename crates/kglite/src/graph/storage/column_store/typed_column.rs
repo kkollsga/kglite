@@ -470,11 +470,13 @@ impl TypedColumn {
                 data: MmapOrVec::new(),
                 nulls: MmapOrVec::new(),
             },
-            // `unknown` — a property every write so far left NULL — takes the
+            // `unknown`/`null` — a property every write so far left NULL (`null`
+            // is what files written before a null stopped changing a recorded
+            // kind may carry) — takes the
             // shape an all-null object column always had: a `Str` column of
             // nulls. The first value of another kind retypes it rather than
             // demoting it (`ColumnStore::widen_for`).
-            "string" | "unknown" => TypedColumn::Str {
+            "string" | "unknown" | "null" => TypedColumn::Str {
                 offsets: MmapOrVec::from_vec(vec![0u64]),
                 data: MmapBytes::new(),
                 nulls: MmapOrVec::new(),

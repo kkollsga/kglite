@@ -327,10 +327,6 @@ struct Model {
     only_a: bool,
     /// (type, property) columns a non-string value was written to.
     non_string: HashSet<(usize, usize)>,
-    /// (type, property) pairs a null was written to. The engine then records
-    /// the property's declared kind as `Null` for the whole type, and a
-    /// reload types the column `Mixed` (holding strings): a decline here.
-    null_declared: HashSet<(usize, usize)>,
 }
 
 impl Model {
@@ -347,7 +343,7 @@ impl Model {
         if !self.nodes.values().any(|n| n.ty == ty) {
             allowed.push(TextDecline::NoStore);
         }
-        if self.non_string.contains(&(ty, prop)) || self.null_declared.contains(&(ty, prop)) {
+        if self.non_string.contains(&(ty, prop)) {
             allowed.push(TextDecline::NotStringColumn);
         }
         allowed
@@ -475,15 +471,9 @@ fn apply(
                 format!("SET {set}")
             };
             let ty = node.ty;
-            let nulls = value.is_none();
             (
                 format!("MATCH (n:{} {{id: {id}}}) {clause}", TYPES[ty]),
-                Box::new(move |m: &mut Model| {
-                    m.nodes.get_mut(&id).unwrap().vals[p] = value;
-                    if nulls {
-                        m.null_declared.insert((ty, p));
-                    }
-                }),
+                Box::new(move |m: &mut Model| m.nodes.get_mut(&id).unwrap().vals[p] = value),
             )
         }
         Op::Delete => {

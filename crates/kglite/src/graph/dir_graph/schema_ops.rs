@@ -32,6 +32,13 @@ impl DirGraph {
         mut props: HashMap<String, String>,
     ) {
         if let Some(existing) = self.node_type_metadata.get(node_type) {
+            // A null write is absence, not a type: `Null`/`Unknown` never
+            // displace a concrete recorded kind (`merged_property_type` says
+            // the same for the loader paths).
+            let no_evidence = |kind: &str| kind == "Null" || kind == "Unknown";
+            props.retain(|key, kind| {
+                !(no_evidence(kind) && existing.get(key).is_some_and(|r| !no_evidence(r)))
+            });
             for (key, kind) in props.iter_mut() {
                 if let Some(now) = existing
                     .get(key)
