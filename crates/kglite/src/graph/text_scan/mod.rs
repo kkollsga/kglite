@@ -26,3 +26,6 @@ pub(crate) mod scope;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod bench_tests;

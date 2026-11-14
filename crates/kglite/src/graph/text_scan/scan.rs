@@ -16,10 +16,10 @@ use super::scope::{self, Plan, ScopeStrategy};
 
 /// Largest slice of the data one work unit covers (the interrupt granularity).
 pub(crate) const UNIT_BYTES: usize = 8 << 20;
-/// Layouts smaller than this scan on the calling thread. Derived from earlier
-/// release timings (a `memmem` scan moves ~49 GB/s, so 4 MiB is ~85 us, the
-/// order of waking a pool); not re-measured. **Provisional.**
+/// Layouts smaller than this scan on the calling thread. Provisional.
 pub(crate) const PARALLEL_MIN_BYTES: u64 = 4 << 20;
+/// Smallest work unit a parallel scan cuts a layout into.
+pub(crate) const MIN_PARALLEL_UNIT: usize = 256 << 10;
 pub(crate) const POLL_EVERY: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +49,9 @@ pub(crate) struct ScanResult {
 pub(crate) struct ScanOptions<'a> {
     pub(crate) max_hits: Option<usize>,
     pub(crate) count_only: bool,
+    /// Report at most one hit per record (the first): a record-level
+    /// "contains" test without materialising every occurrence.
+    pub(crate) first_per_record: bool,
     /// Run every record through the per-record oracle (tests, measurements).
     pub(crate) oracle_only: bool,
     /// Override [`PARALLEL_MIN_BYTES`]; `Some(0)` forces the parallel path.
@@ -127,6 +130,11 @@ impl<'a, L: RecordLayout> ChunkScan<'a, L> {
         }
         let text = self.layout.record(record);
         let room = self.limit - self.out.count;
+        let room = if self.opts.first_per_record {
+            room.min(1)
+        } else {
+            room
+        };
         let mut found = Vec::new();
         self.matcher.find_in_record(text, &mut |s, e| {
             found.push((s, e - s));
@@ -170,7 +178,11 @@ impl<'a, L: RecordLayout> ChunkScan<'a, L> {
                 if self.wanted(record) {
                     self.emit(record, base + s - range.start, e - s);
                 }
-                cursor = e;
+                cursor = if self.opts.first_per_record {
+                    range.end - base
+                } else {
+                    e
+                };
             } else {
                 cursor = range.end - base;
             }
@@ -251,12 +263,16 @@ fn scan_chunk<L: RecordLayout>(
 }
 
 /// `range` cut into pieces of roughly [`UNIT_BYTES`], aligned to records.
-fn chunk_ranges_in(layout: &impl RecordLayout, range: (usize, usize)) -> Vec<(usize, usize)> {
+fn chunk_ranges_in(
+    layout: &impl RecordLayout,
+    range: (usize, usize),
+    unit: usize,
+) -> Vec<(usize, usize)> {
     let n = range.1.min(layout.len());
     let mut out = Vec::new();
     let mut r0 = range.0;
     while r0 < n {
-        let target = layout.range(r0).start.saturating_add(UNIT_BYTES) as u64;
+        let target = layout.range(r0).start.saturating_add(unit) as u64;
         let ahead = layout.offsets().get(r0..=n).unwrap_or(&[]);
         let r1 = (r0 + ahead.partition_point(|&o| o <= target)).clamp(r0 + 1, n);
         out.push((r0, r1));
@@ -277,20 +293,30 @@ pub(crate) fn scan<L: RecordLayout + Sync>(
         ..opts.clone()
     };
     let whole = (0, layout.len());
+    let total = layout.bytes().len() as u64;
+    let eligible = total >= opts.parallel_min_bytes.unwrap_or(PARALLEL_MIN_BYTES);
+    // Parallel scans need several units per thread to balance; a serial scan
+    // keeps the large unit (fewer matcher restarts).
+    let unit = if eligible {
+        (total as usize / (rayon::current_num_threads().max(1) * 4))
+            .clamp(MIN_PARALLEL_UNIT, UNIT_BYTES)
+    } else {
+        UNIT_BYTES
+    };
     let chunks: Vec<(usize, usize)> = match scope.as_deref().map(|s| {
         (
             s,
             scope::plan(layout, s, opts.scope_strategy, matcher.scope_margin()),
         )
     }) {
-        None => chunk_ranges_in(layout, whole),
+        None => chunk_ranges_in(layout, whole, unit),
         Some((s, Plan::Filtered)) => {
             effective.scan_scope = Some(s);
-            chunk_ranges_in(layout, whole)
+            chunk_ranges_in(layout, whole, unit)
         }
         Some((_, Plan::Ranges(ranges))) => ranges
             .into_iter()
-            .flat_map(|r| chunk_ranges_in(layout, r))
+            .flat_map(|r| chunk_ranges_in(layout, r, unit))
             .collect(),
     };
     let opts = &effective;

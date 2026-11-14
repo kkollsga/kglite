@@ -566,6 +566,32 @@ fn the_interrupt_hook_stops_a_scan_mid_flight_and_the_filter_drops_records() {
 }
 
 #[test]
+fn first_per_record_reports_each_records_first_hit_only() {
+    let rows = straddle_corpus(13, 300);
+    let l = layout(&rows);
+    for pattern in patterns() {
+        let mut want: Vec<(usize, u64, u64)> = Vec::new();
+        for hit in naive(&rows, &pattern) {
+            if want.last().is_none_or(|last| last.0 != hit.0) {
+                want.push(hit);
+            }
+        }
+        for oracle_only in [false, true] {
+            let opts = ScanOptions {
+                first_per_record: true,
+                oracle_only,
+                ..Default::default()
+            };
+            assert_eq!(
+                run(&l, &pattern, &opts),
+                want,
+                "{pattern:?} oracle_only={oracle_only}"
+            );
+        }
+    }
+}
+
+#[test]
 fn the_overlay_matcher_is_the_oracle_and_agrees_with_the_scan() {
     let rows = straddle_corpus(5, 200);
     let l = layout(&rows);
