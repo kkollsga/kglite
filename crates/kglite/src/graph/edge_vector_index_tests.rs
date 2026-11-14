@@ -685,3 +685,44 @@ fn relationship_embeddings_reads_the_store_by_endpoint_ids_in_a_stable_order() {
         "{error}"
     );
 }
+
+/// Every index listing calls `list_edge_vector_indexes`, and so does every
+/// `db.index.fulltext.queryNodes`. A graph with no relationship embedding store
+/// must answer without visiting its edges: with 300,000 of them the walk cost
+/// milliseconds per call (about 10 ns per edge in release), where the answer
+/// is empty. The minimum of 20 calls is compared with a bound the walk
+/// exceeds on any machine and the early return stays far under.
+#[test]
+fn listing_with_no_edge_store_does_not_walk_the_edges() {
+    let mut graph = DirGraph::new();
+    let hub = GraphWrite::add_node(
+        &mut graph.graph,
+        NodeData::new(
+            Value::Int64(0),
+            Value::String("hub".into()),
+            "Doc".into(),
+            HashMap::new(),
+            &mut graph.interner,
+        ),
+    );
+    for _ in 0..300_000 {
+        GraphWrite::add_edge(
+            &mut graph.graph,
+            hub,
+            hub,
+            EdgeData::new("CITES".into(), HashMap::new(), &mut graph.interner),
+        );
+    }
+    let fastest = (0..20)
+        .map(|_| {
+            let started = std::time::Instant::now();
+            assert!(list_edge_vector_indexes(&graph).is_empty());
+            started.elapsed()
+        })
+        .min()
+        .unwrap();
+    assert!(
+        fastest < std::time::Duration::from_micros(500),
+        "listing with no edge store took {fastest:?}: it walked the edges"
+    );
+}

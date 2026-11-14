@@ -76,6 +76,12 @@ impl EdgeEmbeddingStore {
 }
 
 pub(crate) fn list_edge_vector_indexes(graph: &DirGraph) -> Vec<EdgeVectorIndexStatus> {
+    // The live-edge count below walks every edge; every index listing (and so
+    // every `db.index.fulltext.queryNodes`) calls this, so a graph with no
+    // relationship embedding store must not pay for it.
+    if graph.edge_embeddings.is_empty() {
+        return Vec::new();
+    }
     let guard = graph.graph.begin_query();
     let mut live_by_type = std::collections::HashMap::<&str, usize>::new();
     for edge in graph.graph.edge_indices() {

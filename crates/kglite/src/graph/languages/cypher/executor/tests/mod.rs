@@ -108,6 +108,7 @@ mod temporal_zones;
 mod text_bm25;
 mod text_rank;
 mod text_rank_bench;
+mod text_synth_bench;
 mod valid_time_guard;
 mod value_kind_matrix;
 mod vector_score;
