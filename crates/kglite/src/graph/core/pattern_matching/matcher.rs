@@ -253,6 +253,11 @@ fn str_starts_with(s: &str, prefix: &str) -> bool {
 /// [`PatternExecutor::prop_matches`], which calls the same function through
 /// `str_prop_eq`, so the two routes cannot disagree.
 pub(super) fn str_field_test(matcher: &PropertyMatcher) -> Option<impl Fn(&str) -> bool + '_> {
+    // A text-scan wrapper around a string matcher tests as that matcher.
+    let matcher = match matcher {
+        PropertyMatcher::TextScan(spec) => spec.inner()?,
+        other => other,
+    };
     let string_only = match matcher {
         // A date-shaped target also equals a stored date or datetime, which
         // the string form cannot see.
@@ -367,6 +372,10 @@ pub(super) fn value_matches(
             _ => false,
         },
         PropertyMatcher::NullOr(inner) => value_matches(params, value, inner),
+        PropertyMatcher::TextScan(spec) => match spec.inner() {
+            Some(inner) => value_matches(params, value, inner),
+            None => spec.candidate_value(value),
+        },
     }
 }
 
@@ -750,6 +759,9 @@ impl<'a> PatternExecutor<'a> {
                 }
             }
 
+            if let Some(out) = self.text_scan_nodes(pattern, &extra_keys, secondary.is_some())? {
+                return Ok(out);
+            }
             // The choke-point API forbids primary==secondary on the same node,
             // so this type_indices ∪ secondary_label_index has no duplicates.
             let mut candidates = self
@@ -2258,6 +2270,9 @@ pub(crate) mod edge_anchor;
 
 #[path = "matcher_guard.rs"]
 mod guard;
+
+#[path = "matcher_text.rs"]
+mod text_source;
 
 #[path = "matcher_var_length.rs"]
 mod var_length;

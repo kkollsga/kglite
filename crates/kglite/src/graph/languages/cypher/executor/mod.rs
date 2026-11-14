@@ -1097,6 +1097,7 @@ pub(crate) mod row_cursor;
 pub(crate) mod statement_clock;
 #[cfg(test)]
 mod test_clock;
+mod text_search_procedure;
 pub(crate) use procedure_registry::{
     is_context_free_procedure, is_mask_routed_procedure, is_view_routed_procedure,
 };

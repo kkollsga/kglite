@@ -101,6 +101,7 @@ pub(super) fn drive(
             mode,
             interrupt: Interrupt::default(),
             serial: false,
+            candidate_cap: None,
         },
     )
 }

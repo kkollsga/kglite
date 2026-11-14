@@ -348,6 +348,59 @@ The log records the declaration (type, property, refresh limit), not the posting
 
 A vector index is logged the same way.
 
+## Exact text: phrases, regex and positions
+
+Use `text_match()` when you need yes or no for an exact string, a phrase or a pattern. It has no score and needs no index.
+
+```python
+graph.cypher("MATCH (a:Article) WHERE text_match(a.body, 'low light') RETURN a.title")
+graph.cypher("""
+    MATCH (a:Article)
+    WHERE text_match(a.body, 'low  light', {mode: 'phrase', ignore_case: true})
+    RETURN a.title
+""")
+graph.cypher(r"""
+    MATCH (a:Article)
+    WHERE text_match(a.body, '\\bchlorophyll\\s+[ab]\\b', {mode: 'regex'})
+    RETURN a.title
+""")
+```
+
+The three modes are `literal` (a substring, the default), `phrase` (whitespace in the query matches any run of whitespace, newlines included) and `regex`. `ignore_case: true` folds case. A null value gives null, and so does a value that is not a string or a list of strings.
+
+A string predicate on a single-label `MATCH` scans the property's column instead of reading one node at a time. This applies to `text_match()`, `CONTAINS`, `toLower(n.p) CONTAINS 'x'`, `=~` and `text_match_regex()`. The predicate still decides every row, so results do not change. `PROFILE` shows `[text column scan]` when it ran. The Cypher reference lists the exact shapes and the cases that fall back to the per-node path.
+
+To get each occurrence with its position, call `db.text.search`:
+
+```python
+rows = graph.cypher("""
+    CALL db.text.search({type: 'Article', property: 'body', query: 'low light',
+                         ignore_case: true, snippet_chars: 30})
+    YIELD node, offset, length, snippet
+    RETURN node.title AS title, offset, length, snippet
+""")
+```
+
+`offset` and `length` are byte positions in the property's current value, and `char_offset` counts characters. One row comes back per occurrence, in node order and then offset order. Pass `within` a list of nodes to search only those, for example the paragraphs of one document:
+
+```python
+graph.cypher("""
+    MATCH (d:Doc {id: 1})-[:CONTAINS]->(p:Para)
+    WITH collect(p) AS ps
+    CALL db.text.search({type: 'Para', property: 'text', query: 'rollback', within: ps})
+    YIELD node, offset, snippet
+    RETURN node.id, offset, snippet
+""")
+```
+
+Choose by what you need back:
+
+| You need | Use |
+|---|---|
+| Rows that contain an exact string, phrase or pattern | `text_match()` |
+| The occurrences with offsets and snippets | `db.text.search` |
+| The best rows for a loose query, ranked | `text_bm25()` |
+
 ## Relationship text indexes
 
 A relationship property can carry a BM25 index too: evidence on a `SUPPORTS` edge, a quote on a `CITES` edge. The relationship index is the node index's twin. It has:

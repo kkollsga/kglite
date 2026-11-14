@@ -367,6 +367,7 @@ pub(crate) fn scan<L: RecordLayout + Sync>(
     Ok(result)
 }
 
+#[cfg(test)]
 /// The matched bytes plus up to `context` bytes either side, widened to
 /// character boundaries and decoded lossily.
 pub(crate) fn snippet(layout: &impl RecordLayout, hit: &Hit, context: usize) -> String {
@@ -390,6 +391,7 @@ pub(crate) fn snippet(layout: &impl RecordLayout, hit: &Hit, context: usize) -> 
     String::from_utf8_lossy(&text[lo..hi]).into_owned()
 }
 
+#[cfg(test)]
 /// Number of characters before the hit inside its record.
 pub(crate) fn char_offset(layout: &impl RecordLayout, hit: &Hit) -> usize {
     let text = layout.record(hit.record);

@@ -103,7 +103,7 @@ fn document_text<'a>(
 /// skipped, and `None` — no document at all — when any member is neither.
 /// Shared by the node and relationship readers so the two cannot disagree on
 /// what a list document is.
-fn join_text_list(items: &[Value]) -> Option<String> {
+pub(crate) fn join_text_list(items: &[Value]) -> Option<String> {
     let mut text = String::new();
     for item in items {
         match item {

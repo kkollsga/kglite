@@ -27,6 +27,8 @@ pub(crate) const RANGE_OVERHEAD_BYTES: u64 = 3072;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScopeStrategy {
+    // Chosen by the planner or forced by a test or measurement.
+    #[allow(dead_code)]
     RangeDriven,
     ScanDriven,
 }
@@ -103,6 +105,7 @@ pub(crate) fn plan(
     Plan::Ranges(ranges)
 }
 
+#[cfg(test)]
 /// Counts for ranking, from the offsets and nulls only (the data is never
 /// read).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -112,6 +115,7 @@ pub(crate) struct ScopeStats {
     pub(crate) bytes: u64,
 }
 
+#[cfg(test)]
 /// Statistics of `scope` (or of every record when `None`). Indices past the
 /// end are ignored.
 pub(crate) fn scope_stats(layout: &impl RecordLayout, scope: Option<&[u32]>) -> ScopeStats {
@@ -131,6 +135,7 @@ pub(crate) fn scope_stats(layout: &impl RecordLayout, scope: Option<&[u32]>) -> 
     stats
 }
 
+#[cfg(test)]
 /// Number of terms in `record` by the analyzer's rule
 /// (`algorithms::text_index::analyzer`): maximal runs of `char::is_alphanumeric`.
 /// Invalid UTF-8 is decoded lossily. For a ranking layer to call on scope

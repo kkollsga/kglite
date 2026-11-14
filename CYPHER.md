@@ -1212,6 +1212,8 @@ normalised for document length. It needs no embedder and no vectors. It is the
 keyword-search half of hybrid retrieval, and it finds the exact term (a product
 code, a name, a rare noun) that an embedding blurs away.
 
+To test for an exact string, phrase or pattern without ranking, use [`text_match`](#exact-text--text_match-and-dbtextsearch): it needs no index and returns yes or no per row.
+
 The index is **opt-in and explicit**, like `build_vector_index`:
 
 ```python
@@ -1286,6 +1288,89 @@ corpus, so `auto_refresh_limit` bounds a document *count*, not a duration. Past
 roughly 1500 documents, folding costs more than rebuilding the index outright
 and the catch-up rebuilds instead. A refresh costs the cheaper of the two and
 never more than one rebuild, whatever the limit is set to.
+
+### Exact text — `text_match` and `db.text.search`
+
+`text_match(value, query [, options])` is true when the value's text holds a match of `query`. It needs no index and no build step.
+
+```cypher
+MATCH (d:Doc) WHERE text_match(d.body, 'ORA-01555') RETURN d.id
+MATCH (d:Doc) WHERE text_match(d.body, 'rollback segment', {mode: 'phrase', ignore_case: true}) RETURN d.id
+MATCH (d:Doc) WHERE text_match(d.body, '\\bORA-\\d{5}\\b', {mode: 'regex'}) RETURN d.id
+```
+
+The `options` map takes two keys.
+
+| Option | Values | Default | Meaning |
+|---|---|---|---|
+| `mode` | `'literal'`, `'phrase'`, `'regex'` | `'literal'` | `literal` is a substring. `phrase` treats each run of whitespace in the query as one or more whitespace characters of any kind, including newlines. `regex` is a [Rust regex](https://docs.rs/regex/latest/regex/#syntax). |
+| `ignore_case` | `true`, `false` | `false` | Simple Unicode case folding, as the regex engine's `(?i)` does. |
+
+The result follows these rules.
+
+- A null value or null query gives null.
+- A value that is neither a string nor a list of strings gives null.
+- A list of strings is one document: the strings joined by one space, null members skipped. A list with any other kind of member gives null. This is the document `text_bm25` indexes.
+- An empty query, an unknown option, an invalid regex, or a regex that matches the empty string is an error.
+- `text_match_regex`, `CONTAINS`, `STARTS WITH`, `ENDS WITH` and `=~` keep their meaning.
+
+#### When the column scan is used
+
+A string predicate on a single-label `MATCH` finds its candidate nodes by scanning the property's column instead of reading one node at a time. The predicate stays in the plan and decides every candidate, so the answer never depends on the route.
+
+The scan serves a positive top-level `WHERE` conjunct of these forms, when the query is a literal or a parameter:
+
+- `text_match(n.p, q [, options])`;
+- `n.p CONTAINS 'literal'`;
+- `toLower(n.p) CONTAINS 'literal'` (the literal must already be lowercase);
+- `n.p =~ 'regex'` and `text_match_regex(n.p, 'regex')`, when the regex has a literal of at least three plain characters that every match must contain.
+
+It applies when `n` is the first node of its pattern with exactly one label and no index serves the pattern. It does not apply to `OPTIONAL MATCH`, to a predicate under `NOT`, `OR` or `XOR`, to `STARTS WITH`, `ENDS WITH` or `toUpper`, or to a node reached by expanding from a bound node.
+
+At run time the scan declines, and the query runs as it always did, on disk graphs, when a node of another type carries the label as a secondary label, for an ontology closure, for `id`, `title` and the aliases `name`, `type`, `node_type` and `label`, and when the property's column holds strings beside other kinds of value.
+
+`PROFILE` ends the `MATCH` line with `[text column scan]` when the scan answered, or `[text scan declined: <reason>]` when it did not. `EXPLAIN` lists `text_column_scan` among the optimizer passes that changed the plan. `disabled_passes=['text_column_scan']` turns the scan off.
+
+#### Positions: `db.text.search`
+
+`db.text.search` returns one row per occurrence, with its position.
+
+```cypher
+CALL db.text.search({type: 'Para', property: 'text', query: 'rollback segment',
+                     mode: 'phrase', ignore_case: true, `limit`: 20, snippet_chars: 30})
+YIELD node, property, offset, length, char_offset, snippet
+RETURN node.id, offset, snippet
+```
+
+| Parameter | Required | Meaning |
+|---|---|---|
+| `type`, `property`, `query` | yes | The label, the string property and the query. |
+| `mode`, `ignore_case` | no | As for `text_match`. |
+| `within` | no | A list of nodes: only these are searched, in the list's order. Nodes of another label and repeats are ignored. |
+| `limit` | no | At most this many rows, taken in node order then offset order. Write it `` `limit` ``: the bare word is reserved in a map. |
+| `snippet_chars` | no | Characters of context on each side of the match in `snippet`. Default 40. |
+
+`offset` and `length` are **byte** positions in the property's current value; `char_offset` counts characters. Only string values have occurrences. Rows come in node order, then offset order, whichever route answers.
+
+To search inside a chosen part of the graph, collect the nodes first:
+
+```cypher
+MATCH (d:Doc {id: 1})-[:CONTAINS]->(p:Para)
+WITH collect(p) AS ps
+CALL db.text.search({type: 'Para', property: 'text', query: 'rollback', within: ps})
+YIELD node, offset, snippet
+RETURN node.id, offset, snippet
+```
+
+#### Which lane to use
+
+| You want | Use |
+|---|---|
+| Every row that contains an exact string, phrase or pattern | `text_match` |
+| The matches with their positions or a snippet | `db.text.search` |
+| The best rows for a loose query, ranked | `text_bm25` |
+
+`text_match` answers yes or no per row and has no score. `text_bm25` ranks by word overlap and needs an index.
 
 ### Lexical search over relationships — `db.relationship_text_index.*`
 
@@ -2441,6 +2526,7 @@ Python.
 | `text_ngrams(s, n)` | `List<String>` | Character n-grams |
 | `text_contains_any(s, needles)` | `Boolean` | True if `s` contains any needle (variadic or list arg) |
 | `text_starts_with_any(s, prefixes)` | `Boolean` | True if `s` starts with any prefix (variadic or list arg) |
+| `text_match(value, query [, options])` | `Boolean` | True if the value's text holds a match of `query`; see [Exact text](#exact-text--text_match-and-dbtextsearch) |
 
 ```python
 # Edit distance — Levenshtein
@@ -3532,6 +3618,7 @@ Parameters and examples are in the sections above and in
 | `db.embeddings.refresh_index` | `refreshed` | Router: entity:'node' (default) runs db.node_embeddings.refresh_index, entity:'relationship' runs db.relationship_embeddings.refresh_index |
 | `db.embeddings.drop_index` | `dropped` | Router: entity:'node' (default) runs db.node_embeddings.drop_index, entity:'relationship' runs db.relationship_embeddings.drop_index |
 | `db.embeddings.query` | `node`, `score`, `search_method`, `type` | Router: entity:'node' (default) runs db.node_embeddings.query, entity:'relationship' runs db.relationship_embeddings.query (the relationship route yields relationship in place of node) |
+| `db.text.search` | `node`, `property`, `offset`, `length`, `char_offset`, `snippet` | Exact text matches with positions, no index needed. |
 | `db.text_index.build` | `indexed`, `skipped`, `terms` | Router: entity:'node' (default) runs db.node_text_index.build, entity:'relationship' runs db.relationship_text_index.build |
 | `db.text_index.refresh` | `refreshed` | Router: entity:'node' (default) runs db.node_text_index.refresh, entity:'relationship' runs db.relationship_text_index.refresh |
 | `db.text_index.drop` | `dropped` | Router: entity:'node' (default) runs db.node_text_index.drop, entity:'relationship' runs db.relationship_text_index.drop |

@@ -3,7 +3,9 @@
 //! matcher and mode, and then pins the specific answer the state is about, so
 //! that a driver and a brute force that agree on a wrong thing still fail.
 
-use super::text_column_scan::{TextAnswer, TextDecline, TextMode};
+use super::text_column_scan::{
+    text_column_scan, TextAnswer, TextDecline, TextMode, TextScanRequest,
+};
 use super::text_column_scan_tests::*;
 use crate::datatypes::Value;
 use crate::graph::algorithms::Interrupt;
@@ -266,6 +268,7 @@ fn an_empty_scope_does_not_touch_the_column() {
                 mode: TextMode::Exists,
                 interrupt: expired,
                 serial: false,
+                candidate_cap: None,
             },
         )
     };
@@ -318,6 +321,7 @@ fn an_interrupt_reaches_the_engines_timeout_and_cancel_wording() {
                 mode: TextMode::Count,
                 interrupt,
                 serial: false,
+                candidate_cap: None,
             },
         )
         .unwrap_err();
@@ -610,4 +614,29 @@ fn a_real_type_change_still_changes_the_recorded_kind() {
         .and_then(|m| m.get("a"))
         .cloned();
     assert_ne!(recorded.as_deref(), Some("String"), "{recorded:?}");
+}
+
+#[test]
+fn a_candidate_cap_makes_an_unselective_scan_decline() {
+    let g = docs();
+    let ask = |cap| {
+        text_column_scan(
+            &g,
+            &TextScanRequest {
+                node_type: "A",
+                property: "a",
+                matcher: &lit("a"),
+                scope: None,
+                mode: TextMode::Exists,
+                interrupt: Interrupt::default(),
+                serial: false,
+                candidate_cap: cap,
+            },
+        )
+        .unwrap()
+    };
+    // All five values contain "a"; the cap counts matching nodes.
+    assert!(matches!(ask(Some(5)), Ok(TextAnswer::Nodes(n)) if n.len() == 5));
+    assert_eq!(ask(Some(4)), Err(TextDecline::Unselective));
+    assert!(ask(None).is_ok());
 }

@@ -109,6 +109,13 @@ pub(crate) const FUNCTIONS: &[FunctionSpec] = &[
         signature: "text_starts_with_any(text :: STRING, prefixes :: LIST<STRING> | STRING...) :: BOOLEAN?",
     },
     FunctionSpec {
+        name: "text_match",
+        aliases: &[],
+        category: "string",
+        description: "True when the text holds a match of the query: literal substring, whitespace-flexible phrase or regex, optionally case-insensitive",
+        signature: "text_match(value :: STRING | LIST<STRING>, query :: STRING, options :: MAP?) :: BOOLEAN?",
+    },
+    FunctionSpec {
         name: "text_match_regex",
         aliases: &[],
         category: "string",

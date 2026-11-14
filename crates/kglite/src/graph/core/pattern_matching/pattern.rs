@@ -580,6 +580,82 @@ pub enum PropertyMatcher {
     /// comparison and a false one both drop the row. Never index-served: the
     /// range index holds no NULL rows, and deriving them costs a type scan.
     NullOr(Box<PropertyMatcher>),
+    /// A text predicate the column driver can answer: pushed from
+    /// `text_match`, `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `=~`,
+    /// `text_match_regex` and `toLower/toUpper(..) CONTAINS` by the
+    /// `text_column_scan` pass. Only ever a *candidate filter*: the
+    /// predicate it came from stays in the plan and decides every row.
+    TextScan(std::sync::Arc<TextScanSpec>),
+}
+
+/// What a [`PropertyMatcher::TextScan`] needs to find candidates.
+pub struct TextScanSpec {
+    /// Any of these patterns matching the value makes the node a candidate.
+    /// The union is a **superset** of the nodes the predicate accepts.
+    patterns: Vec<crate::graph::text_scan::matcher::Pattern>,
+    /// The matcher whose per-value test is the predicate itself, when one
+    /// exists (`CONTAINS` and friends); otherwise the patterns decide.
+    inner: Option<PropertyMatcher>,
+    compiled: std::sync::OnceLock<Option<Vec<crate::graph::text_scan::matcher::Matcher>>>,
+}
+
+impl std::fmt::Debug for TextScanSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TextScanSpec")
+            .field("patterns", &self.patterns)
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
+impl TextScanSpec {
+    pub(crate) fn new(
+        patterns: Vec<crate::graph::text_scan::matcher::Pattern>,
+        inner: Option<PropertyMatcher>,
+    ) -> Self {
+        Self {
+            patterns,
+            inner,
+            compiled: std::sync::OnceLock::new(),
+        }
+    }
+
+    pub(crate) fn inner(&self) -> Option<&PropertyMatcher> {
+        self.inner.as_ref()
+    }
+
+    /// The compiled patterns; `None` when one does not compile, in which case
+    /// nothing is scanned and every value passes this filter.
+    pub(crate) fn matchers(&self) -> Option<&[crate::graph::text_scan::matcher::Matcher]> {
+        self.compiled
+            .get_or_init(|| {
+                self.patterns
+                    .iter()
+                    .map(crate::graph::text_scan::matcher::Matcher::compile)
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok()
+            })
+            .as_deref()
+    }
+
+    /// The candidate test on one value. Lax by design (see the field docs).
+    pub(crate) fn candidate_value(&self, value: &Value) -> bool {
+        let Some(matchers) = self.matchers() else {
+            return true;
+        };
+        match crate::graph::text_scan::spec::document_text(value) {
+            Some(text) => matchers
+                .iter()
+                .any(|m| crate::graph::text_scan::spec::has_match(m, &text)),
+            None => false,
+        }
+    }
+}
+
+impl Clone for TextScanSpec {
+    fn clone(&self) -> Self {
+        Self::new(self.patterns.clone(), self.inner.clone())
+    }
 }
 
 impl PropertyMatcher {

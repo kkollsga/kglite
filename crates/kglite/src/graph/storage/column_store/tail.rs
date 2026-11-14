@@ -269,8 +269,6 @@ impl ColumnStore {
     /// ordinary store addressed from its own row 0. A store without a tail is
     /// one part. For readers that walk columns directly (the text scan): a row
     /// id `first + local` of part `store` is read at `local` in that store.
-    // Its only caller is the text column driver, which has no query route yet.
-    #[allow(dead_code)]
     pub(crate) fn row_parts(&self) -> Vec<(u32, &ColumnStore)> {
         let mut parts = vec![(0u32, self)];
         let mut first = self.row_count;

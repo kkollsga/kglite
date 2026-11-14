@@ -49,10 +49,6 @@
 //! lookup per scope node; the column is touched only inside the scope's rows.
 //! The overlay pass is proportional to the number of relocated rows.
 
-// Nothing outside the tests calls the driver until the Cypher route is wired,
-// so everything it reaches reads as dead code until then.
-#![allow(dead_code)]
-
 use petgraph::graph::NodeIndex;
 use rustc_hash::FxHashMap;
 
@@ -110,24 +106,28 @@ pub(crate) enum TextDecline {
     Cardinality,
     /// A node of the type has map storage rather than a column row.
     NodeNotColumnar,
+    /// More candidates than the request's `candidate_cap`: the caller re-tests
+    /// every candidate, so above a share of the type the scan saves nothing.
+    Unselective,
 }
 
 impl TextDecline {
     pub(crate) fn label(self) -> &'static str {
         match self {
-            TextDecline::Disk => "disk",
-            TextDecline::NoStore => "no column store",
-            TextDecline::SecondaryLabel => "secondary-label carriers",
-            TextDecline::Ontology => "ontology closure",
-            TextDecline::IdentityField => "id/title field",
-            TextDecline::SoftAlias => "soft alias field",
-            TextDecline::MmapBase => "mmap base",
-            TextDecline::Overflow => "overflow bag",
-            TextDecline::NullOverrides => "null overrides",
-            TextDecline::NotStringColumn => "non-string column",
-            TextDecline::ShortColumn => "short column",
-            TextDecline::Cardinality => "cardinality mismatch",
-            TextDecline::NodeNotColumnar => "non-columnar node",
+            TextDecline::Disk => "text scan declined: disk",
+            TextDecline::NoStore => "text scan declined: no column store",
+            TextDecline::SecondaryLabel => "text scan declined: secondary-label carriers",
+            TextDecline::Ontology => "text scan declined: ontology closure",
+            TextDecline::IdentityField => "text scan declined: id/title field",
+            TextDecline::SoftAlias => "text scan declined: soft alias field",
+            TextDecline::MmapBase => "text scan declined: mmap base",
+            TextDecline::Overflow => "text scan declined: overflow bag",
+            TextDecline::NullOverrides => "text scan declined: null overrides",
+            TextDecline::NotStringColumn => "text scan declined: non-string column",
+            TextDecline::ShortColumn => "text scan declined: short column",
+            TextDecline::Cardinality => "text scan declined: cardinality mismatch",
+            TextDecline::NodeNotColumnar => "text scan declined: non-columnar node",
+            TextDecline::Unselective => "text scan declined: unselective",
         }
     }
 }
@@ -159,6 +159,8 @@ pub(crate) enum TextMode {
     /// The nodes whose value contains a match.
     Exists,
     /// How many nodes would be in the `Exists` set.
+    // Used by the tests and measurements; no query asks for a bare count yet.
+    #[allow(dead_code)]
     Count,
     /// Every occurrence with its byte offset and length, in node order;
     /// `max` keeps the first that many.
@@ -178,6 +180,9 @@ pub(crate) struct TextScanRequest<'a> {
     pub(crate) interrupt: Interrupt,
     /// Scan on the calling thread whatever the column's size.
     pub(crate) serial: bool,
+    /// `Exists` mode: give up with [`TextDecline::Unselective`] once more than
+    /// this many nodes match. The scan stops early, so the bail is cheap.
+    pub(crate) candidate_cap: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,6 +207,34 @@ pub(crate) enum TextAnswer {
 }
 
 pub(crate) type TextOutcome = Result<Result<TextAnswer, TextDecline>, TextScanInterrupted>;
+
+/// The route a served text scan reports to PROFILE.
+pub(crate) const TEXT_ROUTE: &str = "text column scan";
+
+pub(crate) fn note_text_served() {
+    super::column_scan::note_route(TEXT_ROUTE);
+    #[cfg(test)]
+    METERS.with(|m| m.borrow_mut().push(None));
+}
+
+pub(crate) fn note_text_decline(decline: TextDecline) {
+    super::column_scan::note_route(decline.label());
+    #[cfg(test)]
+    METERS.with(|m| m.borrow_mut().push(Some(decline)));
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Outcomes the candidate source reported on this thread, in order:
+    /// `None` served, `Some` declined.
+    static METERS: std::cell::RefCell<Vec<Option<TextDecline>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_text_meters() -> Vec<Option<TextDecline>> {
+    METERS.with(|m| std::mem::take(&mut *m.borrow_mut()))
+}
 
 /// One column-bearing part of the type's rows, as the scan reads it.
 struct Part<'a> {
@@ -272,6 +305,9 @@ pub(crate) fn text_column_scan(graph: &DirGraph, req: &TextScanRequest<'_>) -> T
         )?;
         count += out.count;
         hits.extend(out.hits);
+        if exceeds_cap(req, hits.len()) {
+            return Ok(Err(TextDecline::Unselective));
+        }
     }
     #[cfg(debug_assertions)]
     if scoped.is_none() {
@@ -289,6 +325,10 @@ pub(crate) fn text_column_scan(graph: &DirGraph, req: &TextScanRequest<'_>) -> T
     };
     let ordered = order_by_source(&walk, &hits, total_rows);
     Ok(Ok(finish(req.mode, ordered)))
+}
+
+fn exceeds_cap(req: &TextScanRequest<'_>, matched: usize) -> bool {
+    matches!(req.mode, TextMode::Exists) && req.candidate_cap.is_some_and(|cap| matched > cap)
 }
 
 /// Eligibility that depends on the type and the store, not on the request's
@@ -358,8 +398,8 @@ fn eligible_parts<'a>(
 ///
 /// `None` is a column no string test can pass on: a fixed-width column reads
 /// as `NotString` or absent (`TypedColumn::str_field`), and so does a `Mixed`
-/// column holding no string. A `Mixed` column holding one is the per-row
-/// path's to answer.
+/// column holding no string and no list (a list of strings is a document to
+/// `text_match`). A `Mixed` column holding either is the per-row path's.
 fn str_col(column: &TypedColumn, rows: u32) -> Result<Option<StrCol<'_>>, TextDecline> {
     let (offsets, data, nulls, relocated) = match column {
         TypedColumn::Str {
@@ -369,7 +409,10 @@ fn str_col(column: &TypedColumn, rows: u32) -> Result<Option<StrCol<'_>>, TextDe
             relocated,
         } => (offsets, data, nulls, relocated),
         TypedColumn::Mixed { data } => {
-            return if data.iter().any(|v| matches!(v, Value::String(_))) {
+            return if data
+                .iter()
+                .any(|v| matches!(v, Value::String(_) | Value::List(_)))
+            {
                 Err(TextDecline::NotStringColumn)
             } else {
                 Ok(None)
@@ -494,6 +537,10 @@ fn scan_part(
         !part.tombstoned(local) && !col.relocated.contains_key(&local)
     };
     let opts = ScanOptions {
+        max_hits: req
+            .candidate_cap
+            .filter(|_| matches!(req.mode, TextMode::Exists))
+            .map(|cap| cap.saturating_add(1)),
         count_only: !want_rows,
         first_per_record: first_only,
         interrupt: Some(&poll),

@@ -449,6 +449,12 @@ pub(super) const PROCEDURES: &[ProcedureSpec] = &[
         columns: &["node", "score", "search_method", "type"],
     },
     ProcedureSpec {
+        name: "db.text.search",
+        aliases: &[],
+        description: "Exact text matches with positions, no index needed. CALL db.text.search({type, property, query, mode: 'literal'|'phrase'|'regex', ignore_case, within: [nodes], limit, snippet_chars}); one row per occurrence in node order, offset and length in bytes",
+        columns: &["node", "property", "offset", "length", "char_offset", "snippet"],
+    },
+    ProcedureSpec {
         name: "db.text_index.build",
         aliases: &[],
         description: "Router: entity:'node' (default) runs db.node_text_index.build, entity:'relationship' runs db.relationship_text_index.build",

@@ -5,16 +5,21 @@
 //!
 //! `cargo test --release -p kglite --lib -- --ignored driver_gate --nocapture`
 
-use super::text_column_scan::{text_column_scan, TextAnswer, TextMode, TextScanRequest};
+use super::text_column_scan::{
+    take_text_meters, text_column_scan, TextAnswer, TextMode, TextScanRequest,
+};
+use crate::datatypes::Value;
 use crate::graph::algorithms::Interrupt;
 use crate::graph::dir_graph::DirGraph;
 use crate::graph::io::file::{load_file_with, LoadOptions, MapPolicy};
+use crate::graph::session::{execute_read, ExecuteOptions};
 use crate::graph::storage::mode::StorageMode;
 use crate::graph::text_scan::bench_tests::{
     control, control_buffer, time_ms, uptime, word, word_at,
 };
 use crate::graph::text_scan::matcher::{Matcher, Pattern};
 use petgraph::graph::NodeIndex;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 const TYPE: &str = "CourtDecision";
@@ -83,6 +88,7 @@ fn ask(
             mode,
             interrupt: Interrupt::default(),
             serial,
+            candidate_cap: None,
         },
     )
     .unwrap()
@@ -193,4 +199,195 @@ fn driver_gate() {
         let graph: Arc<DirGraph> = load_file_with(&path, &options).unwrap();
         run_graph(label, &graph, &terms, &buffer);
     }
+}
+
+// ── through Cypher ───────────────────────────────────────────────────
+
+fn escape_regex(text: &str) -> String {
+    regex::escape(text)
+}
+
+fn cypher_value(graph: &DirGraph, query: &str, params: &HashMap<String, Value>, off: bool) -> i64 {
+    let disabled: HashSet<String> = off
+        .then(|| "text_column_scan".to_string())
+        .into_iter()
+        .collect();
+    let mut opts = ExecuteOptions::eager(params);
+    opts.disabled_passes = Some(&disabled);
+    let rows = execute_read(graph, query, &opts)
+        .unwrap_or_else(|e| panic!("{query}: {e}"))
+        .result
+        .rows;
+    match rows.first().and_then(|r| r.first()) {
+        Some(Value::Int64(n)) => *n,
+        _ => rows.len() as i64,
+    }
+}
+
+#[test]
+#[ignore = "release-mode timing; needs KGLITE_TEXT_GRAPH and KGLITE_SCAN_TERMS"]
+fn cypher_gate() {
+    let (Ok(path), Ok(terms)) = (
+        std::env::var("KGLITE_TEXT_GRAPH"),
+        std::env::var("KGLITE_SCAN_TERMS"),
+    ) else {
+        println!("skipped: set KGLITE_TEXT_GRAPH and KGLITE_SCAN_TERMS");
+        return;
+    };
+    let terms: serde_json::Value = serde_json::from_slice(&std::fs::read(terms).unwrap()).unwrap();
+    let buffer = control_buffer();
+    let graph = load_file_with(
+        &path,
+        &LoadOptions::new()
+            .with_storage(StorageMode::Memory)
+            .with_columns(MapPolicy::Memory),
+    )
+    .unwrap();
+    let t = |k: &str| Value::String(word(&terms, k));
+    let (w1, w2) = (word_at(&terms, "phrase", 0), word_at(&terms, "phrase", 1));
+    let phrase = format!("{w1} {w2}");
+    let three: Vec<String> = (0..3)
+        .map(|i| escape_regex(&word_at(&terms, "three", i)))
+        .collect();
+    let alt = format!("({})", three.join("|"));
+    let sv = |s: &str| Value::String(s.to_string());
+    type CypherCell = (String, String, HashMap<String, Value>, Option<i64>);
+    let mut cells: Vec<CypherCell> = Vec::new();
+    let mut add = |name: String, q: &str, p: Vec<(&str, Value)>, want: Option<i64>| {
+        cells.push((
+            name,
+            q.to_string(),
+            p.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+            want,
+        ));
+    };
+    for (tier, cs, ci, bounded) in [
+        ("rare", 34, 34, 15),
+        ("mid", 637, 741, 399),
+        ("common", 13431, 31689, 11440),
+    ] {
+        add(
+            format!("CONTAINS count [{tier}]"),
+            "MATCH (n:CourtDecision) WHERE n.sammendrag CONTAINS $t RETURN count(n) AS c",
+            vec![("t", t(tier))],
+            Some(cs),
+        );
+        add(
+            format!("toLower CONTAINS count [{tier}]"),
+            "MATCH (n:CourtDecision) WHERE toLower(n.sammendrag) CONTAINS $t RETURN count(n) AS c",
+            vec![("t", t(tier))],
+            Some(ci),
+        );
+        add(
+            format!("regex literal count [{tier}]"),
+            "MATCH (n:CourtDecision) WHERE text_match_regex(n.sammendrag,$p) RETURN count(n) AS c",
+            vec![("p", sv(&escape_regex(&word(&terms, tier))))],
+            Some(cs),
+        );
+        add(
+            format!("regex \\b..\\b count [{tier}]"),
+            "MATCH (n:CourtDecision) WHERE text_match_regex(n.sammendrag,$p) RETURN count(n) AS c",
+            vec![(
+                "p",
+                sv(&format!("\\b{}\\b", escape_regex(&word(&terms, tier)))),
+            )],
+            Some(bounded),
+        );
+        add(format!("text_match ci count [{tier}]"), "MATCH (n:CourtDecision) WHERE text_match(n.sammendrag,$t,{ignore_case: true}) RETURN count(n) AS c", vec![("t", t(tier))], Some(ci));
+    }
+    add(
+        "3-way alternation count".into(),
+        "MATCH (n:CourtDecision) WHERE text_match_regex(n.sammendrag,$p) RETURN count(n) AS c",
+        vec![("p", sv(&alt))],
+        Some(3959),
+    );
+    add(
+        "3-way alternation (?i) count".into(),
+        "MATCH (n:CourtDecision) WHERE text_match_regex(n.sammendrag,$p,'i') RETURN count(n) AS c",
+        vec![("p", sv(&alt))],
+        Some(4053),
+    );
+    add(
+        "phrase CONTAINS count".into(),
+        "MATCH (n:CourtDecision) WHERE n.sammendrag CONTAINS $t RETURN count(n) AS c",
+        vec![("t", sv(&phrase))],
+        Some(42),
+    );
+    add(
+        "phrase toLower CONTAINS count".into(),
+        "MATCH (n:CourtDecision) WHERE toLower(n.sammendrag) CONTAINS $t RETURN count(n) AS c",
+        vec![("t", sv(&phrase))],
+        Some(42),
+    );
+    add("phrase text_match phrase ci count".into(), "MATCH (n:CourtDecision) WHERE text_match(n.sammendrag,$t,{mode:'phrase', ignore_case:true}) RETURN count(n) AS c", vec![("t", sv(&phrase))], Some(42));
+    add(
+        "phrase regex \\s+ 'i' count".into(),
+        "MATCH (n:CourtDecision) WHERE text_match_regex(n.sammendrag,$p,'i') RETURN count(n) AS c",
+        vec![(
+            "p",
+            sv(&format!(
+                "\\b{}\\s+{}\\b",
+                escape_regex(&w1),
+                escape_regex(&w2)
+            )),
+        )],
+        Some(30),
+    );
+    for tier in ["mid", "common"] {
+        add(format!("CONTAINS then expand + group [{tier}]"), "MATCH (n:CourtDecision) WHERE n.sammendrag CONTAINS $t MATCH (n)-[:CITES]->(l:LawSection) RETURN l.id AS i, count(*) AS c ORDER BY c DESC LIMIT 5", vec![("t", t(tier))], None);
+        add(format!("single pattern CONTAINS expand + group [{tier}]"), "MATCH (n:CourtDecision)-[:CITES]->(l:LawSection) WHERE n.sammendrag CONTAINS $t RETURN l.id AS i, count(*) AS c ORDER BY c DESC LIMIT 5", vec![("t", t(tier))], None);
+        add(format!("year AND court AND CONTAINS count [{tier}]"), "MATCH (n:CourtDecision) WHERE n.year >= 2015 AND n.court_level = 'hoyesterett' AND n.sammendrag CONTAINS $t RETURN count(n) AS c", vec![("t", t(tier))], None);
+        add(format!("CONTAINS group by court_level [{tier}]"), "MATCH (n:CourtDecision) WHERE n.sammendrag CONTAINS $t RETURN n.court_level AS c, count(*) AS k", vec![("t", t(tier))], None);
+    }
+    println!("== through Cypher: load {}", uptime());
+    println!("CONTROL start {:.2} ms", control(&buffer));
+    let ctrl = "MATCH (d:CourtDecision)-[:CITES]->(s:LawSection)-[:SECTION_OF]->(l:Law) RETURN count(*) AS c";
+    let none = HashMap::new();
+    println!(
+        "CTRL 2hop count {:.3} ms",
+        time_ms(|| {
+            std::hint::black_box(cypher_value(&graph, ctrl, &none, false));
+        })
+        .0
+    );
+    for (name, query, params, want) in &cells {
+        take_text_meters();
+        let on_value = cypher_value(&graph, query, params, false);
+        let meters = take_text_meters();
+        let off_value = cypher_value(&graph, query, params, true);
+        let on = time_ms(|| {
+            std::hint::black_box(cypher_value(&graph, query, params, false));
+        });
+        let off = time_ms(|| {
+            std::hint::black_box(cypher_value(&graph, query, params, true));
+        });
+        let route = if meters.is_empty() {
+            "per-row".to_string()
+        } else if meters.iter().all(Option::is_none) {
+            "scan".to_string()
+        } else {
+            format!("declined {meters:?}")
+        };
+        let check = match want {
+            Some(w) => {
+                if *w == on_value && *w == off_value {
+                    "MATCH"
+                } else {
+                    "MISMATCH"
+                }
+            }
+            None => {
+                if on_value == off_value {
+                    "ON==OFF"
+                } else {
+                    "DIFFER"
+                }
+            }
+        };
+        println!(
+            "CYPHER {name:52} on {:9.3} off {:9.3} ms  x{:5.2}  route {route}  value {on_value} {check}",
+            on.0, off.0, off.0 / on.0
+        );
+    }
+    println!("CONTROL end {:.2} ms load {}", control(&buffer), uptime());
 }

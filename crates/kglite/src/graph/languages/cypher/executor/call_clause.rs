@@ -597,6 +597,7 @@ impl<'a> CypherExecutor<'a> {
                 "db.index.fulltext.queryrelationships" => {
                     self.fulltext_index_query(true, &params, &clause.yield_items)?
                 }
+                "db.text.search" => self.text_search(&params, &clause.yield_items)?,
                 "db.index.vector.querynodes" => {
                     self.vector_index_query(false, &params, &clause.yield_items)?
                 }

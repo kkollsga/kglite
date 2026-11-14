@@ -3071,6 +3071,98 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         None,
     ),
     ("trigger_node_scan_aggregate", "social_graph", "MATCH (p:Person) RETURN sum(p.age) AS total", None),
+    # ── text column scan (`text_column_scan`) ──
+    #
+    # One query per predicate form on the nine-document BM25 corpus (which also
+    # holds a document with no `body` and one with an empty `body`). The scan
+    # only proposes candidates; every one of these must answer what the
+    # optimizer-off per-row evaluation answers.
+    (
+        "trigger_text_column_scan",
+        "text_index_graph",
+        "MATCH (d:Doc) WHERE text_match(d.body, 'alpha beta') RETURN d.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "text_scan_literal_ci",
+        "text_index_graph",
+        "MATCH (d:Doc) WHERE text_match(d.body, $q, $o) RETURN d.id AS id ORDER BY id",
+        {"q": "ALPHA", "o": {"ignore_case": True}},
+    ),
+    (
+        "text_scan_phrase",
+        "text_index_graph",
+        "MATCH (d:Doc) WHERE text_match(d.body, 'beta  gamma', {mode: 'phrase'}) RETURN d.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "text_scan_regex",
+        "text_index_graph",
+        "MATCH (d:Doc) WHERE text_match(d.body, '^alpha', {mode: 'regex'}) RETURN d.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "text_scan_regex_ci",
+        "text_index_graph",
+        "MATCH (d:Doc) WHERE text_match(d.body, 'GAMMA$', {mode: 'regex', ignore_case: true}) "
+        "RETURN d.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "text_scan_contains",
+        "text_index_graph",
+        "MATCH (d:Doc) WHERE d.body CONTAINS 'beta' RETURN d.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "text_scan_contains_param",
+        "text_index_graph",
+        "MATCH (d:Doc) WHERE d.body CONTAINS $q RETURN d.id AS id ORDER BY id",
+        {"q": "gamma"},
+    ),
+    (
+        "text_scan_to_lower_contains",
+        "text_index_graph",
+        "MATCH (d:Doc) WHERE toLower(d.body) CONTAINS 'alpha' RETURN d.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "text_scan_regex_operator",
+        "text_index_graph",
+        "MATCH (d:Doc) WHERE d.body =~ 'alpha.*' RETURN d.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "text_scan_text_match_regex",
+        "text_index_graph",
+        "MATCH (d:Doc) WHERE text_match_regex(d.body, 'alp.a') RETURN d.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "text_scan_with_other_conjunct",
+        "text_index_graph",
+        "MATCH (d:Doc) WHERE text_match(d.body, 'alpha') AND d.id > 3 RETURN d.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "text_scan_not_bails",
+        "text_index_graph",
+        "MATCH (d:Doc) WHERE NOT text_match(d.body, 'alpha') RETURN d.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "text_scan_count",
+        "text_index_graph",
+        "MATCH (d:Doc) WHERE text_match(d.body, 'alpha') RETURN count(d) AS c",
+        None,
+    ),
+    (
+        "text_scan_procedure_hits",
+        "text_index_graph",
+        "CALL db.text.search({type: 'Doc', property: 'body', query: 'alpha'}) "
+        "YIELD node, offset, length RETURN node.id AS id, offset, length ORDER BY id, offset",
+        None,
+    ),
     # ── column kernel (`columnar_scan_aggregate`) ──
     #
     # Numeric-comparison counts the kernel answers; the single-pass-disabled
@@ -9461,6 +9553,7 @@ PASS_TRIGGER_CASES: dict[str, tuple[str, str]] = {
     "fuse_match_with_aggregate_top_k": ("differential", "trigger_match_with_top_k"),
     "fuse_node_scan_aggregate": ("differential", "trigger_node_scan_aggregate"),
     "columnar_scan_aggregate": ("differential", "trigger_columnar_scan_aggregate"),
+    "text_column_scan": ("differential", "trigger_text_column_scan"),
     "fuse_node_scan_top_k": ("differential", "trigger_node_scan_top_k"),
     "fuse_vector_score_order_limit": ("specialized", "vector_score_top_k"),
     "fuse_order_by_top_k": ("differential", "trigger_generic_top_k"),

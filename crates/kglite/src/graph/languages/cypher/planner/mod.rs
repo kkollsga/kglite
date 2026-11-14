@@ -26,6 +26,7 @@ mod rel_index_anchor;
 pub mod rel_predicate_pushdown;
 pub mod schema_check;
 pub mod simplification;
+mod text_scan;
 mod var_length_lowering;
 mod with_boundary;
 
@@ -215,6 +216,8 @@ pub const PASSES: &[(&str, PassFn)] = &[
         pass_optimize_pattern_start_node,
     ),
     ("reorder_match_patterns", pass_reorder_match_patterns),
+    // After the start-node passes, before the fusions that read properties.
+    ("text_column_scan", text_scan::pass),
     ("push_limit_into_match", pass_push_limit_into_match),
     ("push_limit_into_aggregate", pass_push_limit_into_aggregate),
     ("push_limit_into_fulltext_call", fulltext_limit::pass),

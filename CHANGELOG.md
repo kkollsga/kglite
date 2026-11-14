@@ -9,8 +9,14 @@ before upgrading.
 
 ## [Unreleased]
 
+### Added
+
+- **`text_match(value, query [, {mode, ignore_case}])` tests a string, phrase or regex without an index.** `mode` is `'literal'` (default), `'phrase'` (whitespace in the query matches any run of whitespace, newlines included) or `'regex'`. A null value or a value that is not text gives null; a list of strings is one document, as `text_bm25` indexes it. An empty query, an unknown option and an invalid regex are errors.
+- **`CALL db.text.search({type, property, query, ...})` returns every occurrence with its position.** It yields `node`, `property`, `offset`, `length` (both in bytes), `char_offset` and `snippet`, one row per occurrence in node order. `within` takes a list of nodes to search only those, `` `limit` `` caps the rows and `snippet_chars` sets the context.
+
 ### Changed
 
+- **String predicates on a single-label `MATCH` find their candidates by scanning the property's column.** It serves `text_match`, `CONTAINS`, `toLower(n.p) CONTAINS 'x'`, `=~` and `text_match_regex` with a literal or parameter query. Every candidate is still tested by the predicate, so results do not change. `PROFILE` ends the `MATCH` line with `[text column scan]` or the reason the scan declined, and `disabled_passes=['text_column_scan']` turns it off. FIGURES
 - **`CALL db.index.fulltext.queryNodes(...) YIELD ... RETURN ... [SKIP s] LIMIT n` ranks only the rows it returns.** The trailing literal limit now reaches the procedure as its `limit` option; the rows, scores and order are unchanged. On a 60k-document graph (release, minimum of 25 runs): a common term matching 39k documents 16.8 ms to 0.79 ms, and a three-term query matching all 60k documents 29.6 ms to 3.4 ms. A query with `WHERE`, `ORDER BY` or `DISTINCT` after the call still ranks every match.
 - **A mapped open no longer walks the edge array of a file without edge properties.** Release build, minimum of 7 warm loads: 2.8M edges 12.7 ms to 2.0 ms and 40 MB to 7.5 MB resident after load; 12M edges 68.5 ms to 22.5 ms and 193 MB to 55 MB.
 

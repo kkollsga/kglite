@@ -146,6 +146,7 @@ impl RecordLayout for BorrowedLayout<'_> {
 }
 
 /// An owned layout, built from values (tests, overlays of changed rows).
+#[cfg(test)]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct OwnedLayout {
     offsets: Vec<u64>,
@@ -153,6 +154,7 @@ pub(crate) struct OwnedLayout {
     nulls: Vec<u8>,
 }
 
+#[cfg(test)]
 impl OwnedLayout {
     /// `None` is a null row; `Some("")` is a present, empty value.
     pub(crate) fn from_records<S: AsRef<[u8]>>(records: &[Option<S>]) -> Self {
@@ -171,6 +173,7 @@ impl OwnedLayout {
     }
 }
 
+#[cfg(test)]
 impl RecordLayout for OwnedLayout {
     fn offsets(&self) -> &[u64] {
         &self.offsets

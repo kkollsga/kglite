@@ -71,6 +71,10 @@ pub(super) const GUARD_SAFE_PASSES: &[(&str, &str)] = &[
         "order only; guards on every element make the order irrelevant to the answer",
     ),
     (
+        "text_column_scan",
+        "a candidate source inside the matcher; the guard then filters the candidates and the predicate still decides each",
+    ),
+    (
         "push_limit_into_fulltext_call",
         "an early-stop cap on the procedure's own ranking, which still applies its valid-time filter",
     ),

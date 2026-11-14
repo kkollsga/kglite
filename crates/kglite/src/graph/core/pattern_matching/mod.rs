@@ -29,11 +29,13 @@ mod text_column_scan_bench;
 #[cfg(test)]
 mod text_column_scan_cases;
 #[cfg(test)]
+mod text_column_scan_cypher_tests;
+#[cfg(test)]
 mod text_column_scan_tests;
 
 pub use matcher::PatternExecutor;
 pub use parser::parse_pattern;
 pub use pattern::{
     anon_vlpath_name, EdgeDirection, EdgePattern, MatchBinding, NodePattern, ParamLabel, PathHop,
-    Pattern, PatternElement, PatternMatch, PropertyMatcher, ANON_VLPATH_PREFIX,
+    Pattern, PatternElement, PatternMatch, PropertyMatcher, TextScanSpec, ANON_VLPATH_PREFIX,
 };

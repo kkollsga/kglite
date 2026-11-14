@@ -823,7 +823,7 @@
       "classification": "dead-code"
     },
     {
-      "identity": "crates/kglite/src/graph/core/pattern_matching/text_column_scan.rs::module::dead_code",
+      "identity": "crates/kglite/src/graph/core/pattern_matching/text_column_scan.rs::statement:Count,::dead_code",
       "classification": "dead-code"
     },
     {
@@ -856,10 +856,6 @@
     },
     {
       "identity": "crates/kglite/src/graph/storage/column_store/mod.rs::fn:row_properties_map:pub fn row_properties_map( &self, row_id: u32, interner: &StringInterner, ) -> HashMap<String, Value>::dead_code",
-      "classification": "dead-code"
-    },
-    {
-      "identity": "crates/kglite/src/graph/storage/column_store/tail.rs::fn:row_parts:pub(crate) fn row_parts(&self) -> Vec<(u32, &ColumnStore)>::dead_code",
       "classification": "dead-code"
     },
     {
@@ -959,7 +955,7 @@
       "classification": "dead-code"
     },
     {
-      "identity": "crates/kglite/src/graph/text_scan/mod.rs::module::dead_code",
+      "identity": "crates/kglite/src/graph/text_scan/scope.rs::statement:RangeDriven,::dead_code",
       "classification": "dead-code"
     },
     {
