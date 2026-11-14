@@ -257,14 +257,4 @@ impl Matcher {
         });
         out
     }
-
-    /// How much cheaper than the whole layout a scope must be for range-driven
-    /// scanning: a plain literal's full scan is so cheap that gathering ranges
-    /// costs more than scanning past them.
-    pub(crate) fn scope_margin(&self) -> u64 {
-        match self.engine {
-            Engine::Memmem(_) => super::scope::SET_DRIVEN_MARGIN_LITERAL,
-            _ => super::scope::SET_DRIVEN_MARGIN_REGEX,
-        }
-    }
 }

@@ -16,8 +16,12 @@ use super::scope::{self, Plan, ScopeStrategy};
 
 /// Largest slice of the data one work unit covers (the interrupt granularity).
 pub(crate) const UNIT_BYTES: usize = 8 << 20;
-/// Layouts smaller than this scan on the calling thread. Provisional.
-pub(crate) const PARALLEL_MIN_BYTES: u64 = 4 << 20;
+/// Layouts smaller than this scan on the calling thread. Release timings on a
+/// real 31 MB column and a synthetic one, 10 threads: parallel wins from
+/// 512 KiB for a case-insensitive literal or a regex without a literal (2x at
+/// 512 KiB), and from about 1-2 MiB for a plain rare literal (where 512 KiB
+/// costs 7 us). A mistake below this size is microseconds, above it up to 4x.
+pub(crate) const PARALLEL_MIN_BYTES: u64 = 512 << 10;
 /// Smallest work unit a parallel scan cuts a layout into.
 pub(crate) const MIN_PARALLEL_UNIT: usize = 256 << 10;
 pub(crate) const POLL_EVERY: usize = 256;
@@ -303,12 +307,10 @@ pub(crate) fn scan<L: RecordLayout + Sync>(
     } else {
         UNIT_BYTES
     };
-    let chunks: Vec<(usize, usize)> = match scope.as_deref().map(|s| {
-        (
-            s,
-            scope::plan(layout, s, opts.scope_strategy, matcher.scope_margin()),
-        )
-    }) {
+    let chunks: Vec<(usize, usize)> = match scope
+        .as_deref()
+        .map(|s| (s, scope::plan(layout, s, opts.scope_strategy)))
+    {
         None => chunk_ranges_in(layout, whole, unit),
         Some((s, Plan::Filtered)) => {
             effective.scan_scope = Some(s);

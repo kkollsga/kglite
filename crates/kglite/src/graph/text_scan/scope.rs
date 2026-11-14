@@ -10,17 +10,20 @@
 //!   delimited by the offsets array, so nothing can match across a boundary.
 //! * **scan-driven**: scan every record and drop hits outside the scope.
 //!
-//! Range-driven is chosen when `(scope bytes + ranges * RANGE_OVERHEAD_BYTES) *
-//! margin <= total bytes`. The margin is larger for a plain-literal matcher
-//! (its whole scan is so cheap that gathering ranges costs more than scanning
-//! past them). **All three constants are provisional**: the shape was taken on
-//! a debug build; the coordinator retakes them in release.
+//! Range-driven is chosen when `scope bytes + ranges * RANGE_OVERHEAD_BYTES <=
+//! total bytes`. Release timings on a 31 MB, 57,798-record column with 10
+//! threads (rare and common literal and a `\b..\b` regex behave alike): a
+//! clustered scope wins up to at least 62 % of the bytes, a scattered one wins
+//! at 5 % and 10 % and loses from about 22 %. With an overhead of 3 KiB per
+//! range the rule flips between 10 % and 22 % scattered and keeps clustered
+//! scopes range-driven, which is what those timings show. The constants come
+//! from one corpus on a loaded machine, so treat the overhead figure as
+//! measured but not tight; the break-even region is flat (the two strategies
+//! are within 1.3x of each other across it).
 
 use super::layout::RecordLayout;
 
-pub(crate) const SET_DRIVEN_MARGIN_REGEX: u64 = 2;
-pub(crate) const SET_DRIVEN_MARGIN_LITERAL: u64 = 16;
-pub(crate) const RANGE_OVERHEAD_BYTES: u64 = 4096;
+pub(crate) const RANGE_OVERHEAD_BYTES: u64 = 3072;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScopeStrategy {
@@ -85,7 +88,6 @@ pub(crate) fn plan(
     layout: &impl RecordLayout,
     scope: &[u32],
     forced: Option<ScopeStrategy>,
-    margin: u64,
 ) -> Plan {
     if forced == Some(ScopeStrategy::ScanDriven) {
         return Plan::Filtered;
@@ -94,7 +96,7 @@ pub(crate) fn plan(
     if forced.is_none() {
         let cost = range_bytes(layout, &ranges) + ranges.len() as u64 * RANGE_OVERHEAD_BYTES;
         let total = layout.offsets().last().copied().unwrap_or(0);
-        if cost.saturating_mul(margin) > total {
+        if cost > total {
             return Plan::Filtered;
         }
     }
