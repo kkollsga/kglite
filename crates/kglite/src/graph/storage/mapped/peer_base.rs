@@ -134,6 +134,11 @@ impl PeerBase {
         self.by_conn.get(&conn)
     }
 
+    /// The connection types the base holds counts for, by `InternedKey::as_u64`.
+    pub(crate) fn keys(&self) -> impl Iterator<Item = u64> + '_ {
+        self.by_conn.keys().copied()
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.by_conn.is_empty()
     }

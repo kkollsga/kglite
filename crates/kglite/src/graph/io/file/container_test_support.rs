@@ -100,3 +100,17 @@ pub(crate) fn patch_section(path: &std::path::Path, name: &str, patch: impl FnOn
     assert_eq!(out.len(), bytes.len());
     std::fs::write(path, out).unwrap();
 }
+
+/// The bytes of the mappable section `name` of the v9 file at `path`.
+pub(crate) fn read_section(path: &std::path::Path, name: &str) -> Vec<u8> {
+    let bytes = std::fs::read(path).unwrap();
+    let metadata = super::metadata_head::read_metadata_head(&bytes, "test").unwrap();
+    let json_end = 13 + declared_len(&bytes) - 4;
+    let base = super::data_region_base(&metadata, json_end + 4, bytes.len() as u64).unwrap();
+    let entry = metadata
+        .mappable
+        .iter()
+        .find(|e| e.name == name)
+        .unwrap_or_else(|| panic!("no section named {name}"));
+    bytes[(base + entry.offset) as usize..][..entry.len as usize].to_vec()
+}

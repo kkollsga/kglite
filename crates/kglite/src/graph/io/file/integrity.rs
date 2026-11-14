@@ -207,6 +207,13 @@ pub fn verify_graph(graph: &DirGraph) -> IntegrityReport {
             ));
         }
     }
+    // Only a failed structural check adds a row, so a sound graph's report
+    // lists the same sections as before.
+    for failed in super::structure_checks::check_structure(graph) {
+        report
+            .sections
+            .push(status(&failed.section, 0, true, Err(failed.error)));
+    }
     let mut stores = graph.column_stores_by_name();
     stores.sort_by(|a, b| a.0.cmp(b.0));
     let mut seen = std::collections::HashSet::new();

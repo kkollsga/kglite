@@ -429,6 +429,41 @@ fn a_corrupt_string_section_is_refused_at_open_and_a_numeric_one_by_verify() {
 }
 
 #[test]
+fn a_null_flag_byte_that_is_not_zero_or_one_is_refused_by_the_eager_tier_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("g.kgl");
+    save_to(big_graph(), &path, SaveLayout::Auto);
+    container_test_support::patch_section(&path, "col:Big:ratio:nulls", |b| b[5] = 7);
+    let lazy = load_columns(&path, MapPolicy::Mapped);
+    let report = verify_graph(&lazy);
+    let bad: Vec<_> = report
+        .sections
+        .iter()
+        .filter(|s| s.error.is_some())
+        .collect();
+    assert_eq!(bad.len(), 1, "{report:?}");
+    assert_eq!(bad[0].name, "col:Big");
+    assert!(bad[0]
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("nulls byte 7 at row 5"));
+    let error = load_file_with(
+        path.to_str().unwrap(),
+        &LoadOptions::new()
+            .with_columns(MapPolicy::Mapped)
+            .with_verify(Verify::Eager),
+    )
+    .map(|_| ())
+    .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+    assert!(
+        error.to_string().contains("nulls byte 7 at row 5"),
+        "{error}"
+    );
+}
+
+#[test]
 fn invalid_utf8_with_a_valid_digest_is_refused_at_open() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("g.kgl");

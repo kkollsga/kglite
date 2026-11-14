@@ -15,6 +15,7 @@ before upgrading.
 
 ### Fixed
 
+- **`verify="eager"` and `verify_integrity()` now check the structure of mapped sections, not only their checksums.** They refuse out-of-range edge endpoints and type ordinals, adjacency that disagrees with the edge records or is out of order, a type mask that hides a present type, peer counts and id indexes that disagree with the graph, and null or bool flag bytes other than 0 or 1. The default lazy open runs none of these checks.
 - **A mapped `.kgl` whose topology sections are internally inconsistent is refused or survived instead of panicking.** A node record naming a type the file does not list, or a file that lists no connection types while counting edges, is refused at open with `InvalidData`. An edge record whose endpoint lies past the node array or whose connection type ordinal is past the type list no longer panics a query or `describe()`; it reads as the type `<invalid connection type>`. Adjacency arrays that disagree with each other are still not checked at open and can give wrong answers.
 - **`save()` of a mapped graph with such an edge record now returns an error.** It used to drop the edge from the new file with only a fallback warning.
 

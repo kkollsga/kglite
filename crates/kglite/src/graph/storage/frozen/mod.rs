@@ -42,6 +42,7 @@ mod iters;
 pub(crate) mod node_record;
 mod promote;
 mod read;
+mod structure;
 
 use std::collections::HashMap;
 use std::io;

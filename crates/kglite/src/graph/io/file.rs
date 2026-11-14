@@ -2317,6 +2317,14 @@ fn load_portable_columnar(
         let base = indexes.peer_base(&dir_graph)?;
         dir_graph.graph.install_peer_base(base);
     }
+    if options.verify == Verify::Eager {
+        if let Some(first) = structure_checks::check_structure(&dir_graph)
+            .into_iter()
+            .next()
+        {
+            return Err(invalid_data(format!("{}: {}", first.section, first.error)));
+        }
+    }
     if let Some(file) = source.file {
         sections.release_consumed(file);
     }
@@ -2342,6 +2350,7 @@ use columns::{attach_portable_column_stores, load_disk_column_stores};
 
 mod legacy_references;
 mod metadata_head;
+mod structure_checks;
 pub(crate) use metadata_head::{
     checkpoint_lsn_from_file, read_metadata_head, read_metadata_head_from_file,
 };
@@ -2389,6 +2398,8 @@ mod mappable_tests;
 #[cfg(test)]
 #[path = "file/column_mapped_tests.rs"]
 mod column_mapped_tests;
+#[cfg(test)]
+mod crafted_structure_tests;
 #[cfg(test)]
 mod crafted_topology_tests;
 #[cfg(test)]

@@ -236,6 +236,30 @@ impl TypedColumn {
         }
     }
 
+    /// The first row whose null flag (or, for a bool column, value) is a byte
+    /// other than 0 or 1, as `(what, row, byte)`. Readers treat any non-zero
+    /// null byte as null, so such a byte is wrong without changing a read.
+    pub(crate) fn first_bad_flag(&self) -> Option<(&'static str, usize, u8)> {
+        let flags = |what, bytes: &[u8]| {
+            bytes
+                .iter()
+                .position(|&b| b > 1)
+                .map(|row| (what, row, bytes[row]))
+        };
+        match self {
+            TypedColumn::Mixed { .. } => None,
+            TypedColumn::Bool { data, nulls } => {
+                flags("nulls", nulls.as_slice()).or_else(|| flags("data", data.as_slice()))
+            }
+            TypedColumn::Int64 { nulls, .. }
+            | TypedColumn::Timestamp { nulls, .. }
+            | TypedColumn::Float64 { nulls, .. }
+            | TypedColumn::UniqueId { nulls, .. }
+            | TypedColumn::Date { nulls, .. }
+            | TypedColumn::Str { nulls, .. } => flags("nulls", nulls.as_slice()),
+        }
+    }
+
     /// Check the CRC32 of every mapped section this column reads from.
     pub(crate) fn verify_storage(&self) -> io::Result<()> {
         self.shared_sections()
@@ -245,6 +269,19 @@ impl TypedColumn {
 }
 
 impl ColumnStore {
+    /// The first column of this store with a flag byte other than 0 or 1,
+    /// described as `(column position, what, row, byte)`; the id and title
+    /// columns come after the property columns.
+    pub(crate) fn first_bad_flag(&self) -> Option<(usize, &'static str, usize, u8)> {
+        self.columns
+            .iter()
+            .map(|c| &**c)
+            .chain(self.id_column.as_deref())
+            .chain(self.title_column.as_deref())
+            .enumerate()
+            .find_map(|(i, c)| c.first_bad_flag().map(|(what, row, b)| (i, what, row, b)))
+    }
+
     /// Check the CRC32 of every mapped section this store's columns read from,
     /// so a corrupt section is refused before a save copies it into a new
     /// file.
