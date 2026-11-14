@@ -16,7 +16,8 @@ use super::PatternExecutor;
 use crate::graph::algorithms::Interrupt;
 use crate::graph::core::pattern_matching::pattern::PropertyMatcher;
 use crate::graph::core::pattern_matching::text_column_scan::{
-    note_text_decline, note_text_served, text_column_scan, TextAnswer, TextMode, TextScanRequest,
+    note_text_decline, note_text_served, text_column_scan, TextAnswer, TextDecline, TextMode,
+    TextScanRequest,
 };
 
 /// Candidates above this share of the type (a tenth, never fewer than
@@ -86,6 +87,10 @@ impl PatternExecutor<'_> {
             deadline: self.deadline,
             cancel: self.cancel,
         };
+        if self.probe_is_unselective(node_type, property, matchers, interrupt)? {
+            note_text_decline(TextDecline::Unselective);
+            return Ok(None);
+        }
         let mut sets: Vec<Vec<NodeIndex>> = Vec::with_capacity(matchers.len());
         for matcher in matchers {
             let outcome = text_column_scan(
@@ -125,5 +130,49 @@ impl PatternExecutor<'_> {
             return Ok(Some(Vec::new()));
         };
         Ok(Some(bucket.iter().filter(|n| wanted.contains(n)).collect()))
+    }
+
+    /// Whether the first sixteenth of a large type already matches more than
+    /// the cap's share: a scan that will decline for want of selectivity is
+    /// cheaper to refuse on a prefix than to run to the cap.
+    fn probe_is_unselective(
+        &self,
+        node_type: &str,
+        property: &str,
+        matchers: &[crate::graph::text_scan::matcher::Matcher],
+        interrupt: Interrupt,
+    ) -> Result<bool, String> {
+        let Some(bucket) = self.graph.type_indices.get(node_type) else {
+            return Ok(false);
+        };
+        if bucket.len() < 2 * CAP_FLOOR {
+            return Ok(false);
+        }
+        let prefix: Vec<NodeIndex> = bucket.iter().take(bucket.len() / 16).collect();
+        for matcher in matchers {
+            let outcome = text_column_scan(
+                self.graph,
+                &TextScanRequest {
+                    node_type,
+                    property,
+                    matcher,
+                    scope: Some(&prefix),
+                    mode: TextMode::Exists,
+                    interrupt,
+                    serial: false,
+                    candidate_cap: Some(prefix.len() / 10),
+                },
+            );
+            match outcome {
+                Err(_) => {
+                    return Err(self
+                        .interrupt_reason()
+                        .unwrap_or_else(|| "Query interrupted".to_string()))
+                }
+                Ok(Err(TextDecline::Unselective)) => return Ok(true),
+                Ok(_) => {}
+            }
+        }
+        Ok(false)
     }
 }

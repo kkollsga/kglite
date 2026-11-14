@@ -1325,9 +1325,9 @@ The scan serves a positive top-level `WHERE` conjunct of these forms, when the q
 - `toLower(n.p) CONTAINS 'literal'` (the literal must already be lowercase);
 - `n.p =~ 'regex'` and `text_match_regex(n.p, 'regex')`, when the regex has a literal of at least three plain characters that every match must contain.
 
-It applies when `n` is the first node of its pattern with exactly one label and no index serves the pattern. It does not apply to `OPTIONAL MATCH`, to a predicate under `NOT`, `OR` or `XOR`, to `STARTS WITH`, `ENDS WITH` or `toUpper`, or to a node reached by expanding from a bound node.
+It applies when `n` is the first node of its pattern with exactly one label, no other property filter on `n`, and no index serving the pattern. It does not apply to `OPTIONAL MATCH`, to a predicate under `NOT`, `OR` or `XOR`, to `STARTS WITH`, `ENDS WITH` or `toUpper`, or to a node reached by expanding from a bound node.
 
-At run time the scan declines, and the query runs as it always did, on disk graphs, when a node of another type carries the label as a secondary label, for an ontology closure, for `id`, `title` and the aliases `name`, `type`, `node_type` and `label`, and when the property's column holds strings beside other kinds of value.
+At run time the scan declines, and the query runs as it always did, on disk graphs, when a node of another type carries the label as a secondary label, for an ontology closure, for `id`, `title` and the aliases `name`, `type`, `node_type` and `label`, when the property's column holds strings beside other kinds of value, and when more than a tenth of the label's nodes match (the predicate re-tests each match, so a scan that matches most of the label saves nothing).
 
 `PROFILE` ends the `MATCH` line with `[text column scan]` when the scan answered, or `[text scan declined: <reason>]` when it did not. `EXPLAIN` lists `text_column_scan` among the optimizer passes that changed the plan. `disabled_passes=['text_column_scan']` turns the scan off.
 

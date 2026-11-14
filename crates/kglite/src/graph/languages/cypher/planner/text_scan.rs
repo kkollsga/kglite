@@ -28,8 +28,9 @@ struct Recognised {
 /// `text_match_regex(v.p, 'regex')`, with every argument but `v.p` a literal
 /// or a `$parameter` known at plan time, and `v` the *first* node of its
 /// pattern (the node the matcher starts from after the start-node passes),
-/// bound by this clause alone, with exactly one label and no inline
-/// property of the same name.
+/// bound by this clause alone, with exactly one label, no inline property of
+/// the same name and no other property filter (inline or pushed from the
+/// WHERE).
 ///
 /// **Rewrite:** a [`PropertyMatcher::TextScan`] joins `v`'s properties. When
 /// no index serves the pattern, the matcher asks the column driver for the
@@ -51,7 +52,8 @@ struct Recognised {
 /// **Why-bail** (the plan is left exactly as written): `OPTIONAL MATCH`; a
 /// predicate under `NOT`, `OR` or `XOR`; a non-constant argument; a label-less,
 /// multi-label or alternation node; a node bound by an earlier clause or not
-/// first in its pattern (reached by expansion); an inline property or a
+/// first in its pattern (reached by expansion); another property filter on the
+/// node, which an index may serve and a fused count already scans; a
 /// second text predicate on the same property; a literal that is empty, or
 /// for `toLower` not already lowercase (the predicate can never hold); a regex
 /// without a required literal; `text_match_regex` flags; `STARTS WITH` and
@@ -60,9 +62,10 @@ struct Recognised {
 /// does not compile (the per-row evaluation reports the error).
 ///
 /// **At execution** the driver declines on disk graphs, secondary-label
-/// carriers, ontology closures, id/title and soft-alias fields, and columns it
-/// cannot prove (see `text_column_scan.rs`), and the matcher then scans as it
-/// always did. When another candidate source (an index, a bound variable) is
+/// carriers, ontology closures, id/title and soft-alias fields, columns it
+/// cannot prove (see `text_column_scan.rs`), and when more than a tenth of the
+/// type matches (probed on the first sixteenth of the type, then capped on the
+/// full scan), and the matcher then scans as it always did. When another candidate source (an index, a bound variable) is
 /// available it is used instead.
 pub(super) fn pass(query: &mut CypherQuery, ctx: &PassCtx) {
     let mut i = 0;
@@ -149,6 +152,18 @@ fn attach(patterns: &mut [crate::graph::core::pattern_matching::Pattern], hit: R
         return;
     };
     if np.node_type.is_none() || np.multi_label_constrained() || !np.label_params.is_empty() {
+        return;
+    }
+    // Another property filter on the node (an index may serve it, and a
+    // fused count scans the column with it): the existing path is already
+    // cheap there, and measured no faster with a scan in front.
+    if np.properties.iter().flatten().any(|(key, matcher)| {
+        key != &hit.property
+            && !matches!(
+                matcher,
+                PropertyMatcher::TextScan(_) | PropertyMatcher::Contains(_)
+            )
+    }) {
         return;
     }
     let props = np.properties.get_or_insert_with(HashMap::new);

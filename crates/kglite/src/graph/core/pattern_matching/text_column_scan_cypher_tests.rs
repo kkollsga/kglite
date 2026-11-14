@@ -125,7 +125,8 @@ const DOC_GOLDEN: &[(&str, &[i64], bool)] = &[
     ("toLower(n.t) CONTAINS 'Alpha'", &[], false),
     ("n.t STARTS WITH 'alpha'", &[1, 8, 10], false),
     ("n.t ENDS WITH 'gamma'", &[4, 8], false),
-    ("n.t CONTAINS 'alpha' AND n.id > 4", &[8, 10], true),
+    // Another property filter on the node: the existing path serves it.
+    ("n.t CONTAINS 'alpha' AND n.id > 4", &[8, 10], false),
     (
         "n.t CONTAINS 'alpha' AND text_match(n.u, 'note')",
         &[1, 4, 8, 10],
@@ -228,7 +229,7 @@ fn a_routed_shape_changes_the_plan_and_every_bail_shape_leaves_it_untouched() {
         "MATCH (n:Doc) WHERE n.t CONTAINS $q RETURN n",
         "MATCH (n:Doc) WHERE text_match(n.t, $q, {mode: 'phrase', ignore_case: true}) RETURN n",
         "MATCH (n:Doc) WHERE toLower(n.t) CONTAINS 'alpha' RETURN n",
-        "MATCH (n:Doc) WHERE n.t =~ 'alpha.*' AND n.id > 2 RETURN n",
+        "MATCH (n:Doc) WHERE n.t =~ 'alpha.*' AND text_match(n.u, 'note') RETURN n",
         "MATCH (n:Doc) WHERE text_match_regex(n.t, 'alp.a') RETURN n",
         "MATCH (n:Doc)-[:R]->(m) WHERE text_match(n.t, 'alpha') RETURN m",
     ] {
@@ -246,6 +247,8 @@ fn a_routed_shape_changes_the_plan_and_every_bail_shape_leaves_it_untouched() {
         "MATCH (n:Doc) WHERE text_match(n.t, '(', {mode: 'regex'}) RETURN n",
         "MATCH (n:Doc) WHERE text_match(n.t, 'a', {mode: 'nope'}) RETURN n",
         // pattern shapes
+        "MATCH (n:Doc) WHERE n.id > 2 AND text_match(n.t, 'alpha') RETURN n",
+        "MATCH (n:Doc {u: 'note'}) WHERE text_match(n.t, 'alpha') RETURN n",
         "MATCH (n) WHERE text_match(n.t, 'alpha') RETURN n",
         "MATCH (n:Doc:Other) WHERE text_match(n.t, 'alpha') RETURN n",
         "MATCH (n:Doc|Mix) WHERE text_match(n.t, 'alpha') RETURN n",
@@ -279,6 +282,16 @@ fn an_indexed_anchor_keeps_the_index_as_the_candidate_source() {
         take_text_meters().is_empty(),
         "the index served the pattern"
     );
+    // The planner leaves such a pattern alone, so the index path pays nothing.
+    use crate::graph::languages::cypher::parser::parse_cypher;
+    use crate::graph::languages::cypher::planner::optimize_with_disabled;
+    let planned = |disabled: &[&str]| {
+        let mut parsed = parse_cypher(query).unwrap();
+        let set: HashSet<String> = disabled.iter().map(|d| d.to_string()).collect();
+        optimize_with_disabled(&mut parsed, &graph, &HashMap::new(), &set);
+        format!("{:?}", parsed.clauses)
+    };
+    assert_eq!(planned(&[]), planned(&[PASS]));
 }
 
 // ── db.text.search ───────────────────────────────────────────────────
@@ -544,7 +557,12 @@ const EQUIVALENCE_PREDICATES: &[&str] = &[
     "toLower(n.t) CONTAINS 'ss'",
     "toLower(n.t) CONTAINS 'ß'",
     "text_match(n.t, 'alpha') AND n.g = 3",
+    "text_match(n.t, 'alpha') AND NOT n.g = 3",
 ];
+
+/// The predicates the scan answers: all but the one with a second property
+/// filter (`n.g = 3`), which the existing path serves.
+const ROUTED: usize = EQUIVALENCE_PREDICATES.len() - 1;
 
 /// Every predicate, with the pass on and off, must give the same ids in the
 /// same order; returns how many ran on the column driver.
@@ -566,7 +584,7 @@ fn the_pass_changes_no_answer_across_writes_and_a_transaction_working_copy() {
     use crate::graph::session::Session;
     let mut graph = DirGraph::new();
     corpus(&mut graph, 1, 300);
-    assert!(assert_equivalent(&graph, "fresh") >= EQUIVALENCE_PREDICATES.len());
+    assert!(assert_equivalent(&graph, "fresh") >= ROUTED);
     // Relocated rows, tombstones, new rows, nulls.
     for (id, text) in [
         (
@@ -593,7 +611,7 @@ fn the_pass_changes_no_answer_across_writes_and_a_transaction_working_copy() {
         &HashMap::new(),
     );
     corpus(&mut graph, 1000, 30);
-    assert!(assert_equivalent(&graph, "after writes") >= EQUIVALENCE_PREDICATES.len());
+    assert!(assert_equivalent(&graph, "after writes") >= ROUTED);
 
     let session = Session::new(graph);
     let mut tx = session.begin();
@@ -605,7 +623,7 @@ fn the_pass_changes_no_answer_across_writes_and_a_transaction_working_copy() {
         "CREATE (:Item {id: 5000, t: 'alpha new', g: 3})",
         &HashMap::new(),
     );
-    assert!(assert_equivalent(working, "transaction working copy") >= EQUIVALENCE_PREDICATES.len());
+    assert!(assert_equivalent(working, "transaction working copy") >= ROUTED);
 }
 
 #[test]
@@ -641,13 +659,13 @@ fn the_pass_changes_no_answer_on_mapped_columns_with_edited_rows() {
                 .with_columns(MapPolicy::Mapped),
         )
         .unwrap();
-        assert!(assert_equivalent(&loaded, "mapped, fresh") >= EQUIVALENCE_PREDICATES.len());
+        assert!(assert_equivalent(&loaded, "mapped, fresh") >= ROUTED);
         let params = HashMap::from([("v".to_string(), s("a longer alpha ALPHA value, relocated"))]);
         let graph = std::sync::Arc::make_mut(&mut loaded);
         write(graph, "MATCH (n:Item {id: 3}) SET n.t = $v", &params);
         write(graph, "MATCH (n:Item {id: 4}) DELETE n", &HashMap::new());
         assert!(
-            assert_equivalent(&loaded, "mapped, edited") >= EQUIVALENCE_PREDICATES.len(),
+            assert_equivalent(&loaded, "mapped, edited") >= ROUTED,
             "{storage:?}"
         );
     }
