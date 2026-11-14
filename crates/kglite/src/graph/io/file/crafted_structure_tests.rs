@@ -19,8 +19,10 @@ fn open(path: &std::path::Path, verify: Verify) -> io::Result<Arc<DirGraph>> {
 
 fn u32s(bytes: &[u8]) -> Vec<u32> {
     bytes
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_le_bytes(*c))
         .collect()
 }
 
@@ -33,8 +35,10 @@ fn put_u32(bytes: &mut [u8], index: usize, value: u32) {
 fn mixed_run(path: &std::path::Path) -> usize {
     let off = u32s(&read_section(path, "topo:out_off"));
     let tys: Vec<u16> = read_section(path, "topo:out_ty")
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
         .collect();
     off.windows(2)
         .map(|w| (w[0] as usize, w[1] as usize))
@@ -55,7 +59,9 @@ const CASES: &[(&str, &str, bool, Craft)] = &[
         |p| {
             patch_section(p, "topo:edges", |b| {
                 let live = b
-                    .chunks_exact_mut(12)
+                    .as_chunks_mut::<12>()
+                    .0
+                    .iter_mut()
                     .find(|r| r[..4] != [0xFF; 4])
                     .unwrap();
                 live[..4].copy_from_slice(&900_000u32.to_le_bytes());
@@ -69,7 +75,9 @@ const CASES: &[(&str, &str, bool, Craft)] = &[
         |p| {
             patch_section(p, "topo:edges", |b| {
                 let live = b
-                    .chunks_exact_mut(12)
+                    .as_chunks_mut::<12>()
+                    .0
+                    .iter_mut()
                     .find(|r| r[..4] != [0xFF; 4])
                     .unwrap();
                 live[8..10].copy_from_slice(&9999u16.to_le_bytes());

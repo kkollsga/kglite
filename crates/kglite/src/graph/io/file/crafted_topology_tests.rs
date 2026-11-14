@@ -26,7 +26,9 @@ fn load_mapped(path: &std::path::Path) -> io::Result<Arc<DirGraph>> {
 fn patch_first_live_edge(path: &std::path::Path, patch: impl FnOnce(&mut [u8])) {
     patch_section(path, "topo:edges", |bytes| {
         let record = bytes
-            .chunks_exact_mut(EDGE_RECORD)
+            .as_chunks_mut::<EDGE_RECORD>()
+            .0
+            .iter_mut()
             .find(|r| r[..4] != VACANT_SRC)
             .expect("the fixture has a live edge");
         patch(record);
@@ -123,7 +125,7 @@ fn a_record_naming_an_unlisted_type_is_refused_at_open_with_or_without_member_li
             save(topo_graph(), &path, SaveLayout::Auto)
         });
         patch_section(&path, "topo:nodes", |bytes| {
-            let live = bytes.chunks_exact_mut(32).nth(100).unwrap();
+            let live = &mut bytes.as_chunks_mut::<32>().0[100];
             live[..8].copy_from_slice(&0xDEAD_BEEF_1234_5678u64.to_le_bytes());
         });
         let error = load_mapped(&path).err().expect("the open must refuse");
