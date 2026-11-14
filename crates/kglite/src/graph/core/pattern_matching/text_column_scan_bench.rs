@@ -21,6 +21,7 @@ use crate::graph::text_scan::matcher::{Matcher, Pattern};
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 const TYPE: &str = "CourtDecision";
 const PROP: &str = "sammendrag";
@@ -203,15 +204,63 @@ fn driver_gate() {
 
 // ── through Cypher ───────────────────────────────────────────────────
 
+/// `(min ms)` of two closures run alternately, the order swapped each round, so
+/// that neither always runs on the state the other left (a fixed order skewed
+/// sub-millisecond cells by about 0.1 ms). 3 warm-ups each; 15 rounds, or 100
+/// when the first run is under a millisecond.
+fn time_pair(mut a: impl FnMut(), mut b: impl FnMut()) -> ((f64, f64), (f64, f64)) {
+    for _ in 0..3 {
+        a();
+        b();
+    }
+    let t = Instant::now();
+    a();
+    let rounds = if t.elapsed().as_secs_f64() * 1e3 < 1.0 {
+        100
+    } else {
+        15
+    };
+    let (mut ta, mut tb) = (Vec::new(), Vec::new());
+    let timed = |f: &mut dyn FnMut(), out: &mut Vec<f64>| {
+        let t = Instant::now();
+        f();
+        out.push(t.elapsed().as_secs_f64() * 1e3);
+    };
+    for round in 0..rounds {
+        if round % 2 == 0 {
+            timed(&mut a, &mut ta);
+            timed(&mut b, &mut tb);
+        } else {
+            timed(&mut b, &mut tb);
+            timed(&mut a, &mut ta);
+        }
+    }
+    let min = |v: &mut Vec<f64>| {
+        v.sort_by(|x, y| x.total_cmp(y));
+        (v[0], v[v.len() / 2])
+    };
+    (min(&mut ta), min(&mut tb))
+}
+
+/// A plan's characters in order, so that two renderings that differ only in
+/// the iteration order of a property map compare equal.
+fn canon(plan: &str) -> Vec<char> {
+    let mut chars: Vec<char> = plan.chars().collect();
+    chars.sort_unstable();
+    chars
+}
+
 fn escape_regex(text: &str) -> String {
     regex::escape(text)
 }
 
 fn cypher_value(graph: &DirGraph, query: &str, params: &HashMap<String, Value>, off: bool) -> i64 {
-    let disabled: HashSet<String> = off
-        .then(|| "text_column_scan".to_string())
-        .into_iter()
-        .collect();
+    // Both arms pass a non-empty set, so neither takes the plan-cache path the
+    // other does not (an empty set does): only the text pass differs.
+    let mut disabled: HashSet<String> = HashSet::from(["mark_skip_target_type_check".to_string()]);
+    if off {
+        disabled.insert("text_column_scan".to_string());
+    }
     let mut opts = ExecuteOptions::eager(params);
     opts.disabled_passes = Some(&disabled);
     let rows = execute_read(graph, query, &opts)
@@ -339,6 +388,32 @@ fn cypher_gate() {
         add(format!("year AND court AND CONTAINS count [{tier}]"), "MATCH (n:CourtDecision) WHERE n.year >= 2015 AND n.court_level = 'hoyesterett' AND n.sammendrag CONTAINS $t RETURN count(n) AS c", vec![("t", t(tier))], None);
         add(format!("CONTAINS group by court_level [{tier}]"), "MATCH (n:CourtDecision) WHERE n.sammendrag CONTAINS $t RETURN n.court_level AS c, count(*) AS k", vec![("t", t(tier))], None);
     }
+    // Whether the pass changes each plan (a plan the pass leaves alone cannot
+    // differ in cost, only in noise).
+    for (name, query, params, _) in &cells {
+        let plan = |off: bool| {
+            use crate::graph::languages::cypher::parser::parse_cypher;
+            use crate::graph::languages::cypher::planner::optimize_with_disabled;
+            let disabled: HashSet<String> = off
+                .then(|| "text_column_scan".to_string())
+                .into_iter()
+                .collect();
+            let mut parsed = parse_cypher(query).unwrap();
+            optimize_with_disabled(&mut parsed, &graph, params, &disabled);
+            format!("{:?}", parsed.clauses)
+        };
+        println!(
+            "PLAN {name:52} {}",
+            if canon(&plan(false)) == canon(&plan(true)) {
+                "same"
+            } else {
+                "rewritten"
+            }
+        );
+    }
+    if std::env::var("KGLITE_PLAN_ONLY").is_ok() {
+        return;
+    }
     println!("== through Cypher: load {}", uptime());
     println!("CONTROL start {:.2} ms", control(&buffer));
     let ctrl = "MATCH (d:CourtDecision)-[:CITES]->(s:LawSection)-[:SECTION_OF]->(l:Law) RETURN count(*) AS c";
@@ -355,12 +430,14 @@ fn cypher_gate() {
         let on_value = cypher_value(&graph, query, params, false);
         let meters = take_text_meters();
         let off_value = cypher_value(&graph, query, params, true);
-        let on = time_ms(|| {
-            std::hint::black_box(cypher_value(&graph, query, params, false));
-        });
-        let off = time_ms(|| {
-            std::hint::black_box(cypher_value(&graph, query, params, true));
-        });
+        let (on, off) = time_pair(
+            || {
+                std::hint::black_box(cypher_value(&graph, query, params, false));
+            },
+            || {
+                std::hint::black_box(cypher_value(&graph, query, params, true));
+            },
+        );
         let route = if meters.is_empty() {
             "per-row".to_string()
         } else if meters.iter().all(Option::is_none) {
@@ -389,5 +466,25 @@ fn cypher_gate() {
             on.0, off.0, off.0 / on.0
         );
     }
+    // Noise floor of the paired timing: the same query against itself.
+    let (q, p, _) = cells
+        .iter()
+        .find(|(n, ..)| n == "year AND court AND CONTAINS count [common]")
+        .map(|(_, q, p, w)| (q.clone(), p.clone(), *w))
+        .unwrap();
+    let (x, y) = time_pair(
+        || {
+            std::hint::black_box(cypher_value(&graph, &q, &p, true));
+        },
+        || {
+            std::hint::black_box(cypher_value(&graph, &q, &p, true));
+        },
+    );
+    println!(
+        "NOISE same query twice, paired: {:.3} vs {:.3} ms (x{:.2})",
+        x.0,
+        y.0,
+        y.0 / x.0
+    );
     println!("CONTROL end {:.2} ms load {}", control(&buffer), uptime());
 }
