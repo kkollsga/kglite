@@ -20,6 +20,7 @@ before upgrading.
 - **A mapped `.kgl` whose topology sections are internally inconsistent is refused or survived instead of panicking.** A node record naming a type the file does not list, or a file that lists no connection types while counting edges, is refused at open with `InvalidData`. An edge record whose endpoint lies past the node array or whose connection type ordinal is past the type list no longer panics a query or `describe()`; it reads as the type `<invalid connection type>`. Adjacency arrays that disagree with each other are still not checked at open and can give wrong answers.
 - **`save()` of a mapped graph with such an edge record now returns an error.** It used to drop the edge from the new file with only a fallback warning.
 - **Dependencies moved past three RustSec advisories.** `calamine` 0.38.0 (RUSTSEC-2026-0436), `pulldown-cmark` 0.13.6 (RUSTSEC-2026-0433) and `rmcp` 3.10.0 (RUSTSEC-2026-0462).
+- **A text index on `title` (or on `name`) is now marked stale by `SET n.name` (or `SET n.title`).** The write hook compared only the spelling the statement used, so the index kept answering from the old title and reported no staleness.
 
 ## [0.21.5] - 2026-11-01
 

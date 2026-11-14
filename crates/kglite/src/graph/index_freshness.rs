@@ -501,8 +501,21 @@ pub(crate) mod write_hooks {
             return;
         }
         note_work();
-        crate::graph::text_indexes::note_property_written(graph, node, node_type, field);
-        crate::graph::property_vector_indexes::note_property_written(graph, node, node_type, field);
+        // `name` is the Cypher spelling of the title: a write to either
+        // changes what an index recorded under the other one reads (a node
+        // with no `name` property answers `name` from its title, and `SET
+        // n.name` writes the title too), so the hook names both.
+        let aliased = match field {
+            Some("name") => Some("title"),
+            Some("title") => Some("name"),
+            _ => None,
+        };
+        for written in std::iter::once(field).chain(aliased.map(Some)) {
+            crate::graph::text_indexes::note_property_written(graph, node, node_type, written);
+            crate::graph::property_vector_indexes::note_property_written(
+                graph, node, node_type, written,
+            );
+        }
         if let Some(disk) = disk_tracking(graph) {
             // A typed bundle is keyed on the user's spelling of the property
             // and `field` is the alias-resolved one, so only the global

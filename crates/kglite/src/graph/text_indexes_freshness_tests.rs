@@ -241,6 +241,31 @@ fn removing_the_indexed_property_drops_the_document_on_refresh() {
     assert_matches_rebuild(&graph, "quick brown fox");
 }
 
+/// `name` and `title` are one stored value: `SET n.name` writes the title (and
+/// a `name` property), `SET n.title` changes what a node with no `name`
+/// property answers to `name`. An index on either spelling must see both.
+#[test]
+fn a_write_through_the_other_title_spelling_marks_the_index() {
+    for (indexed, written) in [("title", "name"), ("name", "title"), ("title", "title")] {
+        let (mut graph, _) = indexed_corpus();
+        build_text_index(&mut graph, "Doc", indexed, None).expect("build");
+        let key = index_key("Doc", indexed);
+        assert!(!graph.text_indexes[&key].is_stale(&graph));
+
+        run(
+            &mut graph,
+            &format!("MATCH (d:Doc) WHERE d.id = 1 SET d.{written} = 'zebra crossing'"),
+        );
+
+        let index = &graph.text_indexes[&key];
+        assert!(
+            index.is_stale(&graph),
+            "SET d.{written} must dirty the index on '{indexed}'"
+        );
+        assert_eq!(index.delta_size(&graph), 1);
+    }
+}
+
 /// The bulk paths (`add_nodes` upserts, `add_properties`) write a whole
 /// property map and do not decompose it, so they mark field-blind. That is the
 /// over-approximation contract, and this is the half of it that could be wrong:
