@@ -1369,11 +1369,13 @@ impl DirGraph {
         }
         let triples: Vec<ConnectivityTriple> = counts
             .into_iter()
-            .map(|((src, conn, tgt), count)| ConnectivityTriple {
-                src: self.interner.resolve(src).to_string(),
-                conn: self.interner.resolve(conn).to_string(),
-                tgt: self.interner.resolve(tgt).to_string(),
-                count,
+            .filter_map(|((src, conn, tgt), count)| {
+                Some(ConnectivityTriple {
+                    src: self.interner.try_resolve(src)?.to_string(),
+                    conn: self.interner.try_resolve(conn)?.to_string(),
+                    tgt: self.interner.try_resolve(tgt)?.to_string(),
+                    count,
+                })
             })
             .collect();
         *self.type_connectivity_cache.write().unwrap() = Some(triples.clone());
@@ -1730,7 +1732,11 @@ impl DirGraph {
         let mut by_type_name: HashMap<String, Vec<NodeIndex>> =
             HashMap::with_capacity(by_type_key.len());
         for (type_key, indices) in by_type_key {
-            by_type_name.insert(self.interner.resolve(type_key).to_string(), indices);
+            // A key with no name comes only from a crafted file (a record naming
+            // a type the file does not list); its nodes join no type.
+            if let Some(name) = self.interner.try_resolve(type_key) {
+                by_type_name.insert(name.to_string(), indices);
+            }
         }
         by_type_name
     }

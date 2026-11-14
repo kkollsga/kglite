@@ -1939,29 +1939,34 @@ pub fn compute_all_neighbors_schemas(graph: &DirGraph) -> HashMap<String, Neighb
         }
     }
 
-    let name = |key: InternedKey| graph.interner.resolve(key).to_string();
+    let name = |key: InternedKey| graph.interner.try_resolve(key).map(str::to_string);
     let empty = || NeighborsSchema {
         outgoing: Vec::new(),
         incoming: Vec::new(),
     };
     let mut result: HashMap<String, NeighborsSchema> = HashMap::new();
     for ((src_type, conn_type, tgt_type), count) in edge_counts {
+        // A key with no name comes only from a crafted file; skip its edges.
+        let (Some(src), Some(conn), Some(tgt)) = (name(src_type), name(conn_type), name(tgt_type))
+        else {
+            continue;
+        };
         result
-            .entry(name(src_type))
+            .entry(src.clone())
             .or_insert_with(empty)
             .outgoing
             .push(NeighborConnection {
-                connection_type: name(conn_type),
-                other_type: name(tgt_type),
+                connection_type: conn.clone(),
+                other_type: tgt.clone(),
                 count,
             });
         result
-            .entry(name(tgt_type))
+            .entry(tgt)
             .or_insert_with(empty)
             .incoming
             .push(NeighborConnection {
-                connection_type: name(conn_type),
-                other_type: name(src_type),
+                connection_type: conn,
+                other_type: src,
                 count,
             });
     }

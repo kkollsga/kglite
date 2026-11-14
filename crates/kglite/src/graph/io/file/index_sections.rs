@@ -280,7 +280,13 @@ fn push_node_sections(
         return;
     }
     for (type_key, mut scan) in scans {
-        let name = graph.interner.resolve(type_key);
+        let Some(name) = graph.interner.try_resolve(type_key) else {
+            fallbacks.push(MappedFallback::new(
+                "indexes:nodes",
+                "a node type has no interned name",
+            ));
+            continue;
+        };
         out.push(owned(
             type_section_name(name),
             KIND_TYPE_MEMBERS,
@@ -423,8 +429,15 @@ pub(super) fn count_peers_dense(graph: &DirGraph) -> Option<FxHashMap<InternedKe
             dense.insert(conn, (vec![0; bound], vec![0; bound]));
         }
         let (by_target, by_source) = dense.get_mut(&conn)?;
-        by_target[target.index()] += 1;
-        by_source[source.index()] += 1;
+        // An endpoint past the node array is a crafted file; a save refuses it
+        // before this runs, and the count skips it rather than index out of bounds.
+        if let (Some(t), Some(s)) = (
+            by_target.get_mut(target.index()),
+            by_source.get_mut(source.index()),
+        ) {
+            *t += 1;
+            *s += 1;
+        }
     }
     let pairs = |counts: Vec<u32>| -> Vec<(u32, u32)> {
         let mut out = Vec::new();

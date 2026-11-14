@@ -150,7 +150,7 @@ impl DirGraph {
         let string_counts: Arc<HashMap<String, usize>> = Arc::new(
             counts
                 .into_iter()
-                .map(|(k, v)| (self.interner.resolve(k).to_string(), v))
+                .filter_map(|(k, v)| Some((self.interner.try_resolve(k)?.to_string(), v)))
                 .collect(),
         );
         let mut write = self.edge_type_counts_cache.write().unwrap();

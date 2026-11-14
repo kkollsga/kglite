@@ -175,6 +175,9 @@ pub struct FrozenGraph {
     /// The free lists a heap load of this graph would have, built on the first
     /// write (an overlay allocates by this prediction); see [`Self::slot_mirror`].
     slot_mirror: OnceLock<SlotMirror>,
+    /// The key a record with an out-of-range type ordinal reads as; see
+    /// [`Self::type_key`]. Unset (the default key) for a graph built outside a load.
+    invalid_type: InternedKey,
 }
 
 impl FrozenGraph {
@@ -182,9 +185,12 @@ impl FrozenGraph {
     ///
     /// Every check is O(1) or one sequential pass over the offset and bitset
     /// arrays (never over the edge arrays); the node records were validated
-    /// when `parts.nodes` was built. A CRC-valid file that is internally
-    /// inconsistent yields wrong answers or absent rows, never an out-of-bounds
-    /// access: every read below is bounds-checked.
+    /// when `parts.nodes` was built. The endpoint array is not walked here, so
+    /// a CRC-valid file whose adjacency arrays or endpoint records are
+    /// inconsistent can yield wrong answers or absent rows. The readers still
+    /// never panic (an unknown type ordinal reads as [`Self::invalid_type`],
+    /// an unknown template as an empty one) and never index out of bounds
+    /// (array reads use `get`).
     pub(crate) fn new(parts: FrozenParts) -> io::Result<Self> {
         let FrozenParts {
             nodes,
@@ -289,7 +295,14 @@ impl FrozenGraph {
             peer_base: None,
             type_index: RwLock::new(HashMap::new()),
             slot_mirror: OnceLock::new(),
+            invalid_type: InternedKey::default(),
         })
+    }
+
+    /// Name the key an out-of-range type ordinal reads as. A load interns it,
+    /// so a consumer that resolves the key of any edge gets a name, not a panic.
+    pub(crate) fn set_invalid_type(&mut self, key: InternedKey) {
+        self.invalid_type = key;
     }
 
     /// The free lists petgraph's deserializer builds from this graph's vacancy
@@ -385,13 +398,27 @@ impl FrozenGraph {
         }
         self.templates
             .get(usize::from(ty))
-            .unwrap_or_else(|| &self.templates[0])
+            .unwrap_or_else(|| self.fallback_template())
     }
 
-    /// The connection type of ordinal `ty`.
+    /// The template an out-of-range ordinal reads as (a crafted file): the
+    /// first one, or an empty edge when the file lists no types.
+    #[cold]
+    fn fallback_template(&self) -> &EdgeData {
+        static EMPTY: OnceLock<EdgeData> = OnceLock::new();
+        self.templates.first().unwrap_or_else(|| {
+            EMPTY.get_or_init(|| EdgeData::new_interned(InternedKey::default(), Vec::new()))
+        })
+    }
+
+    /// The connection type of ordinal `ty`. An ordinal the file does not list
+    /// (only a crafted one) reads as [`Self::invalid_type`], never panics.
     #[inline(always)]
     pub(crate) fn type_key(&self, ty: u16) -> InternedKey {
-        self.types.get(usize::from(ty)).copied().unwrap_or_default()
+        self.types
+            .get(usize::from(ty))
+            .copied()
+            .unwrap_or(self.invalid_type)
     }
 
     /// The ordinal of `key`, if any edge of the file has that type.
@@ -744,6 +771,7 @@ impl Clone for FrozenGraph {
             peer_base: self.peer_base.clone(),
             type_index: RwLock::new(HashMap::new()),
             slot_mirror: OnceLock::new(),
+            invalid_type: self.invalid_type,
         }
     }
 }
@@ -994,5 +1022,38 @@ mod tests {
             mutate(&mut broken);
             assert!(FrozenGraph::new(broken).is_err(), "{what} must be refused");
         }
+    }
+
+    /// The shape of a crafted file that lists no connection types and counts no
+    /// edges but carries live endpoint records.
+    fn typeless_parts() -> FrozenParts {
+        let mut p = parts();
+        p.out_off = FrozenArray::from_vec(vec![0, 0, 0, 0]);
+        p.in_off = FrozenArray::from_vec(vec![0, 0, 0, 0]);
+        p.out_edges = FrozenArray::from_vec(vec![]);
+        p.in_edges = FrozenArray::from_vec(vec![]);
+        p.out_ty = FrozenArray::from_vec(vec![]);
+        p.in_ty = FrozenArray::from_vec(vec![]);
+        p.edge_count = 0;
+        p.types = Vec::new();
+        p
+    }
+
+    #[test]
+    fn a_type_ordinal_the_file_does_not_list_reads_without_panicking() {
+        let graph = FrozenGraph::new(typeless_parts()).expect("every check passes");
+        for ty in [0, 1, u16::MAX] {
+            assert!(graph.edge_data(0, ty).properties.is_empty());
+            assert_eq!(graph.type_key(ty), InternedKey::default());
+        }
+        let mut seen = 0;
+        graph.for_each_endpoint_key(|_, _, _| seen += 1);
+        assert_eq!(seen, 2, "the endpoint records are still walked");
+        let listed = FrozenGraph::new(parts()).unwrap();
+        assert_eq!(
+            listed.edge_data(0, 7).connection_type,
+            InternedKey::from_str("E1"),
+            "an ordinal past the list borrows the first template"
+        );
     }
 }

@@ -2390,6 +2390,8 @@ mod mappable_tests;
 #[path = "file/column_mapped_tests.rs"]
 mod column_mapped_tests;
 #[cfg(test)]
+mod crafted_topology_tests;
+#[cfg(test)]
 mod eligibility_tests;
 #[cfg(test)]
 #[path = "file/embedding_load_validation_tests.rs"]

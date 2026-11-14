@@ -104,7 +104,12 @@ impl Serialize for InternedKey {
             // SAFETY: ptr is set by SerdeInternerGuard which ensures the reference
             // outlives the serialize call (the guard lives on the caller's stack).
             let interner = unsafe { &*ptr };
-            interner.resolve(*self).serialize(serializer)
+            interner
+                .try_resolve(*self)
+                .ok_or_else(|| {
+                    serde::ser::Error::custom(format!("key {} has no interned name", self.as_u64()))
+                })?
+                .serialize(serializer)
         })
     }
 }

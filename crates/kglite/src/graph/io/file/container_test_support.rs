@@ -52,3 +52,51 @@ pub(crate) fn as_legacy_container(bytes: &[u8], magic: [u8; 4]) -> Vec<u8> {
     out.extend_from_slice(after_metadata(bytes));
     out
 }
+
+/// Rewrite the bytes of the mappable section `name` of the v9 file at `path`
+/// with `patch`, then re-seal what a reader checks first: the section's own
+/// CRC in the metadata and the metadata CRC. Only a content check can object
+/// to the result, which is how a test builds a crafted file that a byte flip
+/// with a stale CRC cannot. The data region keeps its position: a longer CRC
+/// number in the metadata takes bytes from the padding in front of it.
+pub(crate) fn patch_section(path: &std::path::Path, name: &str, patch: impl FnOnce(&mut [u8])) {
+    let mut bytes = std::fs::read(path).unwrap();
+    let metadata = super::metadata_head::read_metadata_head(&bytes, "test").unwrap();
+    let json_end = 13 + declared_len(&bytes) - 4;
+    let base = super::data_region_base(&metadata, json_end + 4, bytes.len() as u64).unwrap();
+    let entry = metadata
+        .mappable
+        .iter()
+        .find(|e| e.name == name)
+        .unwrap_or_else(|| panic!("no section named {name}"));
+    let range = (base + entry.offset) as usize..(base + entry.offset + entry.len) as usize;
+    patch(&mut bytes[range.clone()]);
+    let mut value: serde_json::Value = serde_json::from_slice(&bytes[13..json_end]).unwrap();
+    let digest = super::section_digest(&bytes[range]);
+    for row in value["mappable"].as_array_mut().unwrap() {
+        if row["name"] == name {
+            row["crc32"] = digest.into();
+        }
+    }
+    let updated = serde_json::to_vec(&value).unwrap();
+    let old_json = json_end - 13;
+    let (grow, shrink) = (
+        updated.len().saturating_sub(old_json),
+        old_json.saturating_sub(updated.len()),
+    );
+    let new_end = 13 + updated.len() + 4;
+    let sealed = sealed_metadata(&bytes[..9], &updated);
+    let moved = super::data_region_base(&metadata, new_end, bytes.len() as u64);
+    assert_eq!(
+        moved.ok(),
+        Some(base),
+        "no padding to absorb the CRC digits"
+    );
+    let mut out = sealed;
+    out.extend_from_slice(&bytes[json_end + 4..base as usize - grow]);
+    // A shorter number leaves the gap as padding.
+    out.resize(out.len() + shrink, 0);
+    out.extend_from_slice(&bytes[base as usize..]);
+    assert_eq!(out.len(), bytes.len());
+    std::fs::write(path, out).unwrap();
+}

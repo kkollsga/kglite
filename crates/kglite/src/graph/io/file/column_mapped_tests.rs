@@ -371,6 +371,10 @@ fn promotion_before_a_windows_save_releases_every_column_mapping() {
 }
 
 fn flip_byte_in(path: &std::path::Path, section: &str, at: usize, refresh_crc: bool) {
+    if refresh_crc {
+        container_test_support::patch_section(path, section, |bytes| bytes[at] = 0xFF);
+        return;
+    }
     let mut bytes = std::fs::read(path).unwrap();
     let (metadata, base) = metadata_of(&bytes);
     let entry = metadata
@@ -378,27 +382,7 @@ fn flip_byte_in(path: &std::path::Path, section: &str, at: usize, refresh_crc: b
         .iter()
         .find(|e| e.name == section)
         .unwrap();
-    let index = (base + entry.offset) as usize + at;
-    bytes[index] = 0xFF;
-    if refresh_crc {
-        // Re-seal the metadata with the corrupted section's new digest, so
-        // only the content check can object. The JSON keeps its length (the
-        // data region's position depends on it): pad with spaces.
-        let json_end = 13 + u32::from_le_bytes(bytes[9..13].try_into().unwrap()) as usize - 4;
-        let json = &bytes[13..json_end];
-        let mut value: serde_json::Value = serde_json::from_slice(json).unwrap();
-        let digest = section_digest(&bytes[(base + entry.offset) as usize..][..entry.len as usize]);
-        for row in value["mappable"].as_array_mut().unwrap() {
-            if row["name"] == section {
-                row["crc32"] = digest.into();
-            }
-        }
-        let mut updated = serde_json::to_vec(&value).unwrap();
-        assert!(updated.len() <= json.len(), "retry with another byte");
-        updated.resize(json.len(), b' ');
-        let sealed = container_test_support::sealed_metadata(&bytes[..9], &updated);
-        bytes[..json_end + 4].copy_from_slice(&sealed);
-    }
+    bytes[(base + entry.offset) as usize + at] = 0xFF;
     std::fs::write(path, bytes).unwrap();
 }
 

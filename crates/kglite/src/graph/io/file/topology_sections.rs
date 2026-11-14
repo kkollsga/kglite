@@ -80,6 +80,10 @@ const EDGES: &str = "topo:edges";
 const TYPE_MASK: &str = "topo:type_mask";
 const EDGE_PROPS: &str = "topo:edge_props";
 
+/// The name a record with an out-of-range connection type ordinal reads as, so
+/// resolving the key of any edge of a crafted file yields a name, not a panic.
+const INVALID_TYPE: &str = "<invalid connection type>";
+
 /// Version of the section set; a reader refuses a newer one by ignoring it.
 const VERSION: u32 = 1;
 
@@ -746,7 +750,12 @@ impl TopologySections {
                 "topology metadata disagrees with the node or edge array lengths",
             ));
         }
-        FrozenGraph::new(parts)
+        let mut frozen = FrozenGraph::new(parts)?;
+        let invalid_type = interner
+            .try_get_or_intern(INVALID_TYPE)
+            .map_err(|e| invalid_data(e.to_string()))?;
+        frozen.set_invalid_type(invalid_type);
+        Ok(frozen)
     }
 }
 

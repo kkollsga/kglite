@@ -335,17 +335,14 @@ pub(super) fn discover_endpoint_types_batch(
 
     result
         .into_iter()
-        .map(|(ck, (srcs, tgts))| {
-            let conn = graph.interner.resolve(ck).to_string();
-            let src_set = srcs
-                .into_iter()
-                .map(|k| graph.interner.resolve(k).to_string())
-                .collect();
-            let tgt_set = tgts
-                .into_iter()
-                .map(|k| graph.interner.resolve(k).to_string())
-                .collect();
-            (conn, (src_set, tgt_set))
+        .filter_map(|(ck, (srcs, tgts))| {
+            let conn = graph.interner.try_resolve(ck)?.to_string();
+            let names = |keys: HashSet<InternedKey>| -> HashSet<String> {
+                keys.into_iter()
+                    .filter_map(|k| graph.interner.try_resolve(k).map(str::to_string))
+                    .collect()
+            };
+            Some((conn, (names(srcs), names(tgts))))
         })
         .collect()
 }
