@@ -5,9 +5,11 @@ TLS), so every ``thread_local!`` in the shared object counts against the small
 static-TLS reserve glibc keeps for a ``dlopen``'ed module. A module that
 exceeds it fails to import with "cannot allocate memory in static TLS block".
 
-The budget is the ``PT_TLS`` size of a build known to import (the 0.21.5 Linux
-extension: memsz 1545, filesz 664). Raise it only together with evidence that
-the larger build imports on the CI glibc.
+The budget is the largest ``PT_TLS`` size seen to import on the CI glibc: the
+debug extension of the py3.12 job, memsz 1657 (the 0.21.5 release wheel is
+1545). A build one 16-byte thread-local larger failed to import, which matches
+glibc's 1664-byte reserve on x86-64, so the debug build has 7 bytes to spare.
+Do not raise the budget; shrink the block instead.
 """
 
 from __future__ import annotations
@@ -24,8 +26,8 @@ DT_NULL = 0
 DT_FLAGS = 30
 DF_STATIC_TLS = 0x10
 
-#: ``PT_TLS`` memsz of the 0.21.5 Linux extension, a build known to import.
-TLS_MEMSZ_BUDGET = 1545
+#: Largest ``PT_TLS`` memsz seen to import on the CI glibc (debug build).
+TLS_MEMSZ_BUDGET = 1657
 
 
 def read_tls(data: bytes) -> tuple[int, int, bool] | None:
