@@ -180,13 +180,20 @@ def test_checkpoint_free_delete_that_times_out_deletes_nothing(surface):
 def test_checkpoint_free_create_that_times_out_creates_nothing():
     """The value expression runs past the deadline without polling (``replace``
     over a parameter list); the node must not be inserted."""
-    params = {"items": list(range(300)), "s": "a" * 20_000}
     query = "CREATE (:T {v: reduce(acc = 0, j IN $items | acc + size(replace($s, 'a', 'bb')))})"
-    g = kglite.KnowledgeGraph()
-    started = time.perf_counter()
-    g.cypher(query, params=params, timeout_ms=0)
-    full = (time.perf_counter() - started) * 1000
-    assert full >= 20, f"expression too cheap ({full:.1f} ms) to outrun a deadline"
+    # Size the expression on this machine: a fixed list ran in 19.6 ms on a fast
+    # CI runner, under the 20 ms the quarter-window timeout below needs.
+    items = 300
+    while True:
+        params = {"items": list(range(items)), "s": "a" * 20_000}
+        g = kglite.KnowledgeGraph()
+        started = time.perf_counter()
+        g.cypher(query, params=params, timeout_ms=0)
+        full = (time.perf_counter() - started) * 1000
+        if full >= 40 or items >= 300 * 64:
+            break
+        items *= 2
+    assert full >= 40, f"expression too cheap ({full:.1f} ms at {items} items) to outrun a deadline"
     g = kglite.KnowledgeGraph()
     with pytest.raises(kglite.CypherTimeoutError):
         g.cypher(query, params=params, timeout_ms=max(1, int(full / 4)))
