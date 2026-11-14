@@ -405,6 +405,16 @@ fn node_properties(
 }
 
 fn collect_edge_changes(graph: &DirGraph) -> io::Result<Vec<EdgeChanges>> {
+    // A frozen graph's edges carry no properties except the ones in its
+    // property map, so with none there is nothing to find. The walk below
+    // would read every 12-byte endpoint record to learn that.
+    if graph
+        .graph
+        .as_frozen()
+        .is_some_and(|frozen| !frozen.has_edge_props())
+    {
+        return Ok(Vec::new());
+    }
     let _guard = graph.begin_read_pass();
     if let Some(disk) = graph.graph.as_disk() {
         let mut changes = Vec::new();

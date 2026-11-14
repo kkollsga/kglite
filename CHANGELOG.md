@@ -9,6 +9,10 @@ before upgrading.
 
 ## [Unreleased]
 
+### Changed
+
+- **A mapped open no longer walks the edge array of a file without edge properties.** Release build, minimum of 7 warm loads: 2.8M edges 12.7 ms to 2.0 ms and 40 MB to 7.5 MB resident after load; 12M edges 68.5 ms to 22.5 ms and 193 MB to 55 MB.
+
 ### Fixed
 
 - **A mapped `.kgl` whose topology sections are internally inconsistent is refused or survived instead of panicking.** A node record naming a type the file does not list, or a file that lists no connection types while counting edges, is refused at open with `InvalidData`. An edge record whose endpoint lies past the node array or whose connection type ordinal is past the type list no longer panics a query or `describe()`; it reads as the type `<invalid connection type>`. Adjacency arrays that disagree with each other are still not checked at open and can give wrong answers.

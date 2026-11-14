@@ -305,6 +305,13 @@ impl FrozenGraph {
         })
     }
 
+    /// Whether any edge carries properties; when none does, every edge weight is
+    /// its type's empty template.
+    #[inline]
+    pub(crate) fn has_edge_props(&self) -> bool {
+        self.has_edge_props
+    }
+
     /// Name the key an out-of-range type ordinal reads as. A load interns it,
     /// so a consumer that resolves the key of any edge gets a name, not a panic.
     pub(crate) fn set_invalid_type(&mut self, key: InternedKey) {
