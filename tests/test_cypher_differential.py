@@ -9554,6 +9554,7 @@ PASS_TRIGGER_CASES: dict[str, tuple[str, str]] = {
     "fuse_node_scan_aggregate": ("differential", "trigger_node_scan_aggregate"),
     "columnar_scan_aggregate": ("differential", "trigger_columnar_scan_aggregate"),
     "text_column_scan": ("differential", "trigger_text_column_scan"),
+    "push_limit_into_fulltext_call": ("differential", "context_twin_fulltext_call_trailing_limit"),
     "fuse_node_scan_top_k": ("differential", "trigger_node_scan_top_k"),
     "fuse_vector_score_order_limit": ("specialized", "vector_score_top_k"),
     "fuse_order_by_top_k": ("differential", "trigger_generic_top_k"),

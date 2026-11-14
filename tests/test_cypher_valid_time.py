@@ -267,6 +267,7 @@ GUARD_SAFE_PASSES = {
     "fuse_vector_score_order_limit",
     "fuse_text_bm25_order_limit",
     "push_limit_into_match",
+    "push_limit_into_fulltext_call",
     "fuse_optional_match_aggregate",
     "fuse_spatial_join",
     "fuse_anchored_edge_count",
