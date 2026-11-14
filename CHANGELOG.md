@@ -21,6 +21,7 @@ before upgrading.
 - **`save()` of a mapped graph with such an edge record now returns an error.** It used to drop the edge from the new file with only a fallback warning.
 - **Dependencies moved past three RustSec advisories.** `calamine` 0.38.0 (RUSTSEC-2026-0436), `pulldown-cmark` 0.13.6 (RUSTSEC-2026-0433) and `rmcp` 3.10.0 (RUSTSEC-2026-0462).
 - **A text index on `title` (or on `name`) is now marked stale by `SET n.name` (or `SET n.title`).** The write hook compared only the spelling the statement used, so the index kept answering from the old title and reported no staleness.
+- **`vacuum()` now carries node timeseries to the node's new position.** The series stayed under the old slot, so a surviving node lost its series and a later node could inherit it.
 
 ## [0.21.5] - 2026-11-01
 

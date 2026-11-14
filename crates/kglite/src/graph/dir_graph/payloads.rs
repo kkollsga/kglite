@@ -80,6 +80,23 @@ impl DirGraph {
         self.timeseries_store.insert(node_idx.index(), timeseries);
     }
 
+    /// Re-key every series through a vacuum's [`NodeRemap`]; a deleted node's
+    /// series is dropped rather than left for whichever node inherits its slot.
+    pub(crate) fn remap_timeseries_slots(&mut self, old_to_new: &super::NodeRemap) {
+        if self.timeseries_store.is_empty() {
+            return;
+        }
+        let old = std::mem::take(&mut self.timeseries_store);
+        self.timeseries_store = old
+            .into_iter()
+            .filter_map(|(raw, series)| {
+                old_to_new
+                    .get(NodeIndex::new(raw))
+                    .map(|new| (new.index(), series))
+            })
+            .collect();
+    }
+
     /// Replace `node_type`'s timeseries declaration. Insert-or-replace per
     /// type, matching every writer of `timeseries_configs`.
     pub fn set_timeseries_config(&mut self, node_type: &str, config: TimeseriesConfig) {

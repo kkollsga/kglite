@@ -1609,3 +1609,68 @@ mod dematerialize_bulk_tests {
         assert!(graph.has_secondary_labels);
     }
 }
+
+/// A vacuum renumbers every surviving node, so each store keyed by node slot
+/// has to follow it: a series left under its old key is lost to its node and
+/// inherited by whichever node lands on that slot next.
+#[cfg(test)]
+mod vacuum_slot_keyed_stores {
+    use super::*;
+    use crate::datatypes::Value;
+    use crate::graph::features::timeseries::NodeTimeseries;
+    use crate::graph::schema::NodeData;
+    use crate::graph::storage::GraphWrite;
+
+    fn series(marker: f64) -> NodeTimeseries {
+        NodeTimeseries {
+            keys: vec![chrono::NaiveDate::from_ymd_opt(2020, 1, 1).unwrap()],
+            channels: HashMap::from([("v".to_string(), vec![marker])]),
+        }
+    }
+
+    #[test]
+    fn a_vacuum_moves_each_timeseries_to_its_nodes_new_slot() {
+        let mut g = DirGraph::new();
+        let mut nodes = Vec::new();
+        for id in 1..=3i64 {
+            let nd = NodeData::new(
+                Value::Int64(id),
+                Value::String(format!("n{id}")),
+                "Sensor".to_string(),
+                HashMap::new(),
+                &mut g.interner,
+            );
+            let idx = GraphWrite::add_node(&mut g.graph, nd);
+            g.type_indices
+                .entry_or_default("Sensor".to_string())
+                .push(idx);
+            nodes.push(idx);
+        }
+        g.set_node_timeseries(nodes[1], series(2.0));
+        g.set_node_timeseries(nodes[2], series(3.0));
+
+        // Delete the first node so both survivors move down one slot.
+        g.graph.remove_node(nodes[0]);
+        g.type_indices
+            .entry_or_default("Sensor".to_string())
+            .retain(|idx| *idx != nodes[0]);
+        g.id_indices.clear();
+
+        let remap = g.vacuum();
+        assert!(remap.describes_rebuild());
+
+        for (old, marker) in [(nodes[1], 2.0), (nodes[2], 3.0)] {
+            let new = remap.get(old).expect("survivor is carried over");
+            assert_ne!(new, old, "precondition: the node moved");
+            let held = g
+                .get_node_timeseries(new.index())
+                .unwrap_or_else(|| panic!("series of node {} lost by vacuum", old.index()));
+            assert_eq!(held.channels["v"], vec![marker]);
+        }
+        assert_eq!(
+            g.timeseries_store.len(),
+            2,
+            "no entry may stay under a slot the vacuum vacated"
+        );
+    }
+}

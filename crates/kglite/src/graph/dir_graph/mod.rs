@@ -2090,6 +2090,7 @@ impl DirGraph {
         }
 
         self.remap_embedding_slots(&old_to_new);
+        self.remap_timeseries_slots(&old_to_new);
         crate::graph::edge_embeddings::remap_edge_embeddings(self, &old_to_new_edges);
         // Secondary labels live above the backend (labels.rs module doc), so
         // neither the clone loop nor reindex() below can carry them over.
