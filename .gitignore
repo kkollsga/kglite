@@ -87,6 +87,8 @@ rust-core-coverage.lcov
 # from tests/fixtures/build_fixtures.py with a seeded RNG). These are tracked
 # in-repo so CI sees them; reproducible by re-running that script.
 !tests/fixtures/*.kgl
+# …and the v8/v9 container goldens, written by this tree (build_container_goldens.py).
+!tests/fixtures/kgl_containers/*.kgl
 # …and the v5 read-compat fixtures, which are the whole point of
 # tests/test_kgl_format_compat.py: `.kgl` files a published 0.15.14 wheel wrote,
 # in a container this build no longer emits. They cannot be regenerated from

@@ -34,11 +34,15 @@ import pandas as pd
 import pytest
 
 import kglite
+from tests.fixtures.build_container_goldens import EXPECTED as GOLDEN_EXPECTED
+from tests.fixtures.build_container_goldens import QUERIES as GOLDEN_QUERIES
 from tests.fixtures.compat_helpers import V8_HEADER, copy_fixture, expected_answers, generator_queries
 
 FIXTURES = Path(__file__).parent / "fixtures" / "kgl_v5"
 GENERATOR = FIXTURES.parent / "build_v5_compat_fixtures.py"
 V5_HEADER = b"RGF\x05\x02"
+GOLDENS = Path(__file__).parent / "fixtures" / "kgl_containers"
+GOLDEN_HEADERS = {"v8": b"RGF\x08\x02", "v9": b"RGF\x09\x02"}
 
 
 def _assert_matches(graph, queries: dict[str, str], expected: dict, label: str) -> None:
@@ -239,3 +243,38 @@ def test_a_newer_container_is_refused_by_name_and_number(tmp_path):
     assert "container version 10" in message
     assert "only supports up to version 9" in message
     assert "Please upgrade kglite" in message
+
+
+# ── v8 and v9 goldens, written by this tree ──────────────────────────────────
+
+
+@pytest.mark.parametrize("version", ["v8", "v9"])
+def test_goldens_are_the_containers_they_claim_to_be(version):
+    """The premise: a v9 golden with no topology sections would pin nothing."""
+    data = (GOLDENS / f"{version}.kgl").read_bytes()
+    assert data[:5] == GOLDEN_HEADERS[version]
+    assert (b"topo:edges" in data) == (version == "v9")
+
+
+@pytest.mark.parametrize("verify", ["lazy", "eager"])
+@pytest.mark.parametrize("storage", ["memory", "mapped"])
+@pytest.mark.parametrize("version", ["v8", "v9"])
+def test_goldens_load_with_their_content(version, storage, verify, tmp_path):
+    path = copy_fixture(GOLDENS / f"{version}.kgl", tmp_path)
+    graph = kglite.load(str(path), storage=storage, verify=verify)
+    assert graph.graph_info()["storage_mode"] == storage
+    for name, query in GOLDEN_QUERIES.items():
+        assert graph.cypher(query).to_list() == GOLDEN_EXPECTED[name], f"{version}/{storage}/{verify}: {name}"
+    types = {row["t"] for row in graph.cypher("MATCH ()-[r]->() RETURN DISTINCT type(r) AS t").to_list()}
+    assert types == {"WORKS_AT", "KNOWS"}
+
+
+@pytest.mark.parametrize("version", ["v8", "v9"])
+def test_a_flipped_byte_in_a_golden_is_refused(version, tmp_path):
+    """The goldens can go red: a byte flipped in a copy is refused, not read."""
+    path = copy_fixture(GOLDENS / f"{version}.kgl", tmp_path)
+    data = bytearray(path.read_bytes())
+    data[len(data) // 2] ^= 0xFF
+    path.write_bytes(bytes(data))
+    with pytest.raises(kglite.FileFormatError):
+        kglite.load(str(path), storage="mapped", verify="eager")
