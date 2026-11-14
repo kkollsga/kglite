@@ -81,17 +81,24 @@ fn build_regex(pattern: &str, ci: bool) -> Result<regex::bytes::Regex, String> {
 /// the top level (outside groups and classes).
 ///
 /// Declines (returns `None`) whenever the text cannot prove the literal is
-/// required: case-insensitive matching, any flag group (`(?i)`, `(?x)` ...), a
-/// top-level `|`, or no qualifying run. A character followed by `*`, `?` or `{`
-/// is optional and is dropped from its run; `+` keeps it. Plain means
-/// alphanumeric, space, `_` or `-`; everything else (escapes, `.`, anchors,
-/// classes) ends a run, so the literal is always a verbatim substring of every
-/// match.
+/// required: case-insensitive matching, any flag group other than the ones
+/// below (`(?i)`, `(?x)` ...), a top-level `|`, or no qualifying run. A
+/// character followed by `*`, `?` or `{` is optional and is dropped from its
+/// run; `+` keeps it. Plain means alphanumeric, space, `_` or `-`; everything
+/// else (escapes, `.`, anchors, classes) ends a run, so the literal is always
+/// a verbatim substring of every match.
+///
+/// A bare flag group made only of `s`, `m`, `U` and `R` (`(?s)`, `(?sm)`) is
+/// accepted: those flags change what `.`, `^`, `$` and the greedy/lazy choice
+/// mean, never which characters a literal in the pattern stands for or must
+/// appear in a match. `i` (a literal then matches several spellings) and `x`
+/// (whitespace and `#` stop being literal) are not accepted, and neither is a
+/// scoped flag group `(?s:..)` other than the plain `(?:..)`.
 pub(crate) fn required_literal(pattern: &str, ci: bool) -> Option<String> {
     if ci
         || pattern
             .match_indices("(?")
-            .any(|(i, _)| !pattern[i..].starts_with("(?:"))
+            .any(|(i, _)| !group_keeps_literals(&pattern[i + 2..]))
     {
         return None;
     }
@@ -101,6 +108,19 @@ pub(crate) fn required_literal(pattern: &str, ci: bool) -> Option<String> {
     }
     scan.end_run();
     (!scan.best.is_empty()).then_some(scan.best)
+}
+
+/// Whether the text after a `(?` opens a group that leaves literals alone: a
+/// non-capturing `(?:`, or a bare `s`/`m`/`U`/`R` flag group.
+fn group_keeps_literals(after: &str) -> bool {
+    if after.starts_with(':') {
+        return true;
+    }
+    let flags = after
+        .chars()
+        .take_while(|c| matches!(c, 's' | 'm' | 'U' | 'R'));
+    let len = flags.map(char::len_utf8).sum::<usize>();
+    len > 0 && after[len..].starts_with(')')
 }
 
 /// Character-at-a-time state for [`required_literal`].

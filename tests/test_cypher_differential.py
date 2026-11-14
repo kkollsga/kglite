@@ -3133,6 +3133,18 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         None,
     ),
     (
+        "text_scan_regex_operator_contains_flag_group",
+        "text_index_graph",
+        "MATCH (d:Doc) WHERE d.body =~ '(?s).*alpha.*' RETURN d.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "text_scan_regex_operator_contains_word_boundary",
+        "text_index_graph",
+        "MATCH (d:Doc) WHERE d.body =~ $p RETURN d.id AS id ORDER BY id",
+        {"p": "(?s).*\\bgamma\\b.*"},
+    ),
+    (
         "text_scan_text_match_regex",
         "text_index_graph",
         "MATCH (d:Doc) WHERE text_match_regex(d.body, 'alp.a') RETURN d.id AS id ORDER BY id",

@@ -42,7 +42,17 @@ struct Recognised {
 /// value the predicate accepts and possibly more. `text_match` scans its own
 /// pattern. `CONTAINS` scans its literal. `=~` and `text_match_regex` scan the
 /// regex only when it has a literal every match must contain (so it cannot
-/// match the empty string, and a full match implies a search match). `toLower`
+/// match the empty string, and a full match implies a search match). Two
+/// constructs make "contains" read as a full match and are accepted: a leading
+/// or trailing `.*` (it ends the literal run and adds none, so it cannot hide a
+/// required literal, and `^(?:.*L.*)$` accepts only strings that contain `L`);
+/// and a bare `(?s)`, `(?m)`, `(?U)` or `(?R)` group (they change what `.`,
+/// `^`, `$` and greediness mean, never the characters a literal in the pattern
+/// names, so each literal run is still a verbatim substring of every match
+/// whatever the flags; the retained predicate then decides, with the flags, on
+/// values holding newlines). `(?i)` and `(?x)` are refused because the
+/// byte prefilter is case-sensitive and `(?x)` stops whitespace being literal.
+/// `toLower`
 /// scans the literal case-insensitively, plus `İ` (the one character whose
 /// lowercase is two characters) when the literal could overlap its expansion,
 /// plus each character the regex crate's older case tables do not fold to a

@@ -116,6 +116,17 @@ const DOC_GOLDEN: &[(&str, &[i64], bool)] = &[
     ("n.t =~ 'alpha.*'", &[1, 8, 10], true),
     ("n.t =~ '.*alpha.*'", &[1, 8, 10], true),
     ("n.t =~ 'alpha'", &[], true),
+    // "Contains" written as a full match: a flag group that only changes what
+    // `.` or the anchors mean leaves the required literal in place.
+    ("n.t =~ '(?s).*alpha.*'", &[1, 4, 8, 10], true),
+    ("n.t =~ '(?s).*\\\\balpha\\\\b.*'", &[1, 4, 8], true),
+    ("n.t =~ '(?m).*alpha.*'", &[1, 8, 10], true),
+    ("n.t =~ '(?sm)alpha.*'", &[1, 8, 10], true),
+    ("n.t =~ '.*(?s)alpha.*'", &[1, 8, 10], true),
+    ("text_match_regex(n.t, '(?s)alp.a')", &[1, 4, 8, 10], true),
+    // `(?i)` and `(?x)` change what a literal stands for: not routed.
+    ("n.t =~ '(?i).*alpha.*'", &[1, 3, 8, 10], false),
+    ("n.t =~ '(?x).*alpha.*'", &[1, 8, 10], false),
     ("text_match_regex(n.t, 'alp.a')", &[1, 4, 8, 10], true),
     ("toLower(n.t) CONTAINS 'alpha'", &[1, 2, 3, 4, 8, 10], true),
     ("toLower(n.t) CONTAINS 'i'", &[2, 5], true),
@@ -551,6 +562,11 @@ const EQUIVALENCE_PREDICATES: &[&str] = &[
     "text_match(n.t, '^alpha', {mode: 'regex'})",
     "text_match(n.t, 'bravo|charlie', {mode: 'regex', ignore_case: true})",
     "n.t =~ '.*alpha.*'",
+    "n.t =~ '(?s).*alpha.*'",
+    "n.t =~ '(?s).*\\\\bravo\\\\b.*'",
+    "n.t =~ '(?m)alpha.*'",
+    "n.t =~ '(?sU).*delta.*'",
+    "n.t =~ '(?i).*alpha.*'",
     "text_match_regex(n.t, 'alp.a')",
     "toLower(n.t) CONTAINS 'alpha'",
     "toLower(n.t) CONTAINS 'i'",
@@ -561,8 +577,9 @@ const EQUIVALENCE_PREDICATES: &[&str] = &[
 ];
 
 /// The predicates the scan answers: all but the one with a second property
-/// filter (`n.g = 3`), which the existing path serves.
-const ROUTED: usize = EQUIVALENCE_PREDICATES.len() - 1;
+/// filter (`n.g = 3`) and `(?i)` (no required literal), which the existing
+/// path serves.
+const ROUTED: usize = EQUIVALENCE_PREDICATES.len() - 2;
 
 /// Every predicate, with the pass on and off, must give the same ids in the
 /// same order; returns how many ran on the column driver.

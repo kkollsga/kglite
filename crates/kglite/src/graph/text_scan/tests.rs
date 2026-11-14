@@ -385,7 +385,7 @@ fn regexes_that_would_match_nothing_useful_are_refused() {
 
 #[test]
 fn the_required_literal_is_extracted_only_when_it_is_provably_required() {
-    let cases: [(&str, bool, Option<&str>); 18] = [
+    let cases: [(&str, bool, Option<&str>); 27] = [
         ("foobar", false, Some("foobar")),
         ("^foo\\d+", false, Some("foo")),
         ("\\bword\\b", false, Some("word")),
@@ -399,7 +399,16 @@ fn the_required_literal_is_extracted_only_when_it_is_provably_required() {
         ("foo|bar", false, None),
         ("foo(bar|baz)?quux", false, Some("quux")),
         ("(?i)foobar", false, None),
-        ("(?s)foo.bar", false, None),
+        ("(?s)foo.bar", false, Some("foo")),
+        ("(?s).*word.*", false, Some("word")),
+        ("(?s).*\\bword\\b.*", false, Some("word")),
+        ("(?sm)^abc$", false, Some("abc")),
+        ("abc(?U)d*efg", false, Some("abc")),
+        ("(?si)foobar", false, None),
+        ("(?x)foo bar", false, None),
+        ("(?s:foobar)", false, None),
+        ("(?s", false, None),
+        ("(?)foobar", false, None),
         ("foobar", true, None),
         ("ab", false, None),
         ("\\.\\.\\.", false, None),
