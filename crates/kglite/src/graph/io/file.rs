@@ -857,8 +857,41 @@ fn zstd_compress(data: &[u8]) -> io::Result<Vec<u8>> {
     encoder.finish()
 }
 
+thread_local! {
+    /// The `max_load_bytes` ceiling of the load running on this thread: no
+    /// single decompressed section may exceed it, since a section is held in
+    /// memory whole. The metadata-side estimate cannot bound this, because a
+    /// crafted file chooses the sizes the estimate reads.
+    static LOAD_CEILING: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// Holds [`LOAD_CEILING`] for the length of one load.
+struct LoadCeilingGuard(Option<u64>);
+
+impl LoadCeilingGuard {
+    fn set(ceiling: Option<u64>) -> Self {
+        LoadCeilingGuard(LOAD_CEILING.with(|cell| cell.replace(ceiling)))
+    }
+}
+
+impl Drop for LoadCeilingGuard {
+    fn drop(&mut self) {
+        LOAD_CEILING.with(|cell| cell.set(self.0));
+    }
+}
+
 fn zstd_decompress(data: &[u8]) -> io::Result<Vec<u8>> {
-    zstd_decompress_limited(data, MAX_DECOMPRESSED_SECTION_BYTES)
+    match LOAD_CEILING.with(|cell| cell.get()) {
+        Some(ceiling) if ceiling < MAX_DECOMPRESSED_SECTION_BYTES => {
+            zstd_decompress_limited(data, ceiling).map_err(|error| {
+                invalid_data(format!(
+                    "{error}; the ceiling is LoadOptions::max_load_bytes / {MAX_LOAD_ENV_VAR}, \
+                     and no single section may decompress past it"
+                ))
+            })
+        }
+        _ => zstd_decompress_limited(data, MAX_DECOMPRESSED_SECTION_BYTES),
+    }
 }
 
 /// Encode a Serde-backed disk sidecar with an explicit codec selector.
@@ -911,6 +944,21 @@ fn corrupt_sidecar_error(file_name: &str, cause: &io::Error) -> io::Error {
     )
 }
 
+/// The most `zstd_decompress_limited` reserves before it has decoded a byte.
+/// The declared size is untrusted: a 16-byte frame can claim 16 GiB, and an
+/// all-zero section decodes to far more than its stored size, so the buffer
+/// grows with the output past this.
+const MAX_UPFRONT_RESERVATION: u64 = 64 * 1024 * 1024;
+
+/// Bytes to reserve before decoding `data`: its declared content size, capped
+/// at the load limit and at [`MAX_UPFRONT_RESERVATION`].
+fn upfront_reservation(data: &[u8], limit: u64) -> usize {
+    zstd::zstd_safe::get_frame_content_size(data)
+        .ok()
+        .flatten()
+        .map_or(0, |n| n.min(limit).min(MAX_UPFRONT_RESERVATION) as usize)
+}
+
 fn zstd_decompress_limited(data: &[u8], limit: u64) -> io::Result<Vec<u8>> {
     let decoder = zstd::Decoder::new(std::io::Cursor::new(data))
         .map_err(|e| invalid_data(format!("invalid zstd section: {e}")))?;
@@ -918,12 +966,8 @@ fn zstd_decompress_limited(data: &[u8], limit: u64) -> io::Result<Vec<u8>> {
     // Sections are written with a known content size; reserving it up front
     // spares the doubling reallocations (a transient 2x of the output) that
     // `read_to_end` would otherwise make. The header is untrusted, so the
-    // reservation is capped at the load limit.
-    let expected = zstd::zstd_safe::get_frame_content_size(data)
-        .ok()
-        .flatten()
-        .map_or(0, |n| n.min(limit) as usize);
-    let mut decoded = Vec::with_capacity(expected);
+    // reservation is capped at the load limit and at `MAX_UPFRONT_RESERVATION`.
+    let mut decoded = Vec::with_capacity(upfront_reservation(data, limit));
     bounded
         .read_to_end(&mut decoded)
         .map_err(|e| invalid_data(format!("invalid zstd section: {e}")))?;
@@ -2192,6 +2236,7 @@ fn load_portable_columnar(
             core_version, CURRENT_CORE_DATA_VERSION,
         )));
     }
+    let _ceiling = LoadCeilingGuard::set(options.max_load_bytes);
     let (metadata, mut sections) =
         parse_portable_metadata(buf, format_name, metadata_len, metadata_start)?;
     if metadata.core_data_version != core_version {

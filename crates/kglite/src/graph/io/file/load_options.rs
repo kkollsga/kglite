@@ -201,6 +201,10 @@ pub struct LoadOptions {
     /// [`estimate_load_memory`](super::estimate_load_memory) reports the same
     /// number this compares, so a caller can decide for itself instead.
     ///
+    /// The ceiling also bounds each section's decompressed size while it is
+    /// decoded, because the estimate reads sizes the file itself declares: a
+    /// section that expands past it is refused mid-decode.
+    ///
     /// Portable `.kgl` loads only. A disk-graph directory streams its columns
     /// off disk and has no single decode to refuse.
     pub max_load_bytes: Option<u64>,

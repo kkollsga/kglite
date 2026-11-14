@@ -824,6 +824,53 @@ mod atomic_save_tests {
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
+    /// A frame header declaring `declared` bytes of content and holding none.
+    fn frame_declaring(declared: u64) -> Vec<u8> {
+        let mut frame = vec![0x28, 0xB5, 0x2F, 0xFD, 0xE0];
+        frame.extend_from_slice(&declared.to_le_bytes());
+        frame
+    }
+
+    #[test]
+    fn a_declared_size_reserves_at_most_the_upfront_cap() {
+        let huge = frame_declaring(1 << 40);
+        assert_eq!(upfront_reservation(&huge, u64::MAX), 64 * 1024 * 1024);
+        assert_eq!(
+            upfront_reservation(&huge, 1 << 20),
+            1 << 20,
+            "the limit still caps it"
+        );
+        assert_eq!(upfront_reservation(&frame_declaring(4096), u64::MAX), 4096);
+        // The decode of the empty stream fails without having reserved the claim.
+        assert!(zstd_decompress_limited(&huge, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn the_load_ceiling_bounds_what_a_section_decompresses_to() {
+        let compressed = zstd_compress(&vec![0u8; 32 * 1024 * 1024]).unwrap();
+        assert!(
+            compressed.len() < 16 * 1024,
+            "zeros compress to almost nothing"
+        );
+        assert_eq!(
+            zstd_decompress(&compressed).unwrap().len(),
+            32 * 1024 * 1024
+        );
+        {
+            let _ceiling = LoadCeilingGuard::set(Some(8 * 1024 * 1024));
+            let error = zstd_decompress(&compressed).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert!(error.to_string().contains("max_load_bytes"), "{error}");
+            let fits = zstd_compress(&vec![0u8; 1024 * 1024]).unwrap();
+            assert_eq!(zstd_decompress(&fits).unwrap().len(), 1024 * 1024);
+        }
+        assert_eq!(
+            zstd_decompress(&compressed).unwrap().len(),
+            32 * 1024 * 1024,
+            "the guard restores"
+        );
+    }
+
     #[test]
     fn retained_flat_csr_index_readers_validate_exact_bounds_and_cardinality() {
         let mut interner = crate::graph::storage::interner::StringInterner::new();
