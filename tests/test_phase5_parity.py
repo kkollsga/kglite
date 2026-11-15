@@ -97,11 +97,11 @@ def test_graph_copy_cow_correctness_mapped():
 #: Linux from the `kglite/kglite.abi3.so` member of the newest manylinux2014
 #: x86_64 wheel already on PyPI, whose file name and SHA-256 follow the table.
 BINARY_SIZE_BASELINES = {
-    "darwin": (32_193_536, "0.21.5"),  # host release build
-    "linux": (39_802_040, "0.21.4"),  # published manylinux2014 x86_64 wheel member
+    "darwin": (32_541_024, "0.21.6"),  # host release build
+    "linux": (39_837_752, "0.21.5"),  # published manylinux2014 x86_64 wheel member
 }
-LINUX_SIZE_WHEEL = "kglite-0.21.4-cp312-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
-LINUX_SIZE_WHEEL_SHA256 = "22b4fd058938a4405f7ca1a5a085b6cefe571a145c56ab8ed31d2d4f47f0a43f"
+LINUX_SIZE_WHEEL = "kglite-0.21.5-cp312-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"
+LINUX_SIZE_WHEEL_SHA256 = "46558932d514f7a6bb3162844b4cfadecb167f26eaa06f3b51aa292a9c3c4b51"
 
 
 @pytest.mark.binary_size
@@ -692,6 +692,14 @@ def test_binary_size_regression():
         and its aggregates (`column_kernel.rs`, `column_agg.rs`), the
         scan driver (`column_scan.rs`) and the `columnar_scan_aggregate`
         planner pass.
+
+
+      - 0.21.6:       32,541,024 bytes (≈31.0 MB), +347,488 (+1.08%)
+        over 0.21.5. In-place text search over string columns: the
+        scan engine (`text_scan/`), its driver (`text_column_scan.rs`)
+        and planner pass, `text_match`, `text_hits`, `db.text.search`
+        and `db.text.rank` with scoped BM25; plus the structure checks
+        of the mapped reader (`structure_checks.rs`).
 
     Raising the baseline is a deliberate act — every bump should
     be accompanied by an updated growth note above. For a precise

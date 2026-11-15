@@ -9,6 +9,8 @@ before upgrading.
 
 ## [Unreleased]
 
+## [0.21.6] - 2026-11-15
+
 ### Added
 
 - **`text_match(value, query [, {mode, ignore_case}])` tests a string, phrase or regex without an index.** `mode` is `'literal'` (default), `'phrase'` (whitespace in the query matches any run of whitespace, newlines included) or `'regex'`. A null value or a value that is not text gives null; a list of strings is one document, as `text_bm25` indexes it. An empty query, an unknown option and an invalid regex are errors.

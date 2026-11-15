@@ -252,11 +252,17 @@
       "sha256": "32890ef98afb12c4d47303dc367a9b4eba7aaac44de5ef4cdb584c4df852ea33",
       "status": "pending"
     },
-    "current.json": {
-      "evidence": "New release capture; awaiting control/measurement qualification.",
+    "0_21_6.json": {
+      "evidence": "Release 0.21.6, 2026-11-15 ~03:05-03:18 local on Mac16,10 (M4, 16 GiB): captured hot, 1-minute load average 45 at the start (another project's test run and a cold release build), 12-15 afterwards. Environmentally inflated, not a code change: vs accepted 0_21_3.json min median +8.7% across 43 cells, uniform; a bench-check at load 12 read return_node_10k +38.7% and commit_tx_after_deletes +26.0% where the capture read under +14% (disagreeing runs). Paired A/B against the published 0.21.5 wheel under the same load, 3 alternating blocks, min of 60: RETURN n over 10k nodes 2.35-2.38 ms -> 2.20-2.22 ms, RETURN id(n) 1.02-1.16 -> 0.90-0.94 ms, begin/CREATE/commit 0.0166-0.0211 -> 0.0159-0.0184 ms (candidate faster in every block). bench-anchor OK (worst +24.1%). Reference stays 0_21_3.json.",
       "platform": "Darwin/arm64",
-      "sha256": "32890ef98afb12c4d47303dc367a9b4eba7aaac44de5ef4cdb584c4df852ea33",
-      "status": "pending"
+      "sha256": "7f3aef1d74559d1850f13dc21fb6e160a680f77a5cb16c818f40e84848d7131c",
+      "status": "rejected"
+    },
+    "current.json": {
+      "evidence": "Release 0.21.6, 2026-11-15 ~03:05-03:18 local on Mac16,10 (M4, 16 GiB): captured hot, 1-minute load average 45 at the start (another project's test run and a cold release build), 12-15 afterwards. Environmentally inflated, not a code change: vs accepted 0_21_3.json min median +8.7% across 43 cells, uniform; a bench-check at load 12 read return_node_10k +38.7% and commit_tx_after_deletes +26.0% where the capture read under +14% (disagreeing runs). Paired A/B against the published 0.21.5 wheel under the same load, 3 alternating blocks, min of 60: RETURN n over 10k nodes 2.35-2.38 ms -> 2.20-2.22 ms, RETURN id(n) 1.02-1.16 -> 0.90-0.94 ms, begin/CREATE/commit 0.0166-0.0211 -> 0.0159-0.0184 ms (candidate faster in every block). bench-anchor OK (worst +24.1%). Reference stays 0_21_3.json.",
+      "platform": "Darwin/arm64",
+      "sha256": "7f3aef1d74559d1850f13dc21fb6e160a680f77a5cb16c818f40e84848d7131c",
+      "status": "rejected"
     },
     "current.linux.json": {
       "evidence": "Verified released kglite==0.13.2 Linux/Python3.12 wheel and complete workload; provenance retained in kglite_baseline.",
