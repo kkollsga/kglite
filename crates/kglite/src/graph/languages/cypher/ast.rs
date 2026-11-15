@@ -1500,6 +1500,11 @@ impl ConstraintRequirement {
 /// spelling and is rendered back as the predicate by `expression_to_string`.
 pub const IS_TYPE_FUNCTION: &str = "__is_type";
 
+/// The hidden function the planner wraps a node variable in inside
+/// `collect(...)` when the list is read only as node identities
+/// (`planner/call_scope.rs`). It has no user-facing spelling.
+pub const NODE_REF_FUNCTION: &str = "__node_ref";
+
 /// The single source of truth for the aggregate name set —
 /// `is_aggregate_expression` classifies with it, and the nested-aggregate
 /// evaluator uses it to find the maximal aggregate calls it must evaluate over

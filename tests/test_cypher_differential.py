@@ -3153,6 +3153,14 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         None,
     ),
     (
+        "text_scan_call_scope_rank_distinct_node_refs",
+        "text_index_graph",
+        "MATCH (d:Doc), (e:Doc) WHERE d.id < 8 AND e.id < 3 WITH collect(DISTINCT d) AS ds "
+        "CALL db.text.rank({type: 'Doc', property: 'body', query: 'alpha', within: ds}) "
+        "YIELD node, score RETURN node.id AS id, score ORDER BY id",
+        None,
+    ),
+    (
         "text_scan_call_scope_kept_when_read",
         "text_index_graph",
         "MATCH (d:Doc) WHERE d.id < 8 WITH collect(d) AS ds "

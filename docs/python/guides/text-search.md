@@ -426,7 +426,7 @@ rows = graph.cypher("""
 
 Use `db.text.search ... within` when you already hold the nodes in a variable. Use `db.text.rank ... within` for scores computed from the selection alone, and `text_bm25()` with an index for scores from the whole corpus.
 
-On a synthetic graph of 58,000 documents of about 500 bytes (release build), a scope of 4,907 documents costs 2.7 ms to select and `collect`; `db.text.search ... within` adds about 0.6 ms, and `text_match()` in the pattern's `WHERE` answers in 1.0 ms. The cost follows the scope, not the type.
+On a synthetic graph of 58,000 documents of about 500 bytes (release build), a scope of 4,907 documents costs 2.9 ms to select and `collect` as full nodes; `WITH collect(d) AS ds CALL db.text.search({..., within: ds})` takes 1.1 ms in all, because a list read only as node identities is collected without materialising the nodes, and `text_match()` in the pattern's `WHERE` answers in 1.0 ms. The cost follows the scope, not the type.
 
 Choose by what you need back:
 

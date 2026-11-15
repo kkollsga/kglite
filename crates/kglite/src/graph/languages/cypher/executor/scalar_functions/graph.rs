@@ -9,6 +9,22 @@ use crate::datatypes::{PropKey, PropMap};
 use crate::graph::storage::GraphRead;
 
 impl<'a> CypherExecutor<'a> {
+    /// `__node_ref(v)`, the planner's spelling of `v` inside a `collect` whose
+    /// list only a node-identity reader consumes: a node binding yields its
+    /// `NodeRef`, anything else (a projected value, a relationship, an unbound
+    /// variable) evaluates exactly as the bare variable would.
+    fn eval_node_ref(&self, args: &[Expression], row: &ResultRow) -> Result<Value, String> {
+        let [Expression::Variable(var)] = args else {
+            return Err(format!("{NODE_REF_FUNCTION}() takes one variable"));
+        };
+        if !row.projected.contains_key(var) {
+            if let Some(&idx) = row.node_bindings.get(var) {
+                return Ok(Value::NodeRef(idx.index() as u32));
+            }
+        }
+        self.evaluate_expression(&args[0], row)
+    }
+
     /// `elementId(entity)` — Neo4j 5 element identity: an opaque STRING,
     /// distinct from `id()`. Keyed off the graph slot index — the same
     /// number the Bolt packer emits as `element_id` on Node/Relationship
@@ -516,6 +532,7 @@ impl<'a> CypherExecutor<'a> {
                     _ => Ok(Value::Null),
                 }
             }
+            NODE_REF_FUNCTION => self.eval_node_ref(args, row),
             "start_node" | "startnode" => Ok(self
                 .eval_endpoint_fn(args, row, true)
                 .unwrap_or(Value::Null)),

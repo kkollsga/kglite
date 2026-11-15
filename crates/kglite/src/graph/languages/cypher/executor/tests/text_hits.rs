@@ -245,6 +245,46 @@ fn releasing_the_scope_variable_changes_no_row() {
     }
 }
 
+/// A scope collected as node identities (`__node_ref`) instead of materialised
+/// nodes changes the cost and nothing else: rows equal the run with the pass
+/// disabled for both procedures, with `collect(DISTINCT d)` over a duplicating
+/// pattern, with nulls from an OPTIONAL MATCH skipped, and for an empty scope.
+#[test]
+fn collecting_the_scope_as_node_identities_changes_no_row() {
+    use std::collections::HashSet;
+    let graph = corpus();
+    let params = HashMap::new();
+    let off: HashSet<String> = HashSet::from(["narrow_unwind_source".to_string()]);
+    let run = |query: &str, disabled: Option<&HashSet<String>>| {
+        let mut options = ExecuteOptions::eager(&params);
+        options.disabled_passes = disabled;
+        let result = execute_read(&graph, query, &options)
+            .unwrap_or_else(|e| panic!("{query}: {e}"))
+            .result;
+        (result.columns, result.rows)
+    };
+    let procedures = [
+        "db.text.search({type: 'Doc', property: 't', query: 'alpha', within: ds}) \
+         YIELD node, offset RETURN node.id AS id, offset ORDER BY id, offset",
+        "db.text.rank({type: 'Doc', property: 't', query: 'alpha', within: ds, `limit`: 10}) \
+         YIELD node, score RETURN node.id AS id, score ORDER BY id",
+    ];
+    let scopes = [
+        "MATCH (d:Doc) WITH collect(d) AS ds",
+        "MATCH (d:Doc), (e:Doc) WITH collect(DISTINCT d) AS ds",
+        "MATCH (a:Doc) OPTIONAL MATCH (d:Doc {id: a.id}) WHERE a.id < 3 WITH collect(d) AS ds",
+        "MATCH (d:Doc {id: -1}) WITH collect(d) AS ds",
+    ];
+    for (n, scope) in scopes.iter().enumerate() {
+        for procedure in procedures {
+            let query = format!("{scope} CALL {procedure}");
+            let on = run(&query, None);
+            assert_eq!(on, run(&query, Some(&off)), "{query}");
+            assert_eq!(on.1.is_empty(), n == 3, "{query}");
+        }
+    }
+}
+
 /// The executor honours `CallClause::release`: a released variable is absent
 /// from the rows the procedure yields (observed through `RETURN *`, which the
 /// planner would never pair with a release), and an unreleased one is present.

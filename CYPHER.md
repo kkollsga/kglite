@@ -1402,7 +1402,7 @@ Choose by what you hold and what you want back.
 | The best rows among the selected ones, scores from the selection alone | `db.text.rank ... within` |
 | The best rows with scores from the whole corpus | `text_bm25` with a text index |
 
-Measured on a synthetic graph of 58,000 documents of about 500 bytes, release build, minimum of runs: a scope of 4,907 of them costs 2.7 ms to select and `collect`, and `db.text.search ... within` adds about 0.6 ms to that. `text_match` in the `WHERE` of the same pattern answers in 1.0 ms, and `toLower(p.text) CONTAINS` takes 3.5 ms where `text_match(..., {ignore_case: true})` takes 1.1 ms. Every figure grows with the scope, not with the type.
+Measured on a synthetic graph of 58,000 documents of about 500 bytes, release build, minimum of runs: a scope of 4,907 of them costs 2.9 ms to select and `collect` as full nodes, while `WITH collect(d) AS ds CALL db.text.search({..., within: ds})` takes 1.1 ms in all: a list that only `within` reads is collected as node identities, not materialised nodes. `text_match` in the `WHERE` of the same pattern answers in 1.0 ms, and `toLower(p.text) CONTAINS` takes 3.5 ms where `text_match(..., {ignore_case: true})` takes 1.1 ms. Every figure grows with the scope, not with the type.
 
 #### Ranking inside a scope: `db.text.rank`
 
@@ -1430,7 +1430,7 @@ That ranks the paragraphs of one document against each other. The call yields `n
 - The result equals building a text index over only the scope's nodes and ranking with it: the same nodes, order and scores.
 - A type or property that nothing holds returns no rows, as `db.text.search` does.
 
-The cost is proportional to the scope's text, because every document in the scope is tokenized on each call. A scope of 128 KiB of text or more is tokenized on several threads; the scores do not depend on that. On the synthetic graph above, a 4,907-document scope ranks in 4.3 ms, down from 11.2 ms single-threaded, and 2.7 ms of the 4.3 is the pattern and `collect`. With no `within`, that is every document of the type, so ranking a whole large type belongs to `text_bm25` with a text index, which answers in milliseconds or less. Use `db.text.rank` for scopes.
+The cost is proportional to the scope's text, because every document in the scope is tokenized on each call. A scope of 128 KiB of text or more is tokenized on several threads; the scores do not depend on that. On the synthetic graph above, a 4,907-document scope ranks in 2.1 ms from the pattern through `within: ds` (5.2 ms when `ds` is collected as full nodes, which happens whenever a later clause reads it). With no `within`, that is every document of the type, so ranking a whole large type belongs to `text_bm25` with a text index, which answers in milliseconds or less. Use `db.text.rank` for scopes.
 
 | You want | Use |
 |---|---|
