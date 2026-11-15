@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 mod annotations;
 mod call_hoist;
+mod call_scope;
 mod fulltext_limit;
 mod guard;
 #[cfg(test)]
@@ -489,8 +490,8 @@ fn pass_fold_pass_through_with(query: &mut CypherQuery, _ctx: &PassCtx) {
 /// downstream mention of the variable — either way the binding may still be
 /// read, so the copy is kept.
 ///
-/// Fixes the quadratic memory of `WITH collect(x) AS xs UNWIND xs AS y`:
-/// `n` rows each retaining an `n`-element copy of the same list.
+/// Fixes the quadratic memory of `WITH collect(x) AS xs UNWIND xs AS y`. The
+/// same proof marks a bare-variable `CALL` parameter (`CallClause::release`).
 fn pass_narrow_unwind_source(query: &mut CypherQuery, _ctx: &PassCtx) {
     narrow_unwind_source(query)
 }

@@ -116,6 +116,13 @@ pub(crate) const FUNCTIONS: &[FunctionSpec] = &[
         signature: "text_match(value :: STRING | LIST<STRING>, query :: STRING, options :: MAP?) :: BOOLEAN?",
     },
     FunctionSpec {
+        name: "text_hits",
+        aliases: &[],
+        category: "string",
+        description: "Where a query matches inside a value: a list of {offset, length, char_offset, snippet}, null when the value has no text",
+        signature: "text_hits(value :: STRING | LIST<STRING>, query :: STRING, options :: MAP?) :: LIST<MAP>?",
+    },
+    FunctionSpec {
         name: "text_match_regex",
         aliases: &[],
         category: "string",

@@ -25,15 +25,18 @@ use petgraph::graph::NodeIndex;
 
 use super::procedure_params::reject_unknown_keys;
 use super::*;
-use crate::graph::algorithms::text_index::scoped::ScopedBm25;
+use crate::graph::algorithms::text_index::scoped::{DocCount, ScopedBm25};
 use crate::graph::core::pattern_matching::text_column_scan::{
-    for_each_document, note_text_decline, note_text_served,
+    documents, note_text_decline, note_text_served,
 };
 use crate::graph::schema::InternedKey;
 use crate::graph::storage::GraphRead;
 use crate::graph::text_indexes::document_text;
 
 const PROC: &str = "db.text.rank";
+/// Scopes holding at least this many bytes of text are tokenized in parallel;
+/// below it the fork and join cost more than they save.
+const PARALLEL_MIN_BYTES: usize = 128 * 1024;
 const KEYS: &[&str] = &["type", "property", "query", "within", "limit"];
 
 fn string_param(params: &HashMap<String, Value>, key: &str) -> Result<String, String> {
@@ -137,27 +140,61 @@ impl CypherExecutor<'_> {
         corpus: &mut ScopedBm25,
     ) -> Result<(), String> {
         let interrupt = self.interrupt();
-        let served = for_each_document(
-            self.graph,
-            node_type,
-            property,
-            scope,
-            interrupt,
-            &mut |node, bytes| {
-                corpus.add_document(node.index() as u32, &String::from_utf8_lossy(bytes));
-            },
-        )
-        .map_err(|e| e.message(&interrupt))?;
+        let served = documents(self.graph, node_type, property, scope, interrupt)
+            .map_err(|e| e.message(&interrupt))?;
         match served {
-            Ok(()) => {
+            Ok(docs) => {
                 note_text_served();
-                Ok(())
+                self.count_documents(&docs, corpus)
             }
             Err(decline) => {
                 note_text_decline(decline);
                 self.collect_documents_per_row(node_type, property, scope, corpus)
             }
         }
+    }
+
+    /// Tokenizes the column's documents into `corpus`. A scope of
+    /// [`PARALLEL_MIN_BYTES`] or more is counted on the rayon pool, in chunks
+    /// that poll the deadline; the counts are absorbed in document order, so
+    /// the statistics and the scores equal the single-thread run's.
+    fn count_documents(
+        &self,
+        docs: &[(NodeIndex, &[u8])],
+        corpus: &mut ScopedBm25,
+    ) -> Result<(), String> {
+        use rayon::prelude::*;
+        let bytes: usize = docs.iter().map(|(_, text)| text.len()).sum();
+        if bytes < PARALLEL_MIN_BYTES {
+            for (i, &(node, text)) in docs.iter().enumerate() {
+                self.check_interrupt_periodic(i)?;
+                corpus.add_document(node.index() as u32, &String::from_utf8_lossy(text));
+            }
+            return Ok(());
+        }
+        let interrupt = self.interrupt();
+        let counted: Option<Vec<Vec<DocCount>>> = docs
+            .par_chunks(64)
+            .map(|chunk| {
+                (!interrupt.exceeded()).then(|| {
+                    chunk
+                        .iter()
+                        .map(|&(node, text)| {
+                            corpus.count(node.index() as u32, &String::from_utf8_lossy(text))
+                        })
+                        .collect()
+                })
+            })
+            .collect();
+        let Some(counted) = counted else {
+            return Err(super::check_statement_interrupt(&interrupt)
+                .err()
+                .unwrap_or_else(|| "Query interrupted".to_string()));
+        };
+        for doc in counted.into_iter().flatten() {
+            corpus.absorb(doc);
+        }
+        Ok(())
     }
 
     fn collect_documents_per_row(

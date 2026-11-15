@@ -26,6 +26,8 @@ mod temporal_map;
 mod temporal_time;
 mod temporal_truncate;
 mod temporal_zoned;
+mod text_hits;
+mod text_match;
 mod timeseries;
 mod utility;
 pub(super) mod validity;

@@ -530,6 +530,7 @@ impl<'a> CypherExecutor<'a> {
                 procedure_name: clause.procedure_name.clone(),
                 parameters: clause.parameters.clone(),
                 yield_items: effective_yields,
+                release: clause.release.clone(),
             };
             &synthesized_clause
         } else {
@@ -568,9 +569,14 @@ impl<'a> CypherExecutor<'a> {
         append_call_yield_columns(&mut columns, clause);
         let outer_rows = existing.rows;
         let mut joined_rows = Vec::new();
-        for (outer_index, outer_row) in outer_rows.into_iter().enumerate() {
+        for (outer_index, mut outer_row) in outer_rows.into_iter().enumerate() {
             self.check_interrupt_periodic(outer_index)?;
             let params = self.extract_call_params(&clause.parameters, &outer_row)?;
+            // Dead after this call (see `CallClause::release`): not copied
+            // into each yielded row.
+            for name in &clause.release {
+                outer_row.projected.remove(name);
+            }
             let yielded_rows = match proc_name.as_str() {
                 "db.relationship_embeddings.list" => super::edge_embedding_procedures::list(
                     self.graph,

@@ -106,6 +106,7 @@ mod temporal_time;
 mod temporal_zoned;
 mod temporal_zones;
 mod text_bm25;
+mod text_hits;
 mod text_rank;
 mod text_rank_bench;
 mod text_synth_bench;

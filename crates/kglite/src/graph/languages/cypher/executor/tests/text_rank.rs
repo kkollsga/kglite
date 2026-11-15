@@ -748,3 +748,59 @@ fn an_expired_deadline_stops_the_ranking_with_the_timeout_error() {
         );
     }
 }
+
+/// A scope of more than the parallel threshold (128 KiB of text) is counted
+/// on several threads and must equal the heap oracle to the bit, whole type
+/// and a scattered scope alike, for queries with one and several terms.
+#[test]
+fn a_scope_above_the_parallel_threshold_ranks_as_the_oracle_does() {
+    let mut rng = Rng(0x51ED_270B_u64);
+    let mut graph = DirGraph::new();
+    for id in 1..=900i64 {
+        let mut text = text_of(&mut rng);
+        while text.len() < 300 {
+            text.push_str(SEPARATORS[rng.below(SEPARATORS.len())]);
+            text.push_str(WORDS[rng.below(WORDS.len())]);
+        }
+        let params = HashMap::from([("t".to_string(), s(&text))]);
+        write(
+            &mut graph,
+            &format!("CREATE (:Doc {{id: {id}, t: $t}})"),
+            &params,
+        );
+    }
+    let docs = nodes_of(&graph, "Doc");
+    let bytes: usize = docs
+        .iter()
+        .map(|&n| {
+            let view = graph.graph.node_view(n).unwrap();
+            let value = view
+                .resolved_field("Doc", "t", InternedKey::from_str("t"))
+                .unwrap();
+            doc_of(value.as_ref()).map_or(0, |t| t.len())
+        })
+        .sum();
+    assert!(
+        bytes > 256 * 1024,
+        "{bytes} bytes is not above the threshold"
+    );
+    let scattered: Vec<NodeIndex> = docs.iter().copied().step_by(2).collect();
+    for query in ["alpha", "Alpha bravo", "straße æøå", "the", "zzz"] {
+        for limit in [3usize, 1000] {
+            let config = format!("type: 'Doc', property: 't', query: '{query}', `limit`: {limit}");
+            let got = rank(&graph, &format!("{{{config}}}"));
+            assert_same(&got, &oracle(&graph, None, query, limit), query);
+            let scoped = rank_with(
+                &graph,
+                &format!("{{{config}, within: $w}}"),
+                &within_param(&scattered),
+            )
+            .unwrap();
+            assert_same(
+                &scoped,
+                &oracle(&graph, Some(&scattered), query, limit),
+                query,
+            );
+        }
+    }
+}

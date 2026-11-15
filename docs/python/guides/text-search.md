@@ -410,11 +410,30 @@ rows = graph.cypher("""
 
 The scores equal those of a text index built over only those paragraphs. They are not comparable with `text_bm25()` scores, whose statistics come from the whole index. Each call tokenizes the scope's text, so it suits scopes. Rank a whole large type with `text_bm25()` and an index.
 
+### Search inside a selected part of the graph
+
+Put the text test in the pattern's own `WHERE` and `RETURN`, so the pattern selects the rows and the test runs on each, with no list of nodes in between:
+
+```python
+rows = graph.cypher("""
+    MATCH (k:Tag {id: $tag})<-[:TAGGED]-(p:Para)
+    WHERE text_match(p.text, 'rollback', {ignore_case: true})
+    RETURN p.id AS id, text_hits(p.text, 'rollback', {ignore_case: true}) AS hits
+""", params={"tag": 7})
+```
+
+`text_hits(value, query [, options])` returns the matches inside one value as a list of `{offset, length, char_offset, snippet}` maps, the fields `db.text.search` yields. Its options are those of `text_match()` plus `snippet_chars` (default 40) and `max`. A value without text gives null; a value with text and no match gives `[]`.
+
+Use `db.text.search ... within` when you already hold the nodes in a variable. Use `db.text.rank ... within` for scores computed from the selection alone, and `text_bm25()` with an index for scores from the whole corpus.
+
+On a synthetic graph of 58,000 documents of about 500 bytes (release build), a scope of 4,907 documents costs 2.7 ms to select and `collect`; `db.text.search ... within` adds about 0.6 ms, and `text_match()` in the pattern's `WHERE` answers in 1.0 ms. The cost follows the scope, not the type.
+
 Choose by what you need back:
 
 | You need | Use |
 |---|---|
 | Rows that contain an exact string, phrase or pattern | `text_match()` |
+| Where it matches, on rows a pattern selected | `text_hits()` |
 | The occurrences with offsets and snippets | `db.text.search` |
 | The best rows for a loose query, ranked | `text_bm25()` |
 | The best rows among a chosen part of the graph, no index | `db.text.rank` |

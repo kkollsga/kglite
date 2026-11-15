@@ -1331,6 +1331,27 @@ At run time the scan declines, and the query runs as it always did, on disk grap
 
 `PROFILE` ends the `MATCH` line with `[text column scan]` when the scan answered, or `[text scan declined: <reason>]` when it did not. `EXPLAIN` lists `text_column_scan` among the optimizer passes that changed the plan. `disabled_passes=['text_column_scan']` turns the scan off.
 
+#### Positions in a pattern row: `text_hits`
+
+`text_hits(value, query [, options])` returns where `query` matches inside one value, as a list of maps `{offset, length, char_offset, snippet}`: the fields `db.text.search` yields for the same value. It runs on whatever row the pattern produced, so it needs no procedure and no `collect`.
+
+```cypher
+MATCH (d:Doc {id: 1})-[:CONTAINS]->(p:Para)
+WHERE text_match(p.text, 'rollback')
+RETURN p.id, text_hits(p.text, 'rollback', {max: 3, snippet_chars: 30}) AS hits
+```
+
+The options are those of `text_match` plus two more.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `snippet_chars` | 40 | Characters of context on each side of the match in `snippet`. |
+| `max` | all | Keep only the first `max` hits of the value. |
+
+A null value or query, and a value without text, give null; a value with text and no match gives `[]`. A list of strings is one document, as for `text_match`. `offset` and `length` are byte positions and `char_offset` counts characters, as in `db.text.search`.
+
+Write `text_match` in the `WHERE` and `text_hits` in the `RETURN`: the first keeps the rows that match, the second reports where.
+
 #### Positions: `db.text.search`
 
 `db.text.search` returns one row per occurrence, with its position.
@@ -1362,6 +1383,27 @@ YIELD node, offset, snippet
 RETURN node.id, offset, snippet
 ```
 
+#### Searching inside a selected part of the graph
+
+Put the text test in the pattern's own `WHERE` and `RETURN`. The pattern selects the rows and the test runs on each, with no list of nodes in between:
+
+```cypher
+MATCH (k:Tag {id: $tag})<-[:TAGGED]-(p:Para)
+WHERE text_match(p.text, 'rollback', {ignore_case: true})
+RETURN p.id, text_hits(p.text, 'rollback', {ignore_case: true}) AS hits
+```
+
+Choose by what you hold and what you want back.
+
+| You hold or want | Use |
+|---|---|
+| A pattern that selects the rows | `text_match` in its `WHERE`, `text_hits` in its `RETURN` |
+| A list of nodes already in a variable | `db.text.search ... within` |
+| The best rows among the selected ones, scores from the selection alone | `db.text.rank ... within` |
+| The best rows with scores from the whole corpus | `text_bm25` with a text index |
+
+Measured on a synthetic graph of 58,000 documents of about 500 bytes, release build, minimum of runs: a scope of 4,907 of them costs 2.7 ms to select and `collect`, and `db.text.search ... within` adds about 0.6 ms to that. `text_match` in the `WHERE` of the same pattern answers in 1.0 ms, and `toLower(p.text) CONTAINS` takes 3.5 ms where `text_match(..., {ignore_case: true})` takes 1.1 ms. Every figure grows with the scope, not with the type.
+
 #### Ranking inside a scope: `db.text.rank`
 
 `db.text.rank` ranks a graph-selected set of nodes by BM25, with no index. The scope is the corpus: its own document count, average length and document frequencies decide every score.
@@ -1388,7 +1430,7 @@ That ranks the paragraphs of one document against each other. The call yields `n
 - The result equals building a text index over only the scope's nodes and ranking with it: the same nodes, order and scores.
 - A type or property that nothing holds returns no rows, as `db.text.search` does.
 
-The cost is proportional to the scope's text, because every document in the scope is tokenized on each call. With no `within`, that is every document of the type, so ranking a whole large type belongs to `text_bm25` with a text index, which answers in milliseconds or less. Use `db.text.rank` for scopes.
+The cost is proportional to the scope's text, because every document in the scope is tokenized on each call. A scope of 128 KiB of text or more is tokenized on several threads; the scores do not depend on that. On the synthetic graph above, a 4,907-document scope ranks in 4.3 ms, down from 11.2 ms single-threaded, and 2.7 ms of the 4.3 is the pattern and `collect`. With no `within`, that is every document of the type, so ranking a whole large type belongs to `text_bm25` with a text index, which answers in milliseconds or less. Use `db.text.rank` for scopes.
 
 | You want | Use |
 |---|---|
@@ -2562,6 +2604,7 @@ Python.
 | `text_contains_any(s, needles)` | `Boolean` | True if `s` contains any needle (variadic or list arg) |
 | `text_starts_with_any(s, prefixes)` | `Boolean` | True if `s` starts with any prefix (variadic or list arg) |
 | `text_match(value, query [, options])` | `Boolean` | True if the value's text holds a match of `query`; see [Exact text](#exact-text--text_match-and-dbtextsearch) |
+| `text_hits(value, query [, options])` | `List` | Where `query` matches inside the value: maps of `offset`, `length`, `char_offset`, `snippet`; see [Exact text](#exact-text--text_match-and-dbtextsearch) |
 
 ```python
 # Edit distance — Levenshtein

@@ -36,6 +36,7 @@ pub(super) fn execute(
             &call.procedure_name,
             &call.yield_items,
         )?,
+        release: call.release.clone(),
     };
     super::call_clause::reject_call_yield_collisions(&existing, &resolved)?;
     let mut columns = existing.columns;

@@ -134,6 +134,7 @@ impl CypherParser {
             procedure_name,
             parameters,
             yield_items,
+            release: Vec::new(),
         }));
         // The index's own label already bounds the hits; a pattern label
         // that names another label leaves nothing after this filter.

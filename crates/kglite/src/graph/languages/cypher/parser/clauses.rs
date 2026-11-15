@@ -1106,6 +1106,7 @@ impl CypherParser {
             procedure_name,
             parameters,
             yield_items,
+            release: Vec::new(),
         }))
     }
 

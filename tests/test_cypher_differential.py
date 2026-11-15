@@ -3145,6 +3145,29 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         {"p": "(?s).*\\bgamma\\b.*"},
     ),
     (
+        "text_scan_call_scope_released",
+        "text_index_graph",
+        "MATCH (d:Doc) WHERE d.id < 8 WITH collect(d) AS ds "
+        "CALL db.text.search({type: 'Doc', property: 'body', query: 'alpha', within: ds}) "
+        "YIELD node, offset RETURN node.id AS id, offset ORDER BY id, offset",
+        None,
+    ),
+    (
+        "text_scan_call_scope_kept_when_read",
+        "text_index_graph",
+        "MATCH (d:Doc) WHERE d.id < 8 WITH collect(d) AS ds "
+        "CALL db.text.search({type: 'Doc', property: 'body', query: 'alpha', within: ds}) "
+        "YIELD node, offset RETURN node.id AS id, offset, size(ds) AS n ORDER BY id, offset",
+        None,
+    ),
+    (
+        "text_scan_text_hits",
+        "text_index_graph",
+        "MATCH (d:Doc) WHERE text_match(d.body, 'alpha') "
+        "RETURN d.id AS id, text_hits(d.body, 'alpha', {max: 2, snippet_chars: 4}) AS h ORDER BY id",
+        None,
+    ),
+    (
         "text_scan_text_match_regex",
         "text_index_graph",
         "MATCH (d:Doc) WHERE text_match_regex(d.body, 'alp.a') RETURN d.id AS id ORDER BY id",

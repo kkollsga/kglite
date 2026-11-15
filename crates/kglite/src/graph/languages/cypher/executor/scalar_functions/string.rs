@@ -6,7 +6,6 @@ use super::super::helpers::*;
 use super::super::*;
 use super::shared::*;
 use crate::datatypes::values::Value;
-use crate::graph::text_scan::spec::{document_text, has_match, TextQuery};
 
 impl<'a> CypherExecutor<'a> {
     pub(super) fn eval_string_fn(
@@ -255,7 +254,7 @@ impl<'a> CypherExecutor<'a> {
             // newline, `x` ignore-whitespace, `U` ungreedy). Internally
             // we prepend `(?<flags>)` to the pattern. Equivalent to
             // writing the flags inline in the pattern string.
-            "text_match_regex" | "text_match" => self.eval_text_matchers(name, args, row),
+            "text_match_regex" | "text_match" | "text_hits" => self.eval_text_fn(name, args, row),
             // ── String functions ──────────────────────────────────
             "split" => {
                 if args.len() != 2 {
@@ -442,46 +441,16 @@ impl<'a> CypherExecutor<'a> {
 
     /// The two `text_match*` predicates, split out of `eval_string_fn` so the
     /// dispatcher stays within the source-quality ceiling.
-    fn eval_text_matchers(
+    fn eval_text_fn(
         &self,
         name: &str,
         args: &[Expression],
         row: &ResultRow,
     ) -> Result<Value, String> {
-        if name == "text_match" {
-            self.eval_text_match(args, row)
-        } else {
-            self.eval_text_match_regex(name, args, row)
+        match name {
+            "text_match" => self.eval_text_match(args, row),
+            "text_hits" => self.eval_text_hits(args, row),
+            _ => self.eval_text_match_regex(name, args, row),
         }
-    }
-
-    /// `text_match(value, query [, {mode, ignore_case}])`: whether the value's
-    /// text holds a non-empty match of the query.
-    ///
-    /// Null for a null value or query and for a value without text (see
-    /// [`document_text`]); an error for an unusable query or option. The
-    /// per-row meaning every access path must reproduce.
-    fn eval_text_match(&self, args: &[Expression], row: &ResultRow) -> Result<Value, String> {
-        const WHO: &str = "text_match()";
-        if args.len() != 2 && args.len() != 3 {
-            return Err("text_match() requires 2 or 3 args: (value, query[, options])".into());
-        }
-        let value = self.evaluate_expression(&args[0], row)?;
-        let query = self.evaluate_expression(&args[1], row)?;
-        let options = match args.get(2) {
-            Some(expr) => Some(self.evaluate_expression(expr, row)?),
-            None => None,
-        };
-        let text = match &query {
-            Value::String(text) => text,
-            Value::Null => return Ok(Value::Null),
-            _ => return Err("text_match() expects a string query".into()),
-        };
-        let query = TextQuery::new(text, options.as_ref(), WHO)?;
-        let matcher = query.compile(WHO)?;
-        Ok(match document_text(&value) {
-            Some(document) => Value::Boolean(has_match(&matcher, &document)),
-            None => Value::Null,
-        })
     }
 }

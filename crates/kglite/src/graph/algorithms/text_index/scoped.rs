@@ -20,6 +20,14 @@ use std::collections::BinaryHeap;
 use super::analyze;
 use super::bm25::{idf, score_document, ScoredDoc};
 
+/// One document's token count and the frequencies of the query's terms in it
+/// (`None` when it holds none of them).
+pub(crate) struct DocCount {
+    slot: u32,
+    len: u32,
+    freq: Option<Vec<u32>>,
+}
+
 pub(crate) struct ScopedBm25 {
     /// The query's distinct terms in first-occurrence order, the order the
     /// heap index sums in.
@@ -64,24 +72,36 @@ impl ScopedBm25 {
 
     /// Add one document to the corpus. Each slot is added at most once.
     pub(crate) fn add_document(&mut self, slot: u32, text: &str) {
+        let counted = self.count(slot, text);
+        self.absorb(counted);
+    }
+
+    /// Tokenize one document against the query's terms. Reads only the query,
+    /// so documents may be counted on several threads and then
+    /// [`absorb`](Self::absorb)ed in order: the statistics and the scores do
+    /// not depend on which thread counted what.
+    pub(crate) fn count(&self, slot: u32, text: &str) -> DocCount {
         let width = self.terms.len();
         let mut len: u32 = 0;
-        let mut freq = vec![0u32; width];
+        let mut freq: Option<Vec<u32>> = None;
         for token in analyze(text) {
             len += 1;
             if let Some(&at) = self.lookup.get(token.as_ref()) {
-                freq[at] += 1;
+                freq.get_or_insert_with(|| vec![0u32; width])[at] += 1;
             }
         }
+        DocCount { slot, len, freq }
+    }
+
+    /// Fold one counted document into the corpus. Call in document order.
+    pub(crate) fn absorb(&mut self, doc: DocCount) {
         self.documents += 1;
-        self.total_len += u64::from(len);
-        if freq.iter().all(|&f| f == 0) {
-            return;
-        }
+        self.total_len += u64::from(doc.len);
+        let Some(freq) = doc.freq else { return };
         for (df, &f) in self.df.iter_mut().zip(&freq) {
             *df += usize::from(f > 0);
         }
-        self.candidates.push((slot, len));
+        self.candidates.push((doc.slot, doc.len));
         self.tf.extend_from_slice(&freq);
     }
 

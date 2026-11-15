@@ -72,7 +72,11 @@ pub(super) fn build(index: bool) -> Synth {
             let id = (vocab * rng.unit().powi(4)) as usize;
             seen.insert(id);
             text.push_str(&format!("w{id}"));
-            text.push(if rng.next() % 17 == 0 { '\n' } else { ' ' });
+            text.push(if rng.next().is_multiple_of(17) {
+                '\n'
+            } else {
+                ' '
+            });
             if w % 9 == 0 {
                 text.push_str("Straße ");
             }
@@ -173,7 +177,7 @@ pub(super) fn build(index: bool) -> Synth {
         graph,
         rare: pick(14, 16),
         mid: pick(480, 520),
-        common: pick(28_000, 32_000).replace("w", "w"),
+        common: pick(28_000, 32_000),
         keywords,
     }
 }

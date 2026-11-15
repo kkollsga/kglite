@@ -2196,7 +2196,7 @@ pub(crate) fn collect_expression_refs(expr: &Expression, out: &mut HashSet<Strin
 /// So this pass asks the stricter question and refuses to reason about any
 /// clause kind whose references are not fully enumerated. `false` here always
 /// costs at most an optimisation.
-fn unwind_scope_refs_are_enumerable(clause: &Clause) -> bool {
+pub(super) fn unwind_scope_refs_are_enumerable(clause: &Clause) -> bool {
     // `RETURN *` / `WITH *` name no variable in the AST: the executor expands
     // the star from the *runtime row's* `projected.keys()`
     // (`executor/return_clause.rs`). So a star item references every binding in
@@ -2269,6 +2269,10 @@ fn unwind_scope_refs_are_enumerable(clause: &Clause) -> bool {
 /// - `v` is mentioned downstream → the binding is live; copying is required.
 pub(super) fn narrow_unwind_source(query: &mut CypherQuery) {
     for i in 0..query.clauses.len() {
+        if matches!(query.clauses[i], Clause::Call(_)) {
+            super::call_scope::narrow_call_parameters(query, i);
+            continue;
+        }
         let Clause::Unwind(u) = &query.clauses[i] else {
             continue;
         };

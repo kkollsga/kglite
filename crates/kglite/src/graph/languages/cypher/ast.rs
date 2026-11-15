@@ -1173,6 +1173,13 @@ pub struct CallClause {
     pub procedure_name: String,
     pub parameters: Vec<(String, Expression)>,
     pub yield_items: Vec<YieldItem>,
+    /// Row variables the procedure reads as a parameter and no later clause
+    /// observes. The executor removes them from each outer row before joining
+    /// the procedure's rows to it, so a large list passed as a parameter
+    /// (`WITH collect(d) AS ds CALL p({within: ds})`) is not copied into every
+    /// yielded row. Set only by the `narrow_unwind_source` planner pass, which
+    /// proves the binding dead; empty is always the safe value.
+    pub release: Vec<String>,
 }
 
 /// A single YIELD item: output_name [AS alias]

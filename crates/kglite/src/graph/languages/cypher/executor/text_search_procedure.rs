@@ -25,7 +25,7 @@ use crate::graph::core::pattern_matching::text_column_scan::{
 };
 use crate::graph::schema::InternedKey;
 use crate::graph::storage::{GraphRead, StrField};
-use crate::graph::text_scan::spec::{snippet, TextQuery};
+use crate::graph::text_scan::spec::{snippet, CharCursor, TextQuery};
 
 const PROC: &str = "db.text.search";
 const KEYS: &[&str] = &[
@@ -157,19 +157,26 @@ impl CypherExecutor<'_> {
         let field = self.graph.resolve_alias(&node_type, &property);
         let key = InternedKey::from_str(field);
         let mut rows = Vec::with_capacity(hits.len());
+        // Hits of one node are adjacent and ascending: fetch its value and
+        // count characters once per node, not once per hit.
+        let mut current: Option<(NodeIndex, String, CharCursor)> = None;
         for (i, hit) in hits.iter().enumerate() {
             self.check_interrupt_periodic(i)?;
-            let value = self
-                .graph
-                .graph
-                .node_view(hit.node)
-                .map(
-                    |view| match view.resolved_field_str(&node_type, field, key) {
-                        StrField::Str(text) => text.into_owned(),
-                        _ => String::new(),
-                    },
-                )
-                .unwrap_or_default();
+            if current.as_ref().is_none_or(|(node, ..)| *node != hit.node) {
+                let value = self
+                    .graph
+                    .graph
+                    .node_view(hit.node)
+                    .map(
+                        |view| match view.resolved_field_str(&node_type, field, key) {
+                            StrField::Str(text) => text.into_owned(),
+                            _ => String::new(),
+                        },
+                    )
+                    .unwrap_or_default();
+                current = Some((hit.node, value, CharCursor::default()));
+            }
+            let (_, value, cursor) = current.as_mut().expect("set above");
             let mut row = ResultRow::new();
             for item in yields {
                 let alias = item.alias.clone().unwrap_or_else(|| item.name.clone());
@@ -187,13 +194,13 @@ impl CypherExecutor<'_> {
                         row.projected.insert(alias, Value::Int64(hit.len as i64));
                     }
                     "char_offset" => {
-                        let chars = value.get(..hit.offset).map_or(0, |s| s.chars().count());
+                        let chars = cursor.char_offset(value, hit.offset);
                         row.projected.insert(alias, Value::Int64(chars as i64));
                     }
                     "snippet" => {
                         row.projected.insert(
                             alias,
-                            Value::String(snippet(&value, hit.offset, hit.len, context)),
+                            Value::String(snippet(value, hit.offset, hit.len, context)),
                         );
                     }
                     _ => {}

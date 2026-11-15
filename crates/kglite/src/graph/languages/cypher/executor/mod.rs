@@ -156,6 +156,9 @@ pub struct CypherExecutor<'a> {
     /// See [`TextBm25Cache`] for why one slot is enough and what a second call
     /// site pays.
     tb_cache: OnceLock<TextBm25Cache>,
+    /// The first `text_match()` call site's compiled matcher for constant
+    /// arguments; see [`TextMatchCache`].
+    tm_cache: OnceLock<TextMatchCache>,
     /// `valid_at()` / `valid_during()` declaration lookups, one slot per
     /// element type and bound-name pair (see
     /// [`scalar_functions::validity::ValidityCaches`]).
@@ -302,6 +305,7 @@ impl<'a> CypherExecutor<'a> {
             params,
             vs_cache: VectorScoreCaches::default(),
             tb_cache: OnceLock::new(),
+            tm_cache: OnceLock::new(),
             validity_caches: Default::default(),
             exists_probes: Default::default(),
             deadline,

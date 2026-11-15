@@ -359,6 +359,7 @@ impl CypherParser {
             procedure_name: procedure.to_string(),
             parameters: Vec::new(),
             yield_items,
+            release: Vec::new(),
         }))
     }
 

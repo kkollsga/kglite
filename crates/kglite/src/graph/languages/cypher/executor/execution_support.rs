@@ -277,6 +277,17 @@ impl ArgKey {
     }
 }
 
+/// The compiled matcher of the first `text_match()` call site whose query and
+/// options are constants, keyed by the arguments themselves (never by address:
+/// see [`TextBm25Cache`]). A second call site with other arguments compiles
+/// through the shared matcher cache per row instead.
+pub(super) struct TextMatchCache {
+    pub(super) query: ArgKey,
+    /// `None` when the call has no options argument.
+    pub(super) options: Option<ArgKey>,
+    pub(super) matcher: std::sync::Arc<crate::graph::text_scan::matcher::Matcher>,
+}
+
 /// Pre-computed `text_bm25()` arguments for one call.
 ///
 /// **Why the arguments are the key, and not "the query".** A per-query cache

@@ -63,7 +63,7 @@ use crate::graph::text_scan::matcher::Matcher;
 use crate::graph::text_scan::scan::{scan, ScanError, ScanOptions};
 
 mod documents;
-pub(crate) use documents::for_each_document;
+pub(crate) use documents::documents;
 
 /// Why the driver did not answer. The caller runs the per-row path, which
 /// answers identically by definition; a wrong bail only costs speed, but a

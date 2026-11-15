@@ -143,3 +143,31 @@ pub(crate) fn snippet(text: &str, offset: usize, len: usize, context: usize) -> 
         .map_or(text.len(), |(i, _)| end + i);
     text[from..to].to_string()
 }
+
+/// Counts the characters before successive byte offsets of one text without
+/// rescanning from the start: hits come in ascending offset order, so each
+/// call counts only the characters since the last. An earlier offset
+/// restarts from the beginning.
+#[derive(Default)]
+pub(crate) struct CharCursor {
+    byte: usize,
+    chars: usize,
+}
+
+impl CharCursor {
+    /// Characters before byte `offset` of `text`; `0` when `offset` is not on
+    /// a character boundary.
+    pub(crate) fn char_offset(&mut self, text: &str, offset: usize) -> usize {
+        if offset < self.byte {
+            *self = Self::default();
+        }
+        match text.get(self.byte..offset) {
+            Some(gap) => {
+                self.chars += gap.chars().count();
+                self.byte = offset;
+                self.chars
+            }
+            None => 0,
+        }
+    }
+}

@@ -16,19 +16,22 @@ use super::{
     TextDecline, TextScanInterrupted,
 };
 
-/// Calls `visit(node, bytes)` once for each live node of `node_type` (those of
-/// `scope` when one is given; repeats and other types' nodes ignored) whose
-/// property holds a string, with that string's UTF-8 bytes. Order is node order.
+/// Each document's node with its text bytes.
+pub(crate) type Documents<'g> = Vec<(NodeIndex, &'g [u8])>;
+
+/// The live nodes of `node_type` (those of `scope` when one is given; repeats
+/// and other types' nodes ignored) whose property holds a string, in node
+/// order, each with that string's UTF-8 bytes borrowed from the column (or from
+/// the overlay of a relocated row).
 ///
-/// Nodes whose value is null or not text are not visited.
-pub(crate) fn for_each_document(
-    graph: &DirGraph,
+/// Nodes whose value is null or not text are absent from the list.
+pub(crate) fn documents<'g>(
+    graph: &'g DirGraph,
     node_type: &str,
     property: &str,
     scope: Option<&[NodeIndex]>,
     interrupt: Interrupt,
-    visit: &mut dyn FnMut(NodeIndex, &[u8]),
-) -> Result<Result<(), TextDecline>, TextScanInterrupted> {
+) -> Result<Result<Documents<'g>, TextDecline>, TextScanInterrupted> {
     let type_key = InternedKey::from_str(node_type);
     let parts = match eligible_parts(graph, node_type, property, type_key) {
         Ok(parts) => parts,
@@ -54,6 +57,7 @@ pub(crate) fn for_each_document(
         walk.sort_unstable_by_key(|&(node, _)| node);
         walk.dedup_by_key(|&mut (node, _)| node);
     }
+    let mut out = Vec::with_capacity(walk.len());
     for (polled, &(node, row)) in walk.iter().enumerate() {
         if polled % 64 == 0 && interrupt.exceeded() {
             return Err(TextScanInterrupted);
@@ -68,15 +72,15 @@ pub(crate) fn for_each_document(
             continue;
         }
         match col.relocated.get(&local) {
-            Some(text) => visit(node, text.as_bytes()),
+            Some(text) => out.push((node, text.as_bytes())),
             None => {
                 let (from, to) = (
                     col.offsets[local as usize] as usize,
                     col.offsets[local as usize + 1] as usize,
                 );
-                visit(node, &col.data[from..to]);
+                out.push((node, &col.data[from..to]));
             }
         }
     }
-    Ok(Ok(()))
+    Ok(Ok(out))
 }
