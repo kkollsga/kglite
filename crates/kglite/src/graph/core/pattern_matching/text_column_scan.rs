@@ -215,13 +215,13 @@ pub(crate) type TextOutcome = Result<Result<TextAnswer, TextDecline>, TextScanIn
 pub(crate) const TEXT_ROUTE: &str = "text column scan";
 
 pub(crate) fn note_text_served() {
-    super::column_scan::note_route(TEXT_ROUTE);
+    super::column_scan::note_route(super::column_scan::Route::Text);
     #[cfg(test)]
     METERS.with(|m| m.borrow_mut().push(None));
 }
 
 pub(crate) fn note_text_decline(decline: TextDecline) {
-    super::column_scan::note_route(decline.label());
+    super::column_scan::note_route(super::column_scan::Route::TextDeclined(decline));
     #[cfg(test)]
     METERS.with(|m| m.borrow_mut().push(Some(decline)));
 }

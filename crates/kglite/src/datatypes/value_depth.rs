@@ -112,8 +112,22 @@ pub fn check_value(value: &Value) -> Result<(), String> {
 }
 
 thread_local! {
-    static DECODE_LEVEL: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static DECODE_EXCEEDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The decode nesting level in the low 15 bits and the "a decode hit the
+    /// ceiling" flag in the top bit. One `u16`, not a `usize` and a `bool`:
+    /// the Linux extension's static TLS block has a few bytes of headroom
+    /// (`tests/test_extension_static_tls.py`), and the pair outgrew it.
+    static DECODE_STATE: std::cell::Cell<u16> = const { std::cell::Cell::new(0) };
+}
+
+const EXCEEDED: u16 = 1 << 15;
+const LEVEL: u16 = EXCEEDED - 1;
+
+fn decode_level() -> usize {
+    usize::from(DECODE_STATE.get() & LEVEL)
+}
+
+fn flag_exceeded() {
+    DECODE_STATE.set(DECODE_STATE.get() | EXCEEDED);
 }
 
 /// Tracks how many [`Value`]s are being decoded inside one another on this
@@ -123,26 +137,25 @@ thread_local! {
 ///
 /// Entry allows one level past [`MAX_VALUE_DEPTH`] because a scalar leaf sits
 /// one level below the deepest container; [`Self::check_container`] then
-/// refuses a container at that last level.
+/// refuses a container at that last level. Entry stops at that level, so the
+/// count never reaches the flag bit.
 pub struct DecodeDepth;
 
 impl DecodeDepth {
     pub fn enter<E: serde::de::Error>() -> Result<Self, E> {
-        let level = DECODE_LEVEL.with(|l| {
-            l.set(l.get() + 1);
-            l.get()
-        });
+        let state = DECODE_STATE.get();
+        DECODE_STATE.set((state & EXCEEDED) | ((state & LEVEL) + 1));
         let guard = DecodeDepth;
-        if level > MAX_VALUE_DEPTH + 1 {
-            DECODE_EXCEEDED.with(|f| f.set(true));
+        if decode_level() > MAX_VALUE_DEPTH + 1 {
+            flag_exceeded();
             return Err(E::custom(depth_error()));
         }
         Ok(guard)
     }
 
     pub fn check_container<E: serde::de::Error>(&self, value: &Value) -> Result<(), E> {
-        if is_container(value) && DECODE_LEVEL.with(|l| l.get()) > MAX_VALUE_DEPTH {
-            DECODE_EXCEEDED.with(|f| f.set(true));
+        if is_container(value) && decode_level() > MAX_VALUE_DEPTH {
+            flag_exceeded();
             return Err(E::custom(depth_error()));
         }
         Ok(())
@@ -151,20 +164,21 @@ impl DecodeDepth {
 
 impl Drop for DecodeDepth {
     fn drop(&mut self) {
-        DECODE_LEVEL.with(|l| l.set(l.get() - 1));
+        let state = DECODE_STATE.get();
+        DECODE_STATE.set((state & EXCEEDED) | ((state & LEVEL) - 1));
     }
 }
 
 /// Clear the "a decode hit the ceiling" flag before a decode starts.
 pub fn reset_decode_exceeded() {
-    DECODE_EXCEEDED.with(|f| f.set(false));
+    DECODE_STATE.set(DECODE_STATE.get() & LEVEL);
 }
 
 /// Whether a decode on this thread since the last reset hit the ceiling.
 /// Serde codecs flatten custom errors to a generic message, so this carries
 /// the cause to the error that reaches the user.
 pub fn decode_exceeded() -> bool {
-    DECODE_EXCEEDED.with(|f| f.get())
+    DECODE_STATE.get() & EXCEEDED != 0
 }
 
 #[cfg(test)]

@@ -84,18 +84,42 @@ impl Decline {
 /// The route label PROFILE appends to the clause when the kernel answered.
 pub(crate) const KERNEL_ROUTE: &str = "column kernel";
 
-thread_local! {
-    /// What the last fused scan on this thread reported, for PROFILE. Taken
-    /// (cleared) by the profiled pipeline around each clause.
-    static ROUTE: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+/// What the last fused scan on this thread did, for PROFILE.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Route {
+    Kernel,
+    Text,
+    Declined(Decline),
+    TextDeclined(super::text_column_scan::TextDecline),
 }
 
-pub(crate) fn note_route(route: &'static str) {
+impl Route {
+    fn label(self) -> &'static str {
+        match self {
+            Route::Kernel => KERNEL_ROUTE,
+            Route::Text => super::text_column_scan::TEXT_ROUTE,
+            Route::Declined(decline) => decline.label(),
+            Route::TextDeclined(decline) => decline.label(),
+        }
+    }
+}
+
+thread_local! {
+    /// Taken (cleared) by the profiled pipeline around each clause. A
+    /// two-byte enum rather than the label's 16-byte `&str`: the Linux
+    /// extension's static TLS block has only a few bytes of headroom
+    /// (`tests/test_extension_static_tls.py`).
+    static ROUTE: std::cell::Cell<Option<Route>> = const { std::cell::Cell::new(None) };
+}
+
+const _: () = assert!(std::mem::size_of::<Option<Route>>() <= 2);
+
+pub(crate) fn note_route(route: Route) {
     ROUTE.set(Some(route));
 }
 
 pub(crate) fn take_route() -> Option<&'static str> {
-    ROUTE.take()
+    ROUTE.take().map(Route::label)
 }
 
 #[cfg(test)]
@@ -126,12 +150,12 @@ pub(crate) fn reset_kernel_meters() {
 pub(crate) fn record<T>(outcome: &Result<T, Decline>) {
     match outcome {
         Ok(_) => {
-            note_route(KERNEL_ROUTE);
+            note_route(Route::Kernel);
             #[cfg(test)]
             ANSWERED.set(ANSWERED.get() + 1);
         }
         Err(decline) => {
-            note_route(decline.label());
+            note_route(Route::Declined(*decline));
             #[cfg(test)]
             DECLINES.with(|d| d.borrow_mut().push(*decline));
         }
