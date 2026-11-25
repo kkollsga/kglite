@@ -151,10 +151,12 @@ fn session_params_are_bounded() {
         let graph = DirGraph::new();
         let read = |depth: usize| {
             let params = params_of(nested_list(depth));
-            execute_read(&graph, "RETURN $p AS x", &ExecuteOptions::eager(&params)).map(|_| ())
+            execute_read(&graph, "RETURN $p AS x", &ExecuteOptions::eager(&params))
+                .map(|_| ())
+                .map_err(|e| e.to_string())
         };
         read(MAX_VALUE_DEPTH).unwrap();
         let err = read(MAX_VALUE_DEPTH + 1).unwrap_err();
-        assert!(err.to_string().contains("256"), "{err}");
+        assert!(err.contains("256"), "{err}");
     });
 }

@@ -1472,8 +1472,7 @@ fn a_mixed_column_value_nested_past_the_ceiling_fails_the_load_with_its_column()
     }
     blob.push(*null_tag);
     let err = ColumnStore::unpack_mixed_column(crate::serde_codec::CURRENT_CODEC, &blob, "tags")
-        .err()
-        .expect("a 300-deep value must be refused");
+        .expect_err("a 300-deep value must be refused");
     let message = err.to_string();
     assert!(message.contains("'tags'"), "{message}");
     assert!(message.contains("exceeds 256 levels"), "{message}");
