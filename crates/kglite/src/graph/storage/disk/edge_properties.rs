@@ -84,6 +84,11 @@ impl ColumnarBase {
             // Empty slot (sparsity encoding).
             return Some(&[]);
         }
+        // `open_base` validates the offsets; this keeps a bad slot from ever
+        // panicking if a base is built another way.
+        if start > end || end > self.heap.len() {
+            return None;
+        }
         Some(self.heap.slice(start, end))
     }
 
@@ -93,6 +98,29 @@ impl ColumnarBase {
         // the total heap length.
         self.offsets.len().saturating_sub(1) as u32
     }
+}
+
+/// The offsets of a columnar base never decrease and end at the heap length.
+fn check_offsets(offsets: &[u64], heap_len: usize) -> io::Result<()> {
+    let mut prev = 0u64;
+    for (i, &off) in offsets.iter().enumerate() {
+        if off < prev {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "edge_prop_offsets: offset {i} ({off}) is below the previous offset ({prev})"
+                ),
+            ));
+        }
+        prev = off;
+    }
+    if prev != heap_len as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("edge_prop_offsets: last offset {prev} does not match the {heap_len}-byte edge_prop_heap"),
+        ));
+    }
+    Ok(())
 }
 
 /// Decode a single slot's bytes into `(InternedKey, Value)` pairs.
@@ -553,6 +581,7 @@ impl EdgePropertyStore {
         }
         let offsets = MmapOrVec::<u64>::load_mapped(&offsets_path, meta.offsets_len)?;
         let heap = MmapBytes::load_mapped(&heap_path, meta.heap_len)?;
+        check_offsets(offsets.as_slice(), meta.heap_len)?;
         Ok(Self {
             base: Some(Arc::new(ColumnarBase {
                 offsets,
@@ -710,6 +739,26 @@ mod tests {
 
     fn k(s: &str, interner: &mut StringInterner) -> InternedKey {
         interner.get_or_intern(s)
+    }
+
+    #[test]
+    fn base_offsets_must_ascend_and_end_at_the_heap() {
+        assert!(check_offsets(&[0, 0, 4, 9], 9).is_ok());
+        assert!(check_offsets(&[0, 5, 4, 9], 9).is_err());
+        assert!(check_offsets(&[0, 4, 12], 9).is_err());
+        assert!(check_offsets(&[0, 4, 8], 9).is_err());
+    }
+
+    #[test]
+    fn slot_past_the_heap_is_absent_not_a_panic() {
+        let base = ColumnarBase {
+            offsets: MmapOrVec::from_vec(vec![0u64, 2, 99, 7]),
+            heap: MmapBytes::Heap { data: vec![1u8; 8] },
+            codec: crate::serde_codec::CodecVersion::PostcardV1,
+        };
+        assert!(base.slot(0).is_some());
+        assert!(base.slot(1).is_none(), "end past the heap");
+        assert!(base.slot(2).is_none(), "start above end");
     }
 
     fn canonical_reference_state(bytes: &[u8]) -> Option<bool> {

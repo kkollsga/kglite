@@ -197,3 +197,95 @@ def test_non_durable_save_fsync_false_no_warning(tmp_path):
     assert not [w for w in caught if issubclass(w.category, UserWarning)], (
         "fsync=False stays honoured (and silent) for non-durable graphs"
     )
+
+
+# ── structural validation of the mapped CSR / slot arrays ────────────────────
+#
+# Layouts (repr(C), little-endian host): DiskNodeSlot is 16 bytes with the type
+# id as the u64 at +0; EdgeEndpoints is 16 bytes (source u32 @0, target u32 @4,
+# connection type u64 @8); offsets files are u64 arrays. A bad value in any of
+# them used to panic at query time (or inside the load) instead of failing it.
+
+BOGUS = 0xDEADBEEFCAFE
+
+
+def _build_structure_graph(tmp_path) -> str:
+    """Disk graph with edge properties, saved so ``seg_000`` holds every array."""
+    path = str(tmp_path / "dg_structure")
+    g = kglite.KnowledgeGraph(storage="disk", path=path)
+    g.cypher("UNWIND range(0, 5) AS i CREATE (:Person {id: i, title: 'p' + toString(i)})")
+    g.cypher("MATCH (a:Person), (b:Person) WHERE b.id = a.id + 1 CREATE (a)-[:KNOWS {w: toFloat(a.id)}]->(b)")
+    g.save(path)
+    return path
+
+
+def _current_file(path: str, name: str) -> str:
+    """The file in the newest generation (older ones stay until pruned)."""
+    hits = sorted(glob.glob(os.path.join(path, "generations", "gen_*", "seg_000", name)))
+    assert hits, f"fixture must have produced {name}"
+    return hits[-1]
+
+
+def _patch(path: str, name: str, offset: int, fmt: str, value: int) -> None:
+    import struct
+
+    f = _current_file(path, name)
+    with open(f, "r+b") as fh:
+        fh.seek(offset)
+        fh.write(struct.pack(fmt, value))
+
+
+def _read_u64s(path: str, name: str) -> list[int]:
+    import struct
+
+    data = open(_current_file(path, name), "rb").read()
+    return list(struct.unpack(f"<{len(data) // 8}Q", data))
+
+
+STRUCTURE_CORRUPTIONS = {
+    "node_type_id": ("node_slots.bin", 16, "<Q", BOGUS, "node_slots"),
+    "connection_type_id": ("edge_endpoints.bin", 16 + 8, "<Q", BOGUS, "edge_endpoints"),
+    "edge_endpoint_node": ("edge_endpoints.bin", 16 + 4, "<I", 1000, "edge_endpoints"),
+    "out_offset_past_edges": ("out_offsets.bin", 8 * 3, "<Q", 1000, "out_offsets"),
+    "in_offset_past_edges": ("in_offsets.bin", 8 * 3, "<Q", 1000, "in_offsets"),
+    "out_offsets_not_monotone": ("out_offsets.bin", 8 * 2, "<Q", 0, "out_offsets"),
+    "in_offsets_not_monotone": ("in_offsets.bin", 8 * 2, "<Q", 0, "in_offsets"),
+    "edge_prop_offset_past_heap": ("edge_prop_offsets.bin", 8 * 2, "<Q", 1 << 40, "edge_prop_offsets"),
+}
+
+
+def test_structure_fixture_is_intact(tmp_path):
+    path = _build_structure_graph(tmp_path)
+    g = kglite.load(path)
+    assert g.cypher("MATCH (:Person)-[r:KNOWS]->(:Person) RETURN count(r) AS c").scalar() == 5
+    assert max(_read_u64s(path, "out_offsets.bin")) > 3  # patched values below differ from valid data
+    assert _read_u64s(path, "edge_prop_offsets.bin"), "fixture must carry edge properties"
+
+
+@pytest.mark.parametrize("case", sorted(STRUCTURE_CORRUPTIONS))
+def test_structurally_corrupt_disk_graph_fails_load_not_panics(case, tmp_path):
+    name, offset, fmt, value, expect = STRUCTURE_CORRUPTIONS[case]
+    path = _build_structure_graph(tmp_path)
+    if "not_monotone" in case:
+        # Make offset[2] smaller than offset[1]: needs offset[1] > 0 first.
+        _patch(path, name, 8, "<Q", 3)
+    _patch(path, name, offset, fmt, value)
+    with pytest.raises(kglite.FileFormatError) as exc_info:
+        kglite.load(path)
+    assert expect in str(exc_info.value), str(exc_info.value)
+
+
+def test_mutated_disk_graph_passes_structure_check_after_reload(tmp_path):
+    """Free node slots, tombstoned edges and overflow-only nodes are valid."""
+    path = _build_structure_graph(tmp_path)
+    g = kglite.load(path)
+    g.cypher("CREATE (:Person {id: 10, title: 'late'})")
+    g.cypher("MATCH (a:Person {id: 10}), (b:Person {id: 0}) CREATE (a)-[:KNOWS {w: 9.0}]->(b)")
+    g.cypher("MATCH (n:Person {id: 5}) DETACH DELETE n")
+    g.cypher("MATCH (:Person {id: 1})-[r:KNOWS]->(:Person {id: 2}) DELETE r")
+    g.save(path)
+    g.cypher("CREATE (:Person {id: 11, title: 'after-save'})")  # tail slot past the saved arrays
+    g.save(path)
+    reloaded = kglite.load(path)
+    assert reloaded.cypher("MATCH (n:Person) RETURN count(n) AS c").scalar() == 7
+    assert reloaded.cypher("MATCH (:Person)-[r:KNOWS]->(:Person) RETURN count(r) AS c").scalar() == 4

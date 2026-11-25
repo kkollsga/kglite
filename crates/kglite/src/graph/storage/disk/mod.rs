@@ -24,6 +24,7 @@ mod le_bytes;
 pub mod property_index;
 pub(crate) mod query_arena;
 pub mod segment_summary;
+mod structure;
 /// Test-only drop-order seam for temp dirs backing a live disk/mapped graph.
 #[cfg(test)]
 pub(crate) mod temp_owner;
@@ -71,3 +72,5 @@ mod index_freshness_tests;
 mod lifecycle_tests;
 #[cfg(test)]
 mod overflow_release_tests;
+#[cfg(test)]
+mod structure_tests;

@@ -1512,6 +1512,9 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
     let (mut disk_graph, temp_dir) =
         crate::graph::storage::disk::graph::DiskGraph::load_from_dir(dir, &mut graph.interner)?;
     disk_graph.set_logical_root(logical_root);
+    disk_graph
+        .check_structure(&graph.interner)
+        .map_err(invalid_data)?;
     log_stage("disk_graph_load", t);
     // Prefetch hot mmap regions (offset arrays + node_slots) into page cache.
     // On macOS, `madvise(MADV_WILLNEED)` synchronously schedules readahead and
