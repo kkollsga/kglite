@@ -34,24 +34,11 @@ fn depth_at(value: &Value, level: usize, limit: usize) -> usize {
     if level > limit {
         return level;
     }
-    let inner = |children: &mut dyn Iterator<Item = &Value>| -> usize {
-        let mut deepest = level + 1;
-        for child in children {
-            if !is_container(child) {
-                continue;
-            }
-            deepest = deepest.max(depth_at(child, level + 1, limit));
-            if deepest > limit {
-                break;
-            }
-        }
-        deepest
-    };
     match value {
-        Value::List(items) => inner(&mut items.iter()),
-        Value::Map(map) => inner(&mut map.values()),
-        Value::Node(node) => inner(&mut node.properties.values()),
-        Value::Relationship(rel) => inner(&mut rel.properties.values()),
+        Value::List(items) => children_depth(items.iter(), level + 1, limit),
+        Value::Map(map) => children_depth(map.values(), level + 1, limit),
+        Value::Node(node) => children_depth(node.properties.values(), level + 1, limit),
+        Value::Relationship(rel) => children_depth(rel.properties.values(), level + 1, limit),
         Value::Path(path) => {
             let mut deepest = level + 1;
             for props in path
@@ -60,11 +47,7 @@ fn depth_at(value: &Value, level: usize, limit: usize) -> usize {
                 .map(|n| &n.properties)
                 .chain(path.rels.iter().map(|r| &r.properties))
             {
-                let node_level = level + 2;
-                deepest = deepest.max(node_level);
-                for child in props.values().filter(|v| is_container(v)) {
-                    deepest = deepest.max(depth_at(child, node_level, limit));
-                }
+                deepest = deepest.max(children_depth(props.values(), level + 2, limit));
                 if deepest > limit {
                     break;
                 }
@@ -73,6 +56,28 @@ fn depth_at(value: &Value, level: usize, limit: usize) -> usize {
         }
         _ => level,
     }
+}
+
+/// Depth of a container at `level` holding `children`. Generic rather than
+/// `dyn Iterator`: a virtual call per child measured +10 % on a 10k-item
+/// comprehension that wraps every element.
+#[inline]
+fn children_depth<'a>(
+    children: impl Iterator<Item = &'a Value>,
+    level: usize,
+    limit: usize,
+) -> usize {
+    let mut deepest = level;
+    for child in children {
+        if !is_container(child) {
+            continue;
+        }
+        deepest = deepest.max(depth_at(child, level, limit));
+        if deepest > limit {
+            break;
+        }
+    }
+    deepest
 }
 
 /// Whether `value` holds other values.
@@ -87,6 +92,7 @@ pub fn is_container(value: &Value) -> bool {
 /// `Err` with [`depth_error`] when a new list or map holding `children` would
 /// exceed [`MAX_VALUE_DEPTH`]. Scalars cost one tag test; only container
 /// children are walked, and each walk stops at the ceiling.
+#[inline]
 pub fn check_wrap<'a>(children: impl IntoIterator<Item = &'a Value>) -> Result<(), String> {
     for child in children {
         if is_container(child) && container_depth(child, MAX_VALUE_DEPTH) >= MAX_VALUE_DEPTH {
@@ -99,6 +105,7 @@ pub fn check_wrap<'a>(children: impl IntoIterator<Item = &'a Value>) -> Result<(
 /// `Err` with [`depth_error`] when `value` itself is deeper than
 /// [`MAX_VALUE_DEPTH`]: for values that arrive whole (parameters, property
 /// writes) rather than being built one level at a time.
+#[inline]
 pub fn check_value(value: &Value) -> Result<(), String> {
     if is_container(value) && container_depth(value, MAX_VALUE_DEPTH) > MAX_VALUE_DEPTH {
         return Err(depth_error());
