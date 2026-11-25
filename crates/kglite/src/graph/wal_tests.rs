@@ -1429,3 +1429,61 @@ fn index_name_ops_round_trip() {
     assert_eq!(log[4], WAL_FORMAT_VERSION);
     assert_eq!(read_frames_all(log).unwrap(), frames);
 }
+
+/// A frame whose `RemoveNode` id is `levels` lists deep, encoded on a
+/// full-size stack (encoding is not depth-guarded; dropping recurses).
+fn frame_with_deep_value(lsn: u64, levels: usize) -> Vec<u8> {
+    std::thread::Builder::new()
+        .stack_size(crate::graph::session::QUERY_THREAD_STACK_SIZE)
+        .spawn(move || {
+            let mut id = Value::Null;
+            for _ in 0..levels {
+                id = Value::List(vec![id]);
+            }
+            let deep = WalFrame {
+                lsn,
+                ops: vec![MutationOp::RemoveNode {
+                    node_type: "Person".to_string(),
+                    id,
+                }],
+            };
+            let mut bytes = Vec::new();
+            append_frame(&mut bytes, &deep).unwrap();
+            bytes
+        })
+        .unwrap()
+        .join()
+        .unwrap()
+}
+
+#[test]
+fn a_crc_valid_frame_past_the_nesting_ceiling_is_an_error_not_a_torn_tail() {
+    let dir = TempDir::new().unwrap();
+    let p = dir.path().join("g.kgl-wal");
+    for trailing_frame in [false, true] {
+        let mut bytes = write_wal(&[frame(1)]);
+        bytes.extend_from_slice(&frame_with_deep_value(2, 257));
+        if trailing_frame {
+            append_frame(&mut bytes, &frame(3)).unwrap();
+        }
+        std::fs::write(&p, &bytes).unwrap();
+        let err = recover(&p).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("deeper than 256 levels"), "{err}");
+        assert!(open_wal(p.clone()).is_err());
+        assert_eq!(std::fs::metadata(&p).unwrap().len(), bytes.len() as u64);
+    }
+}
+
+#[test]
+fn a_frame_at_the_nesting_ceiling_still_replays() {
+    let mut bytes = write_wal(&[frame(1)]);
+    bytes.extend_from_slice(&frame_with_deep_value(2, 256));
+    let frames = std::thread::Builder::new()
+        .stack_size(crate::graph::session::QUERY_THREAD_STACK_SIZE)
+        .spawn(move || read_frames_all(bytes).unwrap().len())
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(frames, 2);
+}

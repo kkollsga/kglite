@@ -1022,6 +1022,16 @@ fn read_frame_step(
     let limits = crate::serde_codec::DecodeLimits::new(MAX_WAL_FRAME_BYTES, len);
     match crate::serde_codec::decode_exact_with::<WalFrame>(codec, &payload, len, limits) {
         Ok(frame) => Ok(FrameStep::Frame(frame, frame_len)),
+        // A CRC-valid frame refused only for its value nesting is a committed
+        // transaction, not damage: treating it as a torn tail would drop a
+        // committed write. Stop with an error and leave the file untouched.
+        Err(_) if crate::datatypes::value_depth::decode_exceeded() => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "write-ahead log frame at offset {frame_start} holds a value nested deeper than {} levels; the frame was not applied and the log was left unchanged",
+                crate::datatypes::value_depth::MAX_VALUE_DEPTH
+            ),
+        )),
         Err(_) => Ok(FrameStep::Corrupt(frame_len)),
     }
 }
