@@ -271,8 +271,16 @@ def test_structurally_corrupt_disk_graph_fails_load_not_panics(case, tmp_path):
         _patch(path, name, 8, "<Q", 3)
     _patch(path, name, offset, fmt, value)
     with pytest.raises(kglite.FileFormatError) as exc_info:
-        kglite.load(path)
+        kglite.load(path, verify="eager")
     assert expect in str(exc_info.value), str(exc_info.value)
+
+
+def test_lazy_load_of_corrupt_edge_prop_offsets_does_not_panic(tmp_path):
+    """The default load skips the structure walk; a bad slot read is bounded, not a panic."""
+    path = _build_structure_graph(tmp_path)
+    name, offset, fmt, value, _ = STRUCTURE_CORRUPTIONS["edge_prop_offset_past_heap"]
+    _patch(path, name, offset, fmt, value)
+    kglite.load(path)
 
 
 def test_mutated_disk_graph_passes_structure_check_after_reload(tmp_path):
@@ -286,6 +294,6 @@ def test_mutated_disk_graph_passes_structure_check_after_reload(tmp_path):
     g.save(path)
     g.cypher("CREATE (:Person {id: 11, title: 'after-save'})")  # tail slot past the saved arrays
     g.save(path)
-    reloaded = kglite.load(path)
+    reloaded = kglite.load(path, verify="eager")
     assert reloaded.cypher("MATCH (n:Person) RETURN count(n) AS c").scalar() == 7
     assert reloaded.cypher("MATCH (:Person)-[r:KNOWS]->(:Person) RETURN count(r) AS c").scalar() == 4

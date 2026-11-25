@@ -1342,7 +1342,7 @@ fn load_file_inner(path: &str, options: &LoadOptions) -> io::Result<Arc<DirGraph
         }
         // Disk identity indexes stay mapped; optional heap index and constraint
         // declarations are always deferred until the first write.
-        return load_disk_dir(p);
+        return load_disk_dir(p, options.verify == Verify::Eager);
     }
 
     let file = File::open(path).map_err(|e| io_context("opening", p, e))?;
@@ -1463,7 +1463,7 @@ fn rebuild_disk_type_schemas(graph: &mut DirGraph) -> io::Result<()> {
     Ok(())
 }
 
-fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
+fn load_disk_dir(dir: &std::path::Path, eager: bool) -> io::Result<Arc<DirGraph>> {
     use crate::graph::io::load_timing::{log_stage, stage_timer};
     use crate::graph::schema::GraphBackend;
 
@@ -1512,9 +1512,11 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
     let (mut disk_graph, temp_dir) =
         crate::graph::storage::disk::graph::DiskGraph::load_from_dir(dir, &mut graph.interner)?;
     disk_graph.set_logical_root(logical_root);
-    disk_graph
-        .check_structure(&graph.interner)
-        .map_err(invalid_data)?;
+    if eager {
+        disk_graph
+            .check_structure(&graph.interner)
+            .map_err(invalid_data)?;
+    }
     log_stage("disk_graph_load", t);
     // Prefetch hot mmap regions (offset arrays + node_slots) into page cache.
     // On macOS, `madvise(MADV_WILLNEED)` synchronously schedules readahead and

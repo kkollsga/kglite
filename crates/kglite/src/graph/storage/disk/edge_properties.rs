@@ -84,8 +84,8 @@ impl ColumnarBase {
             // Empty slot (sparsity encoding).
             return Some(&[]);
         }
-        // `open_base` validates the offsets; this keeps a bad slot from ever
-        // panicking if a base is built another way.
+        // The eager structure check validates the offsets; this keeps a bad
+        // slot from panicking on a lazy load.
         if start > end || end > self.heap.len() {
             return None;
         }
@@ -581,7 +581,6 @@ impl EdgePropertyStore {
         }
         let offsets = MmapOrVec::<u64>::load_mapped(&offsets_path, meta.offsets_len)?;
         let heap = MmapBytes::load_mapped(&heap_path, meta.heap_len)?;
-        check_offsets(offsets.as_slice(), meta.heap_len)?;
         Ok(Self {
             base: Some(Arc::new(ColumnarBase {
                 offsets,
@@ -590,6 +589,14 @@ impl EdgePropertyStore {
             })),
             overlay: HashMap::new(),
         })
+    }
+
+    /// Eager-verify walk: base offsets never decrease and end at the heap length.
+    pub(super) fn check_base_offsets(&self) -> io::Result<()> {
+        match &self.base {
+            Some(base) => check_offsets(base.offsets.as_slice(), base.heap.len()),
+            None => Ok(()),
+        }
     }
 
     /// On-disk metadata for the columnar files in `dir` — call after `save_to`

@@ -20,6 +20,9 @@ impl DiskGraph {
     pub(crate) fn check_structure(&self, interner: &StringInterner) -> Result<(), String> {
         self.check_node_slots(interner)?;
         self.check_edge_endpoints(interner)?;
+        self.edge_properties
+            .check_base_offsets()
+            .map_err(|e| e.to_string())?;
         if !self.defer_csr {
             check_offsets("out_offsets", &self.out_offsets, &self.out_edges)?;
             check_offsets("in_offsets", &self.in_offsets, &self.in_edges)?;

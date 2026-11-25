@@ -992,7 +992,10 @@ def load(
             section copied to the heap is always checked at load. ``"eager"``
             checks every mapped section at load, which reads the whole file
             once, and refuses a file whose mapped topology, indexes or column
-            flags are structurally inconsistent.
+            flags are structurally inconsistent. For a disk graph it checks
+            node and relationship types, relationship endpoints, adjacency
+            offsets and relationship-property offsets, and refuses a
+            directory that fails them.
 
     Returns:
         A new KnowledgeGraph with the loaded data.
