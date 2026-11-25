@@ -58,9 +58,7 @@ fn depth_at(value: &Value, level: usize, limit: usize) -> usize {
     }
 }
 
-/// Depth of a container at `level` holding `children`. Generic rather than
-/// `dyn Iterator`: a virtual call per child measured +10 % on a 10k-item
-/// comprehension that wraps every element.
+/// Depth of a container at `level` holding `children`.
 #[inline]
 fn children_depth<'a>(
     children: impl Iterator<Item = &'a Value>,
