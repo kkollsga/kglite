@@ -196,3 +196,64 @@ fn postcard_generated_corruption_probes_never_panic() {
         assert!(result.is_ok(), "bit flip at byte {index} panicked");
     }
 }
+
+/// Postcard bytes for `levels` lists nested around a `Null`, built directly:
+/// a deep `Value` cannot be constructed (or dropped) safely.
+fn nested_list_bytes(levels: usize) -> Vec<u8> {
+    let unit = postcard_bytes(&Value::List(vec![Value::Null]));
+    let (null_tag, list_prefix) = unit.split_last().unwrap();
+    let mut bytes = Vec::with_capacity(levels * list_prefix.len() + 1);
+    for _ in 0..levels {
+        bytes.extend_from_slice(list_prefix);
+    }
+    bytes.push(*null_tag);
+    bytes
+}
+
+fn decode_value(bytes: &[u8]) -> Result<Value, CodecError> {
+    decode_exact_with(
+        CodecVersion::PostcardV1,
+        bytes,
+        bytes.len() as u64,
+        DecodeLimits::new(u32::MAX as u64, bytes.len() as u64),
+    )
+}
+
+fn on_query_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    std::thread::Builder::new()
+        .stack_size(crate::graph::session::QUERY_THREAD_STACK_SIZE)
+        .spawn(f)
+        .unwrap()
+        .join()
+        .unwrap()
+}
+
+#[test]
+fn decode_refuses_a_payload_nested_far_past_the_stack() {
+    let bytes = nested_list_bytes(100_000);
+    // A small stack proves the guard fires before the decoder recurses.
+    let err = std::thread::Builder::new()
+        .stack_size(512 * 1024)
+        .spawn(move || decode_value(&bytes))
+        .unwrap()
+        .join()
+        .unwrap()
+        .unwrap_err();
+    assert!(err.to_string().contains("exceeds 256 levels"), "{err}");
+}
+
+#[test]
+fn decode_accepts_the_ceiling_and_refuses_one_past_it() {
+    on_query_stack(|| {
+        let ok = decode_value(&nested_list_bytes(256)).unwrap();
+        assert_eq!(
+            crate::datatypes::value_depth::container_depth(&ok, 256),
+            256
+        );
+        drop(ok);
+        let err = decode_value(&nested_list_bytes(257)).unwrap_err();
+        assert!(err.to_string().contains("exceeds 256 levels"), "{err}");
+        // The guard unwinds cleanly: a following decode is unaffected.
+        assert!(decode_value(&nested_list_bytes(3)).is_ok());
+    });
+}

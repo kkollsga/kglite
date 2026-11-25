@@ -42,7 +42,14 @@ pub(super) fn append_encoded<T: Serialize + ?Sized>(
 }
 
 pub(super) fn decode_exact<'de, T: Deserialize<'de>>(bytes: &'de [u8]) -> Result<T, CodecError> {
-    let (value, trailing) = postcard::take_from_bytes(bytes).map_err(decode_error)?;
+    crate::datatypes::value_depth::reset_decode_exceeded();
+    let (value, trailing) = postcard::take_from_bytes(bytes).map_err(|error| {
+        if crate::datatypes::value_depth::decode_exceeded() {
+            decode_error(crate::datatypes::value_depth::depth_error())
+        } else {
+            decode_error(error)
+        }
+    })?;
     if !trailing.is_empty() {
         return Err(CodecError::TrailingBytes {
             remaining: trailing.len() as u64,

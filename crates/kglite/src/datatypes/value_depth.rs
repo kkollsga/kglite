@@ -106,6 +106,62 @@ pub fn check_value(value: &Value) -> Result<(), String> {
     Ok(())
 }
 
+thread_local! {
+    static DECODE_LEVEL: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static DECODE_EXCEEDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Tracks how many [`Value`]s are being decoded inside one another on this
+/// thread. A decoder recurses once per level before it holds any value to
+/// measure, so the ceiling is enforced on entry: a payload crafted deeper
+/// than the stack allows returns an error instead of overflowing it.
+///
+/// Entry allows one level past [`MAX_VALUE_DEPTH`] because a scalar leaf sits
+/// one level below the deepest container; [`Self::check_container`] then
+/// refuses a container at that last level.
+pub struct DecodeDepth;
+
+impl DecodeDepth {
+    pub fn enter<E: serde::de::Error>() -> Result<Self, E> {
+        let level = DECODE_LEVEL.with(|l| {
+            l.set(l.get() + 1);
+            l.get()
+        });
+        let guard = DecodeDepth;
+        if level > MAX_VALUE_DEPTH + 1 {
+            DECODE_EXCEEDED.with(|f| f.set(true));
+            return Err(E::custom(depth_error()));
+        }
+        Ok(guard)
+    }
+
+    pub fn check_container<E: serde::de::Error>(&self, value: &Value) -> Result<(), E> {
+        if is_container(value) && DECODE_LEVEL.with(|l| l.get()) > MAX_VALUE_DEPTH {
+            DECODE_EXCEEDED.with(|f| f.set(true));
+            return Err(E::custom(depth_error()));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for DecodeDepth {
+    fn drop(&mut self) {
+        DECODE_LEVEL.with(|l| l.set(l.get() - 1));
+    }
+}
+
+/// Clear the "a decode hit the ceiling" flag before a decode starts.
+pub fn reset_decode_exceeded() {
+    DECODE_EXCEEDED.with(|f| f.set(false));
+}
+
+/// Whether a decode on this thread since the last reset hit the ceiling.
+/// Serde codecs flatten custom errors to a generic message, so this carries
+/// the cause to the error that reaches the user.
+pub fn decode_exceeded() -> bool {
+    DECODE_EXCEEDED.with(|f| f.get())
+}
+
 #[cfg(test)]
 #[path = "value_depth_tests.rs"]
 mod tests;

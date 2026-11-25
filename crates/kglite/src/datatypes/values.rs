@@ -311,7 +311,8 @@ impl Serialize for Value {
 
 impl<'de> Deserialize<'de> for Value {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Ok(match Wire::deserialize(deserializer)? {
+        let _depth = super::value_depth::DecodeDepth::enter::<D::Error>()?;
+        let value = match Wire::deserialize(deserializer)? {
             Wire::UniqueId(v) => Value::UniqueId(v),
             Wire::Int64(v) => Value::Int64(v),
             Wire::Float64(v) => Value::Float64(v),
@@ -381,7 +382,9 @@ impl<'de> Deserialize<'de> for Value {
                     },
                 }
             }
-        })
+        };
+        _depth.check_container::<D::Error>(&value)?;
+        Ok(value)
     }
 }
 

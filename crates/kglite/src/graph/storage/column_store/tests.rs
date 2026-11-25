@@ -1454,3 +1454,27 @@ fn unpack_column_refuses_an_unknown_type_tag() {
         "{message}"
     );
 }
+
+#[test]
+fn a_mixed_column_value_nested_past_the_ceiling_fails_the_load_with_its_column() {
+    // One-element `Vec<Value>` whose element is 300 lists deep, written as raw
+    // postcard bytes: a value that deep cannot be built through the engine.
+    let unit = crate::serde_codec::encode_versioned(
+        crate::serde_codec::CURRENT_CODEC,
+        &Value::List(vec![Value::Null]),
+        1024,
+    )
+    .unwrap();
+    let (null_tag, list_prefix) = unit.split_last().unwrap();
+    let mut blob = vec![1u8];
+    for _ in 0..300 {
+        blob.extend_from_slice(list_prefix);
+    }
+    blob.push(*null_tag);
+    let err = ColumnStore::unpack_mixed_column(crate::serde_codec::CURRENT_CODEC, &blob, "tags")
+        .err()
+        .expect("a 300-deep value must be refused");
+    let message = err.to_string();
+    assert!(message.contains("'tags'"), "{message}");
+    assert!(message.contains("exceeds 256 levels"), "{message}");
+}

@@ -564,6 +564,7 @@ pub fn read_value(blob: &[u8], pos: &mut usize, type_tag: u8) -> Option<Value> {
                 bytes.len() as u64,
                 limits,
             )
+            .map_err(note_undecodable)
             .ok()?;
             Some(Value::List(items))
         }
@@ -576,10 +577,32 @@ pub fn read_value(blob: &[u8], pos: &mut usize, type_tag: u8) -> Option<Value> {
                 bytes.len() as u64,
                 limits,
             )
+            .map_err(note_undecodable)
             .ok()?;
             Some(Value::Map(entries))
         }
         _ => None,
+    }
+}
+
+/// Report a list or map that could not be decoded from a row blob.
+///
+/// The row readers return `Option`/`Vec` and have no error channel, so an
+/// undecodable value reads as absent. A value nested past the ceiling is a
+/// real stored value the engine now refuses, not noise, so say so once per
+/// process instead of letting the property vanish silently.
+fn note_undecodable(error: crate::serde_codec::CodecError) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if error
+        .to_string()
+        .contains(&crate::datatypes::value_depth::depth_error())
+        && !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        eprintln!(
+            "[kglite] WARN a stored list or map is nested deeper than {} levels and reads as \
+             absent; rebuild the graph from source with the value flattened",
+            crate::datatypes::value_depth::MAX_VALUE_DEPTH
+        );
     }
 }
 
@@ -806,7 +829,10 @@ where
                     limits,
                 ) {
                     Ok(v) => v,
-                    Err(_) => return Some(Ok(())), // corrupt payload — stop
+                    Err(e) => {
+                        note_undecodable(e);
+                        return Some(Ok(())); // corrupt payload — stop
+                    }
                 };
                 if let Err(e) = f(key, BorrowedValue::List(&items)) {
                     return Some(Err(e));
@@ -826,7 +852,10 @@ where
                         limits,
                     ) {
                         Ok(v) => v,
-                        Err(_) => return Some(Ok(())),
+                        Err(e) => {
+                            note_undecodable(e);
+                            return Some(Ok(()));
+                        }
                     };
                 if let Err(e) = f(key, BorrowedValue::Map(&entries)) {
                     return Some(Err(e));
