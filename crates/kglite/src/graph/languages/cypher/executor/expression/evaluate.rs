@@ -201,7 +201,9 @@ impl<'a> CypherExecutor<'a> {
             }
             self.budget
                 .consume_collection(1, "pattern comprehension")?;
-            items.push(self.evaluate_expression(map_expr, joined)?);
+            let item = self.evaluate_expression(map_expr, joined)?;
+            check_wrap(std::iter::once(&item))?;
+            items.push(item);
         }
         Ok(Value::List(items))
     }
@@ -483,10 +485,9 @@ impl<'a> CypherExecutor<'a> {
                     }
                 }
                 MapProjectionItem::Alias { key, expr } => {
-                    properties.push((
-                        PropKey::from(key.as_str()),
-                        self.evaluate_expression(expr, row)?,
-                    ));
+                    let value = self.evaluate_expression(expr, row)?;
+                    check_wrap(std::iter::once(&value))?;
+                    properties.push((PropKey::from(key.as_str()), value));
                 }
             }
         }
@@ -500,10 +501,9 @@ impl<'a> CypherExecutor<'a> {
     ) -> Result<Value, String> {
         let mut properties: Vec<(PropKey, Value)> = Vec::with_capacity(entries.len());
         for (key, expression) in entries {
-            properties.push((
-                PropKey::from(key.as_str()),
-                self.evaluate_expression(expression, row)?,
-            ));
+            let value = self.evaluate_expression(expression, row)?;
+            check_wrap(std::iter::once(&value))?;
+            properties.push((PropKey::from(key.as_str()), value));
         }
         Ok(Value::Map(PropMap::from_pairs(properties)))
     }
@@ -621,6 +621,7 @@ impl<'a> CypherExecutor<'a> {
             .iter()
             .map(|item| self.evaluate_expression(item, row))
             .collect::<Result<Vec<_>, _>>()?;
+        check_wrap(&values)?;
         Ok(Value::List(values))
     }
 
@@ -667,7 +668,9 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             results.push(if let Some(expression) = map_expr {
-                self.evaluate_expression(expression, &temp_row)?
+                let mapped = self.evaluate_expression(expression, &temp_row)?;
+                check_wrap(std::iter::once(&mapped))?;
+                mapped
             } else {
                 item
             });

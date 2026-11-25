@@ -25,6 +25,7 @@
 
 use super::ast::*;
 use super::result::*;
+use crate::datatypes::value_depth::check_wrap;
 use crate::datatypes::values::Value;
 use crate::graph::core::graph_filter::ElementFilter;
 use crate::graph::core::pattern_matching::{

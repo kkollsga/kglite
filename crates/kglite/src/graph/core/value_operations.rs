@@ -199,12 +199,14 @@ pub fn arithmetic_add_checked(a: &Value, b: &Value) -> Result<Value, String> {
             Ok(Value::List(values))
         }
         (Value::List(left), right) => {
+            crate::datatypes::value_depth::check_wrap(std::iter::once(right))?;
             let mut values = Vec::with_capacity(left.len() + 1);
             values.extend(left.iter().cloned());
             values.push(right.clone());
             Ok(Value::List(values))
         }
         (left, Value::List(right)) => {
+            crate::datatypes::value_depth::check_wrap(std::iter::once(left))?;
             let mut values = Vec::with_capacity(right.len() + 1);
             values.push(left.clone());
             values.extend(right.iter().cloned());

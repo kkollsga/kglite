@@ -1016,6 +1016,12 @@ pub(super) fn prepare(
     // caller closes it with `classify_pending` once it knows `is_mutation`.
     #[cfg(test)]
     cypher::plan_cache::instrumentation::begin_prepare();
+    // Every binding's own converter caps parameter depth lower, but a Rust
+    // caller hands over `Value`s directly; nothing below may see a value past
+    // the ceiling.
+    for value in opts.params.values() {
+        crate::datatypes::value_depth::check_value(value).map_err(KgError::Argument)?;
+    }
     // Plan cache: a codec-free, no-disabled-passes query against an unchanged
     // graph, with the same bound parameter values, reuses its fully-optimized
     // plan, skipping parse + validate + optimize. Keyed on (graph_id, version,

@@ -105,7 +105,7 @@ test('panics become Internal errors and the process keeps running', async () => 
   assert.deepEqual(rows.map((r) => r.rows[0].i), Array.from({ length: 16 }, (_, i) => i));
 });
 
-test('queries near the parser nesting ceiling complete; past it they are refused, not fatal', async () => {
+test('queries near the nesting ceilings complete; past them they are refused, not fatal', async () => {
   const nested = (n) => `RETURN ${'['.repeat(n)}1${']'.repeat(n)} AS v`;
   const depthOf = (v) => {
     let d = 0;
@@ -115,9 +115,13 @@ test('queries near the parser nesting ceiling complete; past it they are refused
     }
     return d;
   };
-  for (const n of [450, 511]) {
+  // A built value is bounded at 256 levels; the parser accepts 512.
+  for (const n of [200, 256]) {
     const r = await graph.executeRead(nested(n));
     assert.equal(depthOf(r.rows[0].v), n);
+  }
+  for (const n of [257, 511]) {
+    await assert.rejects(graph.executeRead(nested(n)), (e) => e.code !== 'Internal' && /256/.test(e.message));
   }
   await assert.rejects(graph.executeRead(nested(513)), (e) => e.code === 'CypherSyntax' && /nesting exceeds/.test(e.message));
   await assert.rejects(graph.executeRead(nested(100000)), (e) => e.code === 'CypherSyntax');

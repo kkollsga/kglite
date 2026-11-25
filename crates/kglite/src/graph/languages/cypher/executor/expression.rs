@@ -55,6 +55,7 @@ impl<'a> CypherExecutor<'a> {
                 }
             };
 
+            check_wrap(std::iter::once(&result))?;
             results.push(result);
         }
         Ok(Value::List(results))
@@ -98,6 +99,7 @@ impl<'a> CypherExecutor<'a> {
                 projected_for_var
             };
 
+            check_wrap(std::iter::once(&result))?;
             results.push(result);
         }
         Ok(Value::List(results))

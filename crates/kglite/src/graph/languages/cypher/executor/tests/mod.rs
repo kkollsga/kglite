@@ -112,6 +112,7 @@ mod text_rank_bench;
 mod text_synth_bench;
 mod valid_time_guard;
 mod value_kind_matrix;
+mod value_nesting;
 mod vector_score;
 mod vectors;
 mod window_aggregates;

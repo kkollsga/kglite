@@ -18,8 +18,9 @@ use crate::classes::{
 };
 use crate::errors::{JsErr, JsRes};
 
-/// Deepest list/map nesting converted into JS. The parser bounds query
-/// expressions at 512, so any value a query can build fits.
+/// Deepest list/map nesting converted into JS. The engine refuses to build a
+/// value past its own ceiling (`MAX_VALUE_DEPTH`, 256), so any value a query
+/// returns fits.
 pub const MAX_DEPTH: usize = 1024;
 
 /// Deepest nesting accepted in a parameter. Conversion recurses on the JS

@@ -473,6 +473,7 @@ fn merge_expected_edge_props<'p>(
         .iter()
         .map(|(key, expr)| {
             let mut value = executor.evaluate_expression(expr, row)?;
+            crate::datatypes::value_depth::check_value(&value)?;
             crate::graph::session::snapshot_property_values(
                 &graph.graph,
                 std::iter::once(&mut value),

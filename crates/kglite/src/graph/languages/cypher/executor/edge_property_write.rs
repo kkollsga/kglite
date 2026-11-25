@@ -52,7 +52,9 @@ pub(super) fn set_edge_property(
     let edge_index = edge_binding.edge_index;
     let mut value = {
         let executor = super::write::row_evaluator(graph, ctx);
-        executor.evaluate_expression(expression, row)?
+        let value = executor.evaluate_expression(expression, row)?;
+        crate::datatypes::value_depth::check_value(&value)?;
+        value
     };
     crate::graph::session::snapshot_property_values(&graph.graph, std::iter::once(&mut value));
     if matches!(value, Value::String(_)) {

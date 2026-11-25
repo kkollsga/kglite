@@ -75,7 +75,9 @@ pub(super) fn apply_path(
     steps: &[ResolvedStep],
     new_value: Value,
 ) -> Result<Value, String> {
-    descend(property.to_string(), current, steps, new_value)
+    let rebuilt = descend(property.to_string(), current, steps, new_value)?;
+    crate::datatypes::value_depth::check_value(&rebuilt)?;
+    Ok(rebuilt)
 }
 
 fn descend(

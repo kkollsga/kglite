@@ -1319,6 +1319,7 @@ impl<'a> CypherExecutor<'a> {
                     continue;
                 }
                 self.budget.consume_collection(1, "collect()")?;
+                check_wrap(std::iter::once(&val))?;
                 values.push(val);
             }
         }

@@ -23,6 +23,7 @@ use super::projected_targets::{
 use super::set_row::{apply_node_property_set, NodePropertySet, SetMemos};
 use super::write_scope::{enforce_edge_write_scope, enforce_node_write_scope, enforce_write_scope};
 use super::{clause_display_name, delete_clause, merge_pattern, schema_ddl, CypherExecutor};
+use crate::datatypes::value_depth::check_value;
 pub(crate) mod create_support;
 use create_support::{note_created_id, reject_abstract_create};
 // The relationship-identity tests address DELETE's slot retirement through the
@@ -1091,6 +1092,7 @@ fn create_pattern_edges(
                 let executor = row_evaluator(graph, ctx);
                 for (key, expr) in &edge_pat.properties {
                     let val = executor.evaluate_expression(expr, new_row)?;
+                    check_value(&val)?;
                     if matches!(val, Value::Null) {
                         continue;
                     }
@@ -1191,7 +1193,11 @@ fn evaluate_properties(
     let executor = row_evaluator(graph, ctx);
     properties
         .iter()
-        .map(|(key, expr)| Ok((key.clone(), executor.evaluate_expression(expr, row)?)))
+        .map(|(key, expr)| {
+            let value = executor.evaluate_expression(expr, row)?;
+            check_value(&value)?;
+            Ok((key.clone(), value))
+        })
         .collect()
 }
 
@@ -1643,6 +1649,7 @@ fn execute_property_set_item<'a>(
     let value = {
         let executor = row_evaluator(graph, ctx);
         let value = executor.evaluate_expression(expression, row)?;
+        check_value(&value)?;
         if path.is_empty() {
             value
         } else {
@@ -1805,6 +1812,7 @@ fn execute_set_items(
                     replace,
                 } => {
                     let value = row_evaluator(graph, ctx).evaluate_expression(expression, row)?;
+                    check_value(&value)?;
                     let Value::Map(map) = value else {
                         return Err(format!(
                             "SET {} {} expects a map expression",
@@ -2395,6 +2403,7 @@ fn evaluate_merge_pattern<'p>(
         };
         for (slot, (name, expression)) in merge_element_properties(element).iter().enumerate() {
             let mut value = executor.evaluate_expression(expression, row)?;
+            check_value(&value)?;
             let is_identity = identity
                 .as_ref()
                 .is_some_and(|aliases| aliases.canonical(name) == "id");
