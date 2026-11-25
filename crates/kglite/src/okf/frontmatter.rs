@@ -8,6 +8,7 @@
 //!    scalars, quoting, the Norway problem, nested maps) silently corrupt data,
 //!    which for a fidelity-focused read tool is the worst outcome.
 
+use crate::datatypes::value_depth::{check_value, MAX_VALUE_DEPTH};
 use crate::datatypes::values::Value;
 use std::collections::BTreeMap;
 
@@ -61,6 +62,7 @@ pub fn parse(text: &str) -> Result<BTreeMap<String, Value>, String> {
     if yaml.trim().is_empty() {
         return Ok(BTreeMap::new());
     }
+    check_nesting(&yaml).map_err(|e| format!("invalid YAML in frontmatter: {e}"))?;
     let docs = yaml_rust2::YamlLoader::load_from_str(&yaml)
         .map_err(|e| format!("invalid YAML in frontmatter: {e}"))?;
     let doc = match docs.into_iter().next() {
@@ -73,7 +75,7 @@ pub fn parse(text: &str) -> Result<BTreeMap<String, Value>, String> {
         _ => return Err("frontmatter must be a YAML mapping".to_string()),
     };
     let mut out = BTreeMap::new();
-    flatten_into("", &map, &mut out);
+    flatten_into("", &map, &mut out)?;
     Ok(out)
 }
 
@@ -90,10 +92,11 @@ pub fn parse_yaml(yaml: &str) -> Result<Value, String> {
     if yaml.trim().is_empty() {
         return Ok(Value::Null);
     }
+    check_nesting(yaml).map_err(|e| format!("invalid YAML: {e}"))?;
     let docs =
         yaml_rust2::YamlLoader::load_from_str(yaml).map_err(|e| format!("invalid YAML: {e}"))?;
     match docs.into_iter().next() {
-        Some(doc) => Ok(yaml_to_value(&doc)),
+        Some(doc) => yaml_to_value(&doc).map_err(|e| format!("invalid YAML: {e}")),
         None => Ok(Value::Null),
     }
 }
@@ -137,7 +140,11 @@ fn is_iso_date(s: &str) -> bool {
 
 /// Flatten a YAML mapping into dotted keys. Nested mappings recurse with a
 /// `prefix.` ; everything else converts via [`yaml_to_value`].
-fn flatten_into(prefix: &str, map: &yaml_rust2::yaml::Hash, out: &mut BTreeMap<String, Value>) {
+fn flatten_into(
+    prefix: &str,
+    map: &yaml_rust2::yaml::Hash,
+    out: &mut BTreeMap<String, Value>,
+) -> Result<(), String> {
     for (k, v) in map {
         let key = match k.as_str() {
             Some(s) => s.to_string(),
@@ -149,19 +156,88 @@ fn flatten_into(prefix: &str, map: &yaml_rust2::yaml::Hash, out: &mut BTreeMap<S
             format!("{prefix}.{key}")
         };
         match v {
-            yaml_rust2::Yaml::Hash(inner) => flatten_into(&full, inner, out),
+            yaml_rust2::Yaml::Hash(inner) => flatten_into(&full, inner, out)?,
             other => {
-                out.insert(full, yaml_to_value(other));
+                out.insert(full, yaml_to_value(other)?);
             }
         }
     }
+    Ok(())
+}
+
+/// Refuse YAML nested clearly deeper than [`MAX_VALUE_DEPTH`] before it is
+/// parsed. `yaml-rust2` builds and drops its document tree recursively, so a
+/// few thousand `- - - …` levels overflow the stack inside the parser; the
+/// depth has to be bounded on the text.
+///
+/// The estimate is block levels (a stack of indentation columns, each leading
+/// `- ` marker counting as a level) plus the flow brackets open on a line.
+/// It undercounts rather than overcounts (a `- ` aligned with its parent key
+/// adds no column), so only input that is clearly too deep is refused;
+/// [`yaml_to_value`] bounds whatever the estimate lets through.
+fn check_nesting(yaml: &str) -> Result<(), String> {
+    let limit = MAX_VALUE_DEPTH + 1;
+    let mut columns: Vec<usize> = Vec::new();
+    for line in yaml.lines() {
+        let trimmed = line.trim_start_matches(' ');
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let mut col = line.len() - trimmed.len();
+        while columns.last().is_some_and(|&c| c >= col) {
+            columns.pop();
+        }
+        let mut rest = trimmed;
+        while rest == "-" || rest.starts_with("- ") {
+            columns.push(col);
+            let after = &rest[1..];
+            let body = after.trim_start_matches(' ');
+            col += 1 + (after.len() - body.len());
+            rest = body;
+        }
+        columns.push(col);
+        if columns.len() + flow_depth(rest) > limit {
+            return Err(nesting_error());
+        }
+    }
+    Ok(())
+}
+
+/// Deepest flow bracket nesting on one line, ignoring quoted text.
+fn flow_depth(line: &str) -> usize {
+    let (mut depth, mut deepest) = (0usize, 0usize);
+    let mut quote: Option<char> = None;
+    for c in line.chars() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(c),
+            (None, '[' | '{') => {
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+            (None, ']' | '}') => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    deepest
+}
+
+fn nesting_error() -> String {
+    format!("YAML nested deeper than {MAX_VALUE_DEPTH} levels; flatten the structure")
 }
 
 /// Convert a single YAML value into a kglite [`Value`]. Mappings nested *inside*
 /// a sequence are preserved as [`Value::Map`] (only top-level maps flatten).
-fn yaml_to_value(v: &yaml_rust2::Yaml) -> Value {
+fn yaml_to_value(v: &yaml_rust2::Yaml) -> Result<Value, String> {
+    let value = convert_yaml(v)?;
+    check_value(&value).map_err(|_| nesting_error())?;
+    Ok(value)
+}
+
+fn convert_yaml(v: &yaml_rust2::Yaml) -> Result<Value, String> {
     use yaml_rust2::Yaml;
-    match v {
+    Ok(match v {
         Yaml::Null | Yaml::BadValue => Value::Null,
         Yaml::Boolean(b) => Value::Boolean(*b),
         Yaml::Integer(i) => Value::Int64(*i),
@@ -170,18 +246,18 @@ fn yaml_to_value(v: &yaml_rust2::Yaml) -> Value {
             .map(Value::Float64)
             .unwrap_or_else(|_| Value::String(s.clone())),
         Yaml::String(s) => Value::String(s.clone()),
-        Yaml::Array(seq) => Value::List(seq.iter().map(yaml_to_value).collect()),
+        Yaml::Array(seq) => Value::List(seq.iter().map(convert_yaml).collect::<Result<_, _>>()?),
         Yaml::Hash(map) => {
             let mut pairs: Vec<(crate::datatypes::PropKey, Value)> = Vec::with_capacity(map.len());
             for (k, val) in map {
                 if let Some(key) = k.as_str() {
-                    pairs.push((crate::datatypes::PropKey::from(key), yaml_to_value(val)));
+                    pairs.push((crate::datatypes::PropKey::from(key), convert_yaml(val)?));
                 }
             }
             Value::Map(crate::datatypes::PropMap::from_pairs(pairs))
         }
         Yaml::Alias(_) => Value::Null,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -283,5 +359,44 @@ mod tests {
                 "This table contains information about orders across all channels.".into()
             ))
         );
+    }
+
+    fn block_sequence_note(levels: usize) -> String {
+        format!("---\na:\n  {}x\n---\nbody", "- ".repeat(levels))
+    }
+
+    #[test]
+    fn a_block_sequence_nested_far_past_the_ceiling_is_refused_not_parsed() {
+        // 20k levels overflowed the stack inside the YAML parser itself.
+        let err = parse(&block_sequence_note(20_000)).unwrap_err();
+        assert!(err.contains("deeper than 256 levels"), "{err}");
+        let err = parse_yaml(&format!("a:\n  {}x", "- ".repeat(20_000))).unwrap_err();
+        assert!(err.contains("deeper than 256 levels"), "{err}");
+    }
+
+    #[test]
+    fn a_nested_map_and_a_flow_sequence_past_the_ceiling_are_refused() {
+        let mut map = String::new();
+        for i in 0..400 {
+            map.push_str(&format!("{}k{i}:\n", " ".repeat(i)));
+        }
+        map.push_str(&format!("{}v: 1", " ".repeat(400)));
+        assert!(parse(&format!("---\n{map}\n---")).is_err());
+        let flow = format!("---\na: {}x{}\n---", "[".repeat(300), "]".repeat(300));
+        assert!(parse(&flow).is_err());
+    }
+
+    #[test]
+    fn nesting_at_the_ceiling_still_parses() {
+        let fm = parse(&block_sequence_note(255)).unwrap();
+        assert!(matches!(fm.get("a"), Some(Value::List(_))));
+        let flow = format!("---\na: {}x{}\n---", "[".repeat(200), "]".repeat(200));
+        assert!(parse(&flow).unwrap().contains_key("a"));
+    }
+
+    #[test]
+    fn brackets_inside_quotes_do_not_count_as_nesting() {
+        let text = format!("---\na: \"{}\"\n---", "[".repeat(1000));
+        assert!(parse(&text).unwrap().contains_key("a"));
     }
 }
