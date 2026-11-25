@@ -112,13 +112,14 @@ def test_deep_nesting_within_budget_parses_and_executes():
     g = KnowledgeGraph()
     # 400-deep parenthesized expression
     assert g.cypher("RETURN " + "(" * 400 + "1" + ")" * 400 + " AS x").scalar() == 1
-    # 400-deep list literal survives parse -> plan -> execute -> conversion
-    value = g.cypher("RETURN " + "[" * 400 + "1" + "]" * 400 + " AS x").scalar()
+    # A 250-deep list literal survives parse -> plan -> execute -> conversion
+    # (built values stop at 256 levels; tests/test_value_nesting_limit.py)
+    value = g.cypher("RETURN " + "[" * 250 + "1" + "]" * 250 + " AS x").scalar()
     depth = 0
     while isinstance(value, list):
         value = value[0]
         depth += 1
-    assert (depth, value) == (400, 1)
+    assert (depth, value) == (250, 1)
     # 400-deep NOT chain and unary-minus chain
     assert g.cypher("RETURN " + "NOT " * 400 + "false AS x").scalar() is False
     assert g.cypher("RETURN " + "-" * 400 + "5 AS x").scalar() == 5
