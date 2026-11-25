@@ -9,6 +9,14 @@ before upgrading.
 
 ## [Unreleased]
 
+### Security
+
+- **The lockfile uses `url` 2.5.9.** It fixes RUSTSEC-2026-0592, a stack overflow in `Url::origin()` on nested `blob:` URLs. `url` reaches KGLite only through the optional `fastembed` model download. Published binaries and wheels pick it up at the next release. The lockfile also moves `cookie` to 0.18.3 (RUSTSEC-2026-0594); no KGLite build compiles it.
+
+### Fixed
+
+- **`SECURITY.md` names the private vulnerability reporting form, and the form now accepts reports.** Public issues remain the channel for every other bug; the issue chooser links to the private form. Reported in #236 by @ydongyeon.
+
 ## [0.21.6] - 2026-11-15
 
 ### Added

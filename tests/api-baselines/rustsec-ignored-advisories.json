@@ -18,6 +18,72 @@
       "reason": "unsafe-libyaml reaches the tree only through serde_yaml 0.9 inside the sibling mcp-methods crate (kglite-cli and kglite-mcp-server), which parses the operator's own manifest files; the notice reports maintenance status, not a vulnerability. Retire once mcp-methods moves off serde_yaml.",
       "reviewed": "2026-10-19",
       "expires": "2027-01-17"
+    },
+    {
+      "id": "RUSTSEC-2026-0574",
+      "reason": "heapless 0.8.0 is reached only through rstar's nearest-neighbour iterator, which uses heapless::BinaryHeap push/pop and one into_vec into a std heap; items are distance wrappers over references with no Drop, so the panic-unwind case cannot occur. The advisory's affected functions (Deque, IndexMap, SortedLinkedList, Spsc, HistoryBuf, the pools, and Vec IntoIter drop under a panicking element Drop) are not called. heapless 0.6.1 and 0.7.17 are lockfile-only through rstar 0.8–0.11 compatibility features of geo-types that no target activates. Retire once rstar releases on heapless >= 0.9.4.",
+      "reviewed": "2026-11-25",
+      "expires": "2027-02-23"
+    },
+    {
+      "id": "RUSTSEC-2026-0575",
+      "reason": "heapless 0.8.0 is reached only through rstar's nearest-neighbour iterator, which uses heapless::BinaryHeap push/pop and one into_vec into a std heap; items are distance wrappers over references with no Drop, so the panic-unwind case cannot occur. The advisory's affected functions (Deque, IndexMap, SortedLinkedList, Spsc, HistoryBuf, the pools, and Vec IntoIter drop under a panicking element Drop) are not called. heapless 0.6.1 and 0.7.17 are lockfile-only through rstar 0.8–0.11 compatibility features of geo-types that no target activates. Retire once rstar releases on heapless >= 0.9.4.",
+      "reviewed": "2026-11-25",
+      "expires": "2027-02-23"
+    },
+    {
+      "id": "RUSTSEC-2026-0576",
+      "reason": "heapless 0.8.0 is reached only through rstar's nearest-neighbour iterator, which uses heapless::BinaryHeap push/pop and one into_vec into a std heap; items are distance wrappers over references with no Drop, so the panic-unwind case cannot occur. The advisory's affected functions (Deque, IndexMap, SortedLinkedList, Spsc, HistoryBuf, the pools, and Vec IntoIter drop under a panicking element Drop) are not called. heapless 0.6.1 and 0.7.17 are lockfile-only through rstar 0.8–0.11 compatibility features of geo-types that no target activates. Retire once rstar releases on heapless >= 0.9.4.",
+      "reviewed": "2026-11-25",
+      "expires": "2027-02-23"
+    },
+    {
+      "id": "RUSTSEC-2026-0577",
+      "reason": "heapless 0.8.0 is reached only through rstar's nearest-neighbour iterator, which uses heapless::BinaryHeap push/pop and one into_vec into a std heap; items are distance wrappers over references with no Drop, so the panic-unwind case cannot occur. The advisory's affected functions (Deque, IndexMap, SortedLinkedList, Spsc, HistoryBuf, the pools, and Vec IntoIter drop under a panicking element Drop) are not called. heapless 0.6.1 and 0.7.17 are lockfile-only through rstar 0.8–0.11 compatibility features of geo-types that no target activates. Retire once rstar releases on heapless >= 0.9.4.",
+      "reviewed": "2026-11-25",
+      "expires": "2027-02-23"
+    },
+    {
+      "id": "RUSTSEC-2026-0578",
+      "reason": "heapless 0.8.0 is reached only through rstar's nearest-neighbour iterator, which uses heapless::BinaryHeap push/pop and one into_vec into a std heap; items are distance wrappers over references with no Drop, so the panic-unwind case cannot occur. The advisory's affected functions (Deque, IndexMap, SortedLinkedList, Spsc, HistoryBuf, the pools, and Vec IntoIter drop under a panicking element Drop) are not called. heapless 0.6.1 and 0.7.17 are lockfile-only through rstar 0.8–0.11 compatibility features of geo-types that no target activates. Retire once rstar releases on heapless >= 0.9.4.",
+      "reviewed": "2026-11-25",
+      "expires": "2027-02-23"
+    },
+    {
+      "id": "RUSTSEC-2026-0579",
+      "reason": "heapless 0.8.0 is reached only through rstar's nearest-neighbour iterator, which uses heapless::BinaryHeap push/pop and one into_vec into a std heap; items are distance wrappers over references with no Drop, so the panic-unwind case cannot occur. The advisory's affected functions (Deque, IndexMap, SortedLinkedList, Spsc, HistoryBuf, the pools, and Vec IntoIter drop under a panicking element Drop) are not called. heapless 0.6.1 and 0.7.17 are lockfile-only through rstar 0.8–0.11 compatibility features of geo-types that no target activates. Retire once rstar releases on heapless >= 0.9.4.",
+      "reviewed": "2026-11-25",
+      "expires": "2027-02-23"
+    },
+    {
+      "id": "RUSTSEC-2026-0580",
+      "reason": "heapless 0.8.0 is reached only through rstar's nearest-neighbour iterator, which uses heapless::BinaryHeap push/pop and one into_vec into a std heap; items are distance wrappers over references with no Drop, so the panic-unwind case cannot occur. The advisory's affected functions (Deque, IndexMap, SortedLinkedList, Spsc, HistoryBuf, the pools, and Vec IntoIter drop under a panicking element Drop) are not called. heapless 0.6.1 and 0.7.17 are lockfile-only through rstar 0.8–0.11 compatibility features of geo-types that no target activates. Retire once rstar releases on heapless >= 0.9.4.",
+      "reviewed": "2026-11-25",
+      "expires": "2027-02-23"
+    },
+    {
+      "id": "RUSTSEC-2026-0581",
+      "reason": "heapless 0.8.0 is reached only through rstar's nearest-neighbour iterator, which uses heapless::BinaryHeap push/pop and one into_vec into a std heap; items are distance wrappers over references with no Drop, so the panic-unwind case cannot occur. The advisory's affected functions (Deque, IndexMap, SortedLinkedList, Spsc, HistoryBuf, the pools, and Vec IntoIter drop under a panicking element Drop) are not called. heapless 0.6.1 and 0.7.17 are lockfile-only through rstar 0.8–0.11 compatibility features of geo-types that no target activates. Retire once rstar releases on heapless >= 0.9.4.",
+      "reviewed": "2026-11-25",
+      "expires": "2027-02-23"
+    },
+    {
+      "id": "RUSTSEC-2026-0582",
+      "reason": "heapless 0.8.0 is reached only through rstar's nearest-neighbour iterator, which uses heapless::BinaryHeap push/pop and one into_vec into a std heap; items are distance wrappers over references with no Drop, so the panic-unwind case cannot occur. The advisory's affected functions (Deque, IndexMap, SortedLinkedList, Spsc, HistoryBuf, the pools, and Vec IntoIter drop under a panicking element Drop) are not called. heapless 0.6.1 and 0.7.17 are lockfile-only through rstar 0.8–0.11 compatibility features of geo-types that no target activates. Retire once rstar releases on heapless >= 0.9.4.",
+      "reviewed": "2026-11-25",
+      "expires": "2027-02-23"
+    },
+    {
+      "id": "RUSTSEC-2026-0543",
+      "reason": "chrono is a direct dependency of the kglite engine for date and datetime values; the notice reports maintenance status, not a vulnerability. Replacing it (jiff or time) is a planned migration, not a lockfile change.",
+      "reviewed": "2026-11-25",
+      "expires": "2027-02-23"
+    },
+    {
+      "id": "RUSTSEC-2026-0555",
+      "reason": "chrono-tz is an optional kglite dependency behind the iana-zones feature for named time zones; the notice reports maintenance status, not a vulnerability. It is replaced together with chrono.",
+      "reviewed": "2026-11-25",
+      "expires": "2027-02-23"
     }
   ]
 }
