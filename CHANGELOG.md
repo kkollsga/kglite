@@ -31,7 +31,9 @@ before upgrading.
 
 ### Fixed
 
-- **Loading a damaged disk graph raises `FileFormatError`.** The load now checks node types, relationship types and endpoints, the outgoing and incoming offset arrays, and the relationship-property offsets. A damaged one of these used to raise a Rust panic during `kglite.load` or at the first query that read it.
+- **`verify="eager"` checks a disk graph's structure at load.** It now covers node types, relationship types and endpoints, the outgoing and incoming offset arrays, and the relationship-property offsets, and a damaged one raises `FileFormatError`. Before, the disk path ignored `verify`, and a damaged file raised a Rust panic during `kglite.load` or at the first query that read it.
+  - The default `verify="lazy"` skips these walks, which read every node and relationship. A damaged relationship-property offset no longer panics during the load; other damage can still panic at the first query that reads it.
+  - **Do:** load a disk graph you did not write yourself with `verify="eager"`, or set `KGLITE_VERIFY=eager`.
 - **`SECURITY.md` names the private vulnerability reporting form, and the form now accepts reports.** Public issues remain the channel for every other bug; the issue chooser links to the private form. Reported in #236 by @ydongyeon.
 
 ## [0.21.6] - 2026-11-15
