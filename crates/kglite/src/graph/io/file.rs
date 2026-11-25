@@ -1463,6 +1463,31 @@ fn rebuild_disk_type_schemas(graph: &mut DirGraph) -> io::Result<()> {
     Ok(())
 }
 
+/// Map a disk graph's stores from `dir` and root them at `logical_root`;
+/// `eager` (`verify="eager"`) also checks the structure, which reads every
+/// node slot, endpoint and adjacency offset.
+///
+/// Compressed files are decompressed to the returned temp dir, then mapped.
+/// The loader owns the interner mutably while assembling the stores, because
+/// current edge-property payloads carry resolved raw key hashes.
+fn open_disk_graph(
+    dir: &std::path::Path,
+    interner: &mut crate::graph::schema::StringInterner,
+    logical_root: std::path::PathBuf,
+    eager: bool,
+) -> io::Result<(
+    crate::graph::storage::disk::graph::DiskGraph,
+    std::path::PathBuf,
+)> {
+    let (mut disk_graph, temp_dir) =
+        crate::graph::storage::disk::graph::DiskGraph::load_from_dir(dir, interner)?;
+    disk_graph.set_logical_root(logical_root);
+    if eager {
+        disk_graph.check_structure(interner).map_err(invalid_data)?;
+    }
+    Ok((disk_graph, temp_dir))
+}
+
 fn load_disk_dir(dir: &std::path::Path, eager: bool) -> io::Result<Arc<DirGraph>> {
     use crate::graph::io::load_timing::{log_stage, stage_timer};
     use crate::graph::schema::GraphBackend;
@@ -1505,18 +1530,8 @@ fn load_disk_dir(dir: &std::path::Path, eager: bool) -> io::Result<Arc<DirGraph>
     }
     log_stage("interner_load", t);
 
-    // Load DiskGraph — compressed files decompressed to temp dir, then mmap'd.
-    // The disk storage loader owns the interner mutably while assembling all
-    // stores; current edge-property payloads contain resolved raw key hashes.
     let t = stage_timer();
-    let (mut disk_graph, temp_dir) =
-        crate::graph::storage::disk::graph::DiskGraph::load_from_dir(dir, &mut graph.interner)?;
-    disk_graph.set_logical_root(logical_root);
-    if eager {
-        disk_graph
-            .check_structure(&graph.interner)
-            .map_err(invalid_data)?;
-    }
+    let (disk_graph, temp_dir) = open_disk_graph(dir, &mut graph.interner, logical_root, eager)?;
     log_stage("disk_graph_load", t);
     // Prefetch hot mmap regions (offset arrays + node_slots) into page cache.
     // On macOS, `madvise(MADV_WILLNEED)` synchronously schedules readahead and
