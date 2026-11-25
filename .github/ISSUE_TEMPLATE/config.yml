@@ -1,1 +1,5 @@
 blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/kkollsga/kglite/security/advisories/new
+    about: Report vulnerabilities privately here. Use a public issue for every other bug.
