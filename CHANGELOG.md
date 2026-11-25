@@ -9,12 +9,29 @@ before upgrading.
 
 ## [Unreleased]
 
+### Changed
+
+- **Lists and maps nest at most 256 levels.** A deeper value now fails with "value nesting exceeds 256 levels" instead of being built:
+  - a query that builds one at runtime: `reduce` with a wrapping body, nested `collect`, comprehensions, `list + element`, map projection;
+  - a property write (`CREATE`, `SET`, `MERGE`) or a session parameter;
+  - a vault note's YAML frontmatter, reported as that note's error.
+
+  Cypher syntax still parses up to 512 levels, so a literal deeper than 256 fails when it is evaluated. A node counts its property map as one level.
+- **A saved graph holding a value nested deeper than 256 levels is refused or reported.** No KGLite release could reopen such a file above about 14,000 levels.
+  - A column in a `.kgl` file: the load fails and names the column.
+  - The write-ahead log: opening fails, the frame is not applied and the log is left unchanged.
+  - An overflow cell: the property reads as absent, with one warning per process on stderr.
+
+  **Do:** load the graph with 0.21.6 and flatten the value, or rebuild the graph from its source.
+
 ### Security
 
+- **Deeply nested values no longer overflow the stack.** A single read-only query such as `RETURN reduce(acc = 1, i IN range(1, 100000) | [acc])` crashed the process with a segmentation fault, from about 11,000 levels on 0.21.6 release builds. The same crash followed from saving and reloading such a value, and from a vault note with deeply nested frontmatter. Any process that runs queries it does not write (the MCP server, the Bolt server, an application passing user Cypher) could be stopped this way. The 256-level ceiling above removes the crash.
 - **The lockfile uses `url` 2.5.9.** It fixes RUSTSEC-2026-0592, a stack overflow in `Url::origin()` on nested `blob:` URLs. `url` reaches KGLite only through the optional `fastembed` model download. Published binaries and wheels pick it up at the next release. The lockfile also moves `cookie` to 0.18.3 (RUSTSEC-2026-0594); no KGLite build compiles it.
 
 ### Fixed
 
+- **Loading a damaged disk graph raises `FileFormatError`.** The load now checks node types, relationship types and endpoints, the outgoing and incoming offset arrays, and the relationship-property offsets. A damaged one of these used to raise a Rust panic during `kglite.load` or at the first query that read it.
 - **`SECURITY.md` names the private vulnerability reporting form, and the form now accepts reports.** Public issues remain the channel for every other bug; the issue chooser links to the private form. Reported in #236 by @ydongyeon.
 
 ## [0.21.6] - 2026-11-15

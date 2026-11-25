@@ -2735,6 +2735,18 @@ The list operators take a list.
 - So is `size()` of a value that is neither a list nor a string, and `length()`
   of one that is not a list, string or path.
 
+### Nesting depth
+
+Lists and maps nest at most **256 levels**. A node or relationship counts its
+property map as one level.
+
+- A query that would build a deeper value fails with `value nesting exceeds
+  256 levels`. This covers `reduce`, `collect`, comprehensions, `list + element`
+  and map projection.
+- A property write or parameter deeper than 256 levels is refused the same way.
+- A literal parses up to the 512-level expression limit, but fails when it is
+  evaluated if it is deeper than 256.
+
 ## List Comprehensions
 
 `[x IN list WHERE predicate | expression]` syntax:
