@@ -49,6 +49,7 @@ use super::ast::CypherQuery;
 use super::executor::CypherExecutor;
 use super::parser::{parse_cypher, MAX_EXPRESSION_DEPTH};
 use super::planner::optimize;
+use crate::datatypes::value_depth::MAX_VALUE_DEPTH;
 use crate::datatypes::Value;
 use crate::graph::algorithms::Interrupt;
 use crate::graph::dir_graph::DirGraph;
@@ -185,13 +186,44 @@ fn seeded_graph() -> DirGraph {
     graph
 }
 
+/// Shapes whose value nests one container level per nesting level.
+const CONTAINER_SHAPES: &[&str] = &["lists", "maps", "listcomp"];
+
+/// The outcome a budget-ceiling query must have. A container shape deeper
+/// than [`MAX_VALUE_DEPTH`] builds a value past the value ceiling, so its
+/// evaluation recurses the full depth and then fails with the nesting error —
+/// still a stack test, with a clean refusal instead of a result. Every other
+/// query must succeed.
+fn expect_ceiling_outcome<T, E: std::fmt::Display>(
+    shape: &str,
+    depth: usize,
+    result: Result<T, E>,
+) {
+    match result {
+        Ok(_) => assert!(
+            !CONTAINER_SHAPES.contains(&shape) || depth <= MAX_VALUE_DEPTH,
+            "{shape} at depth {depth} built a value past the {MAX_VALUE_DEPTH}-level ceiling"
+        ),
+        Err(e) => {
+            let message = e.to_string();
+            assert!(
+                CONTAINER_SHAPES.contains(&shape)
+                    && depth > MAX_VALUE_DEPTH
+                    && message.contains("value nesting exceeds"),
+                "{shape} at depth {depth} failed: {message}"
+            );
+        }
+    }
+}
+
 /// Run the whole pipeline — parse, plan, execute, and drop the AST.
-fn run_full_pipeline(graph: &DirGraph, text: &str) {
+fn run_full_pipeline(graph: &DirGraph, shape: &str) {
     let params: HashMap<String, Value> = HashMap::new();
-    let mut q = parse_cypher(text).expect("query must parse within the budget");
+    let depth = ceiling_depth(shape);
+    let mut q = parse_cypher(&query(shape, depth)).expect("query must parse within the budget");
     optimize(&mut q, graph, &params);
     let exec = CypherExecutor::with_params(graph, &params, None);
-    exec.execute(&q).expect("query must execute");
+    expect_ceiling_outcome(shape, depth, exec.execute(&q));
 }
 
 /// The load-bearing invariant: the deepest AST the parser accepts still fits
@@ -215,7 +247,7 @@ fn budget_ceiling_query_fits_the_query_thread_stack() {
         .spawn(move || {
             let graph = seeded_graph();
             for shape in ALL_SHAPES {
-                run_full_pipeline(&graph, &query(shape, ceiling_depth(shape)));
+                run_full_pipeline(&graph, shape);
             }
         })
         .expect("spawn query-sized thread")
@@ -248,7 +280,7 @@ fn budget_ceiling_query_fits_the_query_pool_worker_stack() {
              test would measure the caller's stack instead"
         );
         for shape in ALL_SHAPES {
-            run_full_pipeline(&graph, &query(shape, ceiling_depth(shape)));
+            run_full_pipeline(&graph, shape);
         }
     });
 }
@@ -275,10 +307,13 @@ fn budget_ceiling_query_fits_through_execute_read() {
                     let mut opts = ExecuteOptions::eager(&params);
                     opts.streaming = streaming;
                     opts.lazy_eligible = lazy;
-                    execute_read(&graph, &query(shape, ceiling_depth(shape)), &opts)
-                        .unwrap_or_else(|e| {
-                            panic!("{shape} streaming={streaming} lazy={lazy}: {e}")
-                        });
+                    let depth = ceiling_depth(shape);
+                    let result = execute_read(&graph, &query(shape, depth), &opts);
+                    expect_ceiling_outcome(
+                        shape,
+                        depth,
+                        result.map_err(|e| format!("streaming={streaming} lazy={lazy}: {e}")),
+                    );
                 }
             }
         })
