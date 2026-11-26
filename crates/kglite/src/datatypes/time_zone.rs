@@ -91,35 +91,84 @@ impl ZoneId {
 #[cfg(feature = "iana-zones")]
 mod imp {
     use super::{LocalFit, ZoneId, ZoneInstant};
-    use chrono::{LocalResult, NaiveDateTime, Offset, TimeDelta, TimeZone};
-    use chrono_tz::{Tz, TZ_VARIANTS};
+    use chrono::{NaiveDateTime, TimeDelta};
+    use jiff::civil;
+    use jiff::tz::{AmbiguousOffset, TimeZone, TimeZoneDatabase};
+    use jiff::Timestamp;
     use std::num::NonZeroU16;
-    use std::str::FromStr;
+    use std::sync::OnceLock;
 
-    fn tz(id: ZoneId) -> Tz {
-        TZ_VARIANTS[usize::from(id.0.get()) - 1]
+    /// Every zone name the bundled database knows, sorted for an exact
+    /// (case-sensitive) lookup, each with its rules parsed on first use.
+    /// A `ZoneId` is `index + 1` into this table. The bundled database is
+    /// named explicitly so the answer never depends on the host's zoneinfo.
+    struct Table {
+        db: TimeZoneDatabase,
+        zones: Vec<(String, OnceLock<TimeZone>)>,
+    }
+
+    fn table() -> &'static Table {
+        static TABLE: OnceLock<Table> = OnceLock::new();
+        TABLE.get_or_init(|| {
+            let db = TimeZoneDatabase::bundled();
+            let mut names: Vec<String> = db.available().map(|n| n.as_str().to_owned()).collect();
+            names.sort_unstable();
+            names.dedup();
+            let zones = names.into_iter().map(|n| (n, OnceLock::new())).collect();
+            Table { db, zones }
+        })
+    }
+
+    fn tz(id: ZoneId) -> &'static TimeZone {
+        let table = table();
+        let (name, zone) = &table.zones[usize::from(id.0.get()) - 1];
+        zone.get_or_init(|| {
+            // Every listed name resolves; UTC is the defensive fallback.
+            table.db.get(name).unwrap_or(TimeZone::UTC)
+        })
     }
 
     pub(super) fn from_name(name: &str) -> Option<ZoneId> {
-        let tz = Tz::from_str(name).ok()?;
-        let index = u16::try_from(tz as usize).ok()?.checked_add(1)?;
+        let zones = &table().zones;
+        let index = zones.binary_search_by(|(n, _)| n.as_str().cmp(name)).ok()?;
+        let index = u16::try_from(index).ok()?.checked_add(1)?;
         NonZeroU16::new(index).map(ZoneId)
     }
 
     pub(super) fn name(id: ZoneId) -> &'static str {
-        tz(id).name()
+        &table().zones[usize::from(id.0.get()) - 1].0
+    }
+
+    /// `utc` as a jiff instant, clamped into jiff's ±9999-year range (the
+    /// rules at the far ends are fixed offsets, so the clamp answers with the
+    /// offset the zone has there). A leap second (`nanos >= 1e9`) reads as the
+    /// last nanosecond of its second.
+    fn instant(utc: NaiveDateTime) -> Timestamp {
+        let utc = utc.and_utc();
+        let nanos = utc.timestamp_subsec_nanos().min(999_999_999) as i32;
+        Timestamp::new(utc.timestamp(), nanos).unwrap_or(if utc.timestamp() < 0 {
+            Timestamp::MIN
+        } else {
+            Timestamp::MAX
+        })
     }
 
     pub(super) fn offset_at(id: ZoneId, utc: NaiveDateTime) -> i32 {
-        tz(id)
-            .offset_from_utc_datetime(&utc)
-            .fix()
-            .local_minus_utc()
+        tz(id).to_offset(instant(utc)).seconds()
     }
 
-    fn offset_from(wall: NaiveDateTime, id: ZoneId, hours: i64) -> Option<i32> {
-        let probe = wall.checked_add_signed(TimeDelta::try_hours(hours)?)?;
-        Some(offset_at(id, probe))
+    fn civil(wall: NaiveDateTime) -> Option<civil::DateTime> {
+        use chrono::{Datelike, Timelike};
+        civil::DateTime::new(
+            i16::try_from(wall.year()).ok()?,
+            wall.month() as i8,
+            wall.day() as i8,
+            wall.hour() as i8,
+            wall.minute() as i8,
+            wall.second() as i8,
+            wall.nanosecond().min(999_999_999) as i32,
+        )
+        .ok()
     }
 
     pub(super) fn resolve_local(
@@ -135,13 +184,16 @@ mod imp {
                 fit,
             })
         };
-        match tz(id).offset_from_local_datetime(&wall) {
-            LocalResult::Single(o) => at(o.fix().local_minus_utc(), LocalFit::Exact),
-            LocalResult::Ambiguous(earlier, later) => {
-                let (earlier, later) = (
-                    earlier.fix().local_minus_utc(),
-                    later.fix().local_minus_utc(),
-                );
+        let Some(civil) = civil(wall) else {
+            // Outside jiff's range the zone's rules are a fixed offset; read
+            // the reading with the offset at the clamped end.
+            let offset = offset_at(id, wall);
+            return at(offset, LocalFit::Exact);
+        };
+        match tz(id).to_ambiguous_timestamp(civil).offset() {
+            AmbiguousOffset::Unambiguous { offset } => at(offset.seconds(), LocalFit::Exact),
+            AmbiguousOffset::Fold { before, after } => {
+                let (earlier, later) = (before.seconds(), after.seconds());
                 let offset = if preferred == Some(later) {
                     later
                 } else {
@@ -149,16 +201,13 @@ mod imp {
                 };
                 at(offset, LocalFit::Overlap)
             }
-            LocalResult::None => {
+            AmbiguousOffset::Gap { before, after } => {
                 // A skipped reading: read it with the offset from before the
                 // change, which lands after the change, and show it with the
                 // offset from after (the wall clock moves forward by the gap).
-                // Two days either side clears any clock change that is not
-                // itself within two days of another.
-                let before = offset_from(wall, id, -48)?;
-                let instant = at(before, LocalFit::Gap)?;
+                let instant = at(before.seconds(), LocalFit::Gap)?;
                 Some(ZoneInstant {
-                    offset_secs: offset_at(id, instant.utc),
+                    offset_secs: after.seconds(),
                     ..instant
                 })
             }
@@ -167,7 +216,7 @@ mod imp {
 
     #[cfg(test)]
     pub(super) fn variant_count() -> usize {
-        TZ_VARIANTS.len()
+        table().zones.len()
     }
 }
 
@@ -292,6 +341,42 @@ mod tests {
         let r = apia.resolve_local(wall(2011, 12, 30, 12, 0), None).unwrap();
         assert_eq!((r.fit, r.offset_secs), (LocalFit::Gap, 14 * 3600));
         assert_eq!(r.utc, wall(2011, 12, 30, 22, 0));
+    }
+
+    // The database's own lookup ignores case; names stay exact, as they were
+    // before the database changed, so `[europe/oslo]` is still unknown.
+    #[test]
+    fn zone_names_are_case_sensitive() {
+        assert!(ZoneId::from_name("Europe/Oslo").is_some());
+        assert_eq!(ZoneId::from_name("europe/oslo"), None);
+        assert_eq!(ZoneId::from_name("EUROPE/OSLO"), None);
+    }
+
+    // The database covers years -9999..=9999; past that a zone answers with
+    // the fixed offset at the end of its range instead of failing, and a leap
+    // second reads as the end of its second.
+    #[test]
+    fn readings_outside_the_database_range_still_resolve() {
+        let oslo = zone("Europe/Oslo");
+        // Before 1895 Oslo kept local mean time, +00:53:28.
+        for (year, expected) in [
+            (-20_000, &[3208][..]),
+            (10_000, &[3600, 7200]),
+            (200_000, &[3600, 7200]),
+        ] {
+            let utc = wall(year, 6, 1, 12, 0);
+            let offset = oslo.offset_at(utc);
+            assert!(expected.contains(&offset), "{year}: {offset}");
+            let r = oslo.resolve_local(utc, None).unwrap();
+            assert_eq!(r.offset_secs, offset, "{year}");
+        }
+        let leap = NaiveDate::from_ymd_opt(2016, 12, 31)
+            .unwrap()
+            .and_hms_nano_opt(23, 59, 59, 1_500_000_000)
+            .unwrap();
+        assert_eq!(zone("UTC").offset_at(leap), 0);
+        let r = oslo.resolve_local(leap, None).unwrap();
+        assert_eq!((r.fit, r.offset_secs), (LocalFit::Exact, 3600));
     }
 
     #[test]

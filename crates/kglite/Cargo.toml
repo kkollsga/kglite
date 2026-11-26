@@ -38,11 +38,11 @@ path = "src/bin/bz2_bench.rs"
 required-features = ["parallel-bz2"]
 
 [features]
-# `iana-zones` bundles the IANA time-zone database (chrono-tz) for named-zone
-# datetimes. On by default; the shipped bindings forward it explicitly because
+# `iana-zones` bundles the IANA time-zone database (jiff's bundled tzdb) for
+# named-zone datetimes. On by default; the shipped bindings forward it explicitly because
 # they depend on this crate with `default-features = false`.
 default = ["iana-zones"]
-iana-zones = ["dep:chrono-tz"]
+iana-zones = ["dep:jiff"]
 # Exposes `Session::wal_barrier_count` so a binding's tests can assert that
 # concurrent writers shared log barriers. Enabled only by test builds.
 test-seam = []
@@ -109,8 +109,13 @@ serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
 postcard = { version = "1.1.3", default-features = false, features = ["use-std"] }
 chrono = { version = "0.4.45", features = ["serde"] }
-# Optional (feature `iana-zones`); 0.10 is the range pyo3 0.30 accepts.
-chrono-tz = { version = "0.10", default-features = false, optional = true }
+# Optional (feature `iana-zones`): only its time-zone database and rules, behind
+# `ZoneId` in `datatypes/time_zone.rs`; values stay chrono. No default features:
+# those read the host's zoneinfo, and the bundled tzdb keeps every build's
+# answers identical. The data comes from jiff-tzdb, which tracks new tzdb
+# releases (chrono-tz stopped at 2025b); `cargo update -p jiff-tzdb` refreshes
+# it. 1.0.3 is the version this was tested against, not a proven minimum.
+jiff = { version = "1.0.3", default-features = false, features = ["std", "tzdb-bundle-always"], optional = true }
 # default-features = false sheds geo's default "earcut" + "spade"
 # (triangulation/Voronoi crates — 5 transitive packages incl. a duplicate
 # hashbrown) which no kglite code path calls; "multithreading" is kept
