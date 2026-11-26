@@ -1,10 +1,10 @@
-"""``export_csv`` streams: the footprint of exporting a 1 M-row type is bounded
-by the batch, not by the size of the output.
+"""``export_csv`` streams: the footprint of exporting a 1 M-row type does not grow
+with the size of the output.
 
 The export runs in a child process whose resident size the parent samples, so
 the measurement does not depend on the export releasing the GIL. The CSV
 written is ~95 MB; a writer that held a type's text (the old one built one
-``String`` per type) would add at least that much, while the batch-bounded
+``String`` per type) would add at least that much, while the streaming
 writer adds a few MB. Only Darwin asserts the ceiling (the child's RSS on other
 platforms includes allocator behaviour this test has not been calibrated on).
 
@@ -62,8 +62,8 @@ CHILD = textwrap.dedent(
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="footprint ceiling is calibrated on Darwin")
-def test_export_footprint_is_bounded_by_the_batch(tmp_path):
-    env = dict(os.environ, KGLITE_EXPORT_BATCH_ROWS="1000")
+def test_export_footprint_is_bounded(tmp_path):
+    env = dict(os.environ)
     child = subprocess.Popen(
         [sys.executable, "-c", CHILD, str(tmp_path / "out"), str(ROWS)],
         stdout=subprocess.PIPE,

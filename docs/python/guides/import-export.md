@@ -288,8 +288,7 @@ File layout:
   (`WORKS_IN.Person.csv`).
 - A relationship reaching several target types is routed by a `target_type`
   column.
-- Rows stream through a bounded buffer (`KGLITE_EXPORT_BATCH_ROWS`, default 8192),
-  so the export's memory does not grow with the graph.
+- Rows stream to the files, so the export's memory does not grow with the graph.
 
 Limits:
 

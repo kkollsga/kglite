@@ -12,7 +12,7 @@ Locks in the 0.8.11 / 0.8.12 fixes that make `save → reload` preserve:
 
 **Covered**: Cypher `SET n.prop = X` on disk-backed graphs now
 persists through save + reload (bug F1 fix — node_mut_cache
-clone-apply-replace flush in `DiskGraph::clear_arenas`). Asserted by
+clone-apply-replace flush in `DiskGraph::flush_mut_caches`). Asserted by
 `test_cypher_set_persists_through_save_reload`.
 
 **Covered**: DETACH DELETE on disk preserves surviving nodes' full
@@ -401,10 +401,10 @@ def test_cypher_set_persists_through_save_reload(tmp_path):
     """Cypher SET on disk-backed graphs persists through save + reload.
 
     Locked in by the `node_mut_cache` clone-apply-replace flush in
-    `DiskGraph::clear_arenas` + the DirGraph resync in
+    `DiskGraph::flush_mut_caches` + the DirGraph resync in
     `save_disk` (bug F1 fix). Previously this path was a no-op for
-    persistence across 0.8.10 and 0.8.11; the mutation landed in an
-    arena copy that `clear_arenas` dropped."""
+    persistence across 0.8.10 and 0.8.11; the mutation landed in a
+    materialized copy that was then dropped."""
     graph_path = str(tmp_path / "g_disk")
     kg = KnowledgeGraph(storage="disk", path=graph_path)
     kg.add_nodes(
@@ -456,10 +456,10 @@ def test_cypher_set_new_property_persists_through_save_reload(mode, tmp_path):
       path) ignores. Subsequent reads silently returned the pre-SET
       values until the next `&mut self` op (e.g. save) drained the
       cache. Save+reload happened to recover the data because
-      `clear_arenas` runs as part of save, but in-session reads went
+      the cache flush runs as part of save, but in-session reads went
       stale. Fixed by flushing pending writes after every mutation
       clause via `GraphWrite::flush_pending_writes`, which dispatches
-      to `clear_arenas` on the disk backend.
+      to `flush_mut_caches` on the disk backend.
     """
     graph_path = str(tmp_path / f"g_{mode}")
     save_path = str(tmp_path / f"saved_{mode}") if mode != "disk" else graph_path
@@ -524,9 +524,9 @@ def test_disk_parallel_projection_node_weight_is_race_free(tmp_path):
     or use-after-free segfaults (Bug B in the same report — `BUG:
     InternedKey N not found in StringInterner` on stderr).
 
-    Fix: `node_arena` is now `Mutex<Vec<Box<NodeData>>>`, mirroring
-    the long-standing `edge_arena` pattern. The Box gives stable
-    heap pointers across Vec growth and the Mutex serialises pushes.
+    Fixed then by a mutex-guarded arena of boxed records. Disk reads
+    now return an owned record per call, so no shared buffer is left
+    for concurrent projections to race on.
 
     This test creates a disk graph with > 256 polygon-bearing nodes
     (the Rayon threshold) and runs a `centroid` projection 8 times,

@@ -73,8 +73,7 @@ The blueprint points at the manifest. `from_blueprint` therefore restores:
 - id and title kinds
 - every property's type, keeping the empty string distinct from null
 
-Rows stream through a bounded buffer (`KGLITE_EXPORT_BATCH_ROWS`, default 8192), so
-memory does not grow with the graph. Follow the paths in the blueprint rather than
+Rows stream to the files, so memory does not grow with the graph. Follow the paths in the blueprint rather than
 building file names from type names.
 
 ## RDF 1.2

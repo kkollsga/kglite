@@ -11,6 +11,11 @@ before upgrading.
 
 ### Changed
 
+- **Breaking (Rust API): node and relationship reads return a `RecordRef`.** `GraphRead::node_weight`, `edge_weight` and `edge_weights`, `DirGraph::get_node` and `GraphEdgeRef::weight` now return `kglite::api::RecordRef`, which derefs to the `NodeData` or `EdgeData`. It borrows the record on memory and mapped graphs and owns a copy on disk graphs, so a disk record stays valid for as long as you hold it. Method calls work unchanged through deref; a function that takes `&NodeData` needs `&record`. The Python, Node, C, Bolt and MCP interfaces are not affected.
+  - Removed with it: `DirGraph::begin_read_pass`, `DiskQueryGuard`, `GraphRead::reset_arenas`, the `Index<NodeIndex>`/`Index<EdgeIndex>` impls on `GraphBackend` and `DiskGraph`, and petgraph's `EdgeRef` impl for `GraphEdgeRef`. A disk read no longer needs a read-pass guard.
+  - `NodeView` is no longer `Copy`: pass it by reference.
+- **`KGLITE_EXPORT_BATCH_ROWS` is gone.** It only paced internal bookkeeping in the disk-graph CSV and RDF exports. Both exports still stream, and their memory still does not grow with the graph.
+
 - **Named time zones use the 2026f IANA time-zone database.** The previous database (via chrono-tz) stopped at 2025b and will get no more updates. Zone names, case sensitivity and the stored form of a zoned value are unchanged.
   - A zone whose rules changed after 2025b shows its new offset. A stored value keeps its instant and recomputes the offset from its zone name.
   - A reading past year 9999 (or before -9999) takes the zone's offset at the nearest end of the database's range.

@@ -1,16 +1,16 @@
-"""Release-mode coverage for disk query-guard overhead.
+"""Release-mode coverage for per-read overhead on the disk backend.
 
-The disk backend protects arena-backed materializations with a query guard.
-These cells cover six shapes where redundant or nested guards are
-performance-sensitive regression targets:
+Disk reads build each node or relationship record on demand. These cells
+cover six shapes where a fixed per-read cost is a performance-sensitive
+regression target:
 
-* ``degrees()`` performs guarded node-info and adjacency reads for every node;
+* ``degrees()`` performs node-info and adjacency reads for every node;
 * an in-memory ``degrees()`` control catches backend-neutral regressions;
-* same-node shortest-path length makes the fixed guard cost large relative to
-  the algorithm work; and
+* same-node shortest-path length makes the fixed per-read cost large relative
+  to the algorithm work; and
 * fluent ``update()`` sends all selected nodes through the bulk property
-  updater, whose validation historically performed a guarded materialization
-  per node, with identical in-memory and mapped updates as comparison controls.
+  updater, whose validation historically materialized a record per node, with
+  identical in-memory and mapped updates as comparison controls.
 
 Run after building the extension in release mode::
 

@@ -7856,8 +7856,8 @@ class KnowledgeGraph:
         labels, parent types, and the id and title kinds. Nodes sharing an id
         (valid-time versions) get a ``;<node index>`` IRI suffix on all but the
         one the id index answers for. No prefixes are declared. The file is
-        written statement by statement, so memory is bounded by the batch
-        (``KGLITE_EXPORT_BATCH_ROWS``, default 8192).
+        written statement by statement, so memory does not grow with the
+        graph.
 
         Not restored: a language-map property (an ordinary map: written as
         ``kg:json``), a secondary label carried by only some nodes of a type,
@@ -7945,8 +7945,8 @@ class KnowledgeGraph:
         lists, maps, durations, points), with the empty string distinct from
         null. A relationship leaving several source types is written as one
         ``<REL>.<Source>.csv`` per source; one reaching several target types is
-        routed by the ``target_type`` column. Rows stream through a bounded
-        buffer (``KGLITE_EXPORT_BATCH_ROWS``, default 8192). Not restored: an
+        routed by the ``target_type`` column. Rows stream to the files, so
+        memory does not grow with the graph. Not restored: an
         edge attached to an earlier version of a node whose id repeats (it
         re-attaches to the latest), a point on a relationship property (text), a
         secondary label carried by only some nodes of a type, and a property

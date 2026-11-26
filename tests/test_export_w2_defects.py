@@ -218,8 +218,8 @@ def test_rdf_keeps_mixed_kind_ids_apart(tmp_path, fmt):
     assert len(ids(back)) == 3
 
 
-def _disk_graph(tmp_path):
-    g = KnowledgeGraph(storage="disk", path=str(tmp_path / "disk"))
+def _people_graph(tmp_path, storage):
+    g = KnowledgeGraph(storage=storage, path=str(tmp_path / storage)) if storage == "disk" else KnowledgeGraph()
     for n in range(7):
         g.cypher(f"CREATE (:Person {{id: {n}, title: 'p{n}', age: {20 + n}, hired: date('2020-01-0{n + 1}')}})")
     g.cypher("CREATE (:Department {id: 'eng', title: 'Engineering'})")
@@ -233,22 +233,19 @@ def _tree(root):
     return {str(p.relative_to(root)): p.read_bytes() for p in sorted(pathlib.Path(root).rglob("*")) if p.is_file()}
 
 
-def test_csv_export_of_a_disk_graph_is_batch_size_independent(tmp_path, monkeypatch):
-    g = _disk_graph(tmp_path)
-    g.export_csv(str(tmp_path / "default"))
-    monkeypatch.setenv("KGLITE_EXPORT_BATCH_ROWS", "1")
-    g.export_csv(str(tmp_path / "one"))
-    assert _tree(tmp_path / "one") == _tree(tmp_path / "default")
-    assert len(_tree(tmp_path / "one")) > 3
+# A disk graph builds each record it reads on demand; its export must match the
+# in-memory graph's byte for byte.
+def test_csv_export_of_a_disk_graph_matches_memory(tmp_path):
+    _people_graph(tmp_path, "disk").export_csv(str(tmp_path / "from_disk"))
+    _people_graph(tmp_path, "default").export_csv(str(tmp_path / "from_memory"))
+    assert _tree(tmp_path / "from_disk") == _tree(tmp_path / "from_memory")
+    assert len(_tree(tmp_path / "from_disk")) > 3
 
 
 @pytest.mark.parametrize("fmt", ["nq", "trig"])
-def test_rdf_export_of_a_disk_graph_is_batch_size_independent(tmp_path, monkeypatch, fmt):
-    g = _disk_graph(tmp_path)
-    g.export_rdf(str(tmp_path / f"default.{fmt}"), format=fmt)
-    monkeypatch.setenv("KGLITE_EXPORT_BATCH_ROWS", "1")
-    g.export_rdf(str(tmp_path / f"one.{fmt}"), format=fmt)
-    default = (tmp_path / f"default.{fmt}").read_text(encoding="utf-8")
-    one = (tmp_path / f"one.{fmt}").read_text(encoding="utf-8")
-    assert one == default
-    assert default.count("WORKS_IN") >= 7
+def test_rdf_export_of_a_disk_graph_matches_memory(tmp_path, fmt):
+    _people_graph(tmp_path, "disk").export_rdf(str(tmp_path / f"disk.{fmt}"), format=fmt)
+    _people_graph(tmp_path, "default").export_rdf(str(tmp_path / f"memory.{fmt}"), format=fmt)
+    disk = (tmp_path / f"disk.{fmt}").read_text(encoding="utf-8")
+    assert disk == (tmp_path / f"memory.{fmt}").read_text(encoding="utf-8")
+    assert disk.count("WORKS_IN") >= 7

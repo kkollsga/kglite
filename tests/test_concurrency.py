@@ -138,7 +138,7 @@ class TestConcurrentReads:
             assert got == baseline, f"worker {i} diverged from sequential baseline"
 
     def test_concurrent_disk_reads_keep_materialized_nodes_alive(self, tmp_path):
-        """Overlapping disk queries must not reclaim another query's node arena."""
+        """Overlapping disk queries each keep the node records they read."""
         from concurrent.futures import ThreadPoolExecutor
 
         graph = kglite.KnowledgeGraph(storage="disk", path=str(tmp_path / "concurrent-disk"))
