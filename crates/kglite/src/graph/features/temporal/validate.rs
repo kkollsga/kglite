@@ -339,11 +339,11 @@ impl Seen {
 
 /// [`node_bound`] read through a view the caller already resolved, so a
 /// node's two bounds share one store resolution.
-pub(crate) fn view_bound<'a>(
-    view: &NodeView<'a>,
+pub(crate) fn view_bound<'v>(
+    view: &'v NodeView<'_>,
     property: &str,
     key: InternedKey,
-) -> Cow<'a, Value> {
+) -> Cow<'v, Value> {
     match property {
         "id" => view.id(),
         "title" => view.title(),

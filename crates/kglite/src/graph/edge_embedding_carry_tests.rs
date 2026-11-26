@@ -55,6 +55,7 @@ fn edge_by_uid(graph: &DirGraph, uid: &str) -> EdgeIndex {
             graph
                 .graph
                 .edge_weight(*edge)
+                .as_deref()
                 .and_then(|w| w.get_property("uid"))
                 == Some(&Value::String(uid.into()))
         })

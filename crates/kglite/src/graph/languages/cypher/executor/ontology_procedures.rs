@@ -168,13 +168,14 @@ fn edge_property_findings(
         } else {
             ""
         };
+        let weight = er.weight();
         let verdict = predicates::edge_property_verdict(
             &graph.ontology,
             decl,
             check.name(),
             source_type,
             has_secondary,
-            |p| er.weight().get_property(p),
+            |p| weight.get_property(p),
         );
         if verdict.failures.is_empty() {
             continue;

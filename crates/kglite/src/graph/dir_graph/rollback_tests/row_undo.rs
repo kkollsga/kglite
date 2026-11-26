@@ -68,7 +68,12 @@ fn a_rolled_back_create_restores_the_row_count_and_the_next_row_id() {
         .node_indices()
         .find(|i| graph.graph.get_node_id(*i) == Some(Value::Int64(102)))
         .expect("the new node");
-    let row = match graph.graph.node_weight(idx).map(|n| &n.properties) {
+    let row = match graph
+        .graph
+        .node_weight(idx)
+        .as_deref()
+        .map(|n| &n.properties)
+    {
         Some(PropertyStorage::Columnar(row)) => row.row_id(),
         other => panic!("expected a columnar row, got {other:?}"),
     };
@@ -208,7 +213,12 @@ fn a_title_write_goes_through_the_master_and_rolls_back() {
         .node_indices()
         .find(|i| graph.graph.get_node_id(*i) == Some(Value::Int64(1)))
         .expect("the node");
-    let row = match graph.graph.node_weight(idx).map(|n| &n.properties) {
+    let row = match graph
+        .graph
+        .node_weight(idx)
+        .as_deref()
+        .map(|n| &n.properties)
+    {
         Some(PropertyStorage::Columnar(row)) => row.row_id(),
         other => panic!("expected a columnar row, got {other:?}"),
     };
@@ -219,7 +229,11 @@ fn a_title_write_goes_through_the_master_and_rolls_back() {
     );
     assert!(
         matches!(
-            graph.graph.node_weight(idx).map(|n| n.title_ref()),
+            graph
+                .graph
+                .node_weight(idx)
+                .as_deref()
+                .map(|n| n.title_ref()),
             Some(Value::Null)
         ),
         "and the inline field must stay on its sentinel — a second copy is what \

@@ -113,30 +113,6 @@ pub(crate) enum PropertyStorage {
     Columnar(ColumnarRow),
 }
 
-/// Zero-allocation iterator over property key strings.
-/// Replaces the prior `Box<dyn Iterator>` returned by `PropertyStorage::keys`,
-/// saving one heap allocation per call (keys/iter runs in the hot path of
-/// `keys(n)` and `RETURN n {.*}` per row).
-pub(crate) enum PropertyKeyIter<'a> {
-    Map {
-        inner: std::collections::hash_map::Keys<'a, InternedKey, Value>,
-        interner: &'a StringInterner,
-    },
-    Columnar(std::vec::IntoIter<&'a str>),
-}
-
-impl<'a> Iterator for PropertyKeyIter<'a> {
-    type Item = &'a str;
-
-    #[inline]
-    fn next(&mut self) -> Option<&'a str> {
-        match self {
-            PropertyKeyIter::Map { inner, interner } => inner.next().map(|k| interner.resolve(*k)),
-            PropertyKeyIter::Columnar(iter) => iter.next(),
-        }
-    }
-}
-
 impl PropertyStorage {
     /// Look up a property value by interned key. Returns None if absent or Value::Null.
     ///
@@ -288,19 +264,6 @@ impl PropertyStorage {
                 // Already columnar — nothing to drain
                 Vec::new()
             }
-        }
-    }
-
-    pub(in crate::graph::storage) fn keys<'a>(
-        &'a self,
-        interner: &'a StringInterner,
-    ) -> PropertyKeyIter<'a> {
-        match self {
-            PropertyStorage::Map(map) => PropertyKeyIter::Map {
-                inner: map.keys(),
-                interner,
-            },
-            PropertyStorage::Columnar(_) => PropertyKeyIter::Columnar(Vec::new().into_iter()),
         }
     }
 }

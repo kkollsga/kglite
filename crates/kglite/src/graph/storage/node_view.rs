@@ -32,26 +32,24 @@ use std::collections::HashMap;
 use crate::datatypes::Value;
 use crate::graph::schema::{InternedKey, NodeData, NodeInfo, PropertyStorage, StringInterner};
 use crate::graph::storage::column_store::ColumnStore;
+use crate::graph::storage::RecordRef;
 use crate::graph::storage::StrField;
 
-/// A borrowed, backend-resolved read handle for one node.
+/// A backend-resolved read handle for one node.
 ///
-/// Cheap to copy (two words + a row id). Obtained from
+/// Obtained from
 /// [`GraphRead::node_view`](crate::graph::storage::GraphRead::node_view).
 ///
 /// # Lifetime discipline
 ///
-/// A `NodeView` borrows the storage backend. On the disk backend the borrowed
-/// `NodeData` lives in the per-query arena, so a view must not outlive the
-/// read-pass guard, and must never be held across a `Python::attach` boundary
-/// or a GIL release — resolve to owned [`Value`]s at such a boundary (that is
-/// what [`NodeView::properties_cloned`] and [`NodeView::to_node_info`] are
-/// for). Embedders acquire the guard from the public
-/// [`DirGraph::begin_read_pass`](crate::graph::dir_graph::DirGraph::begin_read_pass);
-/// the crate-internal spelling is `begin_query()`.
-#[derive(Clone, Copy)]
+/// A `NodeView` owns or borrows its [`NodeData`] through a [`RecordRef`]
+/// (borrowed on the heap backends, materialized for the view on disk), and
+/// borrows the backend's column store. Values read through it borrow the
+/// view. It must not be held across a `Python::attach` boundary or a GIL
+/// release — resolve to owned [`Value`]s at such a boundary (that is what
+/// [`NodeView::properties_cloned`] and [`NodeView::to_node_info`] are for).
 pub struct NodeView<'a> {
-    data: &'a NodeData,
+    data: RecordRef<'a, NodeData>,
     /// The resolved column store for this node's row, when its properties are
     /// columnar. Resolving once per view rather than once per read is the
     /// point of the type.
@@ -67,7 +65,10 @@ impl<'a> NodeView<'a> {
     /// A `None` store on a columnar node means the backend has no store for
     /// that type, which reads as an empty property set.
     #[inline]
-    pub(crate) fn new(data: &'a NodeData, store: Option<(&'a ColumnStore, u32)>) -> Self {
+    pub(crate) fn new(
+        data: RecordRef<'a, NodeData>,
+        store: Option<(&'a ColumnStore, u32)>,
+    ) -> Self {
         NodeView { data, store }
     }
 
@@ -77,8 +78,8 @@ impl<'a> NodeView<'a> {
     /// equality, serialization) rather than a property read. **Not** for
     /// property reads — those must go through this type's methods.
     #[inline]
-    pub fn data(&self) -> &'a NodeData {
-        self.data
+    pub fn data(&self) -> &NodeData {
+        &self.data
     }
 
     /// The column store holding this node's row, and the row; `None` for a
@@ -111,7 +112,7 @@ impl<'a> NodeView<'a> {
     /// The node's id (resolving the columnar `Null` sentinel through the
     /// column store).
     #[inline]
-    pub fn id(&self) -> Cow<'a, Value> {
+    pub fn id(&self) -> Cow<'_, Value> {
         if matches!(self.data.id_ref(), Value::Null) {
             if let Some((store, row_id)) = self.store {
                 if let Some(v) = store.get_id(row_id) {
@@ -125,7 +126,7 @@ impl<'a> NodeView<'a> {
     /// The node's title (resolving the columnar `Null` sentinel through the
     /// column store).
     #[inline]
-    pub fn title(&self) -> Cow<'a, Value> {
+    pub fn title(&self) -> Cow<'_, Value> {
         if matches!(self.data.title_ref(), Value::Null) {
             if let Some((store, row_id)) = self.store {
                 if let Some(v) = store.get_title(row_id) {
@@ -145,10 +146,27 @@ impl<'a> NodeView<'a> {
     /// the length of `n.vec`. The borrow is pinned by
     /// `tests::an_in_memory_list_property_is_borrowed_not_cloned`.
     #[inline]
-    pub fn get(&self, key: InternedKey) -> Option<Cow<'a, Value>> {
+    pub fn get(&self, key: InternedKey) -> Option<Cow<'_, Value>> {
         match self.store {
             Some((store, row_id)) => store.get_cow(row_id, key),
             None => self.data.properties.get(key),
+        }
+    }
+
+    /// [`NodeView::get`] consuming the view, so the value may borrow the
+    /// backend's column store for `'a` rather than the view. A record the view
+    /// owns (disk) cannot lend its own `Map` values, so those come back owned.
+    #[inline]
+    pub fn into_property(self, key: InternedKey) -> Option<Cow<'a, Value>> {
+        match self.store {
+            Some((store, row_id)) => store.get_cow(row_id, key),
+            None => match self.data {
+                RecordRef::Borrowed(data) => data.properties.get(key),
+                RecordRef::Owned(data) => data
+                    .properties
+                    .get(key)
+                    .map(|value| Cow::Owned(value.into_owned())),
+            },
         }
     }
 
@@ -173,7 +191,7 @@ impl<'a> NodeView<'a> {
 
     /// Read a property by name (excludes `id` / `title`).
     #[inline]
-    pub fn get_property(&self, key: &str) -> Option<Cow<'a, Value>> {
+    pub fn get_property(&self, key: &str) -> Option<Cow<'_, Value>> {
         self.get(InternedKey::from_str(key))
     }
 
@@ -186,7 +204,7 @@ impl<'a> NodeView<'a> {
     /// Read a *field* by name — `id` and `title` resolve to the node's
     /// identity columns, anything else to a property.
     #[inline]
-    pub fn get_field_ref(&self, field: &str) -> Option<Cow<'a, Value>> {
+    pub fn get_field_ref(&self, field: &str) -> Option<Cow<'_, Value>> {
         match field {
             "id" => Some(self.id()),
             "title" => Some(self.title()),
@@ -214,7 +232,7 @@ impl<'a> NodeView<'a> {
         type_str: &str,
         field: &str,
         key: InternedKey,
-    ) -> Option<Cow<'a, Value>> {
+    ) -> Option<Cow<'_, Value>> {
         if field == "id" {
             return Some(self.id());
         }
@@ -242,12 +260,12 @@ impl<'a> NodeView<'a> {
     /// alias. Any divergence here would make a `WHERE` clause see a different
     /// value than the planner's statistics do.
     #[inline]
-    pub fn resolved_field_str(
-        &self,
-        type_str: &'a str,
+    pub fn resolved_field_str<'s>(
+        &'s self,
+        type_str: &'s str,
         field: &str,
         key: InternedKey,
-    ) -> StrField<'a> {
+    ) -> StrField<'s> {
         if field == "id" {
             return self.id_field();
         }
@@ -269,7 +287,7 @@ impl<'a> NodeView<'a> {
 
     /// Borrowed string read of a property. Mirrors [`Self::get`].
     #[inline]
-    pub fn str_field(&self, key: InternedKey) -> StrField<'a> {
+    pub fn str_field(&self, key: InternedKey) -> StrField<'_> {
         match self.store {
             Some((store, row_id)) => store.str_field(row_id, key),
             None => self.data.properties.str_field(key),
@@ -278,7 +296,7 @@ impl<'a> NodeView<'a> {
 
     /// Borrowed string read of the node's title. Mirrors [`Self::title`].
     #[inline]
-    pub fn title_field(&self) -> StrField<'a> {
+    pub fn title_field(&self) -> StrField<'_> {
         Self::identity_str(
             self.data.title_ref(),
             |store, row_id| store.title_field(row_id),
@@ -288,7 +306,7 @@ impl<'a> NodeView<'a> {
 
     /// Borrowed string read of the node's id. Mirrors [`Self::id`].
     #[inline]
-    pub fn id_field(&self) -> StrField<'a> {
+    pub fn id_field(&self) -> StrField<'_> {
         Self::identity_str(
             self.data.id_ref(),
             |store, row_id| store.id_field(row_id),
@@ -299,11 +317,11 @@ impl<'a> NodeView<'a> {
     /// Shared shape of the two identity reads: the inline field wins unless it
     /// carries the columnar `Null` sentinel, in which case the store answers.
     #[inline]
-    fn identity_str(
-        inline: &'a Value,
-        from_store: impl FnOnce(&'a ColumnStore, u32) -> StrField<'a>,
-        store: Option<(&'a ColumnStore, u32)>,
-    ) -> StrField<'a> {
+    fn identity_str<'s>(
+        inline: &'s Value,
+        from_store: impl FnOnce(&'s ColumnStore, u32) -> StrField<'s>,
+        store: Option<(&'s ColumnStore, u32)>,
+    ) -> StrField<'s> {
         match inline {
             Value::String(s) => StrField::Str(Cow::Borrowed(s.as_str())),
             Value::Null => match store {
@@ -413,14 +431,17 @@ impl<'a> NodeView<'a> {
     /// interner cannot resolve; the `Map` arm goes through
     /// `PropertyStorage::keys`, which resolves unconditionally and panics on an
     /// unknown key.
-    pub fn property_keys(&self, interner: &'a StringInterner) -> Vec<&'a str> {
+    pub fn property_keys<'i>(&self, interner: &'i StringInterner) -> Vec<&'i str> {
         match self.store {
             Some((store, row_id)) => store
                 .row_property_keys(row_id)
                 .into_iter()
                 .filter_map(|ik| interner.try_resolve(ik))
                 .collect(),
-            None => self.data.properties.keys(interner).collect(),
+            None => match &self.data.properties {
+                PropertyStorage::Map(map) => map.keys().map(|k| interner.resolve(*k)).collect(),
+                PropertyStorage::Columnar(_) => Vec::new(),
+            },
         }
     }
 
@@ -516,7 +537,7 @@ mod tests {
             node_type: type_key,
             properties: crate::graph::schema::PropertyStorage::Columnar(ColumnarRow::new(row_id)),
         };
-        let view = NodeView::new(&data, Some((&store, row_id)));
+        let view = NodeView::new(RecordRef::Borrowed(&data), Some((&store, row_id)));
 
         let read = view.get(key).expect("the list property must resolve");
         assert!(

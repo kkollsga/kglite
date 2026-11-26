@@ -132,7 +132,7 @@ impl<'g> CypherExecutor<'g> {
 
             // WHERE filter; an evaluation error fails the query.
             if let Some(pred) = ctx.compiled_where {
-                if !pred.keeps_row(self, runtime, node, &eval_row)? {
+                if !pred.keeps_row(self, runtime, node.as_ref(), &eval_row)? {
                     continue;
                 }
             }
@@ -143,7 +143,7 @@ impl<'g> CypherExecutor<'g> {
             // genuine error (missing parameter, overflow, …), never a group.
             key_values.clear();
             for expr in ctx.compiled_group {
-                key_values.push(expr.eval(self, runtime, node, &eval_row)?);
+                key_values.push(expr.eval(self, runtime, node.as_ref(), &eval_row)?);
             }
 
             // With no group keys there is exactly one group: skip the
@@ -176,12 +176,12 @@ impl<'g> CypherExecutor<'g> {
                     // count(*) / count(<bound var>) marker — always counted.
                     None => acc.absorb(ai, &Value::Boolean(true), need),
                     Some(expr) => {
-                        if let Some(cell) = expr.raw_numeric_cell(runtime, node) {
+                        if let Some(cell) = expr.raw_numeric_cell(runtime, node.as_ref()) {
                             if acc.absorb_cell(ai, cell, need) {
                                 continue;
                             }
                         }
-                        let val = expr.eval(self, runtime, node, &eval_row)?;
+                        let val = expr.eval(self, runtime, node.as_ref(), &eval_row)?;
                         acc.absorb(ai, &val, need);
                     }
                 }

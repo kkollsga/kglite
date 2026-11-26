@@ -93,7 +93,7 @@ impl PropRoute {
     /// The owned read — byte for byte what `resolve_node_property` returns for
     /// this name on a non-spatial graph.
     #[inline]
-    fn read(self, node: NodeView<'_>, type_str: &str) -> Value {
+    fn read(self, node: &NodeView<'_>, type_str: &str) -> Value {
         match self {
             PropRoute::Id => node.id().into_owned(),
             PropRoute::Title => node.title().into_owned(),
@@ -110,7 +110,7 @@ impl PropRoute {
     /// The borrowed read — [`NodeView::resolved_field_str`]'s resolution order,
     /// with the name tests already decided.
     #[inline]
-    fn read_str<'v>(self, node: NodeView<'v>, type_str: &'v str) -> StrField<'v> {
+    fn read_str<'v>(self, node: &'v NodeView<'_>, type_str: &'v str) -> StrField<'v> {
         match self {
             PropRoute::Id => node.id_field(),
             PropRoute::Title => node.title_field(),
@@ -228,7 +228,7 @@ impl<'g> ScanRuntime<'g> {
     /// typed timestamp column and the node has a value there; `None`
     /// otherwise, and the caller reads the value through [`Self::read`].
     #[inline]
-    pub(super) fn timestamp_micros(&self, node: Option<NodeView<'_>>, slot: usize) -> Option<i64> {
+    pub(super) fn timestamp_micros(&self, node: Option<&NodeView<'_>>, slot: usize) -> Option<i64> {
         match self.routes[slot] {
             PropRoute::Stored(key) => node?.timestamp_micros(key),
             _ => None,
@@ -240,13 +240,13 @@ impl<'g> ScanRuntime<'g> {
     /// [`Self::read`]" — NULL, a non-numeric column and a non-columnar node all
     /// land there, so the answer never differs from the owned read.
     #[inline]
-    fn numeric_cell(&self, node: Option<NodeView<'_>>, slot: usize) -> Option<NumericCell> {
+    fn numeric_cell(&self, node: Option<&NodeView<'_>>, slot: usize) -> Option<NumericCell> {
         let (_, row_id) = node?.column_row()?;
         self.cells.get(slot)?.as_ref()?.value(row_id)
     }
 
     #[inline]
-    fn read(&self, node: Option<NodeView<'_>>, slot: usize) -> Value {
+    fn read(&self, node: Option<&NodeView<'_>>, slot: usize) -> Value {
         match node {
             Some(node) => self.routes[slot].read(node, self.type_str),
             None => Value::Null,
@@ -660,7 +660,7 @@ impl ScanExpr<'_> {
     pub(super) fn raw_numeric_cell(
         &self,
         runtime: &ScanRuntime<'_>,
-        node: Option<NodeView<'_>>,
+        node: Option<&NodeView<'_>>,
     ) -> Option<NumericCell> {
         match self {
             ScanExpr::Prop(slot) => runtime.numeric_cell(node, *slot),
@@ -672,7 +672,7 @@ impl ScanExpr<'_> {
         &self,
         executor: &CypherExecutor<'_>,
         runtime: &ScanRuntime<'_>,
-        node: Option<NodeView<'_>>,
+        node: Option<&NodeView<'_>>,
         row: &ResultRow,
     ) -> Result<Value, String> {
         use crate::graph::core::value_operations as ops;
@@ -706,7 +706,7 @@ impl ScanPred<'_> {
         &self,
         executor: &CypherExecutor<'_>,
         runtime: &ScanRuntime<'_>,
-        node: Option<NodeView<'_>>,
+        node: Option<&NodeView<'_>>,
         row: &ResultRow,
     ) -> Result<Option<bool>, String> {
         match self {
@@ -785,7 +785,7 @@ impl ScanPred<'_> {
         &self,
         executor: &CypherExecutor<'_>,
         runtime: &ScanRuntime<'_>,
-        node: Option<NodeView<'_>>,
+        node: Option<&NodeView<'_>>,
         row: &ResultRow,
     ) -> Result<bool, String> {
         Ok(self.eval(executor, runtime, node, row)? == Some(true))
@@ -796,7 +796,7 @@ impl ScanPred<'_> {
     #[inline]
     fn eval_str_cmp(
         runtime: &ScanRuntime<'_>,
-        node: Option<NodeView<'_>>,
+        node: Option<&NodeView<'_>>,
         slot: usize,
         op: StrOp,
         needle: &str,

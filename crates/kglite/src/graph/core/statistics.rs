@@ -92,14 +92,14 @@ pub fn calculate_grouped_property_stats(
         let Some(node) = graph.node_view(index) else {
             continue;
         };
-        let key = match resolved_stat_field(graph, node, group_by).as_deref() {
+        let key = match resolved_stat_field(graph, &node, group_by).as_deref() {
             Some(Value::String(value)) => value.clone(),
             Some(Value::Int64(value)) => value.to_string(),
             Some(value) => format!("{:?}", value),
             None => "null".to_string(),
         };
         let values = grouped_values.entry(key).or_default();
-        let numeric = resolved_stat_field(graph, node, property)
+        let numeric = resolved_stat_field(graph, &node, property)
             .as_deref()
             .and_then(|value| match value {
                 Value::Int64(value) => Some(*value as f64),
@@ -246,7 +246,7 @@ fn calculate_stats_for_nodes(
 
     for &node_idx in nodes {
         if let Some(node) = graph.node_view(node_idx) {
-            if let Some(value) = resolved_stat_field(graph, node, property) {
+            if let Some(value) = resolved_stat_field(graph, &node, property) {
                 match &*value {
                     Value::Null => continue,
                     Value::String(s) if s.is_empty() => continue,
@@ -335,7 +335,7 @@ fn try_convert_to_float(value: &Value) -> Option<f64> {
 /// any spelling) reported `valid_count = 0` and no numeric stats.
 fn resolved_stat_field<'a>(
     graph: &'a DirGraph,
-    node: crate::graph::storage::NodeView<'a>,
+    node: &'a crate::graph::storage::NodeView<'_>,
     property: &str,
 ) -> Option<Cow<'a, Value>> {
     let node_type = node.node_type_str(&graph.interner);

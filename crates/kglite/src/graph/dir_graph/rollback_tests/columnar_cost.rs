@@ -369,7 +369,11 @@ fn no_node_holds_a_column_store_handle() {
         .node_indices()
         .filter(|idx| {
             matches!(
-                graph.graph.node_weight(*idx).map(|n| &n.properties),
+                graph
+                    .graph
+                    .node_weight(*idx)
+                    .as_deref()
+                    .map(|n| &n.properties),
                 Some(PropertyStorage::Columnar(_))
             )
         })

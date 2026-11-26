@@ -192,15 +192,13 @@ fn an_unreached_ambiguous_relationship_type_does_not_refuse_node_retrieval() {
 }
 
 /// The mask walk and the slice walk read each relationship's type and bounds
-/// without materialising it: on Disk, `weight()` parks an owned copy of the
-/// relationship's properties in the query arena until the walk's guard drops,
-/// so a walk over every relationship held one record per relationship at once.
-/// Under an outer guard (which keeps whatever an inner query parks), the mask
-/// build must park none, and the slice one record per kept relationship for
-/// its property count plus one for the induced copy — never one per walked
-/// relationship.
+/// without materialising it: on Disk, `weight()` builds an owned copy of the
+/// relationship's properties, so a walk that called it per relationship would
+/// build one record for every relationship it walked. The mask build must
+/// build none, and the slice one per kept relationship for its property count
+/// plus one for the induced copy — never one per walked relationship.
 #[test]
-fn the_disk_mask_and_slice_walks_park_no_unkept_relationship() {
+fn the_disk_mask_and_slice_walks_materialize_no_unkept_relationship() {
     const WELLS: usize = 2_000;
     let dir = tempfile::tempdir().unwrap();
     let mut g = new_dir_graph_in_mode(StorageMode::Disk, Some(dir.path())).expect("graph");
@@ -226,13 +224,13 @@ fn the_disk_mask_and_slice_walks_park_no_unkept_relationship() {
     assert_eq!(g.graph.edge_count(), WELLS);
 
     let disk = g.graph.as_disk().expect("disk backend");
-    let _outer = g.graph.begin_query();
+    disk.reset_materialization_counts();
     let (_, filter) = instant_filter(&g, at("2010-06-01")).unwrap();
     let filter = filter.expect("the declarations hide the ended relationships");
     assert_eq!(
-        disk.edge_arena_len(),
+        disk.edge_materializations(),
         0,
-        "the mask walk over {WELLS} relationships parked relationship records"
+        "the mask walk over {WELLS} relationships built relationship records"
     );
 
     let slice = slice_at(
@@ -251,8 +249,8 @@ fn the_disk_mask_and_slice_walks_park_no_unkept_relationship() {
         "non-vacuity: the slice keeps the running ones"
     );
     assert!(
-        disk.edge_arena_len() <= 2 * kept,
-        "the slice walk parked {} relationship records for {kept} kept relationships",
-        disk.edge_arena_len()
+        disk.edge_materializations() <= 2 * kept as u64,
+        "the slice walk built {} relationship records for {kept} kept relationships",
+        disk.edge_materializations()
     );
 }

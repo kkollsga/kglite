@@ -1559,8 +1559,8 @@ impl DirGraph {
     /// * **memory / mapped** — the inline fields are the `Value::Null`
     ///   sentinel. Every ingest path is columnar, so the node's identity
     ///   lives in its type's `ColumnStore`, not on the record.
-    /// * **disk** — the arena copy is materialised with the real `id`/`title`
-    ///   before it is handed out, so the same call answers with real values.
+    /// * **disk** — the record is materialised with the real `id`/`title`
+    ///   for the returned handle, so the same call answers with real values.
     ///
     /// So use this to ask *whether* a node exists at `index`, to reach its
     /// `node_type`, or to walk topology. For any **value** read — id, title or
@@ -1570,7 +1570,10 @@ impl DirGraph {
     ///
     /// [`GraphRead::node_view`]: crate::graph::storage::GraphRead::node_view
     /// [`GraphRead::get_node_id`]: crate::graph::storage::GraphRead::get_node_id
-    pub fn get_node(&self, index: NodeIndex) -> Option<&NodeData> {
+    pub fn get_node(
+        &self,
+        index: NodeIndex,
+    ) -> Option<crate::graph::storage::RecordRef<'_, NodeData>> {
         self.graph.node_weight(index)
     }
 
@@ -1682,7 +1685,10 @@ impl DirGraph {
         self.graph.node_weight_mut(index)
     }
 
-    pub fn _get_connection(&self, index: EdgeIndex) -> Option<&EdgeData> {
+    pub fn _get_connection(
+        &self,
+        index: EdgeIndex,
+    ) -> Option<crate::graph::storage::RecordRef<'_, EdgeData>> {
         self.graph.edge_weight(index)
     }
 

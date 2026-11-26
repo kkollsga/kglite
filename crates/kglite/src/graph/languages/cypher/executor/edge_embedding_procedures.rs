@@ -401,14 +401,12 @@ fn execute_embed(
             }
         };
         let edge = resolve_rel_value(relationship, &types[slot], identities, proc_name, at)?;
-        let text = graph
-            .graph
-            .edge_weight(edge)
-            .and_then(|current| current.get_property(&text_property))
-            .and_then(|value| match value {
-                Value::String(text) if !text.is_empty() => Some(text.clone()),
+        let text = graph.graph.edge_weight(edge).and_then(|current| {
+            match current.get_property(&text_property) {
+                Some(Value::String(text)) if !text.is_empty() => Some(text.clone()),
                 _ => None,
-            });
+            }
+        });
         selected[slot].push(SelectedEdgeText { edge, text });
         edges.push(edge);
     }

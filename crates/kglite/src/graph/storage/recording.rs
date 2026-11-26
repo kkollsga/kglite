@@ -32,7 +32,7 @@
 
 use crate::datatypes::Value;
 use crate::graph::schema::{EdgeData, InternedKey, NodeData, StringInterner};
-use crate::graph::storage::{GraphRead, GraphWrite};
+use crate::graph::storage::{GraphRead, GraphWrite, RecordRef};
 use crate::graph::wal::MutationOp;
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::Direction;
@@ -1112,7 +1112,7 @@ impl<G: GraphRead> GraphRead for RecordingGraph<G> {
     }
 
     #[inline]
-    fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
+    fn node_weight(&self, idx: NodeIndex) -> Option<RecordRef<'_, NodeData>> {
         self.inner.node_weight(idx)
     }
 
@@ -1152,7 +1152,7 @@ impl<G: GraphRead> GraphRead for RecordingGraph<G> {
     }
 
     #[inline]
-    fn edge_weights<'a>(&'a self) -> Box<dyn Iterator<Item = &'a EdgeData> + 'a> {
+    fn edge_weights<'a>(&'a self) -> Box<dyn Iterator<Item = RecordRef<'a, EdgeData>> + 'a> {
         self.inner.edge_weights()
     }
 
@@ -1183,7 +1183,7 @@ impl<G: GraphRead> GraphRead for RecordingGraph<G> {
     }
 
     #[inline]
-    fn edge_weight(&self, idx: EdgeIndex) -> Option<&EdgeData> {
+    fn edge_weight(&self, idx: EdgeIndex) -> Option<RecordRef<'_, EdgeData>> {
         self.inner.edge_weight(idx)
     }
 
@@ -1312,11 +1312,6 @@ impl<G: GraphRead> GraphRead for RecordingGraph<G> {
         conn_type: Option<u64>,
     ) -> Box<dyn Iterator<Item = (NodeIndex, EdgeIndex)> + 'a> {
         self.inner.iter_peers_filtered(node, dir, conn_type)
-    }
-
-    #[inline]
-    fn reset_arenas(&self) {
-        self.inner.reset_arenas();
     }
 }
 

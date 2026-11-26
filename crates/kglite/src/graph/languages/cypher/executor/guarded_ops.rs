@@ -449,7 +449,7 @@ impl CypherExecutor<'_> {
                         peer_is_start,
                         edge_ref.source(),
                         edge_ref.target(),
-                        &|prop: &str| edge_ref_property(self.graph, &edge_ref, data, prop),
+                        &|prop: &str| edge_ref_property(self.graph, &edge_ref, &data, prop),
                     );
                     if !keep {
                         continue;

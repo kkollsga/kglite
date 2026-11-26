@@ -39,6 +39,7 @@ pub mod node_view;
 pub mod overflow;
 pub(crate) mod packed_codec;
 pub mod property_storage;
+pub mod record_ref;
 pub(crate) mod shared_tree;
 pub(crate) mod slot_mirror;
 pub(crate) mod topology_memory;
@@ -50,6 +51,7 @@ use crate::graph::core::iterators::GraphEdgeRef;
 use crate::graph::schema::{EdgeData, InternedKey, NodeData};
 pub use crate::graph::storage::column_store::ColumnStore;
 pub use crate::graph::storage::node_view::NodeView;
+pub use crate::graph::storage::record_ref::RecordRef;
 use crate::graph::storage::slot_mirror::SlotMirror;
 use crate::graph::storage::undo::UndoJournal;
 use petgraph::graph::{EdgeIndex, NodeIndex};
@@ -195,10 +197,9 @@ pub trait GraphRead {
 
     /// Borrow the full NodeData. **Escape hatch** — prefer granular reads
     /// ([`GraphRead::get_node_property`], [`GraphRead::get_node_id`], etc.)
-    /// in hot loops. On the disk backend, materialises NodeData through
-    /// the per-query arena, which is cheap per-call but accumulates if
-    /// called many times without [`GraphRead::reset_arenas`].
-    fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData>;
+    /// in hot loops. Heap backends lend the record; the disk backend builds
+    /// one per call, which the returned [`RecordRef`] owns.
+    fn node_weight(&self, idx: NodeIndex) -> Option<RecordRef<'_, NodeData>>;
 
     /// Read a single property without full NodeData materialisation.
     /// Used by the hot WHERE-scan path. Returns `None` if the property
@@ -232,14 +233,9 @@ pub trait GraphRead {
     // type's store rather than the store the backend owns — see
     // `storage/node_view.rs`.
 
-    /// A borrowed read handle for one node, with its column store resolved
-    /// once. Prefer this to [`GraphRead::node_weight`] whenever more than one
+    /// A read handle for one node, with its column store resolved once.
+    /// Prefer this to [`GraphRead::node_weight`] whenever more than one
     /// property of the same node is read.
-    ///
-    /// On the disk backend the returned view borrows per-query arena memory;
-    /// it must not outlive the read-pass guard. Embedders take one from the
-    /// public [`DirGraph::begin_read_pass`](crate::graph::dir_graph::DirGraph::begin_read_pass);
-    /// the crate-internal spelling is `begin_query()`.
     #[inline]
     fn node_view(&self, idx: NodeIndex) -> Option<NodeView<'_>> {
         let data = self.node_weight(idx)?;
@@ -313,7 +309,7 @@ pub trait GraphRead {
     /// Iterator over every live edge's weight (EdgeData). Boxed because
     /// petgraph's underlying `edge_weights` returns an opaque
     /// `impl Iterator` that can't be named as a GAT associated type.
-    fn edge_weights<'a>(&'a self) -> Box<dyn Iterator<Item = &'a EdgeData> + 'a>;
+    fn edge_weights<'a>(&'a self) -> Box<dyn Iterator<Item = RecordRef<'a, EdgeData>> + 'a>;
 
     // ─────────────── per-node edges / neighbours ───────────────
 
@@ -335,13 +331,13 @@ pub trait GraphRead {
 
     fn edges_connecting(&self, a: NodeIndex, b: NodeIndex) -> Self::EdgesConnectingIter<'_>;
 
-    fn edge_weight(&self, idx: EdgeIndex) -> Option<&EdgeData>;
+    fn edge_weight(&self, idx: EdgeIndex) -> Option<RecordRef<'_, EdgeData>>;
 
     /// Read one edge property without materialising the edge: the edge
     /// counterpart of [`GraphRead::get_node_property`], for passes that visit
     /// every edge of a type. `None` if the edge is gone, or the property is
     /// missing or NULL. The disk backend overrides it so the read does not
-    /// grow the query arena.
+    /// materialise a record.
     fn get_edge_property(&self, idx: EdgeIndex, key: InternedKey) -> Option<Value> {
         self.edge_weight(idx)?
             .properties
@@ -353,7 +349,7 @@ pub trait GraphRead {
     /// Every non-NULL property of one edge, without materialising it: the
     /// whole-edge counterpart of [`GraphRead::get_edge_property`]. `None` if
     /// the edge is gone. The disk backend overrides it so the read does not
-    /// grow the query arena.
+    /// materialise a record.
     fn edge_property_list(&self, idx: EdgeIndex) -> Option<Vec<(InternedKey, Value)>> {
         Some(non_null_properties(&self.edge_weight(idx)?.properties))
     }
@@ -503,11 +499,6 @@ pub trait GraphRead {
         });
         Box::new(iter)
     }
-
-    /// Reset per-query materialisation arenas. No-op on memory/mapped;
-    /// frees NodeData / EdgeData allocated during the previous query on
-    /// the disk backend. Called between Cypher queries to cap memory.
-    fn reset_arenas(&self) {}
 }
 
 /// Write-side interface shared by every storage backend.

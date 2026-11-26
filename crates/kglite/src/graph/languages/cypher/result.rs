@@ -546,7 +546,7 @@ fn materialise_lazy_row_inner(
                         .graph
                         .node_view(node_idx)
                         .map(|node| {
-                            super::executor::helpers::resolve_node_property(node, property, graph)
+                            super::executor::helpers::resolve_node_property(&node, property, graph)
                         })
                         .unwrap_or(Value::Null)
                 } else if let Some(edge) = pending_row.edge_bindings.get(variable) {

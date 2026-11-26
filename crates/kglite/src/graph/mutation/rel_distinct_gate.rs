@@ -70,7 +70,7 @@ impl ConnectionBatchGate<'_> {
                     .edges_directed(source, petgraph::Direction::Outgoing)
                     .filter(|e| e.weight().connection_type == conn_key)
                 {
-                    let group = weight_key(edge.weight(), &keys);
+                    let group = weight_key(&edge.weight(), &keys);
                     *held.entry((edge.target(), group)).or_default() += 1;
                 }
                 held

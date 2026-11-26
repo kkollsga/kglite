@@ -55,7 +55,7 @@ pub fn within_bounds(
 
     for node_idx in nodes {
         if let Some(node) = graph.graph.node_view(node_idx) {
-            if let Some((lat, lon)) = node_location(node, lat_field, lon_field, geom_fallback) {
+            if let Some((lat, lon)) = node_location(&node, lat_field, lon_field, geom_fallback) {
                 if lat >= min_lat && lat <= max_lat && lon >= min_lon && lon <= max_lon {
                     matching_nodes.push(node_idx);
                 }
@@ -109,7 +109,7 @@ pub fn near_point(
 
     for node_idx in nodes {
         if let Some(node) = graph.graph.node_view(node_idx) {
-            if let Some((lat, lon)) = node_location(node, lat_field, lon_field, geom_fallback) {
+            if let Some((lat, lon)) = node_location(&node, lat_field, lon_field, geom_fallback) {
                 // Simple Euclidean distance in degrees
                 let d_lat = lat - center_lat;
                 let d_lon = lon - center_lon;
@@ -163,7 +163,7 @@ pub fn near_point_m(
 
     for node_idx in nodes {
         if let Some(node) = graph.graph.node_view(node_idx) {
-            if let Some((lat, lon)) = node_location(node, lat_field, lon_field, geom_fallback) {
+            if let Some((lat, lon)) = node_location(&node, lat_field, lon_field, geom_fallback) {
                 let distance = geodesic_distance(center_lat, center_lon, lat, lon);
                 if distance <= max_distance_m {
                     matching_nodes.push(node_idx);
@@ -618,7 +618,7 @@ fn value_to_f64(value: &Value) -> Option<f64> {
 /// Extract (lat, lon) from a node, trying lat/lon fields first,
 /// then falling back to the centroid of a WKT geometry field.
 pub(crate) fn node_location(
-    node: crate::graph::storage::NodeView<'_>,
+    node: &crate::graph::storage::NodeView<'_>,
     lat_field: &str,
     lon_field: &str,
     geom_fallback: Option<&str>,
@@ -674,7 +674,7 @@ pub fn calculate_centroid(
 
     for node_idx in nodes {
         if let Some(node) = graph.graph.node_view(node_idx) {
-            if let Some((lat, lon)) = node_location(node, lat_field, lon_field, geom_fallback) {
+            if let Some((lat, lon)) = node_location(&node, lat_field, lon_field, geom_fallback) {
                 sum_lat += lat;
                 sum_lon += lon;
                 count += 1;
@@ -718,7 +718,7 @@ pub fn get_bounds(
 
     for node_idx in nodes {
         if let Some(node) = graph.graph.node_view(node_idx) {
-            if let Some((lat, lon)) = node_location(node, lat_field, lon_field, geom_fallback) {
+            if let Some((lat, lon)) = node_location(&node, lat_field, lon_field, geom_fallback) {
                 min_lat = min_lat.min(lat);
                 max_lat = max_lat.max(lat);
                 min_lon = min_lon.min(lon);

@@ -12,7 +12,6 @@
 //! cache each row instead. A string property read off a node binding is
 //! borrowed from its column rather than cloned into a `Value`.
 
-use std::borrow::Cow;
 use std::sync::Arc;
 
 use super::super::execution_support::{ArgKey, TextMatchCache};
@@ -37,8 +36,10 @@ impl CypherExecutor<'_> {
         let Some(matcher) = self.text_match_matcher(args, row)? else {
             return Ok(Value::Null);
         };
-        if let Some(text) = self.borrowed_text(&args[0], row) {
-            return Ok(Value::Boolean(has_match(&matcher, &text)));
+        if let Some(matched) =
+            self.with_borrowed_text(&args[0], row, |text| has_match(&matcher, text))
+        {
+            return Ok(Value::Boolean(matched));
         }
         let value = self.evaluate_expression(&args[0], row)?;
         Ok(match document_text(&value) {
@@ -89,15 +90,16 @@ impl CypherExecutor<'_> {
         Ok(Some(matcher))
     }
 
-    /// The string a `variable.property` read would produce, borrowed from the
-    /// node's column. `None` for every other shape and for a value that is not
-    /// a string (a list property, a number, null), which take the evaluated
-    /// path and its rules.
-    pub(super) fn borrowed_text<'r>(
-        &'r self,
+    /// Run `f` over the string a `variable.property` read would produce,
+    /// borrowed from the node's column for the duration of the call. `None`
+    /// for every other shape and for a value that is not a string (a list
+    /// property, a number, null), which take the evaluated path and its rules.
+    pub(super) fn with_borrowed_text<R>(
+        &self,
         expression: &Expression,
-        row: &'r ResultRow,
-    ) -> Option<Cow<'r, str>> {
+        row: &ResultRow,
+        f: impl FnOnce(&str) -> R,
+    ) -> Option<R> {
         let Expression::PropertyAccess { variable, property } = expression else {
             return None;
         };
@@ -109,7 +111,7 @@ impl CypherExecutor<'_> {
         let type_str = node.node_type_str(&self.graph.interner);
         let field = self.graph.resolve_alias(type_str, property);
         match node.resolved_field_str(type_str, field, InternedKey::from_str(field)) {
-            StrField::Str(text) => Some(text),
+            StrField::Str(text) => Some(f(&text)),
             StrField::NotString | StrField::Absent => None,
         }
     }

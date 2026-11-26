@@ -238,8 +238,7 @@ pub fn get_property_values(
                         .map(|&prop| {
                             graph
                                 .node_view(idx)
-                                .and_then(|node| node.get_field_ref(prop))
-                                .map(Cow::into_owned)
+                                .and_then(|node| node.get_field_ref(prop).map(Cow::into_owned))
                                 .unwrap_or(Value::Null)
                         })
                         .collect()

@@ -198,6 +198,10 @@ pub mod api {
     /// hold it across a `Python::attach` boundary — resolve to owned values
     /// first. See `crates/kglite/src/graph/storage/node_view.rs`.
     pub use crate::graph::storage::NodeView;
+    /// A node or edge record returned by a storage read: borrowed from the
+    /// graph on the heap backends, owned by the handle on disk. Dereferences
+    /// to `NodeData` / `EdgeData`.
+    pub use crate::graph::storage::RecordRef;
     /// Structured-data support over the list/map substrate: table-property
     /// fidelity metadata + declared property shapes (`list<map{...}>`).
     pub use crate::graph::tables::{

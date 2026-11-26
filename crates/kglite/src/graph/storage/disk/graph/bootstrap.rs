@@ -258,6 +258,10 @@ impl DiskGraph {
             node_count: 0,
             free_node_slots: Vec::new(),
             arenas: crate::graph::storage::disk::query_arena::QueryArenas::new(256),
+            #[cfg(test)]
+            node_materializations: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            edge_materializations: std::sync::atomic::AtomicU64::new(0),
             column_stores: rustc_hash::FxHashMap::default(),
             out_offsets: MmapOrVec::mapped(&data_dir.join("out_offsets.bin"), 1025)?,
             out_edges: MmapOrVec::new(),
@@ -463,6 +467,10 @@ impl DiskGraph {
             node_count,
             free_node_slots: Vec::new(),
             arenas: crate::graph::storage::disk::query_arena::QueryArenas::new(1024),
+            #[cfg(test)]
+            node_materializations: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            edge_materializations: std::sync::atomic::AtomicU64::new(0),
             column_stores: rustc_hash::FxHashMap::default(),
             out_offsets,
             out_edges,

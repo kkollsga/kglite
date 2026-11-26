@@ -153,7 +153,7 @@ fn outgoing_groups(
         .filter(|edge| edge.weight().connection_type == conn_key)
         .map(|edge| {
             let weight = edge.weight();
-            (edge.target(), weight_key(weight, keys))
+            (edge.target(), weight_key(&weight, keys))
         })
         .collect()
 }
@@ -210,7 +210,7 @@ pub(crate) fn judge_edges(
         let properties =
             group_properties(graph, graph.interner.resolve(rel_key), rule.properties());
         let keys = interned_keys(&properties);
-        let own = weight_key(weight, &keys);
+        let own = weight_key(&weight, &keys);
         let count = outgoing_groups(graph, source, rel_key, &keys)
             .iter()
             .filter(|(t, k)| *t == target && *k == own)
@@ -281,10 +281,11 @@ pub(crate) fn surplus_edges(
         if er.connection_type() != key {
             continue;
         }
+        let weight = er.weight();
         let group = (
             er.source(),
             er.target(),
-            group_key(&properties, |p| er.weight().get_property(p)),
+            group_key(&properties, |p| weight.get_property(p)),
         );
         if groups.contains(&group) {
             let source = er.source();

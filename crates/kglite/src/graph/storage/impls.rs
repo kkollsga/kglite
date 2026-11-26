@@ -19,6 +19,7 @@ use crate::graph::schema::{EdgeData, InternedKey, NodeData};
 use crate::graph::storage::column_store::ColumnStore;
 use crate::graph::storage::disk::csr::TOMBSTONE_EDGE;
 use crate::graph::storage::disk::graph::DiskGraph;
+use crate::graph::storage::record_ref::RecordRef;
 use crate::graph::storage::undo::{ColumnarPreImages, ColumnarWrite};
 use crate::graph::storage::{GraphRead, GraphWrite, MappedGraph, MemoryGraph};
 use petgraph::graph::{EdgeIndex, NodeIndex};
@@ -126,8 +127,8 @@ macro_rules! impl_heap_graph_read {
             // so the full list comes from `DirGraph::node_labels`.
 
             #[inline]
-            fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
-                self.inner().node_weight(idx)
+            fn node_weight(&self, idx: NodeIndex) -> Option<RecordRef<'_, NodeData>> {
+                self.inner().node_weight(idx).map(RecordRef::Borrowed)
             }
 
             // These four resolve through `NodeView` rather than reading
@@ -181,8 +182,10 @@ macro_rules! impl_heap_graph_read {
             }
 
             #[inline]
-            fn edge_weights<'a>(&'a self) -> Box<dyn Iterator<Item = &'a EdgeData> + 'a> {
-                Box::new(self.inner().edge_weights())
+            fn edge_weights<'a>(
+                &'a self,
+            ) -> Box<dyn Iterator<Item = RecordRef<'a, EdgeData>> + 'a> {
+                Box::new(self.inner().edge_weights().map(RecordRef::Borrowed))
             }
 
             #[inline]
@@ -213,8 +216,8 @@ macro_rules! impl_heap_graph_read {
             }
 
             #[inline]
-            fn edge_weight(&self, idx: EdgeIndex) -> Option<&EdgeData> {
-                self.inner().edge_weight(idx)
+            fn edge_weight(&self, idx: EdgeIndex) -> Option<RecordRef<'_, EdgeData>> {
+                self.inner().edge_weight(idx).map(RecordRef::Borrowed)
             }
 
             #[inline]
@@ -284,7 +287,7 @@ macro_rules! impl_heap_graph_read {
                 )
             }
 
-            // iter_peers_filtered / reset_arenas — trait defaults.
+            // iter_peers_filtered — trait defaults.
         }
     };
 }
@@ -877,8 +880,8 @@ impl GraphRead for MappedGraph {
     // node_labels_of: trait default, as in the heap macro above.
 
     #[inline]
-    fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
-        self.inner().node_weight(idx)
+    fn node_weight(&self, idx: NodeIndex) -> Option<RecordRef<'_, NodeData>> {
+        self.inner().node_weight(idx).map(RecordRef::Borrowed)
     }
     // Through `node_view`, which pairs the node's row id with the store this
     // backend owns. Mapped is the mode where this matters most: its nodes hold
@@ -913,8 +916,8 @@ impl GraphRead for MappedGraph {
         GraphEdgeReferences::InMemory(self.inner().edge_references())
     }
     #[inline]
-    fn edge_weights<'a>(&'a self) -> Box<dyn Iterator<Item = &'a EdgeData> + 'a> {
-        Box::new(self.inner().edge_weights())
+    fn edge_weights<'a>(&'a self) -> Box<dyn Iterator<Item = RecordRef<'a, EdgeData>> + 'a> {
+        Box::new(self.inner().edge_weights().map(RecordRef::Borrowed))
     }
     #[inline]
     fn edges_directed(&self, idx: NodeIndex, dir: Direction) -> GraphEdges<'_> {
@@ -948,8 +951,8 @@ impl GraphRead for MappedGraph {
         GraphEdgesConnecting::InMemory(self.inner().edges_connecting(a, b))
     }
     #[inline]
-    fn edge_weight(&self, idx: EdgeIndex) -> Option<&EdgeData> {
-        self.inner().edge_weight(idx)
+    fn edge_weight(&self, idx: EdgeIndex) -> Option<RecordRef<'_, EdgeData>> {
+        self.inner().edge_weight(idx).map(RecordRef::Borrowed)
     }
     #[inline]
     fn find_edge(&self, a: NodeIndex, b: NodeIndex) -> Option<EdgeIndex> {
@@ -1407,7 +1410,7 @@ impl GraphRead for DiskGraph {
     }
 
     #[inline]
-    fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
+    fn node_weight(&self, idx: NodeIndex) -> Option<RecordRef<'_, NodeData>> {
         DiskGraph::node_weight(self, idx)
     }
 
@@ -1449,7 +1452,7 @@ impl GraphRead for DiskGraph {
     }
 
     #[inline]
-    fn edge_weights<'a>(&'a self) -> Box<dyn Iterator<Item = &'a EdgeData> + 'a> {
+    fn edge_weights<'a>(&'a self) -> Box<dyn Iterator<Item = RecordRef<'a, EdgeData>> + 'a> {
         self.edge_weights_iter()
     }
 
@@ -1485,7 +1488,7 @@ impl GraphRead for DiskGraph {
     }
 
     #[inline]
-    fn edge_weight(&self, idx: EdgeIndex) -> Option<&EdgeData> {
+    fn edge_weight(&self, idx: EdgeIndex) -> Option<RecordRef<'_, EdgeData>> {
         DiskGraph::edge_weight(self, idx)
     }
 
@@ -1631,11 +1634,6 @@ impl GraphRead for DiskGraph {
                 .into_iter()
                 .map(|(peer, edge_idx)| (peer, EdgeIndex::new(edge_idx as usize))),
         )
-    }
-
-    #[inline]
-    fn reset_arenas(&self) {
-        DiskGraph::reset_arenas(self);
     }
 }
 

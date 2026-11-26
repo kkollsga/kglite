@@ -18,6 +18,7 @@ use crate::graph::core::iterators::{
 };
 use crate::graph::schema::{EdgeData, InternedKey, NodeData};
 use crate::graph::storage::column_store::ColumnStore;
+use crate::graph::storage::record_ref::RecordRef;
 use crate::graph::storage::GraphRead;
 
 impl FrozenGraph {
@@ -138,10 +139,10 @@ impl GraphRead for FrozenGraph {
     }
 
     #[inline(always)]
-    fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
+    fn node_weight(&self, idx: NodeIndex) -> Option<RecordRef<'_, NodeData>> {
         let slot = idx.index();
         if self.node_is_alive(slot) {
-            self.node_slice().get(slot)
+            self.node_slice().get(slot).map(RecordRef::Borrowed)
         } else {
             None
         }
@@ -195,8 +196,8 @@ impl GraphRead for FrozenGraph {
         GraphEdgeReferences::Csr(CsrEdgeReferences::Frozen(FrozenEdgeRefs::new(self)))
     }
 
-    fn edge_weights<'a>(&'a self) -> Box<dyn Iterator<Item = &'a EdgeData> + 'a> {
-        Box::new(iters::weights(self))
+    fn edge_weights<'a>(&'a self) -> Box<dyn Iterator<Item = RecordRef<'a, EdgeData>> + 'a> {
+        Box::new(iters::weights(self).map(RecordRef::Borrowed))
     }
 
     #[inline]
@@ -231,10 +232,10 @@ impl GraphRead for FrozenGraph {
     }
 
     #[inline]
-    fn edge_weight(&self, idx: EdgeIndex) -> Option<&EdgeData> {
+    fn edge_weight(&self, idx: EdgeIndex) -> Option<RecordRef<'_, EdgeData>> {
         let slot = idx.index();
         self.endpoint(slot)
-            .map(|ep| self.edge_data(slot as u32, ep.ty))
+            .map(|ep| RecordRef::Borrowed(self.edge_data(slot as u32, ep.ty)))
     }
 
     #[inline]

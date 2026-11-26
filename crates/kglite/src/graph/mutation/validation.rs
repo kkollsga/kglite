@@ -41,7 +41,7 @@ fn validate_nodes(
         if let Some(node_indices) = graph.type_indices.get(node_type) {
             for node_idx in node_indices.iter() {
                 if let Some(node) = graph.node_view(node_idx) {
-                    errors.extend(validate_single_node(node, node_type, node_schema));
+                    errors.extend(validate_single_node(&node, node_type, node_schema));
                 }
             }
         }
@@ -64,7 +64,7 @@ fn validate_nodes(
 
 /// Validate a single node against its schema
 fn validate_single_node(
-    node: crate::graph::storage::NodeView<'_>,
+    node: &crate::graph::storage::NodeView<'_>,
     node_type: &str,
     schema: &NodeSchemaDefinition,
 ) -> Vec<ValidationError> {

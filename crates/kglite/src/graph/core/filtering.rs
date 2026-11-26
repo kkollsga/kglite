@@ -1115,7 +1115,10 @@ fn build_sort_keys(
             let node = graph.node_view(idx);
             let keys = sort_fields
                 .iter()
-                .map(|(field, _)| node.and_then(|n| n.get_field_ref(field).map(Cow::into_owned)))
+                .map(|(field, _)| {
+                    node.as_ref()
+                        .and_then(|n| n.get_field_ref(field).map(Cow::into_owned))
+                })
                 .collect();
             (keys, idx)
         })

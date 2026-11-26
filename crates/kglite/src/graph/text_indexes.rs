@@ -81,7 +81,7 @@ pub struct TextIndexReport {
 /// Strings stay borrowed; lists contribute one document with a separator
 /// between non-null members. Reject the entire list if any member is not text.
 pub(crate) fn document_text<'a>(
-    view: &NodeView<'a>,
+    view: &'a NodeView<'_>,
     node_type: &'a str,
     field: &str,
     key: InternedKey,
@@ -97,6 +97,18 @@ pub(crate) fn document_text<'a>(
             join_text_list(items).map(Cow::Owned)
         }
     }
+}
+
+/// [`document_text`] detached from the view it was read through, for callers
+/// that hand the document on after the view is gone. A string document is
+/// copied, which the streamed index builds accept: tokenising it costs more.
+pub(crate) fn owned_document_text(
+    view: &NodeView<'_>,
+    node_type: &str,
+    field: &str,
+    key: InternedKey,
+) -> Option<Cow<'static, str>> {
+    document_text(view, node_type, field, key).map(|text| Cow::Owned(text.into_owned()))
 }
 
 /// A list's one document: string members joined by a space, null members
@@ -480,7 +492,7 @@ impl TextIndexStore {
                     .then(|| graph.graph.node_view(node))
                     .flatten()
                     .and_then(|view| {
-                        document_text(&view, node_type, &self.resolved_field, field_key)
+                        owned_document_text(&view, node_type, &self.resolved_field, field_key)
                     });
                 (slot, text)
             }))
@@ -564,7 +576,7 @@ impl TextIndexStore {
         let mut skipped = 0usize;
         *index = TextIndex::build(members.iter().filter_map(|node| {
             let view = graph.graph.node_view(*node)?;
-            match document_text(&view, node_type, &self.resolved_field, field_key) {
+            match owned_document_text(&view, node_type, &self.resolved_field, field_key) {
                 Some(text) => Some((Self::slot(*node), text)),
                 None => {
                     skipped += 1;
@@ -737,7 +749,7 @@ pub(crate) fn build_text_index_structure(
     let mut skipped = 0usize;
     let index = TextIndex::build(nodes.iter().filter_map(|node_idx| {
         let view = graph.graph.node_view(*node_idx)?;
-        match document_text(&view, node_type, &field, key) {
+        match owned_document_text(&view, node_type, &field, key) {
             Some(text) => Some((TextIndexStore::slot(*node_idx), text)),
             None => {
                 skipped += 1;

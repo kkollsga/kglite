@@ -40,7 +40,7 @@ use crate::graph::algorithms::text_index::TextIndex;
 use crate::graph::dir_graph::DirGraph;
 use crate::graph::index_freshness::IndexFreshness;
 use crate::graph::schema::{EdgeData, InternedKey};
-use crate::graph::storage::GraphRead;
+use crate::graph::storage::{GraphRead, RecordRef};
 
 #[inline]
 fn edge_slot(edge: EdgeIndex) -> u32 {
@@ -51,6 +51,15 @@ fn edge_slot(edge: EdgeIndex) -> u32 {
 #[inline]
 fn edge_bound(graph: &DirGraph) -> u32 {
     GraphRead::edge_bound(&graph.graph) as u32
+}
+
+/// The document of a record held by handle: borrowed when the record is lent,
+/// owned when it was built for the read.
+fn record_document(edge: RecordRef<'_, EdgeData>, field: InternedKey) -> Option<Cow<'_, str>> {
+    match edge {
+        RecordRef::Borrowed(edge) => edge_document(edge, field),
+        RecordRef::Owned(edge) => edge_document(&edge, field).map(|d| Cow::Owned(d.into_owned())),
+    }
 }
 
 fn edge_document(edge: &EdgeData, field: InternedKey) -> Option<Cow<'_, str>> {
@@ -78,7 +87,7 @@ fn slot_document(
     if edge.connection_type != type_key {
         return None;
     }
-    edge_document(edge, field)
+    record_document(edge, field)
 }
 
 /// Build a fresh index over every relationship of `type_key`. Returns the
@@ -97,7 +106,7 @@ fn build_over_type(
             return None;
         }
         members += 1;
-        match edge_document(data, field) {
+        match record_document(data, field) {
             Some(text) => Some((edge_slot(edge), text)),
             None => {
                 skipped += 1;

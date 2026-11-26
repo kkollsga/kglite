@@ -409,7 +409,7 @@ fn match_relationship_pattern(
         .filter(|e| {
             e.target() == actual_tgt
                 && e.connection_type() == interned_ct
-                && edge_matches_all(e.weight(), &expected_props)
+                && edge_matches_all(&e.weight(), &expected_props)
         })
         .map(|edge_ref| {
             let mut result_row = ResultRow::new();

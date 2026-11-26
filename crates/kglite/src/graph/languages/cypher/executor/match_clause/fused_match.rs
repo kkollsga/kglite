@@ -535,7 +535,7 @@ impl<'a> CypherExecutor<'a> {
                         NodeView::new(data, resolved)
                     });
                     key_scratch.extend(direct_group_properties.iter().map(
-                        |(property, key, pre_resolved)| match node {
+                        |(property, key, pre_resolved)| match node.as_ref() {
                             Some(node) if *pre_resolved => {
                                 resolve_node_property_keyed(node, property, *key, self.graph)
                             }
@@ -1484,7 +1484,7 @@ impl<'a> CypherExecutor<'a> {
 
             // WHERE filter; an evaluation error fails the query.
             if let Some(pred) = &compiled_where {
-                if !pred.keeps_row(self, &runtime, node, &eval_row)? {
+                if !pred.keeps_row(self, &runtime, node.as_ref(), &eval_row)? {
                     continue;
                 }
             }
@@ -1493,7 +1493,7 @@ impl<'a> CypherExecutor<'a> {
             // stored integer: a row strictly worse than the worst retained one
             // cannot enter the top-K, so it is skipped without being decoded.
             if let (Some(ScanExpr::Prop(slot)), Some(cutoff)) = (compiled_keys.first(), cutoff) {
-                if let Some(micros) = runtime.timestamp_micros(node, *slot) {
+                if let Some(micros) = runtime.timestamp_micros(node.as_ref(), *slot) {
                     if !collector.beats_first_micros(micros, cutoff) {
                         continue;
                     }
@@ -1504,7 +1504,7 @@ impl<'a> CypherExecutor<'a> {
             // the top-K pays for an owned key tuple.
             key_buf.clear();
             for expr in &compiled_keys {
-                key_buf.push(expr.eval(self, &runtime, node, &eval_row)?);
+                key_buf.push(expr.eval(self, &runtime, node.as_ref(), &eval_row)?);
             }
             if collector.accepts(&key_buf, scan_count) {
                 collector.push(&key_buf, scan_count, node_idx);

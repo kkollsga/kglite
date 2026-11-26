@@ -10,7 +10,7 @@ use crate::graph::languages::cypher::executor::budget::MatchCeiling;
 use crate::graph::languages::cypher::result::Bindings;
 use crate::graph::schema::{DirGraph, InternedKey, NodeData};
 use crate::graph::storage::column_store::ColumnStore;
-use crate::graph::storage::{GraphRead, NodeView};
+use crate::graph::storage::{GraphRead, NodeView, RecordRef};
 use petgraph::graph::NodeIndex;
 use petgraph::Direction;
 use rayon::prelude::*;
@@ -1018,7 +1018,7 @@ impl<'a> PatternExecutor<'a> {
     {
         let mut out = Vec::new();
         let mut memo: Option<TypeScanMemo<'p>> = None;
-        // Resolved once: only the disk backend materialises into an arena.
+        // Resolved once: only the disk backend builds a record per read.
         let scoped_materialization = self.graph.graph.is_disk();
         for (i, &idx) in candidates.iter().enumerate() {
             interrupt.check(i)?;
@@ -1036,19 +1036,20 @@ impl<'a> PatternExecutor<'a> {
                 out.push(idx);
                 continue;
             };
-            // On disk, materialize into this frame: `node_weight` would park a
-            // record in the query arena for every node the scan walks, and the
-            // scan drops each one immediately (storage/disk/query_arena.rs).
-            // Heap backends borrow straight out of the graph. Both branches
+            // On disk, materialize into this frame: `node_weight` would box a
+            // record for every node the scan walks, and the scan drops each one
+            // immediately. Heap backends borrow straight out of the graph. Both branches
             // then run the same body below, over a plain `&NodeData` — no
             // closure, which would force `memo` out of registers for the whole
             // loop and cost the heap path ~8% on a 50k-node filtered scan.
             let owned;
+            let held;
             let data = if scoped_materialization {
                 owned = self.graph.graph.owned_node_data(idx);
                 owned.as_ref()
             } else {
-                self.graph.graph.node_weight(idx)
+                held = self.graph.graph.node_weight(idx);
+                held.as_deref()
             };
             let Some(data) = data else {
                 continue;
@@ -1075,7 +1076,7 @@ impl<'a> PatternExecutor<'a> {
                     filter.matches(data, row, self.params)
                 })
                 .unwrap_or_else(|| {
-                    self.node_matches_resolved(self.node_view_of(data, memo.store), memo)
+                    self.node_matches_resolved(&self.node_view_of(data, memo.store), memo)
                 });
             if matched {
                 out.push(idx);
@@ -1728,14 +1729,16 @@ impl<'a> PatternExecutor<'a> {
         props: &HashMap<String, PropertyMatcher>,
     ) -> bool {
         // Disk materializes into this frame (see `filter_node_candidates`):
-        // the record is consumed here, so it must not enter the query arena.
+        // the record is consumed here, so it skips `node_weight`'s box.
         // Heap backends keep the direct borrow.
         let owned;
+        let held;
         let data = if self.graph.graph.is_disk() {
             owned = self.graph.graph.owned_node_data(idx);
             owned.as_ref()
         } else {
-            self.graph.graph.node_weight(idx)
+            held = self.graph.graph.node_weight(idx);
+            held.as_deref()
         };
         let Some(data) = data else {
             return false;
@@ -1756,7 +1759,13 @@ impl<'a> PatternExecutor<'a> {
         let node = self.node_view_of(data, self.graph.graph.column_store(data.node_type));
         props.iter().all(|(key, matcher)| {
             let field = self.graph.resolve_alias(type_str, key);
-            self.prop_matches(node, type_str, field, InternedKey::from_str(field), matcher)
+            self.prop_matches(
+                &node,
+                type_str,
+                field,
+                InternedKey::from_str(field),
+                matcher,
+            )
         })
     }
 
@@ -1776,12 +1785,12 @@ impl<'a> PatternExecutor<'a> {
             .properties
             .columnar_row_id()
             .and_then(|row_id| store.map(|store| (&**store, row_id)));
-        NodeView::new(data, resolved)
+        NodeView::new(RecordRef::Borrowed(data), resolved)
     }
 
     /// Match one node against matchers whose field names this node's type has
     /// already resolved.
-    fn node_matches_resolved(&self, node: NodeView<'_>, memo: &TypeScanMemo<'_>) -> bool {
+    fn node_matches_resolved(&self, node: &NodeView<'_>, memo: &TypeScanMemo<'_>) -> bool {
         memo.props.iter().all(|resolved| {
             self.prop_matches(
                 node,
@@ -1801,7 +1810,7 @@ impl<'a> PatternExecutor<'a> {
     #[inline]
     fn prop_matches(
         &self,
-        node: NodeView<'_>,
+        node: &NodeView<'_>,
         type_str: &str,
         field: &str,
         key: InternedKey,
@@ -2043,7 +2052,7 @@ impl<'a> PatternExecutor<'a> {
                 filter.peer_is_start(direction),
                 edge.source(),
                 edge.target(),
-                &|prop: &str| edge_ref_property(self.graph, edge, edge_data, prop),
+                &|prop: &str| edge_ref_property(self.graph, edge, &edge_data, prop),
             );
             if !keep {
                 return false;

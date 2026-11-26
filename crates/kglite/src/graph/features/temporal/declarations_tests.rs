@@ -477,9 +477,13 @@ fn undeclare_removes_and_bumps_only_when_something_was_declared() {
 }
 
 #[test]
-fn a_disk_graph_is_validated_without_growing_the_edge_arena() {
+fn a_disk_graph_is_validated_without_materializing_records() {
     let mut g = graph(HOLDERS);
     g.enable_disk_mode().unwrap();
+    g.graph
+        .as_disk()
+        .expect("disk-backed")
+        .reset_materialization_counts();
     let report = declare(
         &mut g,
         &rel("HAS_HOLDER", Some("Project")),
@@ -490,8 +494,8 @@ fn a_disk_graph_is_validated_without_growing_the_edge_arena() {
     .unwrap();
     assert_eq!((report.rows, report.abutting_rows), (3, Some(1)));
     let disk = g.graph.as_disk().expect("disk-backed");
-    assert_eq!(disk.edge_arena_len(), 0);
-    assert_eq!(disk.node_arena_len(), 0);
+    assert_eq!(disk.edge_materializations(), 0);
+    assert_eq!(disk.node_materializations(), 0);
 }
 
 fn attempt(graph: &mut DirGraph, query: &str) -> Result<(), String> {

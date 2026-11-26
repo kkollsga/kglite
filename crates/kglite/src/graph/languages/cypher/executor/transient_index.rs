@@ -145,7 +145,7 @@ impl TransientEqIndex {
         let mut kinds = TextKinds::default();
         for idx in nodes {
             if let Some(node) = graph.graph.node_view(idx) {
-                let val = resolve_node_property(node, property, graph);
+                let val = resolve_node_property(&node, property, graph);
                 match &val {
                     Value::Null => continue,
                     Value::Float64(f) if f.is_nan() => continue,
@@ -265,13 +265,13 @@ pub(super) fn node_prop_reference(
         .get(var)
         .and_then(|idx| graph.graph.node_view(*idx))
     {
-        return Some(resolve_node_property(node, prop, graph));
+        return Some(resolve_node_property(&node, prop, graph));
     }
     match row.projected.get(var)? {
         Value::NodeRef(i) => graph
             .graph
             .node_view(NodeIndex::new(*i as usize))
-            .map(|node| resolve_node_property(node, prop, graph)),
+            .map(|node| resolve_node_property(&node, prop, graph)),
         Value::Node(node) => node.properties.get(prop).cloned(),
         Value::Map(members) => members.get(prop).cloned(),
         _ => None,

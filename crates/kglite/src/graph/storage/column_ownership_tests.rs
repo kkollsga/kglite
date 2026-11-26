@@ -137,7 +137,12 @@ fn node_of(graph: &DirGraph, id: i64) -> NodeIndex {
 }
 
 fn node_row_id(graph: &DirGraph, idx: NodeIndex) -> Option<u32> {
-    match graph.graph.node_weight(idx).map(|n| &n.properties) {
+    match graph
+        .graph
+        .node_weight(idx)
+        .as_deref()
+        .map(|n| &n.properties)
+    {
         Some(PropertyStorage::Columnar(row)) => Some(row.row_id()),
         _ => None,
     }
@@ -208,8 +213,7 @@ fn all_read_surfaces(
             "GraphRead::node_view",
             graph
                 .node_view(idx)
-                .and_then(|v| v.get_property("c0"))
-                .map(|c| c.into_owned())
+                .and_then(|v| v.get_property("c0").map(|c| c.into_owned()))
                 .unwrap_or(Value::Null),
         ),
         (

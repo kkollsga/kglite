@@ -38,7 +38,11 @@ fn columnar_item() -> DirGraph {
         .expect("seeded node");
     assert!(
         matches!(
-            graph.graph.node_weight(idx).map(|n| &n.properties),
+            graph
+                .graph
+                .node_weight(idx)
+                .as_deref()
+                .map(|n| &n.properties),
             Some(PropertyStorage::Columnar { .. })
         ),
         "the node must read through a column store, or these tests are vacuous"
@@ -56,8 +60,7 @@ fn node_qty(graph: &DirGraph) -> Option<Value> {
     graph
         .lookup_by_id_readonly("Item", &Value::Int64(1))
         .and_then(|i| graph.graph.node_view(i))
-        .and_then(|n| n.get_property("qty"))
-        .map(|v| v.into_owned())
+        .and_then(|n| n.get_property("qty").map(|v| v.into_owned()))
 }
 
 /// The removal must reach the master store — it is what `save()` persists.
@@ -114,8 +117,7 @@ fn remove_over_many_rows_clears_every_node() {
         let value = graph
             .lookup_by_id_readonly("Item", &Value::Int64(id))
             .and_then(|i| graph.graph.node_view(i))
-            .and_then(|n| n.get_property("qty"))
-            .map(|v| v.into_owned());
+            .and_then(|n| n.get_property("qty").map(|v| v.into_owned()));
         assert_eq!(value, None, "node {id} kept its removed property");
     }
     // And a later SET does not bring any of them back.
@@ -124,8 +126,7 @@ fn remove_over_many_rows_clears_every_node() {
         let value = graph
             .lookup_by_id_readonly("Item", &Value::Int64(id))
             .and_then(|i| graph.graph.node_view(i))
-            .and_then(|n| n.get_property("qty"))
-            .map(|v| v.into_owned());
+            .and_then(|n| n.get_property("qty").map(|v| v.into_owned()));
         assert_eq!(value, None, "node {id} resurrected its removed property");
     }
 }

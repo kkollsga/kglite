@@ -19,6 +19,7 @@ use crate::graph::storage::forked_edges::OverlayBits;
 use crate::graph::storage::forked_slots::ExtraIter;
 use crate::graph::storage::frozen::FrozenNodeIndices;
 use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
+use crate::graph::storage::record_ref::RecordRef;
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::visit::EdgeRef;
 use petgraph::Direction;
@@ -96,7 +97,6 @@ enum EdgeWeightSrc<'a> {
 }
 
 /// A lightweight edge reference returned by graph edge iterators.
-/// Implements `petgraph::visit::EdgeRef` for compatibility with existing code.
 #[derive(Clone, Copy)]
 pub struct GraphEdgeRef<'a> {
     source_: NodeIndex,
@@ -165,44 +165,17 @@ impl<'a> GraphEdgeRef<'a> {
     }
 
     #[inline]
-    pub fn weight(&self) -> &'a EdgeData {
+    pub fn weight(&self) -> RecordRef<'a, EdgeData> {
         match self.weight_ {
-            EdgeWeightSrc::Ref(w) => w,
-            EdgeWeightSrc::DiskLazy(g) => g.materialize_edge(self.index_.index() as u32),
+            EdgeWeightSrc::Ref(w) => RecordRef::Borrowed(w),
+            EdgeWeightSrc::DiskLazy(g) => {
+                RecordRef::Owned(Box::new(g.materialize_edge(self.index_.index() as u32)))
+            }
         }
     }
 
     #[inline]
     pub fn id(&self) -> EdgeIndex {
-        self.index_
-    }
-}
-
-impl<'a> EdgeRef for GraphEdgeRef<'a> {
-    type NodeId = NodeIndex;
-    type EdgeId = EdgeIndex;
-    type Weight = EdgeData;
-
-    #[inline]
-    fn source(&self) -> NodeIndex {
-        self.source_
-    }
-
-    #[inline]
-    fn target(&self) -> NodeIndex {
-        self.target_
-    }
-
-    #[inline]
-    fn weight(&self) -> &EdgeData {
-        match self.weight_ {
-            EdgeWeightSrc::Ref(w) => w,
-            EdgeWeightSrc::DiskLazy(g) => g.materialize_edge(self.index_.index() as u32),
-        }
-    }
-
-    #[inline]
-    fn id(&self) -> EdgeIndex {
         self.index_
     }
 }

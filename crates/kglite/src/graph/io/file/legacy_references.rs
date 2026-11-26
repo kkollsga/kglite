@@ -282,7 +282,10 @@ fn collect_node_changes(graph: &DirGraph) -> Vec<NodeChanges> {
                         .map(|store| store.node_ref_candidate_rows(property_value_needs_snapshot))
                         .unwrap_or_default()
                 });
-                rows.contains(&row) || inline_title.is_some_and(property_value_needs_snapshot)
+                rows.contains(&row)
+                    || inline_title
+                        .as_ref()
+                        .is_some_and(property_value_needs_snapshot)
             }
             NodeLocation::Inline => true,
         };
@@ -296,18 +299,18 @@ fn collect_node_changes(graph: &DirGraph) -> Vec<NodeChanges> {
 }
 
 /// Where a node's title and properties live.
-enum NodeLocation<'g> {
+enum NodeLocation {
     /// Row `row` of its type's column store, plus the inline title when the
     /// node carries one (a non-Null `NodeData.title` wins over the store's).
     Row {
         row: u32,
-        inline_title: Option<&'g Value>,
+        inline_title: Option<Value>,
     },
     /// Anywhere else: read the whole node.
     Inline,
 }
 
-fn node_location(graph: &DirGraph, index: NodeIndex) -> Option<(InternedKey, NodeLocation<'_>)> {
+fn node_location(graph: &DirGraph, index: NodeIndex) -> Option<(InternedKey, NodeLocation)> {
     if let Some(disk) = graph.graph.as_disk() {
         // A disk node is always a store row; its title comes from the store.
         let slot = disk.node_slot(index.index());
@@ -324,7 +327,8 @@ fn node_location(graph: &DirGraph, index: NodeIndex) -> Option<(InternedKey, Nod
     let location = match data.properties.columnar_row_id() {
         Some(row) if graph.graph.column_store(data.node_type).is_some() => NodeLocation::Row {
             row,
-            inline_title: (!matches!(data.title_ref(), Value::Null)).then_some(data.title_ref()),
+            inline_title: (!matches!(data.title_ref(), Value::Null))
+                .then(|| data.title_ref().clone()),
         },
         _ => NodeLocation::Inline,
     };

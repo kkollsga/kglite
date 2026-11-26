@@ -73,10 +73,10 @@ fn type_only_cypher_reads_materialise_no_edge() {
     ];
     let mut materialised = Vec::new();
     for (query, expected) in cases {
-        let _outer = graph.graph.begin_query();
+        disk.reset_materialization_counts();
         assert_eq!(count(&graph, query), Value::Int64(expected), "{query}");
-        if disk.edge_arena_len() > 0 {
-            materialised.push((query, disk.edge_arena_len()));
+        if disk.edge_materializations() > 0 {
+            materialised.push((query, disk.edge_materializations()));
         }
     }
     assert!(materialised.is_empty(), "{materialised:#?}");
@@ -86,11 +86,14 @@ fn type_only_cypher_reads_materialise_no_edge() {
 fn neighbor_schemas_materialise_nothing_on_disk() {
     let graph = chain();
     let disk = graph.graph.as_disk().expect("disk-backed");
-    let _outer = graph.graph.begin_query();
+    disk.reset_materialization_counts();
 
     let one = compute_neighbors_schema(&graph, "P").unwrap();
     let all = compute_all_neighbors_schemas(&graph);
-    assert_eq!((disk.edge_arena_len(), disk.node_arena_len()), (0, 0));
+    assert_eq!(
+        (disk.edge_materializations(), disk.node_materializations()),
+        (0, 0)
+    );
 
     let summary = |list: &[crate::graph::introspection::NeighborConnection]| {
         list.iter()

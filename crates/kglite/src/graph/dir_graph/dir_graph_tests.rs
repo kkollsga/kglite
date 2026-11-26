@@ -708,8 +708,7 @@ mod overwrite_index_freshness_tests {
             .any(|error| error.contains("Type mismatch")));
         assert_eq!(
             g.node_view(node)
-                .and_then(|data| data.get_property("city"))
-                .map(|value| value.into_owned()),
+                .and_then(|data| data.get_property("city").map(|value| value.into_owned())),
             Some(Value::Int64(7))
         );
     }

@@ -1469,7 +1469,7 @@ fn t_edge_census(graph: &DirGraph) -> Vec<(Option<i64>, Option<i64>)> {
         .graph
         .edge_indices()
         .filter_map(|idx| graph.graph.edge_weight(idx))
-        .map(|edge| (read(edge, "k"), read(edge, "hits")))
+        .map(|edge| (read(&edge, "k"), read(&edge, "hits")))
         .collect();
     rows.sort();
     rows

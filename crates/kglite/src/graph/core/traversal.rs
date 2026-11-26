@@ -286,8 +286,8 @@ fn make_traversal_fast(
             match target_type {
                 None => true,
                 Some(types) => {
-                    let nt = g[idx].node_type;
-                    types.iter().any(|t| InternedKey::from_str(t) == nt)
+                    let nt = g.node_type_of(idx);
+                    types.iter().any(|t| Some(InternedKey::from_str(t)) == nt)
                 }
             }
         };
@@ -481,8 +481,8 @@ fn make_traversal_full(
             match target_type {
                 None => true,
                 Some(types) => {
-                    let nt = g[idx].node_type;
-                    types.iter().any(|t| InternedKey::from_str(t) == nt)
+                    let nt = g.node_type_of(idx);
+                    types.iter().any(|t| Some(InternedKey::from_str(t)) == nt)
                 }
             }
         };
@@ -729,7 +729,7 @@ fn resolve_geometry_field<'a>(
 }
 
 /// Extract a parsed WKT geometry from a node's properties.
-fn node_geometry(node: NodeView<'_>, geom_field: &str) -> Option<Geometry<f64>> {
+fn node_geometry(node: &NodeView<'_>, geom_field: &str) -> Option<Geometry<f64>> {
     match node.get_property(geom_field).as_deref() {
         Some(Value::String(wkt)) => crate::graph::features::spatial::parse_wkt(wkt).ok(),
         _ => None,
@@ -737,7 +737,7 @@ fn node_geometry(node: NodeView<'_>, geom_field: &str) -> Option<Geometry<f64>> 
 }
 
 /// Extract (lat, lon) from a node using SpatialConfig (location fields + geometry centroid fallback).
-fn node_lat_lon(node: NodeView<'_>, spatial_config: Option<&SpatialConfig>) -> Option<(f64, f64)> {
+fn node_lat_lon(node: &NodeView<'_>, spatial_config: Option<&SpatialConfig>) -> Option<(f64, f64)> {
     let sc = spatial_config?;
     if let Some((ref lat_f, ref lon_f)) = sc.location {
         if let Some((lat, lon)) = extract_lat_lon(node, lat_f, lon_f) {
@@ -759,7 +759,7 @@ fn node_lat_lon(node: NodeView<'_>, spatial_config: Option<&SpatialConfig>) -> O
 /// - Closest/Geometry: also resolve to geometry centroid as a point
 ///   (actual geometry usage is handled by the caller)
 fn resolve_node_point(
-    node: NodeView<'_>,
+    node: &NodeView<'_>,
     spatial_config: Option<&SpatialConfig>,
     resolve: Option<SpatialResolve>,
     geometry_field_override: Option<&str>,
@@ -783,7 +783,7 @@ fn resolve_node_point(
 
 /// Get the parsed geometry for a node (for resolve='geometry' or 'closest' mode).
 fn resolve_node_geom(
-    node: NodeView<'_>,
+    node: &NodeView<'_>,
     spatial_config: Option<&SpatialConfig>,
     geometry_field_override: Option<&str>,
 ) -> Option<Geometry<f64>> {
@@ -792,7 +792,7 @@ fn resolve_node_geom(
     node_geometry(node, geom_field)
 }
 
-fn extract_lat_lon(node: NodeView<'_>, lat_field: &str, lon_field: &str) -> Option<(f64, f64)> {
+fn extract_lat_lon(node: &NodeView<'_>, lat_field: &str, lon_field: &str) -> Option<(f64, f64)> {
     let lat = node
         .get_property(lat_field)
         .as_deref()
@@ -933,7 +933,7 @@ fn spatial_contains_traversal(
             Some(n) => n,
             None => continue,
         };
-        let src_geom = match node_geometry(src_node, src_geom_field) {
+        let src_geom = match node_geometry(&src_node, src_geom_field) {
             Some(g) => g,
             None => continue,
         };
@@ -950,7 +950,7 @@ fn spatial_contains_traversal(
 
             if use_full_geometry {
                 // resolve='geometry': polygon-in-polygon containment
-                if let Some(tgt_geom) = resolve_node_geom(tgt_node, target_spatial, geometry_field)
+                if let Some(tgt_geom) = resolve_node_geom(&tgt_node, target_spatial, geometry_field)
                 {
                     if crate::graph::features::spatial::geometry_contains_geometry(
                         &src_geom, &tgt_geom,
@@ -961,7 +961,7 @@ fn spatial_contains_traversal(
             } else {
                 // Default / resolve='centroid': target as point → point-in-polygon
                 if let Some((lat, lon)) =
-                    resolve_node_point(tgt_node, target_spatial, resolve, geometry_field)
+                    resolve_node_point(&tgt_node, target_spatial, resolve, geometry_field)
                 {
                     // Bounding box pre-filter
                     if let Some(ref bbox) = src_bbox {
@@ -1052,7 +1052,7 @@ fn spatial_intersects_traversal(
             Some(n) => n,
             None => continue,
         };
-        let src_geom = match node_geometry(src_node, src_geom_field) {
+        let src_geom = match node_geometry(&src_node, src_geom_field) {
             Some(g) => g,
             None => continue,
         };
@@ -1063,7 +1063,7 @@ fn spatial_intersects_traversal(
                 Some(n) => n,
                 None => continue,
             };
-            if let Some(tgt_geom) = node_geometry(tgt_node, tgt_geom_field) {
+            if let Some(tgt_geom) = node_geometry(&tgt_node, tgt_geom_field) {
                 if crate::graph::features::spatial::geometries_intersect(&src_geom, &tgt_geom) {
                     matched.push(tgt_idx);
                 }
@@ -1181,7 +1181,7 @@ fn distance_point_mode(
     for &tgt_idx in target_candidates {
         if let Some(tgt_node) = graph.node_view(tgt_idx) {
             if let Some((lat, lon)) =
-                resolve_node_point(tgt_node, target_spatial, resolve, geometry_field)
+                resolve_node_point(&tgt_node, target_spatial, resolve, geometry_field)
             {
                 target_locs.push(TargetLoc {
                     idx: tgt_idx,
@@ -1202,7 +1202,7 @@ fn distance_point_mode(
         };
 
         let (src_lat, src_lon) =
-            match resolve_node_point(src_node, source_spatial, resolve, geometry_field) {
+            match resolve_node_point(&src_node, source_spatial, resolve, geometry_field) {
                 Some(loc) => loc,
                 None => continue,
             };
@@ -1258,10 +1258,10 @@ fn distance_closest_mode(
             None => continue,
         };
 
-        let src_geom = resolve_node_geom(src_node, source_spatial, geometry_field);
+        let src_geom = resolve_node_geom(&src_node, source_spatial, geometry_field);
         // Fallback to centroid point if no geometry
         let src_point = resolve_node_point(
-            src_node,
+            &src_node,
             source_spatial,
             Some(SpatialResolve::Centroid),
             geometry_field,
@@ -1278,9 +1278,9 @@ fn distance_closest_mode(
                 None => continue,
             };
 
-            let tgt_geom = resolve_node_geom(tgt_node, target_spatial, geometry_field);
+            let tgt_geom = resolve_node_geom(&tgt_node, target_spatial, geometry_field);
             let tgt_point = resolve_node_point(
-                tgt_node,
+                &tgt_node,
                 target_spatial,
                 Some(SpatialResolve::Centroid),
                 geometry_field,

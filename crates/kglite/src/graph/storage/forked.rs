@@ -111,6 +111,7 @@ use crate::graph::storage::forked_edges::{EdgeLayer, OverlayBits};
 use crate::graph::storage::forked_slots::ExtraSlots;
 use crate::graph::storage::frozen::FrozenNodeIndices;
 use crate::graph::storage::property_storage::PropertyStorage;
+use crate::graph::storage::record_ref::RecordRef;
 use crate::graph::storage::shared_tree::{OpLog, PagedMap};
 use crate::graph::storage::undo::{ColumnarPreImages, ColumnarWrite, OverlayResidue, UndoJournal};
 use crate::graph::storage::{GraphRead, GraphWrite, MappedGraph, MemoryGraph};
@@ -945,7 +946,7 @@ impl ForkedGraph {
     /// base holds, which may already differ if an earlier statement wrote it.
     #[cold]
     fn capture_node_weight(&mut self, idx: NodeIndex) {
-        let current = GraphRead::node_weight(self, idx).cloned();
+        let current = GraphRead::node_weight(self, idx).map(|r| (*r).clone());
         if let Some(journal) = self.undo.as_deref_mut() {
             journal.note_node_weight(idx, || current);
         }
@@ -959,7 +960,7 @@ impl ForkedGraph {
             base, delta, undo, ..
         } = self;
         if let Some(journal) = undo.as_deref_mut() {
-            journal.note_edge_weight(idx, || delta.edges.weight(base, idx).cloned());
+            journal.note_edge_weight(idx, || delta.edges.weight(base, idx).map(|r| (*r).clone()));
         }
     }
 
@@ -1216,10 +1217,10 @@ impl GraphRead for ForkedGraph {
     }
 
     #[inline]
-    fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
+    fn node_weight(&self, idx: NodeIndex) -> Option<RecordRef<'_, NodeData>> {
         let raw = idx.index() as u32;
         match self.delta.nodes.get(raw) {
-            Some(data) => Some(data),
+            Some(data) => Some(RecordRef::Borrowed(data)),
             None if self.delta.dead_count != 0 && self.delta.dead.holds(raw) => None,
             None => self.base.node_weight(idx),
         }
@@ -1400,7 +1401,7 @@ impl GraphRead for ForkedGraph {
         )))
     }
 
-    fn edge_weights<'a>(&'a self) -> Box<dyn Iterator<Item = &'a EdgeData> + 'a> {
+    fn edge_weights<'a>(&'a self) -> Box<dyn Iterator<Item = RecordRef<'a, EdgeData>> + 'a> {
         if self.delta.edges.is_clean() {
             return base_read!(self.base, g => GraphRead::edge_weights(g));
         }
@@ -1442,7 +1443,7 @@ impl GraphRead for ForkedGraph {
     }
 
     #[inline]
-    fn edge_weight(&self, idx: EdgeIndex) -> Option<&EdgeData> {
+    fn edge_weight(&self, idx: EdgeIndex) -> Option<RecordRef<'_, EdgeData>> {
         self.delta.edges.weight(&self.base, idx)
     }
 
@@ -1543,7 +1544,7 @@ impl GraphWrite for ForkedGraph {
                 journal.note_copied_edge_weight(raw);
             }
         }
-        Some(edges.weight_mut(raw, (src.index() as u32, dst.index() as u32), base))
+        Some(edges.weight_mut(raw, (src.index() as u32, dst.index() as u32), &base))
     }
 
     #[inline]

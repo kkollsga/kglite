@@ -33,6 +33,7 @@ use petgraph::Direction;
 
 use crate::graph::schema::EdgeData;
 use crate::graph::storage::fork_base::ForkBase;
+use crate::graph::storage::record_ref::RecordRef;
 use crate::graph::storage::shared_tree::{PagedBits, PagedMap, PagedSet};
 
 /// Words per chunk of a chunked [`OverlayBits`]: 32,768 bits, 4 KiB.
@@ -323,18 +324,21 @@ impl EdgeLayer {
         &'a self,
         base: &'a ForkBase,
         slot: EdgeIndex,
-    ) -> Option<&'a EdgeData> {
+    ) -> Option<RecordRef<'a, EdgeData>> {
         let raw = slot.index() as u32;
         if !self.touched.holds(raw) {
             return base.edge_weight(slot);
         }
         if let Some(edge) = self.added.get(raw) {
-            return Some(&edge.weight);
+            return Some(RecordRef::Borrowed(&edge.weight));
         }
         if self.removed.contains(raw) {
             return None;
         }
-        self.weights.get(raw).or_else(|| base.edge_weight(slot))
+        self.weights
+            .get(raw)
+            .map(RecordRef::Borrowed)
+            .or_else(|| base.edge_weight(slot))
     }
 
     /// The endpoints of `slot` as this view reads them.

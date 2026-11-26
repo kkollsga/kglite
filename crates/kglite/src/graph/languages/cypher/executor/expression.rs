@@ -327,7 +327,7 @@ impl<'a> CypherExecutor<'a> {
         // conventional property names so a `wkt_geometry`-only node still
         // works in `intersects()` / `contains()` / `centroid()` without the
         // ingester having to declare `column_types={'wkt_geometry':'geometry'}`.
-        self.infer_spatial_data(node)
+        self.infer_spatial_data(&node)
     }
 
     /// Per-query inference fallback: scan the node's properties for
@@ -337,7 +337,7 @@ impl<'a> CypherExecutor<'a> {
     /// "no spatial config" error when the data is sitting right there.
     fn infer_spatial_data(
         &self,
-        node: crate::graph::storage::NodeView<'_>,
+        node: &crate::graph::storage::NodeView<'_>,
     ) -> Option<NodeSpatialData> {
         const GEOMETRY_FIELDS: &[&str] = &["wkt_geometry", "geometry", "geom", "wkt"];
         const LOCATION_FIELDS: &[(&str, &str)] = &[("latitude", "longitude"), ("lat", "lon")];
@@ -500,7 +500,7 @@ impl<'a> CypherExecutor<'a> {
                         // virtual properties (location, geometry, etc.)
                         if self.graph.get_spatial_config(type_str).is_some() {
                             if let Some(node) = self.graph.graph.node_view(idx) {
-                                return Ok(resolve_node_property(node, property, self.graph));
+                                return Ok(resolve_node_property(&node, property, self.graph));
                             }
                         }
                         return Ok(Value::Null);
@@ -518,9 +518,9 @@ impl<'a> CypherExecutor<'a> {
         // the property directly.
         if let Some(node) = self.graph.graph.node_view(idx) {
             if self.property_might_be_alias(property) {
-                return Ok(resolve_node_property(node, property, self.graph));
+                return Ok(resolve_node_property(&node, property, self.graph));
             }
-            return Ok(resolve_node_property_unaliased(node, property, self.graph));
+            return Ok(resolve_node_property_unaliased(&node, property, self.graph));
         }
         Ok(Value::Null)
     }
@@ -564,7 +564,7 @@ impl<'a> CypherExecutor<'a> {
             if let Value::NodeRef(idx) = val {
                 let node_idx = petgraph::graph::NodeIndex::new(*idx as usize);
                 if let Some(node) = self.graph.graph.node_view(node_idx) {
-                    return Ok(resolve_node_property(node, property, self.graph));
+                    return Ok(resolve_node_property(&node, property, self.graph));
                 }
                 return Ok(Value::Null);
             }

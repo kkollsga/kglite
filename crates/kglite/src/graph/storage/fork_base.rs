@@ -26,6 +26,7 @@ use serde::{Serialize, Serializer};
 use crate::graph::schema::{EdgeData, InternedKey, NodeData};
 use crate::graph::storage::column_store::ColumnStore;
 use crate::graph::storage::frozen::{FrozenEdgeRefs, FrozenEdges, FrozenGraph};
+use crate::graph::storage::record_ref::RecordRef;
 use crate::graph::storage::slot_mirror::SlotMirror;
 use crate::graph::storage::undo::UndoJournal;
 use crate::graph::storage::{GraphRead, MappedGraph, MemoryGraph};
@@ -176,7 +177,7 @@ impl<'a> BaseEdges<'a> {
                 .map(|er| (er.id(), er.source(), er.target(), er.weight())),
             Self::Frozen(iter) => iter
                 .next()
-                .map(|er| (er.id(), er.source(), er.target(), er.weight())),
+                .map(|er| (er.id(), er.source(), er.target(), er.weight().lent())),
         }
     }
 }
@@ -196,7 +197,7 @@ impl<'a> BaseEdgeRefs<'a> {
                 .map(|er| (er.id(), er.source(), er.target(), er.weight())),
             Self::Frozen(iter) => iter
                 .next()
-                .map(|er| (er.id(), er.source(), er.target(), er.weight())),
+                .map(|er| (er.id(), er.source(), er.target(), er.weight().lent())),
         }
     }
 }
@@ -241,19 +242,19 @@ impl ForkBase {
     }
 
     #[inline(always)]
-    pub(crate) fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
+    pub(crate) fn node_weight(&self, idx: NodeIndex) -> Option<RecordRef<'_, NodeData>> {
         match self {
-            Self::Memory(g) => g.inner().node_weight(idx),
-            Self::Mapped(g) => g.inner().node_weight(idx),
+            Self::Memory(g) => g.inner().node_weight(idx).map(RecordRef::Borrowed),
+            Self::Mapped(g) => g.inner().node_weight(idx).map(RecordRef::Borrowed),
             Self::Frozen(g) => GraphRead::node_weight(&**g, idx),
         }
     }
 
     #[inline(always)]
-    pub(crate) fn edge_weight(&self, idx: EdgeIndex) -> Option<&EdgeData> {
+    pub(crate) fn edge_weight(&self, idx: EdgeIndex) -> Option<RecordRef<'_, EdgeData>> {
         match self {
-            Self::Memory(g) => g.inner().edge_weight(idx),
-            Self::Mapped(g) => g.inner().edge_weight(idx),
+            Self::Memory(g) => g.inner().edge_weight(idx).map(RecordRef::Borrowed),
+            Self::Mapped(g) => g.inner().edge_weight(idx).map(RecordRef::Borrowed),
             Self::Frozen(g) => GraphRead::edge_weight(&**g, idx),
         }
     }

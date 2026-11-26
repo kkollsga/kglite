@@ -1351,7 +1351,7 @@ impl<'a> CypherExecutor<'a> {
                         let geom_fallback = config.geometry.as_deref();
 
                         if let Some((lat, lon)) = crate::graph::features::spatial::node_location(
-                            node,
+                            &node,
                             lat_f,
                             lon_f,
                             geom_fallback,
@@ -1724,7 +1724,7 @@ impl<'a> CypherExecutor<'a> {
                                 val.clone()
                             } else if let Some(&idx) = row.node_bindings.get(col) {
                                 if let Some(node) = self.graph.graph.node_view(idx) {
-                                    node_to_map_value(node)
+                                    node_to_map_value(&node)
                                 } else {
                                     Value::Null
                                 }

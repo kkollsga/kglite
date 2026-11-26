@@ -9,6 +9,7 @@ use crate::graph::storage::column_store::ColumnStore;
 use crate::graph::storage::fork_base::{can_fork, Folded};
 use crate::graph::storage::forked::ForkedGraph;
 use crate::graph::storage::frozen::FrozenGraph;
+use crate::graph::storage::record_ref::RecordRef;
 use crate::graph::storage::recording::{RecordingGraph, RecordingState};
 use crate::graph::storage::undo::UndoJournal;
 use crate::graph::storage::{GraphRead, GraphWrite, MappedGraph, MemoryGraph};
@@ -218,7 +219,7 @@ impl GraphBackend {
         match self {
             Self::Disk(g) => g.owned_node_data(idx),
             Self::Recording(rg) => rg.inner().owned_node_data(idx),
-            _ => GraphRead::node_weight(self, idx).cloned(),
+            _ => GraphRead::node_weight(self, idx).map(|r| (*r).clone()),
         }
     }
 
@@ -1236,44 +1237,6 @@ impl GraphBackend {
     }
 }
 
-impl std::ops::Index<NodeIndex> for GraphBackend {
-    type Output = NodeData;
-    #[inline]
-    fn index(&self, index: NodeIndex) -> &NodeData {
-        match self {
-            GraphBackend::Memory(g) => &g.inner()[index],
-            GraphBackend::Mapped(g) => &g.inner()[index],
-            GraphBackend::Frozen(g) => {
-                GraphRead::node_weight(&**g, index).expect("Index on a missing node")
-            }
-            GraphBackend::Forked(g) => {
-                GraphRead::node_weight(g.as_ref(), index).expect("Index on a missing node")
-            }
-            GraphBackend::Disk(dg) => &dg[index],
-            GraphBackend::Recording(rg) => &rg.inner()[index],
-        }
-    }
-}
-
-impl std::ops::Index<EdgeIndex> for GraphBackend {
-    type Output = EdgeData;
-    #[inline]
-    fn index(&self, index: EdgeIndex) -> &EdgeData {
-        match self {
-            GraphBackend::Memory(g) => &g.inner()[index],
-            GraphBackend::Mapped(g) => &g.inner()[index],
-            GraphBackend::Frozen(g) => {
-                GraphRead::edge_weight(&**g, index).expect("Index on a missing edge")
-            }
-            GraphBackend::Forked(g) => {
-                GraphRead::edge_weight(g.as_ref(), index).expect("Index on a missing edge")
-            }
-            GraphBackend::Disk(dg) => &dg[index],
-            GraphBackend::Recording(rg) => &rg.inner()[index],
-        }
-    }
-}
-
 /// The backend variant that matches the base an overlay was folded from.
 impl From<Folded> for GraphBackend {
     fn from(folded: Folded) -> Self {
@@ -1665,7 +1628,7 @@ impl GraphRead for GraphBackend {
     }
 
     #[inline(always)]
-    fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
+    fn node_weight(&self, idx: NodeIndex) -> Option<RecordRef<'_, NodeData>> {
         match self {
             Self::Memory(g) => GraphRead::node_weight(&**g, idx),
             Self::Forked(g) => GraphRead::node_weight(g.as_ref(), idx),
@@ -1761,7 +1724,7 @@ impl GraphRead for GraphBackend {
     }
 
     #[inline]
-    fn edge_weights<'a>(&'a self) -> Box<dyn Iterator<Item = &'a EdgeData> + 'a> {
+    fn edge_weights<'a>(&'a self) -> Box<dyn Iterator<Item = RecordRef<'a, EdgeData>> + 'a> {
         match self {
             Self::Memory(g) => GraphRead::edge_weights(&**g),
             Self::Forked(g) => GraphRead::edge_weights(g.as_ref()),
@@ -1826,7 +1789,7 @@ impl GraphRead for GraphBackend {
     }
 
     #[inline]
-    fn edge_weight(&self, idx: EdgeIndex) -> Option<&EdgeData> {
+    fn edge_weight(&self, idx: EdgeIndex) -> Option<RecordRef<'_, EdgeData>> {
         match self {
             Self::Memory(g) => GraphRead::edge_weight(&**g, idx),
             Self::Forked(g) => GraphRead::edge_weight(g.as_ref(), idx),
@@ -2164,15 +2127,6 @@ impl GraphRead for GraphBackend {
             Self::Recording(rg) => {
                 GraphRead::iter_peers_filtered(rg.as_ref(), node, dir, conn_type)
             }
-        }
-    }
-
-    #[inline]
-    fn reset_arenas(&self) {
-        match self {
-            Self::Disk(g) => GraphRead::reset_arenas(g.as_ref()),
-            Self::Recording(rg) => GraphRead::reset_arenas(rg.as_ref()),
-            _ => {}
         }
     }
 }

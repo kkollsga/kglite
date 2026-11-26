@@ -482,8 +482,12 @@ pub fn to_sqlite_dump(
             .map(|(_, idx)| {
                 let node = graph.graph.node_view(*idx);
                 let identity = vec![
-                    node.map(|n| n.id().into_owned()).unwrap_or(Value::Null),
-                    node.map(|n| n.title().into_owned()).unwrap_or(Value::Null),
+                    node.as_ref()
+                        .map(|n| n.id().into_owned())
+                        .unwrap_or(Value::Null),
+                    node.as_ref()
+                        .map(|n| n.title().into_owned())
+                        .unwrap_or(Value::Null),
                 ];
                 (identity, node_properties(graph, *idx))
             })

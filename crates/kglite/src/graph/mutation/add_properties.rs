@@ -366,32 +366,32 @@ fn compute_spatial_property(
 
     match spatial_fn.trim() {
         "distance" => {
-            let (lat1, lon1) = resolve_location(leaf_node, leaf_spatial)?;
-            let (lat2, lon2) = resolve_location(ancestor_node, ancestor_spatial)?;
+            let (lat1, lon1) = resolve_location(&leaf_node, leaf_spatial)?;
+            let (lat2, lon2) = resolve_location(&ancestor_node, ancestor_spatial)?;
             Some(Value::Float64(
                 crate::graph::features::spatial::geodesic_distance(lat1, lon1, lat2, lon2),
             ))
         }
         "area" => {
-            let geom = resolve_geometry(ancestor_node, ancestor_spatial)?;
+            let geom = resolve_geometry(&ancestor_node, ancestor_spatial)?;
             crate::graph::features::spatial::geometry_area_m2(&geom)
                 .ok()
                 .map(Value::Float64)
         }
         "perimeter" => {
-            let geom = resolve_geometry(ancestor_node, ancestor_spatial)?;
+            let geom = resolve_geometry(&ancestor_node, ancestor_spatial)?;
             crate::graph::features::spatial::geometry_perimeter_m(&geom)
                 .ok()
                 .map(Value::Float64)
         }
         "centroid_lat" => {
-            let geom = resolve_geometry(ancestor_node, ancestor_spatial)?;
+            let geom = resolve_geometry(&ancestor_node, ancestor_spatial)?;
             crate::graph::features::spatial::geometry_centroid(&geom)
                 .ok()
                 .map(|(lat, _)| Value::Float64(lat))
         }
         "centroid_lon" => {
-            let geom = resolve_geometry(ancestor_node, ancestor_spatial)?;
+            let geom = resolve_geometry(&ancestor_node, ancestor_spatial)?;
             crate::graph::features::spatial::geometry_centroid(&geom)
                 .ok()
                 .map(|(_, lon)| Value::Float64(lon))
@@ -401,7 +401,7 @@ fn compute_spatial_property(
 }
 
 fn resolve_location(
-    node: crate::graph::storage::NodeView<'_>,
+    node: &crate::graph::storage::NodeView<'_>,
     spatial_config: Option<&crate::graph::schema::SpatialConfig>,
 ) -> Option<(f64, f64)> {
     let sc = spatial_config?;
@@ -427,7 +427,7 @@ fn resolve_location(
 }
 
 fn resolve_geometry(
-    node: crate::graph::storage::NodeView<'_>,
+    node: &crate::graph::storage::NodeView<'_>,
     spatial_config: Option<&crate::graph::schema::SpatialConfig>,
 ) -> Option<geo::geometry::Geometry<f64>> {
     let sc = spatial_config?;

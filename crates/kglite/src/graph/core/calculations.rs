@@ -37,8 +37,7 @@ fn cache_parent_titles(
                     idx,
                     graph
                         .node_view(idx)
-                        .and_then(|node| node.get_field_ref("title"))
-                        .and_then(|v| v.as_string()),
+                        .and_then(|node| node.get_field_ref("title").and_then(|v| v.as_string())),
                 )
             })
         })
@@ -362,7 +361,7 @@ pub fn evaluate_equation(
                     .filter_map(|&node_idx| {
                         graph
                             .node_view(node_idx)
-                            .map(|n| convert_node_to_object(n, &graph.interner))
+                            .map(|n| convert_node_to_object(&n, &graph.interner))
                     })
                     .collect();
 
@@ -418,7 +417,7 @@ pub fn evaluate_equation(
             .map(|&node_idx| match graph.node_view(node_idx) {
                 Some(node) => {
                     let title = node.get_field_ref("title").and_then(|v| v.as_string());
-                    let obj = convert_node_to_object(node, &graph.interner);
+                    let obj = convert_node_to_object(&node, &graph.interner);
 
                     match Evaluator::evaluate(parsed_expr, &[obj]) {
                         Ok(value) => StatResult {
@@ -569,7 +568,7 @@ fn has_aggregation(expr: &Expr) -> bool {
 /// `statistics()` / `calculate()` expression over a saved graph evaluated
 /// against an empty object.
 fn convert_node_to_object(
-    node: crate::graph::storage::NodeView<'_>,
+    node: &crate::graph::storage::NodeView<'_>,
     interner: &StringInterner,
 ) -> HashMap<String, Value> {
     // Pre-allocate HashMap with exact capacity to avoid reallocations
@@ -624,8 +623,7 @@ pub fn count_nodes_by_parent(
             parent_title: pair.parent.and_then(|idx| {
                 graph
                     .node_view(idx)
-                    .and_then(|node| node.get_field_ref("title"))
-                    .and_then(|v| v.as_string())
+                    .and_then(|node| node.get_field_ref("title").and_then(|v| v.as_string()))
             }),
             value: Value::Int64(pair.children.len() as i64),
             error_msg: None,

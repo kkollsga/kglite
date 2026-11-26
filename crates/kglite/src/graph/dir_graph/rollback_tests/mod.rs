@@ -517,7 +517,11 @@ fn seeded_columnar() -> DirGraph {
         .node_indices()
         .filter(|idx| {
             matches!(
-                graph.graph.node_weight(*idx).map(|node| &node.properties),
+                graph
+                    .graph
+                    .node_weight(*idx)
+                    .as_deref()
+                    .map(|node| &node.properties),
                 Some(PropertyStorage::Columnar { .. })
             )
         })

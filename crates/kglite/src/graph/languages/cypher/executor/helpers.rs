@@ -421,7 +421,7 @@ pub(in crate::graph::languages::cypher) fn evaluate_comparison_tristate(
 
 /// Resolve a node property to an owned `Value`, resolving id-/title-field
 /// aliases first.
-pub fn resolve_node_property(node: NodeView<'_>, property: &str, graph: &DirGraph) -> Value {
+pub fn resolve_node_property(node: &NodeView<'_>, property: &str, graph: &DirGraph) -> Value {
     let node_type_str = node.node_type_str(&graph.interner);
     let resolved = graph.resolve_alias(node_type_str, property);
     resolve_node_property_resolved(node, resolved, InternedKey::from_str(resolved), graph)
@@ -436,7 +436,7 @@ pub fn resolve_node_property(node: NodeView<'_>, property: &str, graph: &DirGrap
 /// alias-bearing graphs. Results are identical to `resolve_node_property`
 /// for any non-alias property.
 pub fn resolve_node_property_unaliased(
-    node: NodeView<'_>,
+    node: &NodeView<'_>,
     property: &str,
     graph: &DirGraph,
 ) -> Value {
@@ -448,7 +448,7 @@ pub fn resolve_node_property_unaliased(
 /// scan that reads the same property from every row was paying that hash per
 /// row rather than per query.
 pub fn resolve_node_property_keyed(
-    node: NodeView<'_>,
+    node: &NodeView<'_>,
     property: &str,
     key: InternedKey,
     graph: &DirGraph,
@@ -466,7 +466,7 @@ pub fn resolve_node_property_keyed(
 /// a per-row caller can hoist the hash.
 #[inline]
 fn resolve_node_property_resolved(
-    node: NodeView<'_>,
+    node: &NodeView<'_>,
     resolved: &str,
     key: InternedKey,
     graph: &DirGraph,
@@ -548,7 +548,7 @@ pub fn resolve_edge_property(graph: &DirGraph, edge: &EdgeBinding, property: &st
     )
 }
 
-pub(super) fn node_to_map_value(node: NodeView<'_>) -> Value {
+pub(super) fn node_to_map_value(node: &NodeView<'_>) -> Value {
     node.title().into_owned()
 }
 
@@ -579,7 +579,7 @@ trait PropertySink {
     /// [`complete_from_type_schema`] cannot narrow.
     fn absorb_stored(
         &mut self,
-        node: crate::graph::storage::NodeView<'_>,
+        node: &crate::graph::storage::NodeView<'_>,
         graph: &DirGraph,
     ) -> bool;
 }
@@ -651,7 +651,7 @@ impl PropertySink for PropsSink {
 
     fn absorb_stored(
         &mut self,
-        node: crate::graph::storage::NodeView<'_>,
+        node: &crate::graph::storage::NodeView<'_>,
         graph: &DirGraph,
     ) -> bool {
         // Resolved key by key rather than through `property_pairs_named`: that
@@ -705,7 +705,7 @@ impl PropertySink for KeySink {
 
     fn absorb_stored(
         &mut self,
-        node: crate::graph::storage::NodeView<'_>,
+        node: &crate::graph::storage::NodeView<'_>,
         graph: &DirGraph,
     ) -> bool {
         let mut unresolved_key = false;
@@ -785,11 +785,14 @@ pub(crate) fn materialize_node_value_with(
                 .column_store(data.node_type)
                 .map(|store| (&**store, row_id))
         });
-        let node = crate::graph::storage::NodeView::new(&data, store);
-        return Some(node_value_from_view(idx, node, graph, hide));
+        let node = crate::graph::storage::NodeView::new(
+            crate::graph::storage::RecordRef::Borrowed(&data),
+            store,
+        );
+        return Some(node_value_from_view(idx, &node, graph, hide));
     }
     let node = graph.graph.node_view(idx)?;
-    Some(node_value_from_view(idx, node, graph, hide))
+    Some(node_value_from_view(idx, &node, graph, hide))
 }
 
 /// The sorted, de-duplicated key set of [`materialize_node_value`]'s property
@@ -814,15 +817,18 @@ pub(crate) fn materialize_node_keys(
                 .column_store(data.node_type)
                 .map(|store| (&**store, row_id))
         });
-        let node = crate::graph::storage::NodeView::new(&data, store);
-        return Some(node_keys_from_view(node, graph, hide));
+        let node = crate::graph::storage::NodeView::new(
+            crate::graph::storage::RecordRef::Borrowed(&data),
+            store,
+        );
+        return Some(node_keys_from_view(&node, graph, hide));
     }
     let node = graph.graph.node_view(idx)?;
-    Some(node_keys_from_view(node, graph, hide))
+    Some(node_keys_from_view(&node, graph, hide))
 }
 
 fn node_keys_from_view(
-    node: crate::graph::storage::NodeView<'_>,
+    node: &crate::graph::storage::NodeView<'_>,
     graph: &crate::graph::DirGraph,
     hide: bool,
 ) -> Vec<String> {
@@ -840,7 +846,7 @@ fn node_keys_from_view(
 /// cleared (Null) title, is virtual. A user title that happens to equal the minted form is
 /// indistinguishable from it and is treated as virtual.
 fn title_is_user_data(
-    node: crate::graph::storage::NodeView<'_>,
+    node: &crate::graph::storage::NodeView<'_>,
     node_type: &str,
     graph: &crate::graph::DirGraph,
 ) -> bool {
@@ -867,7 +873,7 @@ fn title_is_user_data(
 /// for it, and the engine does not record whether it was minted instead.
 fn collect_node_properties<S: PropertySink>(
     sink: &mut S,
-    node: crate::graph::storage::NodeView<'_>,
+    node: &crate::graph::storage::NodeView<'_>,
     node_type: &str,
     graph: &crate::graph::DirGraph,
     hide: bool,
@@ -930,7 +936,7 @@ fn collect_node_properties<S: PropertySink>(
 /// [`materialize_node_value`] so the view's lifetime ends with the call.
 fn node_value_from_view(
     idx: petgraph::graph::NodeIndex,
-    node: crate::graph::storage::NodeView<'_>,
+    node: &crate::graph::storage::NodeView<'_>,
     graph: &crate::graph::DirGraph,
     hide: bool,
 ) -> crate::datatypes::values::NodeValue {
@@ -999,7 +1005,7 @@ fn node_value_from_view(
 /// falls back to the full declared set — correct, and off the common path.
 fn complete_from_type_schema<S: PropertySink>(
     properties: &mut S,
-    node: crate::graph::storage::NodeView<'_>,
+    node: &crate::graph::storage::NodeView<'_>,
     node_type: &str,
     type_meta: &HashMap<String, String>,
     graph: &crate::graph::DirGraph,

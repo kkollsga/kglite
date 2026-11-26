@@ -655,10 +655,11 @@ impl KnowledgeGraph {
                     .path
                     .iter()
                     .filter_map(|&idx| {
-                        this.graph()
-                            .node_view(idx)
-                            .and_then(|node| node.get_field_ref("id"))
-                            .map(|id| py_out::value_to_py(py, &id).unwrap_or_else(|_| py.None()))
+                        this.graph().node_view(idx).and_then(|node| {
+                            node.get_field_ref("id").map(|id| {
+                                py_out::value_to_py(py, &id).unwrap_or_else(|_| py.None())
+                            })
+                        })
                     })
                     .collect();
                 Ok(PyList::new(py, ids)?.into())

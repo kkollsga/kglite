@@ -393,7 +393,7 @@ impl<'a> CypherExecutor<'a> {
                     .graph
                     .graph
                     .node_view(node_index)
-                    .map(|node| resolve_node_property(node, property, self.graph))
+                    .map(|node| resolve_node_property(&node, property, self.graph))
                     .unwrap_or(Value::Null))
             }
             Value::Node(node) => {
@@ -470,7 +470,7 @@ impl<'a> CypherExecutor<'a> {
                 MapProjectionItem::Property(property) => {
                     properties.push((
                         PropKey::from(property.as_str()),
-                        resolve_node_property(node, property, self.graph),
+                        resolve_node_property(&node, property, self.graph),
                     ));
                 }
                 MapProjectionItem::AllProperties => {
@@ -575,7 +575,7 @@ impl<'a> CypherExecutor<'a> {
                 if resolved == "id" || resolved == "title" {
                     return None;
                 }
-                node.get_property(resolved)
+                node.into_property(InternedKey::from_str(resolved))
             }
             _ => None,
         }

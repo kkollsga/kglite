@@ -14,6 +14,7 @@ use crate::graph::core::iterators::{
 };
 use crate::graph::schema::{EdgeData, InternedKey, NodeData};
 use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
+use crate::graph::storage::record_ref::RecordRef;
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::Direction;
 use std::borrow::Cow;
@@ -94,6 +95,12 @@ pub struct DiskGraph {
     // SAFETY block below and [`super::query_arena`] — read both before
     // touching either materialization path.
     pub(super) arenas: std::sync::Arc<super::query_arena::QueryArenas>,
+    /// Test-only counts of records built by `node_weight` and
+    /// `materialize_edge`, for pins that a path never materializes a record.
+    #[cfg(test)]
+    pub(super) node_materializations: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    pub(super) edge_materializations: std::sync::atomic::AtomicU64,
 
     // ── Column stores for node properties (Arc refs, data mmap'd) ──
     /// `FxHashMap` for the same reason as the heap backends' field: probed
@@ -470,33 +477,51 @@ impl DiskGraph {
         }
     }
 
-    /// Materialize a NodeData from disk slot + ColumnStore into the arena.
+    /// Materialize a NodeData from disk slot + ColumnStore. The returned
+    /// handle owns the record.
     ///
-    /// Every call parks a record that survives until the calling query ends.
-    /// Callers that finish with the record inside their own stack frame — the
-    /// scans and filters, which are the bulk of the traffic — should use
-    /// [`Self::owned_node_data`] instead and leave the arena alone.
+    /// Callers that finish with the record inside their own stack frame and
+    /// want the bare struct — the scans and filters, which are the bulk of the
+    /// traffic — should use [`Self::owned_node_data`] and skip the box.
     #[inline]
-    pub fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
-        let node_data = self.materialize_node_data(idx)?;
-        // The record is parked in the query arena; the epoch protocol in
-        // `super::query_arena` keeps its heap pointer alive until every query
-        // that could reach it has finished. The `&self` borrow alone would NOT
-        // be enough — `begin_query`/`reset_arenas` reclaim through `&self`.
-        debug_assert_arena_guard_active(self, "node_weight");
-        let ptr = self.arenas.push_node(node_data);
-        // SAFETY: the guard asserted above plus that protocol keep the pointer
-        // alive for at least the returned reference's lifetime.
-        unsafe { Some(&*ptr) }
+    pub fn node_weight(&self, idx: NodeIndex) -> Option<RecordRef<'_, NodeData>> {
+        let data = self.materialize_node_data(idx)?;
+        #[cfg(test)]
+        self.node_materializations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(RecordRef::Owned(Box::new(data)))
+    }
+
+    /// Records built by `node_weight` since the last
+    /// [`Self::reset_materialization_counts`].
+    #[cfg(test)]
+    pub(crate) fn node_materializations(&self) -> u64 {
+        self.node_materializations
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Records built by `materialize_edge` since the last
+    /// [`Self::reset_materialization_counts`].
+    #[cfg(test)]
+    pub(crate) fn edge_materializations(&self) -> u64 {
+        self.edge_materializations
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_materialization_counts(&self) {
+        self.node_materializations
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.edge_materializations
+            .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Materialize a node into the *caller's* frame.
     ///
-    /// The arena-free counterpart of [`Self::node_weight`]: the record dies
+    /// The box-free counterpart of [`Self::node_weight`]: the record dies
     /// where the caller drops it, so a scan over a million nodes holds one at
-    /// a time instead of a million, and never touches the arena mutex.
-    /// Nothing is parked, so no [`DiskQueryGuard`] is required for the
-    /// record's sake (callers still hold one for whatever else the read does).
+    /// a time instead of a million. It is not counted by the test-only
+    /// materialization counter.
     #[inline]
     pub(crate) fn owned_node_data(&self, idx: NodeIndex) -> Option<NodeData> {
         self.materialize_node_data(idx)
@@ -748,10 +773,10 @@ impl DiskGraph {
         DiskNodeIndices::new(self)
     }
 
-    /// Materialize an EdgeData into the arena. Reads conn_type from
-    /// EdgeEndpoints (O(1) lookup) and properties from `edge_properties`.
+    /// Materialize an EdgeData. Reads conn_type from EdgeEndpoints (O(1)
+    /// lookup) and properties from `edge_properties`.
     #[inline]
-    pub(crate) fn materialize_edge(&self, edge_idx: u32) -> &EdgeData {
+    pub(crate) fn materialize_edge(&self, edge_idx: u32) -> EdgeData {
         let ep = self.edge_endpoint(edge_idx as usize);
         let ct = InternedKey::from_u64(ep.connection_type);
         let props = if let Some(staged) = self.staged_edge(edge_idx) {
@@ -764,17 +789,13 @@ impl DiskGraph {
                 .map(|cow| cow.iter().cloned().collect())
                 .unwrap_or_default()
         };
-        debug_assert_arena_guard_active(self, "materialize_edge");
-        // Same lifetime protocol as `node_weight`: the arena's stable heap
-        // pointer is protected by the epoch bookkeeping in
-        // `super::query_arena`, not by the `&self` borrow alone.
-        let ptr = self.arenas.push_edge(EdgeData {
+        #[cfg(test)]
+        self.edge_materializations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        EdgeData {
             connection_type: ct,
             properties: props,
-        });
-        // SAFETY: the guard asserted above keeps the record alive for the
-        // returned reference's lifetime.
-        unsafe { &*ptr }
+        }
     }
 
     /// Count edges of a specific type without materializing EdgeData.
@@ -1510,13 +1531,6 @@ impl DiskGraph {
         self.arenas.active_count()
     }
 
-    /// Reclaim materialization arenas when no guarded read query is active.
-    /// Mutation execution calls this while holding exclusive graph ownership;
-    /// the active-count check also makes accidental concurrent resets safe.
-    pub fn reset_arenas(&self) {
-        self.arenas.reclaim_if_idle();
-    }
-
     pub fn edges_directed_iter(&self, a: NodeIndex, dir: Direction) -> DiskEdges<'_> {
         self.edges_directed_filtered_iter(a, dir, None)
     }
@@ -1571,7 +1585,7 @@ impl DiskGraph {
         self.edge_count
     }
 
-    pub fn edge_weight(&self, idx: EdgeIndex) -> Option<&EdgeData> {
+    pub fn edge_weight(&self, idx: EdgeIndex) -> Option<RecordRef<'_, EdgeData>> {
         self.ensure_csr();
         let ei = idx.index();
         if ei >= self.next_edge_idx as usize {
@@ -1582,7 +1596,7 @@ impl DiskGraph {
             return None;
         }
 
-        Some(self.materialize_edge(ei as u32))
+        Some(RecordRef::Owned(Box::new(self.materialize_edge(ei as u32))))
     }
 
     /// One edge property, read from the edge-property store without going
@@ -1810,7 +1824,7 @@ impl DiskGraph {
         DiskEdgesConnecting::new(self, a, b)
     }
 
-    pub fn edge_weights_iter(&self) -> Box<dyn Iterator<Item = &EdgeData> + '_> {
+    pub fn edge_weights_iter(&self) -> Box<dyn Iterator<Item = RecordRef<'_, EdgeData>> + '_> {
         self.ensure_csr();
         Box::new((0..self.next_edge_idx).filter_map(move |i| {
             let ep = self.edge_endpoint(i as usize);
@@ -1818,7 +1832,7 @@ impl DiskGraph {
                 return None;
             }
 
-            Some(self.materialize_edge(i))
+            Some(RecordRef::Owned(Box::new(self.materialize_edge(i))))
         }))
     }
 
@@ -2258,6 +2272,10 @@ impl DiskGraph {
             node_count: self.node_count,
             free_node_slots: self.free_node_slots.clone(),
             arenas: super::query_arena::QueryArenas::new(0),
+            #[cfg(test)]
+            node_materializations: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            edge_materializations: std::sync::atomic::AtomicU64::new(0),
             column_stores: self.column_stores.clone(),
             out_offsets: snapshot("out offsets", &self.out_offsets)?,
             out_edges: snapshot("out edges", &self.out_edges)?,
@@ -2466,22 +2484,6 @@ impl DiskGraph {
         }
         self.mutation_workspace = None;
         self.independent_root = parent.independent_root.clone();
-    }
-}
-
-impl std::ops::Index<NodeIndex> for DiskGraph {
-    type Output = NodeData;
-    #[inline]
-    fn index(&self, index: NodeIndex) -> &NodeData {
-        self.node_weight(index).expect("DiskGraph: node not found")
-    }
-}
-
-impl std::ops::Index<EdgeIndex> for DiskGraph {
-    type Output = EdgeData;
-    #[inline]
-    fn index(&self, index: EdgeIndex) -> &EdgeData {
-        self.edge_weight(index).expect("DiskGraph: edge not found")
     }
 }
 
