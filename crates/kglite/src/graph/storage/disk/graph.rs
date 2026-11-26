@@ -90,9 +90,7 @@ pub struct DiskGraph {
     /// Test-only counts of records built by `node_weight` and
     /// `materialize_edge`, for pins that a path never materializes a record.
     #[cfg(test)]
-    pub(super) node_materializations: std::sync::atomic::AtomicU64,
-    #[cfg(test)]
-    pub(super) edge_materializations: std::sync::atomic::AtomicU64,
+    pub(super) materializations: MaterializationCounts,
 
     // ── Column stores for node properties (Arc refs, data mmap'd) ──
     /// `FxHashMap` for the same reason as the heap backends' field: probed
@@ -307,6 +305,15 @@ impl std::fmt::Debug for DiskGraph {
 
 include!("graph/bootstrap.rs");
 
+/// Test-only counts behind [`DiskGraph::node_materializations`] and
+/// [`DiskGraph::edge_materializations`].
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct MaterializationCounts {
+    nodes: std::sync::atomic::AtomicU64,
+    edges: std::sync::atomic::AtomicU64,
+}
+
 impl DiskGraph {
     /// Backs `GraphRead::column_stores_iter` for the disk backend.
     pub fn column_stores_iter(
@@ -433,7 +440,8 @@ impl DiskGraph {
     pub fn node_weight(&self, idx: NodeIndex) -> Option<RecordRef<'_, NodeData>> {
         let data = self.materialize_node_data(idx)?;
         #[cfg(test)]
-        self.node_materializations
+        self.materializations
+            .nodes
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Some(RecordRef::owned(Box::new(data)))
     }
@@ -442,7 +450,8 @@ impl DiskGraph {
     /// [`Self::reset_materialization_counts`].
     #[cfg(test)]
     pub(crate) fn node_materializations(&self) -> u64 {
-        self.node_materializations
+        self.materializations
+            .nodes
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
@@ -450,15 +459,18 @@ impl DiskGraph {
     /// [`Self::reset_materialization_counts`].
     #[cfg(test)]
     pub(crate) fn edge_materializations(&self) -> u64 {
-        self.edge_materializations
+        self.materializations
+            .edges
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     #[cfg(test)]
     pub(crate) fn reset_materialization_counts(&self) {
-        self.node_materializations
+        self.materializations
+            .nodes
             .store(0, std::sync::atomic::Ordering::Relaxed);
-        self.edge_materializations
+        self.materializations
+            .edges
             .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -736,7 +748,8 @@ impl DiskGraph {
                 .unwrap_or_default()
         };
         #[cfg(test)]
-        self.edge_materializations
+        self.materializations
+            .edges
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         EdgeData {
             connection_type: ct,
@@ -2192,9 +2205,7 @@ impl DiskGraph {
             node_count: self.node_count,
             free_node_slots: self.free_node_slots.clone(),
             #[cfg(test)]
-            node_materializations: std::sync::atomic::AtomicU64::new(0),
-            #[cfg(test)]
-            edge_materializations: std::sync::atomic::AtomicU64::new(0),
+            materializations: Default::default(),
             column_stores: self.column_stores.clone(),
             out_offsets: snapshot("out offsets", &self.out_offsets)?,
             out_edges: snapshot("out edges", &self.out_edges)?,

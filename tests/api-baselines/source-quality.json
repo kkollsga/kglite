@@ -52,14 +52,14 @@
     {
       "path": "crates/kglite/src/graph/algorithms/centrality.rs",
       "qualified_name": "crate::betweenness_centrality",
-      "lines": 270,
+      "lines": 266,
       "branches": 25,
       "nesting": 6
     },
     {
       "path": "crates/kglite/src/graph/algorithms/centrality.rs",
       "qualified_name": "crate::closeness_centrality",
-      "lines": 243,
+      "lines": 239,
       "branches": 19,
       "nesting": 5
     },
@@ -73,7 +73,7 @@
     {
       "path": "crates/kglite/src/graph/core/calculations.rs",
       "qualified_name": "crate::process_equation",
-      "lines": 232,
+      "lines": 231,
       "branches": 36,
       "nesting": 9
     },
@@ -136,7 +136,7 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/match_execution.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_match",
-      "lines": 225,
+      "lines": 224,
       "branches": 32,
       "nesting": 7
     },
@@ -248,14 +248,14 @@
     {
       "path": "crates/kglite/src/graph/mutation/add_properties.rs",
       "qualified_name": "crate::add_properties_aggregate",
-      "lines": 162,
+      "lines": 157,
       "branches": 36,
       "nesting": 10
     },
     {
       "path": "crates/kglite/src/graph/mutation/maintain.rs",
       "qualified_name": "crate::add_connections_tracked",
-      "lines": 216,
+      "lines": 215,
       "branches": 19,
       "nesting": 3
     },

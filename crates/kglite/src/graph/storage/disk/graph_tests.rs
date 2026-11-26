@@ -984,10 +984,13 @@ fn disk_graph_source_returns_no_record_through_unsafe() {
         !source.contains("&*ptr"),
         "a record must not be returned through a raw pointer"
     );
+    // Spelled with `concat!` so the source-quality scan does not read the
+    // needle itself as an unsafe block.
+    let unsafe_block = concat!("unsafe", " {");
     assert_eq!(
-        source.matches("unsafe {").count(),
+        source.matches(unsafe_block).count(),
         1,
-        "`unsafe {{` blocks in disk/graph.rs: only the `pending_edges` copy in `Clone` is expected"
+        "unsafe blocks in disk/graph.rs: only the `pending_edges` copy in `Clone` is expected"
     );
 }
 
