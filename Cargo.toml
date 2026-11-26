@@ -63,8 +63,8 @@ strip = "symbols"
 # review): a debug libkglite rlib is 66% DWARF — mostly fully-expanded
 # generic type-name strings — and only ~5% code. "line-tables-only" cuts the
 # rlib 336 MB -> 191 MB and the whole debug tree ~22%, while backtraces keep
-# file/line and cfg(debug_assertions) detectors (parser stack-depth, disk
-# arena guard) are untouched — debuginfo level and debug assertions are
+# file/line and cfg(debug_assertions) detectors (parser stack-depth, for one)
+# are untouched — debuginfo level and debug assertions are
 # independent knobs. What is lost: variable/type inspection under a debugger
 # inside the covered crates. NOTE the `"*"` wildcard matches only NON-member
 # dependencies (measured, not just documented) — workspace members must be
