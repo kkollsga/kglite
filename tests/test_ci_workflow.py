@@ -550,22 +550,43 @@ def test_loom_and_unsafe_jobs_use_the_intended_commands() -> None:
     loom = _ci_job("loom-session")
     _assert_runs(loom, 'RUSTFLAGS="--cfg loom" cargo test -p kglite --test loom_session')
 
-    miri = _ci_job("miri-loaders")
-    for test_name in (
+    miri_filters = (
         "packed_primitives_decode_from_misaligned_little_endian_bytes",
         "parse_line_borrowed_uri_boundaries_are_valid",
         "parse_line_preserves_utf8_literal_boundaries",
         "graph::storage::record_ref",
-    ):
+    )
+    miri = _ci_job("miri-loaders")
+    for test_name in miri_filters:
         _assert_runs(miri, f"cargo miri test -p kglite --lib {test_name}")
 
-    asan = _ci_job("address-sanitizer")
-    asan_step = _step_running(
-        asan,
-        "cargo test -p kglite --lib --target x86_64-unknown-linux-gnu "
-        "overlapping_query_guards_keep_materializations_alive",
+    asan_filters = (
+        "packed_primitives_decode_from_misaligned_little_endian_bytes",
+        "a_disk_node_record_survives_later_reads_and_queries",
     )
-    assert asan_step["env"]["RUSTFLAGS"] == "-Zsanitizer=address"
+    asan = _ci_job("address-sanitizer")
+    for test_name in asan_filters:
+        asan_step = _step_running(
+            asan,
+            f"cargo test -p kglite --lib --target x86_64-unknown-linux-gnu {test_name}",
+        )
+        assert asan_step["env"]["RUSTFLAGS"] == "-Zsanitizer=address"
+
+    # A name filter that matches nothing passes with "running 0 tests": the
+    # ASan job ran its arena test that way after the test was deleted.
+    for test_name in {*miri_filters, *asan_filters}:
+        assert _kglite_test_filter_matches(test_name), f"no kglite test or module matches `{test_name}`"
+
+
+def _kglite_test_filter_matches(test_filter: str) -> bool:
+    """Whether a `cargo test` name filter selects something in the kglite crate:
+    a module path (`a::b`) that exists as a source file, or a test fn name."""
+    src = REPO_ROOT / "crates/kglite/src"
+    if "::" in test_filter:
+        module = src.joinpath(*test_filter.split("::"))
+        return module.with_suffix(".rs").is_file() or (module / "mod.rs").is_file()
+    fn_def = re.compile(rf"\bfn {re.escape(test_filter)}\s*\(")
+    return any(fn_def.search(path.read_text(encoding="utf-8")) for path in src.rglob("*.rs"))
 
 
 def test_heavy_thread_sanitizer_is_scheduled_only() -> None:

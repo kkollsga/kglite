@@ -1247,7 +1247,7 @@ jobs:
   address-sanitizer:
     needs: [dedup]
     if: needs.dedup.outputs.fresh == 'true'
-    name: AddressSanitizer disk arenas
+    name: AddressSanitizer disk records
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -1255,13 +1255,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: nightly
-      - name: Check packed decoding and arena lifetimes
+      - name: Check packed decoding and disk record lifetimes
         env:
           RUSTFLAGS: -Zsanitizer=address
           RUSTDOCFLAGS: -Zsanitizer=address
         run: |
           cargo test -p kglite --lib --target x86_64-unknown-linux-gnu packed_primitives_decode_from_misaligned_little_endian_bytes
-          cargo test -p kglite --lib --target x86_64-unknown-linux-gnu overlapping_query_guards_keep_materializations_alive
+          cargo test -p kglite --lib --target x86_64-unknown-linux-gnu a_disk_node_record_survives_later_reads_and_queries
 
   # `-Zbuild-std` is not an optimisation here, it is what makes the job compile
   # at all. TSan is an ABI-changing sanitizer, and rustc rejects linking
