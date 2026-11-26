@@ -74,7 +74,7 @@ path = "src/main.rs"
 # tool schema it lists (`format` values outside JSON Schema 2020-12 dropped,
 # instance data and properties named `default`/`enum` handled correctly), which
 # tests/tool_schema_formats.rs requires of every tool.
-mcp-methods = { version = "0.6.2", default-features = false, features = ["server"] }
+mcp-methods = { version = "0.6.3", default-features = false, features = ["server"] }
 
 # kglite (pure-Rust core) — no pyo3 in the resulting binary, no
 # libpython link. The 0.10.1 lift moved KnowledgeGraph +
@@ -97,9 +97,12 @@ kglite = { version = "0.21.7", path = "../kglite", default-features = false, fea
 # No default features: see the same dependency in crates/kglite/Cargo.toml.
 yaml-rust2 = { version = "0.13", default-features = false }
 
-# rmcp re-export for the dynamic tool registration path. 3.8.0 is the floor
-# mcp-methods 0.6.1 itself requires.
-rmcp = { version = "3.10.0", features = ["server", "macros", "transport-io", "schemars"] }
+# rmcp re-export for the dynamic tool registration path. 3.10.0 is the floor
+# mcp-methods 0.6.3 itself requires. No default features (they add `base64`,
+# which nothing here uses): features unify across the graph, so this opt-out
+# and mcp-methods' own are both needed for chrono to leave the build once rmcp
+# makes it an optional default feature.
+rmcp = { version = "3.10.0", default-features = false, features = ["server", "macros", "transport-io", "schemars"] }
 
 # 1.54.1, not "1": mcp-methods 0.6.1 requires it (boltr 0.3.0 needs 1.44.2,
 # RUSTSEC-2025-0023; rmcp 3.1.1 alone needs 1.37.0: Receiver::is_closed and
@@ -161,7 +164,7 @@ libc = "0.2.191"
 tempfile = "3.27.0"
 # Exercise hidden-tool rejection through a real in-memory MCP handshake. The
 # production dependency enables only the server half; client code is test-only.
-rmcp = { version = "3.10.0", features = ["client"] }
+rmcp = { version = "3.10.0", default-features = false, features = ["client"] }
 
 [features]
 # `fastembed` is an OPTIONAL feature, default OFF. Enabling it
