@@ -785,7 +785,7 @@ pub(crate) fn materialize_node_value_with(
                 .map(|store| (&**store, row_id))
         });
         let node = crate::graph::storage::NodeView::new(
-            crate::graph::storage::RecordRef::Borrowed(&data),
+            crate::graph::storage::RecordRef::borrowed(&data),
             store,
         );
         return Some(node_value_from_view(idx, &node, graph, hide));
@@ -817,7 +817,7 @@ pub(crate) fn materialize_node_keys(
                 .map(|store| (&**store, row_id))
         });
         let node = crate::graph::storage::NodeView::new(
-            crate::graph::storage::RecordRef::Borrowed(&data),
+            crate::graph::storage::RecordRef::borrowed(&data),
             store,
         );
         return Some(node_keys_from_view(&node, graph, hide));

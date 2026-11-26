@@ -128,7 +128,7 @@ macro_rules! impl_heap_graph_read {
 
             #[inline]
             fn node_weight(&self, idx: NodeIndex) -> Option<RecordRef<'_, NodeData>> {
-                self.inner().node_weight(idx).map(RecordRef::Borrowed)
+                self.inner().node_weight(idx).map(RecordRef::borrowed)
             }
 
             // These four resolve through `NodeView` rather than reading
@@ -185,7 +185,7 @@ macro_rules! impl_heap_graph_read {
             fn edge_weights<'a>(
                 &'a self,
             ) -> Box<dyn Iterator<Item = RecordRef<'a, EdgeData>> + 'a> {
-                Box::new(self.inner().edge_weights().map(RecordRef::Borrowed))
+                Box::new(self.inner().edge_weights().map(RecordRef::borrowed))
             }
 
             #[inline]
@@ -217,7 +217,7 @@ macro_rules! impl_heap_graph_read {
 
             #[inline]
             fn edge_weight(&self, idx: EdgeIndex) -> Option<RecordRef<'_, EdgeData>> {
-                self.inner().edge_weight(idx).map(RecordRef::Borrowed)
+                self.inner().edge_weight(idx).map(RecordRef::borrowed)
             }
 
             #[inline]
@@ -881,7 +881,7 @@ impl GraphRead for MappedGraph {
 
     #[inline]
     fn node_weight(&self, idx: NodeIndex) -> Option<RecordRef<'_, NodeData>> {
-        self.inner().node_weight(idx).map(RecordRef::Borrowed)
+        self.inner().node_weight(idx).map(RecordRef::borrowed)
     }
     // Through `node_view`, which pairs the node's row id with the store this
     // backend owns. Mapped is the mode where this matters most: its nodes hold
@@ -917,7 +917,7 @@ impl GraphRead for MappedGraph {
     }
     #[inline]
     fn edge_weights<'a>(&'a self) -> Box<dyn Iterator<Item = RecordRef<'a, EdgeData>> + 'a> {
-        Box::new(self.inner().edge_weights().map(RecordRef::Borrowed))
+        Box::new(self.inner().edge_weights().map(RecordRef::borrowed))
     }
     #[inline]
     fn edges_directed(&self, idx: NodeIndex, dir: Direction) -> GraphEdges<'_> {
@@ -952,7 +952,7 @@ impl GraphRead for MappedGraph {
     }
     #[inline]
     fn edge_weight(&self, idx: EdgeIndex) -> Option<RecordRef<'_, EdgeData>> {
-        self.inner().edge_weight(idx).map(RecordRef::Borrowed)
+        self.inner().edge_weight(idx).map(RecordRef::borrowed)
     }
     #[inline]
     fn find_edge(&self, a: NodeIndex, b: NodeIndex) -> Option<EdgeIndex> {

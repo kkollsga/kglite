@@ -330,14 +330,14 @@ impl EdgeLayer {
             return base.edge_weight(slot);
         }
         if let Some(edge) = self.added.get(raw) {
-            return Some(RecordRef::Borrowed(&edge.weight));
+            return Some(RecordRef::borrowed(&edge.weight));
         }
         if self.removed.contains(raw) {
             return None;
         }
         self.weights
             .get(raw)
-            .map(RecordRef::Borrowed)
+            .map(RecordRef::borrowed)
             .or_else(|| base.edge_weight(slot))
     }
 

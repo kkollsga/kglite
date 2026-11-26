@@ -142,7 +142,7 @@ impl GraphRead for FrozenGraph {
     fn node_weight(&self, idx: NodeIndex) -> Option<RecordRef<'_, NodeData>> {
         let slot = idx.index();
         if self.node_is_alive(slot) {
-            self.node_slice().get(slot).map(RecordRef::Borrowed)
+            self.node_slice().get(slot).map(RecordRef::borrowed)
         } else {
             None
         }
@@ -197,7 +197,7 @@ impl GraphRead for FrozenGraph {
     }
 
     fn edge_weights<'a>(&'a self) -> Box<dyn Iterator<Item = RecordRef<'a, EdgeData>> + 'a> {
-        Box::new(iters::weights(self).map(RecordRef::Borrowed))
+        Box::new(iters::weights(self).map(RecordRef::borrowed))
     }
 
     #[inline]
@@ -235,7 +235,7 @@ impl GraphRead for FrozenGraph {
     fn edge_weight(&self, idx: EdgeIndex) -> Option<RecordRef<'_, EdgeData>> {
         let slot = idx.index();
         self.endpoint(slot)
-            .map(|ep| RecordRef::Borrowed(self.edge_data(slot as u32, ep.ty)))
+            .map(|ep| RecordRef::borrowed(self.edge_data(slot as u32, ep.ty)))
     }
 
     #[inline]

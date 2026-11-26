@@ -56,9 +56,9 @@ fn edge_bound(graph: &DirGraph) -> u32 {
 /// The document of a record held by handle: borrowed when the record is lent,
 /// owned when it was built for the read.
 fn record_document(edge: RecordRef<'_, EdgeData>, field: InternedKey) -> Option<Cow<'_, str>> {
-    match edge {
-        RecordRef::Borrowed(edge) => edge_document(edge, field),
-        RecordRef::Owned(edge) => edge_document(&edge, field).map(|d| Cow::Owned(d.into_owned())),
+    match edge.as_lent() {
+        Some(edge) => edge_document(edge, field),
+        None => edge_document(&edge, field).map(|d| Cow::Owned(d.into_owned())),
     }
 }
 

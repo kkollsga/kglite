@@ -160,9 +160,10 @@ impl<'a> NodeView<'a> {
     pub fn into_property(self, key: InternedKey) -> Option<Cow<'a, Value>> {
         match self.store {
             Some((store, row_id)) => store.get_cow(row_id, key),
-            None => match self.data {
-                RecordRef::Borrowed(data) => data.properties.get(key),
-                RecordRef::Owned(data) => data
+            None => match self.data.as_lent() {
+                Some(data) => data.properties.get(key),
+                None => self
+                    .data
                     .properties
                     .get(key)
                     .map(|value| Cow::Owned(value.into_owned())),
@@ -537,7 +538,7 @@ mod tests {
             node_type: type_key,
             properties: crate::graph::schema::PropertyStorage::Columnar(ColumnarRow::new(row_id)),
         };
-        let view = NodeView::new(RecordRef::Borrowed(&data), Some((&store, row_id)));
+        let view = NodeView::new(RecordRef::borrowed(&data), Some((&store, row_id)));
 
         let read = view.get(key).expect("the list property must resolve");
         assert!(

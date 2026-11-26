@@ -1774,7 +1774,7 @@ impl<'a> PatternExecutor<'a> {
             .properties
             .columnar_row_id()
             .and_then(|row_id| store.map(|store| (&**store, row_id)));
-        NodeView::new(RecordRef::Borrowed(data), resolved)
+        NodeView::new(RecordRef::borrowed(data), resolved)
     }
 
     /// Match one node against matchers whose field names this node's type has

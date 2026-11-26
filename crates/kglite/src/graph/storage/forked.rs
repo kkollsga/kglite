@@ -1220,7 +1220,7 @@ impl GraphRead for ForkedGraph {
     fn node_weight(&self, idx: NodeIndex) -> Option<RecordRef<'_, NodeData>> {
         let raw = idx.index() as u32;
         match self.delta.nodes.get(raw) {
-            Some(data) => Some(RecordRef::Borrowed(data)),
+            Some(data) => Some(RecordRef::borrowed(data)),
             None if self.delta.dead_count != 0 && self.delta.dead.holds(raw) => None,
             None => self.base.node_weight(idx),
         }

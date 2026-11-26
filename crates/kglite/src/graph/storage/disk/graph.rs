@@ -435,7 +435,7 @@ impl DiskGraph {
         #[cfg(test)]
         self.node_materializations
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Some(RecordRef::Owned(Box::new(data)))
+        Some(RecordRef::owned(Box::new(data)))
     }
 
     /// Records built by `node_weight` since the last
@@ -1517,7 +1517,7 @@ impl DiskGraph {
             return None;
         }
 
-        Some(RecordRef::Owned(Box::new(self.materialize_edge(ei as u32))))
+        Some(RecordRef::owned(Box::new(self.materialize_edge(ei as u32))))
     }
 
     /// One edge property, read from the edge-property store without
@@ -1752,7 +1752,7 @@ impl DiskGraph {
                 return None;
             }
 
-            Some(RecordRef::Owned(Box::new(self.materialize_edge(i))))
+            Some(RecordRef::owned(Box::new(self.materialize_edge(i))))
         }))
     }
 

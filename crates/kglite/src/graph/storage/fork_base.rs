@@ -244,8 +244,8 @@ impl ForkBase {
     #[inline(always)]
     pub(crate) fn node_weight(&self, idx: NodeIndex) -> Option<RecordRef<'_, NodeData>> {
         match self {
-            Self::Memory(g) => g.inner().node_weight(idx).map(RecordRef::Borrowed),
-            Self::Mapped(g) => g.inner().node_weight(idx).map(RecordRef::Borrowed),
+            Self::Memory(g) => g.inner().node_weight(idx).map(RecordRef::borrowed),
+            Self::Mapped(g) => g.inner().node_weight(idx).map(RecordRef::borrowed),
             Self::Frozen(g) => GraphRead::node_weight(&**g, idx),
         }
     }
@@ -253,8 +253,8 @@ impl ForkBase {
     #[inline(always)]
     pub(crate) fn edge_weight(&self, idx: EdgeIndex) -> Option<RecordRef<'_, EdgeData>> {
         match self {
-            Self::Memory(g) => g.inner().edge_weight(idx).map(RecordRef::Borrowed),
-            Self::Mapped(g) => g.inner().edge_weight(idx).map(RecordRef::Borrowed),
+            Self::Memory(g) => g.inner().edge_weight(idx).map(RecordRef::borrowed),
+            Self::Mapped(g) => g.inner().edge_weight(idx).map(RecordRef::borrowed),
             Self::Frozen(g) => GraphRead::edge_weight(&**g, idx),
         }
     }

@@ -167,9 +167,9 @@ impl<'a> GraphEdgeRef<'a> {
     #[inline]
     pub fn weight(&self) -> RecordRef<'a, EdgeData> {
         match self.weight_ {
-            EdgeWeightSrc::Ref(w) => RecordRef::Borrowed(w),
+            EdgeWeightSrc::Ref(w) => RecordRef::borrowed(w),
             EdgeWeightSrc::DiskLazy(g) => {
-                RecordRef::Owned(Box::new(g.materialize_edge(self.index_.index() as u32)))
+                RecordRef::owned(Box::new(g.materialize_edge(self.index_.index() as u32)))
             }
         }
     }
