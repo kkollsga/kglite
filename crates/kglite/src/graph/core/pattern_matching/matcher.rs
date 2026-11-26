@@ -1032,13 +1032,11 @@ impl<'a> PatternExecutor<'a> {
             // closure, which would force `memo` out of registers for the whole
             // loop and cost the heap path ~8% on a 50k-node filtered scan.
             let owned;
-            let held;
             let data = if scoped_materialization {
                 owned = self.graph.graph.owned_node_data(idx);
                 owned.as_ref()
             } else {
-                held = self.graph.graph.node_weight(idx);
-                held.as_deref()
+                self.graph.graph.lent_node_weight(idx)
             };
             let Some(data) = data else {
                 continue;
@@ -1721,13 +1719,11 @@ impl<'a> PatternExecutor<'a> {
         // the record is consumed here, so it skips `node_weight`'s box.
         // Heap backends keep the direct borrow.
         let owned;
-        let held;
         let data = if self.graph.graph.is_disk() {
             owned = self.graph.graph.owned_node_data(idx);
             owned.as_ref()
         } else {
-            held = self.graph.graph.node_weight(idx);
-            held.as_deref()
+            self.graph.graph.lent_node_weight(idx)
         };
         let Some(data) = data else {
             return false;

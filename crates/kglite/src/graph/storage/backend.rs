@@ -217,7 +217,24 @@ impl GraphBackend {
         match self {
             Self::Disk(g) => g.owned_node_data(idx),
             Self::Recording(rg) => rg.inner().owned_node_data(idx),
-            _ => GraphRead::node_weight(self, idx).map(|r| (*r).clone()),
+            _ => self.lent_node_weight(idx).cloned(),
+        }
+    }
+
+    /// A heap backend's node record as a plain borrow, with no
+    /// [`RecordRef`] around it; `None` for a missing node and **always** on a
+    /// disk graph, whose records are built per read. For hot loops that
+    /// already route disk through [`Self::owned_node_data`]: holding a handle
+    /// across such a loop cost a filtered scan under a held fork 7-9 %.
+    #[inline(always)]
+    pub(crate) fn lent_node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
+        match self {
+            Self::Memory(g) => g.inner().node_weight(idx),
+            Self::Mapped(g) => g.inner().node_weight(idx),
+            Self::Frozen(g) => g.lent_node_weight(idx),
+            Self::Forked(g) => g.lent_node_weight(idx),
+            Self::Disk(_) => None,
+            Self::Recording(rg) => rg.inner().lent_node_weight(idx),
         }
     }
 

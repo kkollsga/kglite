@@ -22,6 +22,18 @@ use crate::graph::storage::record_ref::RecordRef;
 use crate::graph::storage::GraphRead;
 
 impl FrozenGraph {
+    /// The node record as a plain borrow; [`GraphRead::node_weight`] without
+    /// the handle. See `GraphBackend::lent_node_weight`.
+    #[inline(always)]
+    pub(crate) fn lent_node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
+        let slot = idx.index();
+        if self.node_is_alive(slot) {
+            self.node_slice().get(slot)
+        } else {
+            None
+        }
+    }
+
     /// Count edges at `node` in `dir`, optionally of one type and with a far
     /// end of one node type. `exclude_self` skips self-loops (the incoming
     /// count the pattern matcher uses, which sees a loop on the outgoing side).

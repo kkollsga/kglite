@@ -241,6 +241,16 @@ impl ForkBase {
         }
     }
 
+    /// The node record as a plain borrow (every base lends its records).
+    #[inline(always)]
+    pub(crate) fn lent_node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
+        match self {
+            Self::Memory(g) => g.inner().node_weight(idx),
+            Self::Mapped(g) => g.inner().node_weight(idx),
+            Self::Frozen(g) => g.lent_node_weight(idx),
+        }
+    }
+
     #[inline(always)]
     pub(crate) fn node_weight(&self, idx: NodeIndex) -> Option<RecordRef<'_, NodeData>> {
         match self {

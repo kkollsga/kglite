@@ -510,6 +510,17 @@ impl Overlay<'_> {
 }
 
 impl ForkedGraph {
+    /// The node record as a plain borrow: an overlay record or the base's.
+    #[inline]
+    pub(crate) fn lent_node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
+        let raw = idx.index() as u32;
+        match self.delta.nodes.get(raw) {
+            Some(data) => Some(data),
+            None if self.delta.dead_count != 0 && self.delta.dead.holds(raw) => None,
+            None => self.base.lent_node_weight(idx),
+        }
+    }
+
     /// Incoming bindings of `node`, excluding a self-loop's second incidence.
     pub(super) fn count_incoming_nonself_edges_filtered(
         &self,
