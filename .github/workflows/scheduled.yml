@@ -62,12 +62,39 @@ jobs:
           tool: cargo-audit@0.22.2
       - name: Validate temporary advisory exceptions
         run: python scripts/check_rustsec_advisories.py --policy-only
+      # No `--workspace`: that flag limits the update to workspace members, so
+      # the report read "Locking 0 packages" while 107 updates were pending.
       - name: Report compatible lockfile updates
         continue-on-error: true
-        run: cargo update --workspace --dry-run
+        run: cargo update --dry-run
       - name: Report RustSec advisories
         continue-on-error: true
         run: python scripts/check_rustsec_advisories.py
+
+  # A consumer of the published crates resolves without our Cargo.lock, so it
+  # gets each dependency's newest compatible release, which the lockfile-pinned
+  # PR jobs never build. fastembed 7.8.0 broke that build for every
+  # `--features fastembed` consumer (it moved tokenizers' regex backend behind
+  # a feature we did not name) while CI stayed green on the pinned 7.5.0.
+  # This job resolves fresh and checks every published crate with its
+  # optional features, so an upstream break surfaces within a week.
+  fresh-resolve-build:
+    name: Scheduled build against the newest dependency versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_STABLE }}
+      - name: Resolve every dependency to its newest compatible version
+        run: cargo update
+      - name: Check the published crates with their optional features
+        run: |
+          cargo check --locked -p kglite --lib --features fastembed,okf,parallel-bz2,rdf,xlsx
+          cargo check --locked -p kglite-c --lib --features fastembed,rdf
+          cargo check --locked -p kglite-mcp-server --features fastembed
+          cargo check --locked -p kglite-bolt-server -p kglite-cli
 
   scheduled-concurrency-stress:
     name: Scheduled bounded Session and Bolt stress

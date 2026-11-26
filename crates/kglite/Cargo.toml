@@ -51,9 +51,9 @@ test-seam = []
 # `~/.cache/fastembed/`). Off by default — the Python wheel relies
 # on user-provided Python embedder classes via `PyEmbedderAdapter`,
 # and we don't want to pull a 100-200 MB ONNX runtime into every
-# wheel build. The `kglite-mcp-server` binary enables this feature
-# so the Rust-only deployment path supports `text_score()` semantic
-# search without a Python embedder.
+# wheel build. `kglite-mcp-server --features fastembed` forwards it
+# so a Rust-only deployment supports `text_score()` semantic search
+# without a Python embedder; no shipped artifact enables it.
 fastembed = ["dep:fastembed"]
 # Block-level parallel decoder for single-stream `.bz2` files (the
 # Wikidata `latest-truthy.nt.bz2` shape). With this feature off the loader
@@ -96,11 +96,13 @@ petgraph = { version = "0.8.3", features = ["serde-1"] }
 # through petgraph (which does not re-export it); default features off to
 # match petgraph's own requirement, so feature unification does not move.
 fixedbitset = { version = "0.5.7", default-features = false }
-# 7.1 carries both features selected below. fastembed 6 replaced its
-# `anyhow`-based error type with a concrete `fastembed::Error`; the adapter
-# stringifies with Display, so that switch is source-compatible. 7 renames
+# 7.8 is a real minimum: it moved tokenizers' regex backend behind its own
+# `onig` feature (on in fastembed's defaults, which we turn off). Through
+# 7.7 `onig` was unconditional; a 7.8 resolve without the feature named
+# fails to build tokenizers ("One of the onig, or fancy-regex features must
+# be enabled"), and older versions have no `onig` feature to name. 7 renames
 # `InitOptions` to `TextInitOptions`, which the adapter uses.
-fastembed = { version = "7.1", optional = true, default-features = false, features = ["ort-download-binaries-native-tls", "hf-hub-native-tls"] }
+fastembed = { version = "7.8", optional = true, default-features = false, features = ["ort-download-binaries-native-tls", "hf-hub-native-tls", "onig"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 # `float_roundtrip`: list/map cells of the lossless exports hold floats as JSON
 # text; the default parser can land one ulp off.

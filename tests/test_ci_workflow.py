@@ -89,6 +89,9 @@ REQUIRED_JOBS = {
     "address-sanitizer",
     "dependency-maintenance",
     "scheduled-concurrency-stress",
+    # Builds the published crates against fresh dependency resolves; the only
+    # check that sees what a consumer without our lockfile gets.
+    "fresh-resolve-build",
     "bolt-driver-conformance",
     "perf-regression",
     # The JVM binding's only CI home, and the only gate pinning the numeric
@@ -301,7 +304,7 @@ def test_required_verification_jobs_still_exist() -> None:
     is gone. These names are checked for existence for that reason only — their
     aggregation is the derivation's job, not this one's.
     """
-    scheduled_owned = {"dependency-maintenance", "scheduled-concurrency-stress"}
+    scheduled_owned = {"dependency-maintenance", "scheduled-concurrency-stress", "fresh-resolve-build"}
     for name in sorted(REQUIRED_JOBS):
         (_scheduled_job if name in scheduled_owned else _ci_job)(name)
 
@@ -696,7 +699,7 @@ def test_scheduled_dependency_maintenance_is_report_first() -> None:
     assert tools == ["cargo-audit@0.22.2"]
     # Report-first: the two report steps tolerate failure, the policy check does
     # not — asserted per step rather than by counting the flag across the job.
-    assert _step_running(maintenance, "cargo update --workspace --dry-run").get("continue-on-error") is True
+    assert _step_running(maintenance, "cargo update --dry-run").get("continue-on-error") is True
     assert _step_running(maintenance, "python scripts/check_rustsec_advisories.py").get("continue-on-error") is True
     assert (
         _step_running(maintenance, "python scripts/check_rustsec_advisories.py --policy-only").get("continue-on-error")

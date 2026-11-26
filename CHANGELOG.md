@@ -9,6 +9,10 @@ before upgrading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Rust builds with the `fastembed` feature work again.** fastembed 7.8.0 made tokenizers' regex backend an opt-in feature, so a build without our lockfile (`cargo install kglite-mcp-server --features fastembed`, or any crate depending on `kglite` or `kglite-c` with `fastembed`) failed with "One of the onig, or fancy-regex features must be enabled". kglite now requires fastembed 7.8 and enables its `onig` backend. Embeddings are unchanged: the same texts give bit-identical vectors under 7.5.0 and 7.8.0. The PyPI, npm and Maven packages were not affected.
+
 ## [0.21.7] - 2026-11-26
 
 ### Changed
