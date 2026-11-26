@@ -231,9 +231,12 @@ fn on_query_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
 #[test]
 fn decode_refuses_a_payload_nested_far_past_the_stack() {
     let bytes = nested_list_bytes(100_000);
-    // A small stack proves the guard fires before the decoder recurses.
+    // A 2 MiB stack proves the guard fires before the decoder recurses: an
+    // unguarded 100k-level decode needs ~200 MB. Not smaller, because a debug
+    // build on Windows spends ~2 KiB per level, so even the 257 levels the
+    // guard admits overflowed 512 KiB there.
     let err = std::thread::Builder::new()
-        .stack_size(512 * 1024)
+        .stack_size(2 * 1024 * 1024)
         .spawn(move || decode_value(&bytes))
         .unwrap()
         .join()

@@ -36,9 +36,6 @@ def one(g, query, **kw):
     return g.cypher(query, **kw).to_list()[0]["v"]
 
 
-TODAY = datetime.datetime.now(datetime.timezone.utc).date()
-
-
 def test_literal_date_instant(g):
     assert one(g, "FOR VALID_TIME AS OF date('2015-06-15') MATCH (p:Plant {id: 1}) RETURN valid_instant() AS v") == (
         datetime.date(2015, 6, 15)
@@ -65,7 +62,11 @@ def test_valid_at_parameter(g):
 
 
 def test_default_context_is_today(g):
-    assert one(g, "MATCH (p:Plant {id: 1}) RETURN valid_instant() AS v") == TODAY
+    # Read the clock on both sides: a run that crosses midnight UTC sees either day.
+    before = datetime.datetime.now(datetime.timezone.utc).date()
+    instant = one(g, "MATCH (p:Plant {id: 1}) RETURN valid_instant() AS v")
+    after = datetime.datetime.now(datetime.timezone.utc).date()
+    assert instant in {before, after}
     # The default context applied: B (valid to 2010) is hidden.
     assert g.cypher("MATCH (p:Plant) RETURN count(p) AS v").to_list()[0]["v"] == 1
     assert g.cypher("MATCH (p:Plant) WHERE valid_instant() = date() RETURN count(p) AS v").to_list()[0]["v"] == 1

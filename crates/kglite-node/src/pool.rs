@@ -353,8 +353,9 @@ mod tests {
     use kglite::api::Value;
     use std::collections::HashMap;
 
-    /// The deepest list literal the parser accepts runs end to end through the
-    /// public entry point on a thread of exactly the pool's stack size.
+    /// The deepest list literal the parser accepts goes through the public
+    /// entry point on a thread of exactly the pool's stack size without
+    /// overflowing it.
     #[test]
     fn deepest_accepted_query_fits_the_worker_stack() {
         thread::Builder::new()
@@ -369,9 +370,15 @@ mod tests {
                 let params: HashMap<String, Value> = HashMap::new();
                 let mut opts = ExecuteOptions::eager(&params);
                 opts.streaming = true;
+                // The parser's deepest accepted list literal recurses through
+                // evaluation and then fails with the engine's 256-level value
+                // ceiling: a clean refusal, not a stack overflow.
                 let depth = 511;
                 let q = format!("RETURN {}1{} AS v", "[".repeat(depth), "]".repeat(depth));
-                execute_read(&opened.session.snapshot(), &q, &opts).expect("query within budget");
+                let Err(err) = execute_read(&opened.session.snapshot(), &q, &opts) else {
+                    panic!("a 511-deep list is past the value ceiling");
+                };
+                assert!(err.to_string().contains("value nesting exceeds"), "{err}");
             })
             .expect("spawn")
             .join()
