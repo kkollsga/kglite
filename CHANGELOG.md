@@ -9,11 +9,18 @@ before upgrading.
 
 ## [Unreleased]
 
+## [0.21.8] - 2026-11-27
+
+### Security
+
+- **Disk-graph reads in the Rust API no longer return references that can be freed.** On a disk graph, `GraphRead::node_weight`, `edge_weight`, `edge_weights` and `DirGraph::get_node` returned a reference into a per-graph cache. Dropping a `DiskQueryGuard`, calling `begin_read_pass` again or calling `GraphRead::reset_arenas` freed that cache while the reference was alive, so safe Rust could read freed memory. These reads now return a `RecordRef` that owns its copy (see Changed). Only Rust programs reading disk graphs were exposed; we found no path from the Python, Node, C, Bolt, MCP or CLI interfaces. Every earlier published `kglite` crate version is affected. Reported in GHSA-wqv2-cgpc-pq89 by @ydongyeon.
+- **Two unmaintained dependencies leave the tree.** `kglite-mcp-server` and `kglite-cli` use `mcp-methods` 0.6.3, whose YAML parsing moves from `serde_yaml` to `yaml_serde`; that removes `unsafe-libyaml` (RUSTSEC-2024-0449). Named time zones no longer use `chrono-tz` (RUSTSEC-2026-0555; see Changed). Both servers now build `rmcp` without its default features.
+
 ### Changed
 
 - **Breaking (Rust API): node and relationship reads return a `RecordRef`.** `GraphRead::node_weight`, `edge_weight` and `edge_weights`, `DirGraph::get_node` and `GraphEdgeRef::weight` now return `kglite::api::RecordRef`, which derefs to the `NodeData` or `EdgeData`. It borrows the record on memory and mapped graphs and owns a copy on disk graphs, so a disk record stays valid for as long as you hold it. Method calls work unchanged through deref; a function that takes `&NodeData` needs `&record`. The Python, Node, C, Bolt and MCP interfaces are not affected.
   - Removed with it: `DirGraph::begin_read_pass`, `DiskQueryGuard`, `GraphRead::reset_arenas`, the `Index<NodeIndex>`/`Index<EdgeIndex>` impls on `GraphBackend` and `DiskGraph`, and petgraph's `EdgeRef` impl for `GraphEdgeRef`. A disk read no longer needs a read-pass guard.
-  - `NodeView` is no longer `Copy`: pass it by reference.
+  - `NodeView` is no longer `Copy` or `Clone`: pass it by reference.
 - **`KGLITE_EXPORT_BATCH_ROWS` is gone.** It only paced internal bookkeeping in the disk-graph CSV and RDF exports. Both exports still stream, and their memory still does not grow with the graph.
 
 - **Named time zones use the 2026f IANA time-zone database.** The previous database (via chrono-tz) stopped at 2025b and will get no more updates. Zone names, case sensitivity and the stored form of a zoned value are unchanged.

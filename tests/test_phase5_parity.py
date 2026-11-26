@@ -97,11 +97,11 @@ def test_graph_copy_cow_correctness_mapped():
 #: Linux from the `kglite/kglite.abi3.so` member of the newest manylinux2014
 #: x86_64 wheel already on PyPI, whose file name and SHA-256 follow the table.
 BINARY_SIZE_BASELINES = {
-    "darwin": (32_557_552, "0.21.7"),  # host release build
-    "linux": (40_242_616, "0.21.6"),  # published manylinux2014 x86_64 wheel member
+    "darwin": (31_649_248, "0.21.8"),  # host release build
+    "linux": (40_264_952, "0.21.7"),  # published manylinux2014 x86_64 wheel member
 }
-LINUX_SIZE_WHEEL = "kglite-0.21.6-cp312-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"
-LINUX_SIZE_WHEEL_SHA256 = "dbf198139f771303efd886b415f1ff24e97cb6d5619c1ca8bf9cf2bbc8882653"
+LINUX_SIZE_WHEEL = "kglite-0.21.7-cp312-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"
+LINUX_SIZE_WHEEL_SHA256 = "b786ef2acd444e9f855ec43b95c420ed8c6167fa243a89f88c60761036f11177"
 
 
 @pytest.mark.binary_size
@@ -705,6 +705,12 @@ def test_binary_size_regression():
       - 0.21.7:       32,557,552 bytes (≈31.0 MB). +16,528 bytes over 0.21.6: the
         value-nesting ceiling (runtime checks, the decode depth guard, the YAML
         frontmatter pre-scan) and the disk-graph structure check.
+
+
+      - 0.21.8:       31,649,248 bytes (≈30.2 MB). −908,304 bytes from 0.21.7: chrono-tz's
+        compiled zone tables gave way to jiff's bundled database, and the
+        disk query arenas and read-pass guards were removed (attribution
+        inferred, not measured with cargo bloat).
 
     Raising the baseline is a deliberate act — every bump should
     be accompanied by an updated growth note above. For a precise

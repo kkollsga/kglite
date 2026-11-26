@@ -264,10 +264,16 @@
       "sha256": "e2ac721d17699e01811bc13a361e2e25673e9f1bc0fcc78dd860efcce3bac8a2",
       "status": "rejected"
     },
-    "current.json": {
-      "evidence": "Release 0.21.7, 2026-11-26 ~02:10-02:21 local on Mac16,10 (M4, 16 GiB): captured hot, 1-minute load average 14-24 (another project's agent builds running concurrently). Environmentally inflated, not a code change: paired A/B against the published 0.21.6 wheel the same night (release builds, Python 3.14, 6 ABBA blocks, median per-block ratio) read every changed path within noise except list_comp_wrap_10k +11.7% (accepted: the value-nesting check, ~5 ns per wrapped container); the three cells the 2026-11-25 bench-check flagged against 0_21_3 read 0.963/0.995/1.032 paired against 0.21.6; PR #238 Linux perf gate green on rerun. bench-anchor OK (worst +15.9%). Reference stays 0_21_3.json.",
+    "0_21_8.json": {
+      "evidence": "Release 0.21.8, 2026-11-26 ~23:55-00:05 local on Mac16,10 (M4, 16 GiB): captured hot, load average 8-21 (other projects' agent sessions; no concurrent KGLite build). Environmentally inflated, not a code change: vs accepted 0_21_3.json min median +7.2% over 43 cells with the controls shifted alike (cypher_match +7.7%, shortest_path +7.7%, var_length_1_8 +7.2%, khop3_unwind +6.2%, khop3_in_list +4.5%) and the untouched write path add_nodes +17.9%; vs the also-hot 0_21_7 median -0.2%. The release's own paired release-mode A/B (alternating rounds, min, 100-200 rounds, controls) put every in-memory cell within the 5% cancel rule after a threshold retake. bench-anchor passes (worst +20.9%). Reference stays 0_21_3.json.",
       "platform": "Darwin/arm64",
-      "sha256": "e2ac721d17699e01811bc13a361e2e25673e9f1bc0fcc78dd860efcce3bac8a2",
+      "sha256": "9581271e474de667cad2921c1e7bba7453eacbfa037c3e3f78345520b182ebf8",
+      "status": "rejected"
+    },
+    "current.json": {
+      "evidence": "Release 0.21.8, 2026-11-26 ~23:55-00:05 local on Mac16,10 (M4, 16 GiB): captured hot, load average 8-21 (other projects' agent sessions; no concurrent KGLite build). Environmentally inflated, not a code change: vs accepted 0_21_3.json min median +7.2% over 43 cells with the controls shifted alike (cypher_match +7.7%, shortest_path +7.7%, var_length_1_8 +7.2%, khop3_unwind +6.2%, khop3_in_list +4.5%) and the untouched write path add_nodes +17.9%; vs the also-hot 0_21_7 median -0.2%. The release's own paired release-mode A/B (alternating rounds, min, 100-200 rounds, controls) put every in-memory cell within the 5% cancel rule after a threshold retake. bench-anchor passes (worst +20.9%). Reference stays 0_21_3.json.",
+      "platform": "Darwin/arm64",
+      "sha256": "9581271e474de667cad2921c1e7bba7453eacbfa037c3e3f78345520b182ebf8",
       "status": "rejected"
     },
     "current.linux.json": {

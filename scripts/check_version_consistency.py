@@ -2333,6 +2333,17 @@ def run_notify(
 #: Add an entry when a release removes or changes a public symbol; never edit
 #: an existing release's set to mean "the current release".
 BREAKING_SYMBOLS_BY_VERSION: dict[str, list[str]] = {
+    # 0.21.8 — disk record handles: node/relationship reads return `RecordRef`,
+    # `NodeView` lost Copy/Clone, and the read-pass guard API is removed.
+    "0.21.8": [
+        "begin_read_pass",
+        "DiskQueryGuard",
+        "reset_arenas",
+        "edge_weights",
+        "NodeView",
+        "GraphEdgeRef",
+        "get_node",
+    ],
     # 0.19.1 — register-scale disk build + open exports: four structs gained a
     # field and `save_disk` returns `SaveError` instead of `String`.
     "0.19.1": [
