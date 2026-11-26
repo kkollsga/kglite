@@ -1237,11 +1237,12 @@ jobs:
           components: miri
       - name: Prepare Miri
         run: cargo miri setup
-      - name: Check packed decoding and N-Triples parsing
+      - name: Check packed decoding, N-Triples parsing and record handles
         run: |
           cargo miri test -p kglite --lib packed_primitives_decode_from_misaligned_little_endian_bytes
           cargo miri test -p kglite --lib parse_line_borrowed_uri_boundaries_are_valid
           cargo miri test -p kglite --lib parse_line_preserves_utf8_literal_boundaries
+          cargo miri test -p kglite --lib graph::storage::record_ref
 
   address-sanitizer:
     needs: [dedup]

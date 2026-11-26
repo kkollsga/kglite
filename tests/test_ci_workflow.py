@@ -555,6 +555,7 @@ def test_loom_and_unsafe_jobs_use_the_intended_commands() -> None:
         "packed_primitives_decode_from_misaligned_little_endian_bytes",
         "parse_line_borrowed_uri_boundaries_are_valid",
         "parse_line_preserves_utf8_literal_boundaries",
+        "graph::storage::record_ref",
     ):
         _assert_runs(miri, f"cargo miri test -p kglite --lib {test_name}")
 
