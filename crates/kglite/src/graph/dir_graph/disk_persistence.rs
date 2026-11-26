@@ -478,7 +478,7 @@ impl DirGraph {
             _ => return Err("save_disk requires disk mode".to_string()),
         };
 
-        // `save_to_dir` runs `clear_arenas` internally, which drains
+        // `save_to_dir` runs `flush_mut_caches` internally, which drains
         // `node_mut_cache` into each mutated type's store in
         // `DiskGraph.column_stores`.
         dg.save_to_dir_with_edge_embeddings(dir, &self.interner, edge_embeddings_required)
@@ -715,11 +715,11 @@ impl DirGraph {
     /// edge endpoint and index entry keeps meaning what it meant.
     fn drop_dead_column_rows(&mut self) -> usize {
         // Staged node writes still name *old* row ids, so they must land
-        // before anything is renumbered. `clear_arenas` is what `save_to_dir`
+        // before anything is renumbered. `flush_mut_caches` is what `save_to_dir`
         // would call moments later anyway; calling it here only moves it
         // ahead of the renumbering.
         if let GraphBackend::Disk(ref mut dg) = self.graph {
-            dg.clear_arenas();
+            dg.flush_mut_caches();
         }
 
         // Live rows per type, from the slots themselves — the census on

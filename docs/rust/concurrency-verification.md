@@ -74,9 +74,8 @@ slow.
   safely. The entire Session concurrency story rests on zero unsafe code.
 - **Disk mode** (`crates/kglite/src/graph/storage/disk/graph.rs:305`): two
   `unsafe impl Send/Sync` on `DiskGraph`. They are sound for the shared-read path:
-  - `node_arena` / `edge_arena` are `Mutex<Vec<Box<…>>>`. The `Box` gives stable
-    heap pointers across `Vec` realloc; the `Mutex` serializes pushes from
-    concurrent `node_weight` callers.
+  - `node_weight` / `edge_weight` hand back an owned record
+    (`RecordRef::Owned`), so concurrent readers share no materialized state.
   - The mmap-backed columns are read-only.
   - The one remaining `UnsafeCell` (`pending_edges`) is only accessed through
     `&mut self` (`build_csr_from_pending` / `compact`), never during shared

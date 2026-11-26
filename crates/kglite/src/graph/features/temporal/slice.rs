@@ -176,7 +176,6 @@ pub(crate) fn slice_at(
     filter: Option<&ElementFilter>,
     caps: SliceCaps,
 ) -> Result<ValidSlice, String> {
-    let _arena_guard = base.graph.begin_query();
     let mut budget = ElementBudget {
         cap: caps.disk_elements,
         admitted: 0,

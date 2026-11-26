@@ -470,7 +470,6 @@ impl DirGraph {
         if !self.ontology_tx_gate {
             return;
         }
-        let _arena_guard = self.graph.begin_query();
         let (Some((source, target)), Some(weight)) = (
             self.graph.edge_endpoints(edge),
             self.graph.edge_weight(edge),
@@ -486,7 +485,6 @@ impl DirGraph {
         if !self.ontology_tx_gate {
             return;
         }
-        let _arena_guard = self.graph.begin_query();
         let incident: Vec<(InternedKey, NodeIndex, NodeIndex)> =
             [Direction::Outgoing, Direction::Incoming]
                 .into_iter()
@@ -508,7 +506,6 @@ impl DirGraph {
         GraphWrite::flush_pending_writes(&mut self.graph);
         {
             let graph: &DirGraph = self;
-            let _arena_guard = graph.graph.begin_query();
             let rules = MustRules::build(&graph.ontology);
             let mut judge = Judge {
                 graph,
@@ -631,7 +628,6 @@ pub(crate) fn stored_violations(
     if rules.by_rel.is_empty() {
         return Vec::new();
     }
-    let _arena_guard = graph.graph.begin_query();
     let mut tally = Tally::counting();
     let mut created: Vec<NodeIndex> = Vec::new();
     for (_, rule) in rules.by_rel.values() {

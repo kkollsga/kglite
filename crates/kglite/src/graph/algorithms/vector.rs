@@ -456,10 +456,6 @@ pub fn vector_search(
         exact,
         use_stored_metric,
     } = *options;
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena, which must run under a DiskQueryGuard (arena protocol in
-    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     if top_k == 0 {
         return Ok(Vec::new());
     }

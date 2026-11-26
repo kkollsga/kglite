@@ -114,7 +114,6 @@ fn disk_clear_returns_committed_or_staged_previous_value() {
 }
 
 fn assert_removed_property_and_untouched_row(graph: &DirGraph) {
-    let _query = graph.graph.begin_query();
     let first = graph
         .graph
         .node_view(petgraph::graph::NodeIndex::new(0))
@@ -247,7 +246,6 @@ fn untouched_saved_disk_resave_to_new_directory_preserves_complete_rows() {
     save_graph(&mut handle, output.to_str().unwrap()).unwrap();
     drop(handle);
     let reopened = load_file(output.to_str().unwrap()).unwrap();
-    let _query = reopened.graph.begin_query();
     for (row, expected) in [(0, "old"), (1, "other")] {
         let node = reopened
             .graph

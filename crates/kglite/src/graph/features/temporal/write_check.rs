@@ -549,7 +549,6 @@ pub fn check_label_stamp(
         return Ok(None);
     };
     let key = InternedKey::from_str(label);
-    let _arena_guard = graph.graph.begin_query();
     let mut empty = EmptyIntervals::default();
     for &idx in nodes {
         if graph.graph.node_type_of(idx) == Some(key) || graph.node_has_label(idx, key) {

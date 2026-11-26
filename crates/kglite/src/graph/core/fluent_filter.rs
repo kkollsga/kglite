@@ -415,7 +415,6 @@ impl FluentFilter {
         if self.elements.is_none() {
             return Ok(());
         }
-        let _arena_guard = graph.graph.begin_query();
         let level_idx = selection.get_level_count().saturating_sub(1);
         if let Some(level) = selection.get_level_mut(level_idx) {
             for nodes in level.selections.values_mut() {

@@ -556,7 +556,6 @@ fn node_slot(
         Value::NodeRef(index) => (NodeIndex::new(*index as usize), None),
         _ => return Err(format!("CALL {proc_name}: {at} must be a node")),
     };
-    let _arena_guard = graph.graph.begin_query();
     let live = graph
         .graph
         .node_view(node)
@@ -622,7 +621,6 @@ fn reject_repeated(
     let mut first_seen = HashMap::with_capacity(nodes.len());
     for (position, node) in nodes.iter().enumerate() {
         if let Some(first) = first_seen.insert(node.index(), position) {
-            let _arena_guard = graph.graph.begin_query();
             let id = graph
                 .graph
                 .node_view(*node)

@@ -49,7 +49,6 @@ impl DoomedBuckets {
         doomed_by_type: &HashMap<String, Vec<NodeIndex>>,
     ) -> Self {
         let mut plan = Self::default();
-        let _guard = graph.graph.begin_query();
         for (node_type, doomed) in doomed_by_type {
             let members = graph.type_indices.get(node_type).map_or(0, |m| m.len());
             if doomed.len().saturating_mul(POINT_READ_WEIGHT) > members {

@@ -214,7 +214,6 @@ impl ResultView {
         results: Vec<CentralityResult>,
         top_k: Option<usize>,
     ) -> Self {
-        let _arena_guard = graph.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         let limit = top_k.unwrap_or(results.len());
         let columns = vec!["type".into(), "title".into(), "id".into(), "score".into()];
 
@@ -275,7 +274,6 @@ impl ResultView {
         graph: &DirGraph,
         node_indices: &[petgraph::graph::NodeIndex],
     ) -> Self {
-        let _arena_guard = graph.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         let nodes_vec: Vec<kglite_core::api::NodeView<'_>> = node_indices
             .iter()
             .filter_map(|&idx| graph.node_view(idx))
@@ -366,8 +364,7 @@ impl ResultView {
     }
 
     /// Materialise a contiguous lazy range with one provenance check per batch
-    /// instead of one per row. The core still holds a separate disk arena guard
-    /// for every row, preserving bounded arena lifetime under large reads.
+    /// instead of one per row.
     fn materialise_lazy_range(&self, range: std::ops::Range<usize>) -> PyResult<Vec<Vec<Value>>> {
         let lz = self
             .lazy

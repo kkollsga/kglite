@@ -41,7 +41,6 @@ fn prop(graph: &DirGraph, id: i64, key: &str) -> Option<Value> {
         .node_indices()
         .find(|i| graph.graph.get_node_id(*i) == Some(Value::Int64(id)))
         .expect("node exists");
-    let _guard = graph.graph.begin_query();
     graph
         .graph
         .node_view(idx)
@@ -132,7 +131,6 @@ fn a_retained_disk_snapshot_keeps_its_values() {
         .find(|i| graph.graph.get_node_id(*i) == Some(Value::Int64(3)))
         .unwrap();
     assert_eq!(prop(&graph, 3, "x"), Some(Value::Int64(33)));
-    let _guard = snapshot.begin_query();
     assert_eq!(
         snapshot
             .node_view(idx)

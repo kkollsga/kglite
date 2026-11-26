@@ -444,10 +444,10 @@ impl DirGraph {
     /// `(source, target, connection_type)` and no edge index, so there is no
     /// route from one of its items to that edge's properties. This one filters
     /// by type and hands over the property slice in the same pass, and it is
-    /// the arena-safe reader on the disk backend: it reads `edge_endpoints` +
-    /// `edge_properties` directly instead of materialising a `Box<EdgeData>`
-    /// per edge into the per-query arena, which is the same rule
-    /// `owned_node_data` follows on the node side. On disk it is also
+    /// the cheap reader on the disk backend: it reads `edge_endpoints` +
+    /// `edge_properties` directly instead of materialising an `EdgeData` per
+    /// edge, which is the same rule `owned_node_data` follows on the node
+    /// side. On disk it is also
     /// O(matching edges) rather than O(all edges) whenever the persisted
     /// `conn_type_index_*` inverted index exists; without one it sweeps the
     /// CSR, which still visits every relationship of the type — a scan that

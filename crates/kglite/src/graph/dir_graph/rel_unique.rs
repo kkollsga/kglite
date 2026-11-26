@@ -187,7 +187,6 @@ impl DirGraph {
     }
 
     fn edge_is_of_type(&self, edge: EdgeIndex, rel_type: &str) -> bool {
-        let _arena = self.graph.begin_query();
         self.graph
             .edge_weight(edge)
             .and_then(|data| self.interner.try_resolve(data.connection_type))

@@ -98,7 +98,7 @@ fn outgoing_targets(graph: &DirGraph, source: NodeIndex, conn_key: InternedKey) 
 }
 
 /// Judge the stored out-degree of each distinct `(type, source)` a statement
-/// touched. The caller holds the arena guard.
+/// touched.
 pub(crate) fn judge_sources(
     graph: &DirGraph,
     sources: &HashSet<(InternedKey, NodeIndex)>,
@@ -150,7 +150,6 @@ pub(crate) fn judge_frame(
     let conn_key = InternedKey::from_str(rel_type);
     let independent = frame.folding == RowFolding::Independent;
     let read_stored = frame.folding == (RowFolding::Merging { read_stored: true });
-    let _arena_guard = graph.graph.begin_query();
 
     let mut by_source: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
     for (_, source, target) in frame.matched {
@@ -220,7 +219,6 @@ pub(crate) fn stored_max_violations(graph: &DirGraph, rel_type: &str) -> u64 {
         return 0;
     };
     let conn_key = InternedKey::from_str(rel_type);
-    let _arena_guard = graph.graph.begin_query();
     let mut over = 0;
     for node_type in accepted_types(&graph.ontology, domain) {
         let Some(nodes) = graph.type_indices.get(&node_type) else {

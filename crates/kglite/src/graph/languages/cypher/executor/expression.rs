@@ -465,7 +465,7 @@ impl<'a> CypherExecutor<'a> {
         property: &str,
     ) -> Result<Value, String> {
         // Disk-graph fast path: resolve properties via direct column access
-        // without full NodeData materialization. Saves arena allocation +
+        // without full NodeData materialization. Saves a record build +
         // id/title reads per access. In-memory graphs use node_weight()
         // which is a cheap pointer chase.
         if self.graph.graph.is_disk() {

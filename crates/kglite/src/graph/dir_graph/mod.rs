@@ -1174,11 +1174,6 @@ impl DirGraph {
 
         // In-memory (and disk-without-column-store): scan node weights.
         if !used_columns {
-            // Arena guard: on the disk backend node_weight materializes into
-            // the query arena, which must run under a DiskQueryGuard (arena
-            // protocol in disk/graph.rs, enforced by a debug assert); no-op
-            // on memory/mapped backends.
-            let _guard = self.graph.begin_query();
             for node_idx in node_indices.iter() {
                 if let Some(node) = self.graph.node_view(node_idx) {
                     let node_id = node.id().into_owned();
@@ -1319,11 +1314,6 @@ impl DirGraph {
             return;
         }
 
-        // Fallback: scan all edges (pre-metadata graphs). On the disk
-        // backend `edge_weights()` materializes into the query arena,
-        // which must run under a DiskQueryGuard (arena protocol in
-        // disk/graph.rs, enforced by a debug assert).
-        let _guard = self.graph.begin_query();
         for edge in self.graph.edge_weights() {
             self.connection_types.insert(edge.connection_type);
         }
@@ -1353,9 +1343,6 @@ impl DirGraph {
                 return cached.clone();
             }
         }
-        // Arena guard: node_weight materializes on the disk backend
-        // (protocol in disk/graph.rs); no-op on memory/mapped.
-        let _guard = self.graph.begin_query();
         let mut counts: HashMap<(InternedKey, InternedKey, InternedKey), usize> = HashMap::new();
         for (src_idx, tgt_idx, conn_key) in self.graph.edge_endpoint_keys() {
             let src_type = match self.graph.node_type_of(src_idx) {
@@ -1537,17 +1524,6 @@ impl DirGraph {
             .get(node_type)
             .map(String::as_str)
             .filter(|alias| *alias != "title")
-    }
-
-    /// Hold the disk materialization arenas for the lifetime of a direct
-    /// `GraphRead` traversal. `None` on memory/mapped backends (they don't
-    /// materialize through shared arenas). Every reader that borrows node or
-    /// edge weights outside the Cypher executor / pattern matcher — bindings
-    /// iterating the graph directly, index builders, exporters — must keep
-    /// the returned guard alive while those borrows live; see the arena
-    /// SAFETY protocol in `storage/disk/graph.rs`.
-    pub fn begin_read_pass(&self) -> Option<crate::graph::storage::disk::graph::DiskQueryGuard> {
-        self.graph.begin_query()
     }
 
     /// The raw stored node record — **topology and existence only**.

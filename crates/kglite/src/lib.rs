@@ -162,10 +162,6 @@ pub mod api {
     pub use crate::graph::schema_json::{
         schema_from_json, schema_from_value, SchemaParseError, SchemaParseErrorKind,
     };
-    /// Arena guard for direct `GraphRead` traversals on disk-backed graphs.
-    /// Acquire via [`DirGraph::begin_read_pass`] and keep alive while
-    /// borrowed node/edge weights live; `None` on memory/mapped backends.
-    pub use crate::graph::storage::disk::graph::DiskQueryGuard;
     /// Interned property-/type-key handle (`InternedKey`, a transparent
     /// `u64` newtype) + the `StringInterner` that mints them.
     /// `InternedKey::from_str(..)` computes the hash **without registering

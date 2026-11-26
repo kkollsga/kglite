@@ -83,7 +83,6 @@ pub fn add_edges_from_specs(
     // Batch entry point: no violation parked by an earlier write may be
     // attributed to this one.
     graph.clear_pending_constraint_violation();
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     use std::collections::BTreeMap;
     let mut interned_names = Vec::from(RESERVED_PROVENANCE_KEYS);
     for spec in &specs {

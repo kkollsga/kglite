@@ -816,7 +816,6 @@ mod adjacency_probe_tests {
             add(&mut graph, target, source, "R", Value::Int64(5));
         }
         graph.flush_pending_writes();
-        let _query = graph.begin_query();
         let kind = InternedKey::from_str("R");
         let mut expected: Vec<GroupMember> = graph
             .edges_connecting(source, target)

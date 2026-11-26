@@ -38,7 +38,6 @@ pub(super) fn convert_point_columns(
             for chunk in indices.chunks(BATCH) {
                 let updates: Vec<(Option<NodeIndex>, Value)> = {
                     use crate::graph::storage::GraphRead;
-                    let _guard = graph.graph.begin_query();
                     chunk
                         .iter()
                         .filter_map(|&idx| {

@@ -71,7 +71,7 @@ pub(crate) use documents::documents;
 /// for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TextDecline {
-    /// Disk graph: columns are read through the arena guard, not as slices.
+    /// Disk graph: columns are read through the backend, not as slices.
     Disk,
     /// The type has no column store (non-columnar properties).
     NoStore,

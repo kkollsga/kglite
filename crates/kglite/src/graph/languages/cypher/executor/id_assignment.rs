@@ -52,7 +52,6 @@ pub(super) fn set_existing_id(
     value: &Value,
 ) -> Result<(), String> {
     let (current, node_type) = {
-        let _arena_guard = graph.graph.begin_query();
         let node_type = graph
             .graph
             .node_type_of(node_idx)

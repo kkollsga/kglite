@@ -246,15 +246,6 @@ pub struct CypherExecutor<'a> {
     relationship_identities: Option<
         std::sync::Arc<std::sync::Mutex<relationship_identity::StatementRelationshipIdentities>>,
     >,
-    /// Holds the disk materialization arenas alive for this executor's
-    /// lifetime (arena protocol in `storage/disk/graph.rs`, enforced by a
-    /// debug assert). Acquired in the constructor so EVERY read this
-    /// executor performs — including the temporary executors the mutable
-    /// engine (`executor/write.rs`) spins up per clause/row — runs under
-    /// an active `DiskQueryGuard`. `None` on the memory/mapped backends
-    /// (they don't materialize through shared arenas), so the in-memory
-    /// hot path pays one enum match at construction.
-    _arena_guard: Option<crate::graph::storage::disk::graph::DiskQueryGuard>,
     /// Retention cap on the *final* row set of a top-level statement — see
     /// [`apply_row_limit`]. `None` (the default, and the only value a nested
     /// executor ever holds) retains everything.
@@ -321,7 +312,6 @@ impl<'a> CypherExecutor<'a> {
             runtime_warnings: Mutex::new(Vec::new()),
             runtime_retrieval: Mutex::new(Vec::new()),
             relationship_identities: None,
-            _arena_guard: graph.graph.begin_query(),
             row_limit: None,
             graph_filter: OnceLock::new(),
             statement_instant: OnceLock::new(),
@@ -600,11 +590,6 @@ impl<'a> CypherExecutor<'a> {
     }
 
     /// Execute a parsed Cypher query (read-only)
-    ///
-    /// Disk materializations are retained for this entire execution by the
-    /// `_arena_guard` the constructor acquired. The first query after an
-    /// idle period reclaims the prior generation; overlapping and nested
-    /// queries share the generation without invalidating refs.
     pub fn execute(&self, query: &CypherQuery) -> Result<CypherResult, String> {
         crate::graph::languages::cypher::valid_time::check_executable(query)?;
         if query.context.is_some() {

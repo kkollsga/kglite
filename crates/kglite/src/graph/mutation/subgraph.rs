@@ -29,9 +29,6 @@ pub fn expand_selection(
     valid_time: Option<&FluentFilter>,
 ) -> Result<(), String> {
     let valid_time = valid_time.filter(|filter| !filter.is_empty());
-    // Arena guard: the filtered walk reads relationships, which disk mode
-    // materialises into the query arena (protocol in disk/graph.rs).
-    let _arena_guard = graph.graph.begin_query();
     let level_idx = selection.get_level_count().saturating_sub(1);
     let level = selection
         .get_level(level_idx)
@@ -138,10 +135,6 @@ pub(crate) fn copy_induced_subgraph(
     nodes: &[NodeIndex],
     mut keep_edge: impl FnMut(EdgeIndex) -> bool,
 ) -> Result<(DirGraph, HashMap<NodeIndex, NodeIndex>), String> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
-    let _arena_guard = source.graph.begin_query();
-
     let mut new_graph = DirGraph::new();
     // Before the inserts: they encode rows against the interner and type
     // schemas, and only add to the type metadata.
@@ -477,9 +470,6 @@ pub fn get_subgraph_stats(
     source: &DirGraph,
     selection: &CurrentSelection,
 ) -> Result<SubgraphStats, String> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
-    let _arena_guard = source.graph.begin_query();
     let level_idx = selection.get_level_count().saturating_sub(1);
     let level = selection
         .get_level(level_idx)

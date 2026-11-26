@@ -110,14 +110,11 @@ pub(crate) fn embed_selected_nodes(
             )));
         }
     }
-    // Disk arena guard over both node reads: the column probe and the scan.
-    let arena_guard = graph.begin_read_pass();
     let source_field = resolve_source_column(graph, node_type, text_column)
         .map_err(EmbedError::Column)?
         .to_string();
     let source_key = crate::graph::storage::interner::InternedKey::from_str(&source_field);
     let found = {
-        let _arena_guard = arena_guard;
         collect_embed_candidates(
             graph,
             selected,

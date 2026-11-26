@@ -702,7 +702,6 @@ impl KnowledgeGraph {
         name: &str,
         node_type: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        let _arena_guard = self.graph().begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         let (resolved, matches) = self.resolve_code_entity(name, node_type);
 
         let target_idx = match resolved {
@@ -1073,7 +1072,6 @@ pub(crate) fn centrality_results_to_dataframe(
     results: Vec<kglite_core::api::algorithms::CentralityResult>,
     top_k: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
-    let _arena_guard = graph.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
     let limit = top_k.unwrap_or(results.len());
 
     let mut types: Vec<&str> = Vec::with_capacity(limit);
@@ -1111,7 +1109,6 @@ pub(crate) fn community_results_to_py(
     graph: &DirGraph,
     result: kglite_core::api::algorithms::CommunityResult,
 ) -> PyResult<Py<PyAny>> {
-    let _arena_guard = graph.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
     let dict = PyDict::new(py);
 
     let key_type = pyo3::intern!(py, "type");

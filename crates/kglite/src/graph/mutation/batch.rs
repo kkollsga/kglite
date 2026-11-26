@@ -423,7 +423,7 @@ impl BatchProcessor {
             graph.install_column_store(&node_type, Arc::new(store));
         }
         // Disk only, in effect: `node_weight_mut()` materializes a `NodeData`
-        // into an arena that the next call clears, so the `Columnar` row
+        // that the next flush discards, so the `Columnar` row
         // reference the create loop put on the node does not reach the disk
         // slot — `update_row_id` is what persists it. A no-op on the heap
         // backends, where the node itself already carries the row.
@@ -482,8 +482,8 @@ impl BatchProcessor {
                 );
                 // The disk twin of `note_bulk_update` below. It cannot be that
                 // call: this arm resolved the type off the node slot rather
-                // than through `node_weight`, which a disk graph answers out of
-                // a per-query arena.
+                // than through `node_weight`, which a disk graph answers with a
+                // record built for the call.
                 crate::graph::index_freshness::write_hooks::note_property_written(
                     graph,
                     update.node_idx,
@@ -512,8 +512,8 @@ impl BatchProcessor {
     /// representation, where the `ColumnStore` row *is* the node's property
     /// storage. Arm for arm the twin of [`Self::apply_node_update`]; the two
     /// stay separate because `node_weight_mut` on a disk graph materialises
-    /// `NodeData` into an arena that the next `&mut` call drops, so a disk
-    /// update has to reach the store directly.
+    /// a `NodeData` that the next flush discards, so a disk update has to
+    /// reach the store directly.
     fn apply_row_update(
         store: &mut crate::graph::storage::column_store::ColumnStore,
         row_id: u32,
@@ -1151,8 +1151,7 @@ impl Candidate {
     }
 }
 
-/// A stored edge's start, read without materialising the edge, which keeps a
-/// disk graph's query arena flat.
+/// A stored edge's start, read without materialising the edge.
 fn stored_start(graph: &DirGraph, key: &StartKey, edge: EdgeIndex) -> Start {
     key.read(|property| graph.graph.get_edge_property(edge, property))
 }

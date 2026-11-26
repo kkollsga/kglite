@@ -184,8 +184,7 @@ pub(crate) fn interned_keys(properties: &[String]) -> Vec<(InternedKey, &str)> {
 }
 
 /// Judge the group of each edge a statement touched, on the stored graph, so
-/// a later write in the same statement can repair an earlier one. The caller
-/// holds the arena guard.
+/// a later write in the same statement can repair an earlier one.
 pub(crate) fn judge_edges(
     graph: &DirGraph,
     edges: &[EdgeIndex],

@@ -524,9 +524,6 @@ pub fn materialise_lazy_row(
             found: index.to_string(),
         }
     })?;
-    // Disk node/edge materialization returns arena-backed references. Keep
-    // the arena generation alive until every cell in this row is owned.
-    let _arena_guard = graph.graph.begin_query();
     let mut row = materialise_lazy_row_inner(pending_row, &descriptor.return_items, graph);
     clear_published_row(&mut row);
     Ok(row)
@@ -594,9 +591,8 @@ pub fn materialise_lazy(
 
 /// Materialise a contiguous range of pending lazy-result rows.
 ///
-/// Provenance and bounds are checked once for the whole batch. Disk arena
-/// lifetime is still scoped independently to each row, so large sequential
-/// reads retain the bounded-memory guarantee of [`materialise_lazy_row`].
+/// Provenance and bounds are checked once for the whole batch; each row is
+/// materialised independently, as [`materialise_lazy_row`] does.
 // KgError deliberately carries structured context; boxing it would change the public result type.
 #[allow(clippy::result_large_err)]
 pub fn materialise_lazy_range(
@@ -614,9 +610,6 @@ pub fn materialise_lazy_range(
     }
     let mut rows = Vec::with_capacity(range.len());
     for pending_row in &descriptor.pending_rows[range] {
-        // One guard per row bounds sequential disk-arena growth. Each cell is
-        // converted to an owned Value before the guard drops.
-        let _arena_guard = graph.graph.begin_query();
         let mut row = materialise_lazy_row_inner(pending_row, &descriptor.return_items, graph);
         clear_published_row(&mut row);
         rows.push(row);

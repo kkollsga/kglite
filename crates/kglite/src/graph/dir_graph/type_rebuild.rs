@@ -33,10 +33,6 @@ impl DirGraph {
         let mut by_type_key: FxHashMap<InternedKey, Vec<NodeIndex>> =
             FxHashMap::with_capacity_and_hasher(type_count, Default::default());
         {
-            // Arena guard: node_weight materializes on the disk backend
-            // (protocol in disk/graph.rs); scoped so the borrow ends with the
-            // scan.
-            let _guard = self.graph.begin_query();
             for node_idx in self.graph.node_indices() {
                 if let Some(node) = self.graph.node_view(node_idx) {
                     by_type_key
@@ -115,11 +111,7 @@ impl DirGraph {
         }
 
         // Fallback: if metadata is empty (pre-metadata graph), scan nodes.
-        // Arena guard: node_weight materializes on the disk backend
-        // (protocol in disk/graph.rs); scoped so the borrow ends with the
-        // fallback scan rather than outliving it.
         if schemas.is_empty() {
-            let _guard = self.graph.begin_query();
             for node_idx in self.graph.node_indices() {
                 if let Some(node) = self.graph.node_weight(node_idx) {
                     let type_str = node.node_type_str(&self.interner).to_string();
@@ -161,11 +153,7 @@ impl DirGraph {
         }
 
         // Fallback: if metadata is empty (loaded from file), scan nodes.
-        // Arena guard: node_weight materializes on the disk backend
-        // (protocol in disk/graph.rs); scoped so the borrow ends before
-        // the type-index grouping pass below takes its own.
         if schemas.is_empty() {
-            let _guard = self.graph.begin_query();
             for node_idx in self.graph.node_indices() {
                 if let Some(node) = self.graph.node_weight(node_idx) {
                     let type_str = node.node_type_str(&self.interner).to_string();

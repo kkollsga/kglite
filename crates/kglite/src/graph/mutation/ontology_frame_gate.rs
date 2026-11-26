@@ -55,7 +55,6 @@ pub(super) fn gate_node_frame(
     graph.build_id_index(node_type);
     let mut tally = Tally::default();
     {
-        let _arena_guard = graph.graph.begin_query();
         judge_rows(graph, node_type, df, shape, mode, &rules, &mut tally);
     }
     Ok(as_diagnostics(graph.settle_ontology_tally(tally)?))
@@ -83,7 +82,6 @@ pub(super) fn gate_node_updates<'v>(
     let mut tally = Tally::default();
     {
         let graph: &DirGraph = graph;
-        let _arena_guard = graph.graph.begin_query();
         let mut by_type: HashMap<InternedKey, Option<TypeRules>> = HashMap::new();
         for (idx, writes) in updates {
             let Some(view) = graph.graph.node_view(idx) else {

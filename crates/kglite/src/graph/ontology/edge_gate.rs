@@ -341,7 +341,6 @@ impl DirGraph {
         touched.dedup();
         {
             let graph: &DirGraph = self;
-            let _arena_guard = graph.graph.begin_query();
             let mut rules_by_type: HashMap<InternedKey, Option<RelRules>> = HashMap::new();
             let mut endpoint_verdicts: HashMap<
                 (InternedKey, InternedKey, InternedKey),

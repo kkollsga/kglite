@@ -7,9 +7,8 @@
 //! [`ExportManifest`], applied after the build for what no spec key can say).
 //!
 //! Two passes, both streaming: the manifest scan types every column, then each
-//! CSV is written row by row through a buffered writer, so memory is bounded
-//! by the batch (`KGLITE_EXPORT_BATCH_ROWS`, default 8192 rows) whatever the
-//! graph's size. The disk arena guard is renewed per batch.
+//! CSV is written row by row through a buffered writer, so memory does not grow
+//! with the graph's size.
 //!
 //! Cell grammar (see `blueprint::typing::exact` for the reader side): null is
 //! the empty cell; strings are `text` (empty string `\e`, a leading `\`
@@ -35,7 +34,6 @@ use crate::datatypes::values::{raw_string, Value};
 use crate::graph::blueprint::typing::exact::encode_text;
 use crate::graph::dir_graph::DirGraph;
 use crate::graph::schema::CurrentSelection;
-use crate::graph::storage::disk::graph::DiskQueryGuard;
 use crate::graph::storage::GraphRead;
 
 /// Summary of a CSV directory export.
@@ -53,43 +51,6 @@ pub struct ExportSummary {
 }
 
 const STANDARD_EDGE_COLUMNS: [&str; 4] = ["source_id", "source_type", "target_id", "target_type"];
-
-pub(super) fn batch_rows() -> usize {
-    std::env::var("KGLITE_EXPORT_BATCH_ROWS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(8192)
-}
-
-/// Holds the arena guard of a disk-backed read and renews it every batch.
-pub(super) struct BatchGuard<'g> {
-    graph: &'g DirGraph,
-    rows: usize,
-    batch: usize,
-    _guard: Option<DiskQueryGuard>,
-}
-
-impl<'g> BatchGuard<'g> {
-    pub(super) fn new(graph: &'g DirGraph, batch: usize) -> Self {
-        Self {
-            graph,
-            rows: 0,
-            batch,
-            _guard: graph.graph.begin_query(),
-        }
-    }
-
-    pub(super) fn tick(&mut self) {
-        self.rows += 1;
-        if self.rows.is_multiple_of(self.batch) {
-            // Drop the old guard before taking the new one: the arena resets
-            // when the last guard goes.
-            self._guard = None;
-            self._guard = self.graph.graph.begin_query();
-        }
-    }
-}
 
 /// The blueprint type keyword a column of `kind` is declared with.
 fn keyword(kind: ColumnKind) -> &'static str {
@@ -214,7 +175,6 @@ fn write_node_csv(
     node_type: &str,
     output: &Path,
     relative: &str,
-    batch: usize,
 ) -> Result<usize, String> {
     let info = &manifest.node_types[node_type];
     let props: Vec<(&String, ColumnKind)> = info.properties.iter().map(|(k, v)| (k, *v)).collect();
@@ -227,7 +187,6 @@ fn write_node_csv(
     line.push('\n');
     write_all(&mut out, relative, &line)?;
 
-    let mut guard = BatchGuard::new(graph, batch);
     let mut written = 0usize;
     if let Some(nodes) = graph.type_indices.get(node_type) {
         for idx in nodes.iter() {
@@ -254,7 +213,6 @@ fn write_node_csv(
             line.push('\n');
             write_all(&mut out, relative, &line)?;
             written += 1;
-            guard.tick();
         }
     }
     out.flush()
@@ -267,7 +225,6 @@ struct Layout<'a> {
     keys: &'a BTreeMap<(String, String), String>,
     paths: &'a ExportPaths,
     output: &'a Path,
-    batch: usize,
 }
 
 /// One pass over a source type's nodes feeding every relationship CSV that
@@ -315,7 +272,6 @@ fn write_source_edges(
             },
         );
     }
-    let mut guard = BatchGuard::new(graph, layout.batch);
     let mut line = String::new();
     if let Some(nodes) = graph.type_indices.get(source_type) {
         for idx in nodes.iter() {
@@ -357,7 +313,6 @@ fn write_source_edges(
                 write_all(&mut sink.out, &sink.relative, &line)?;
                 sink.written += 1;
             }
-            guard.tick();
         }
     }
     let mut counts = BTreeMap::new();
@@ -488,7 +443,6 @@ pub fn to_csv_dir(
         return Err("export_csv: output_dir must not be empty".to_string());
     }
     let output = Path::new(output_dir);
-    let batch = batch_rows();
     let scope = Scope::new(graph, selection);
     let manifest = ExportManifest::build_in(graph, &scope, parent_types)?;
     // A CSV id column holds one kind: `{id: 1}` and `{id: '1'}` would both
@@ -536,7 +490,7 @@ pub fn to_csv_dir(
     };
     for (node_type, info) in &manifest.node_types {
         let relative = paths.node(node_type);
-        let n = write_node_csv(graph, &scope, &manifest, node_type, output, relative, batch)?;
+        let n = write_node_csv(graph, &scope, &manifest, node_type, output, relative)?;
         summary.log_lines.push(format!(
             "  {relative}: {n} nodes, {} properties",
             info.properties.len()
@@ -551,7 +505,6 @@ pub fn to_csv_dir(
             keys: &keys,
             paths: &paths,
             output,
-            batch,
         };
         let counts = write_source_edges(graph, &scope, &manifest, source_type, &layout)?;
         for (rel, n) in counts {

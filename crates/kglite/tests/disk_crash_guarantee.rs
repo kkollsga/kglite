@@ -49,10 +49,8 @@ fn run(graph: &mut Arc<DirGraph>, query: &str) {
     execute_mutable(dir, &parsed, HashMap::new(), Default::default()).expect("execute");
 }
 
-/// Every node title in the graph, sorted. Disk-backed reads borrow out of
-/// the arena, so the read guard must outlive the borrows.
+/// Every node title in the graph, sorted.
 fn titles(graph: &DirGraph) -> Vec<String> {
-    let _guard = graph.begin_read_pass();
     let mut found: Vec<String> = graph
         .graph
         .node_indices()

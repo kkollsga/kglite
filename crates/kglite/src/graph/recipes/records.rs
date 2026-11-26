@@ -205,7 +205,6 @@ fn read_record(graph: &DirGraph, idx: petgraph::graph::NodeIndex) -> RecipeRecor
 /// and export need every property, so an abridged listing would only force a
 /// [`get`] per row.
 pub fn list(graph: &DirGraph) -> Vec<RecipeRecord> {
-    let _arena_guard = graph.graph.begin_query();
     let Some(members) = graph.type_indices.get(RECIPE_LABEL) else {
         return Vec::new();
     };
@@ -216,7 +215,6 @@ pub fn list(graph: &DirGraph) -> Vec<RecipeRecord> {
 
 /// One record by its `(recipe, name)` key.
 pub fn get(graph: &DirGraph, recipe: &str, name: &str) -> Result<RecipeRecord, KgError> {
-    let _arena_guard = graph.graph.begin_query();
     let found = graph.type_indices.get(RECIPE_LABEL).and_then(|members| {
         members.iter().find(|idx| {
             string_property(graph, *idx, "recipe") == recipe

@@ -27,7 +27,6 @@ fn prop(graph: &DirGraph, id: i64, key: &str) -> Option<Value> {
         .node_indices()
         .find(|i| graph.graph.get_node_id(*i) == Some(Value::Int64(id)))
         .expect("node exists");
-    let _guard = graph.graph.begin_query();
     graph
         .graph
         .node_view(idx)

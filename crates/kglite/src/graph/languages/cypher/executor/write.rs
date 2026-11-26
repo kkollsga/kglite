@@ -299,10 +299,6 @@ pub(crate) fn execute_mutable_with_csv(
     // Lowering refuses a writing statement under a context; this catches a
     // caller that executes without optimizing.
     crate::graph::languages::cypher::valid_time::check_executable(query)?;
-    // Arena guard for the whole mutation: holds the query count so every
-    // materializing read (`get_node` → `node_weight`) inside a mutation clause
-    // is guard-covered. Owned counter handle — coexists with `&mut`.
-    let _arena_guard = graph.graph.begin_query();
 
     let budget = super::budget::ExecutionBudget::new(limits.max_work_units);
 
@@ -1436,11 +1432,10 @@ fn resolve_create_node_idx(
 }
 
 /// The node's type name when that type opted into `updated_at` stamping, else
-/// `None`. Arena guard: `node_view` materializes on the disk backend, so the
-/// read is scoped and the borrow ends before the caller's `&mut` writes.
+/// `None`. The read is scoped so the borrow ends before the caller's `&mut`
+/// writes.
 fn auto_timestamp_type_of(graph: &DirGraph, node_idx: NodeIndex) -> Option<String> {
     let node_type = {
-        let _arena_guard = graph.graph.begin_query();
         graph
             .graph
             .node_view(node_idx)
@@ -1456,10 +1451,6 @@ fn existing_property_keys(
     row: &ResultRow,
     variable: &str,
 ) -> Vec<String> {
-    // Arena guard: node_weight/edge_weight materialize on the disk backend
-    // (protocol in disk/graph.rs); scoped so the borrow ends before the
-    // caller's &mut.
-    let _arena_guard = graph.graph.begin_query();
     // A projected node value is a `SET x = {…}` target like any bound node, so
     // its stored keys have to reach the clear-list too — otherwise the replace
     // form kept every property the map did not mention.
@@ -1999,11 +1990,8 @@ fn stamp_node_provenance(graph: &mut DirGraph, nodes_to_stamp: &HashMap<NodeInde
     if !nodes_to_stamp.is_empty() {
         let prov = graph.provenance_props();
         for (node_idx, node_type) in nodes_to_stamp {
-            // Arena guard: node_weight materializes on the disk backend
-            // (protocol in disk/graph.rs); scoped so the borrow ends before
-            // the &mut writes below.
+            // Scoped so the read ends before the &mut writes below.
             let columnar_row_id = {
-                let _arena_guard = graph.graph.begin_query();
                 graph
                     .graph
                     .node_weight(*node_idx)
@@ -2135,7 +2123,6 @@ fn execute_remove(
                     let mut cleared_via_master = None;
                     if !is_disk && write_field != "name" && write_field != "title" {
                         let columnar_row_id = {
-                            let _arena_guard = graph.graph.begin_query();
                             graph
                                 .graph
                                 .node_weight(node_idx)
@@ -2268,8 +2255,8 @@ fn execute_merge(
 
     for mut new_row in source_rows.into_iter() {
         check_interrupt_row(ctx.interrupt)?;
-        // (Block-scoped: the executor holds the disk arena guard, whose
-        // borrow of `graph` must end before the &mut mutation calls below.)
+        // (Block-scoped: the executor's borrow of `graph` must end before the
+        // &mut mutation calls below.)
         let pattern = {
             let executor = row_evaluator(graph, ctx);
             evaluate_merge_pattern(graph, &executor, &merge.pattern, &mut row_pattern, &new_row)?

@@ -193,7 +193,6 @@ fn read_record(graph: &DirGraph, idx: petgraph::graph::NodeIndex, with_body: boo
 /// carried them would hand a caller megabytes it did not ask for; use [`get`]
 /// for the one that matters.
 pub fn list(graph: &DirGraph) -> Vec<SkillRecord> {
-    let _arena_guard = graph.graph.begin_query();
     let Some(members) = graph.type_indices.get(SKILL_LABEL) else {
         return Vec::new();
     };
@@ -207,7 +206,6 @@ pub fn list(graph: &DirGraph) -> Vec<SkillRecord> {
 
 /// One skill, body included.
 pub fn get(graph: &DirGraph, name: &str) -> Result<SkillRecord, KgError> {
-    let _arena_guard = graph.graph.begin_query();
     let found = graph.type_indices.get(SKILL_LABEL).and_then(|members| {
         members
             .iter()

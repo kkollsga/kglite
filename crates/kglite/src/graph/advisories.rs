@@ -135,7 +135,6 @@ fn has_duplicate_edge_pair(graph: &DirGraph, node_type: &str) -> bool {
     let Some(nodes) = graph.type_indices.get(node_type) else {
         return false;
     };
-    let _guard = graph.graph.begin_query();
     for node in nodes.iter().take(CONFIRM_SCAN_NODES) {
         let mut seen = HashSet::new();
         for edge in graph.graph.edges_directed(node, Direction::Outgoing) {

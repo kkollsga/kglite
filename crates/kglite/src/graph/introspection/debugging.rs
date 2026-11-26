@@ -2,9 +2,6 @@ use crate::datatypes::values::Value;
 use crate::graph::schema::{CurrentSelection, DirGraph, SelectionOperation};
 
 pub fn get_schema_string(graph: &DirGraph) -> String {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     let mut schema_string = String::from("Graph Schema:\n");
     let mut has_metadata = false;
 
@@ -75,9 +72,6 @@ pub fn get_schema_string(graph: &DirGraph) -> String {
 }
 
 pub fn get_selection_string(graph: &DirGraph, selection: &CurrentSelection) -> String {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     let mut output = String::from("Selection State:\n");
     if selection.get_level_count() == 0 {
         output.push_str("    No active selections\n");

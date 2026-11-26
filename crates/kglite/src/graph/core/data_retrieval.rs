@@ -25,9 +25,8 @@ pub struct LevelValues {
 
 /// Collect `(title, degree)` rows for the current selection in iteration order.
 ///
-/// The result is owned so the disk arena guard never escapes this bulk read.
-/// Using granular title reads and neighbour iterators also avoids retaining one
-/// materialized `NodeData`/`EdgeData` per selected node for the guard lifetime.
+/// The result is owned. Granular title reads and neighbour iterators avoid
+/// materializing a `NodeData`/`EdgeData` per selected node.
 /// Each selected node's title and relationship count — under `valid_time`,
 /// the relationships it admits to nodes it admits. Errors only on a bound the
 /// filter could not read.
@@ -36,8 +35,6 @@ pub fn get_node_degrees(
     selection: &CurrentSelection,
     valid_time: Option<&FluentFilter>,
 ) -> Result<Vec<(String, usize)>, String> {
-    // One guard covers the complete disk read pass; memory/mapped return None.
-    let _arena_guard = graph.graph.begin_query();
     if let Some(filter) = valid_time.filter(|filter| !filter.is_empty()) {
         let degrees = selection
             .current_node_indices()
@@ -84,9 +81,6 @@ pub fn get_nodes(
     indices: Option<&[usize]>,
     max_nodes: Option<usize>,
 ) -> Vec<LevelNodes> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     // If specific indices are provided, do direct lookup
     if let Some(idx) = indices {
         let mut direct_nodes = Vec::new();
@@ -207,9 +201,6 @@ pub fn get_property_values(
     indices: Option<&[usize]>,
     max_nodes: Option<usize>,
 ) -> Vec<LevelValues> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     let level_idx = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
     let mut result = Vec::new();
 
@@ -286,9 +277,6 @@ pub fn get_unique_values(
     group_by_parent: bool,
     indices: Option<&[usize]>,
 ) -> Vec<UniqueValues> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     let level_idx = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
     let mut result = Vec::new();
 
@@ -475,9 +463,6 @@ pub fn get_connections(
                 .unwrap_or(false)
         })
     };
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     let level_idx = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
     let mut result = Vec::new();
 

@@ -48,7 +48,6 @@ pub fn add_properties(
     selection: &CurrentSelection,
     property_spec: HashMap<String, PropertySpec>,
 ) -> Result<AddPropertiesReport, String> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     graph
         .prepare_mutation()
         .map_err(|e| format!("disk mutation lease failed: {e}"))?;
@@ -129,9 +128,6 @@ pub fn add_properties(
     // Collect updates first (to avoid borrow issues with graph)
     let mut updates: Vec<(NodeIndex, HashMap<String, Value>)> = Vec::new();
 
-    // Arena guard: node_weight materializes on the disk backend (protocol
-    // in disk/graph.rs); dropped before the &mut apply loop below.
-    let collect_guard = graph.graph.begin_query();
     for (_parent_opt, targets) in target_level_data.iter_groups() {
         for &target_idx in targets {
             let mut props_to_set: HashMap<String, Value> = HashMap::new();
@@ -193,8 +189,6 @@ pub fn add_properties(
             }
         }
     }
-
-    drop(collect_guard);
 
     apply_property_updates(graph, updates)
 }
@@ -466,9 +460,6 @@ fn add_properties_aggregate(
 
     let mut updates: HashMap<NodeIndex, HashMap<String, Value>> = HashMap::new();
 
-    // Arena guard: node_weight materializes on the disk backend (protocol
-    // in disk/graph.rs); dropped before the &mut apply loop below.
-    let collect_guard = graph.graph.begin_query();
     for (source_type, spec) in property_spec {
         let source_level = match type_to_level.get(source_type) {
             Some(&lvl) => lvl,
@@ -606,8 +597,6 @@ fn add_properties_aggregate(
             }
         }
     }
-
-    drop(collect_guard);
 
     apply_property_updates(graph, updates)
 }

@@ -64,7 +64,6 @@ fn save_disk(mut graph: DirGraph, dir: &std::path::Path) {
 }
 
 fn only_edge_of_type(graph: &DirGraph, relationship_type: &str) -> EdgeIndex {
-    let _guard = graph.graph.begin_query();
     let matches: Vec<_> = graph
         .graph
         .edge_indices()

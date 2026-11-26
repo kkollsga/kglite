@@ -884,9 +884,6 @@ where
         node_type,
         text_column,
     )?;
-    // Disk arena guard (owned; no-op on memory/mapped) — the column probe and
-    // the id lookups below both read node views.
-    let _arena_guard = graph.graph.begin_query();
 
     if !graph.type_indices.contains_key(node_type) {
         return Err(format!(
@@ -1181,9 +1178,6 @@ pub fn embed_property(
     let requested_model_id = model.model_id();
     let (mut found, store_dimension, had_existing_store) = {
         let graph: &DirGraph = graph;
-        // Disk arena guard over every node read below — the column probe as
-        // well as the scan; a no-op on the memory backend most callers use.
-        let _arena_guard = graph.begin_read_pass();
         let node_indices: Vec<NodeIndex> = graph
             .type_indices
             .get(node_type)

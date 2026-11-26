@@ -97,10 +97,6 @@ impl DirGraph {
     /// private copy only when the answer is yes.
     pub(crate) fn columnar_rebuild_needed(&self) -> bool {
         if self.column_store_count() > 0 {
-            // Arena guard: node_weight materializes on the disk backend
-            // (protocol in disk/graph.rs); the whole drift check is
-            // read-only and the guard drops at the end of this block.
-            let _guard = self.graph.begin_query();
             let backend = &self.graph;
             // Rows a type has handed out so far, walking nodes in ascending
             // index order — the order the file is written and read back in.
@@ -213,20 +209,12 @@ impl DirGraph {
         let mut row_owners: HashMap<String, Vec<NodeIndex>> = HashMap::new();
 
         // Clean type_indices: remove entries for deleted/tombstoned nodes.
-        // Arena guard: node_weight materializes on the disk backend
-        // (protocol in disk/graph.rs); block-scoped read.
         {
-            let _guard = self.graph.begin_query();
             let graph_ref = &self.graph;
             self.type_indices
                 .retain_all(|idx| graph_ref.node_weight(*idx).is_some());
         }
 
-        // First pass: create stores and push rows. Arena guard: node_weight
-        // materializes on the disk backend (protocol in disk/graph.rs);
-        // scoped so the borrow ends before the second pass's
-        // node_weight_mut re-pointing below.
-        let first_pass_guard = self.graph.begin_query();
         // One buffer for every row of every type: the per-node
         // `Vec<(InternedKey, Value)>` this loop reads out of the old store was
         // allocated and freed once per node of the graph.
@@ -326,7 +314,6 @@ impl DirGraph {
             stores.insert(node_type.to_string(), store);
             row_owners.insert(node_type.to_string(), type_row_owners);
         }
-        drop(first_pass_guard);
 
         self.install_rebuilt_column_stores(stores, &row_owners);
         // Spill to disk if over the memory limit. Through the one spill
@@ -349,7 +336,6 @@ impl DirGraph {
             rustc_hash::FxHashSet::default();
         let mut found: Vec<(InternedKey, InternedKey, Value)> = Vec::new();
         {
-            let _guard = self.graph.begin_query();
             for idx in self.graph.node_indices() {
                 let Some(node) = self.graph.node_weight(idx) else {
                     continue;

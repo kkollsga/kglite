@@ -174,9 +174,6 @@ pub fn make_traversal(
     valid_time: Option<&FluentFilter>,
     target_type: Option<&[String]>,
 ) -> Result<(), String> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     // Validate connection type exists
     if !graph.has_connection_type(&connection_type) {
         return Err(format!(
@@ -586,9 +583,6 @@ pub fn make_comparison_traversal(
     max_nodes: Option<usize>,
     valid_time: Option<&FluentFilter>,
 ) -> Result<(), String> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     let valid_time =
         valid_time.filter(|filter| !filter.is_empty() && config.method_type != "cluster");
     let Some(filter) = valid_time else {
@@ -1666,9 +1660,6 @@ pub fn get_children_properties(
     selection: &CurrentSelection,
     property: &str,
 ) -> Vec<ChildPropertyGroup> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     let mut result = Vec::new();
 
     // Get the current level index

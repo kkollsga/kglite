@@ -850,7 +850,6 @@ fn a_body_link_resolved_through_an_alias_is_not_repeated_in_frontmatter() {
 }
 
 fn links_to_count(graph: &DirGraph) -> usize {
-    let _arena_guard = graph.graph.begin_query();
     graph
         .graph
         .edge_indices()
@@ -864,7 +863,6 @@ fn links_to_count(graph: &DirGraph) -> usize {
 }
 
 fn title_of(graph: &DirGraph, id: &str) -> String {
-    let _arena_guard = graph.graph.begin_query();
     for idx in graph.graph.node_indices() {
         if let Some(view) = graph.node_view(idx) {
             if matches!(view.id().as_ref(), Value::String(s) if s == id) {

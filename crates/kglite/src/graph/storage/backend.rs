@@ -18,7 +18,7 @@ use petgraph::stable_graph::StableDiGraph;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::sync::Arc;
 
-use crate::graph::storage::disk::graph::{DiskGraph, DiskQueryGuard};
+use crate::graph::storage::disk::graph::DiskGraph;
 
 #[cfg(test)]
 thread_local! {
@@ -206,11 +206,9 @@ impl GraphBackend {
     /// An **owned** node record, for a caller that finishes with it inside its
     /// own frame — scans and filters, which drop each record immediately.
     ///
-    /// Exists for the disk backend, where [`GraphRead::node_weight`] parks
-    /// every record it builds in the per-query arena: a scan walking a million
-    /// nodes retains a million records until its query ends
-    /// (`storage/disk/query_arena.rs`). Materializing into the caller's frame
-    /// keeps such a scan flat in memory and skips the arena mutex.
+    /// Exists for the disk backend, where [`GraphRead::node_weight`] boxes
+    /// every record it builds: a scan walking a million nodes would allocate a
+    /// box per node. Materializing into the caller's frame skips it.
     ///
     /// **Gate on [`GraphRead::is_disk`] before calling** — the heap backends
     /// already own their records and can only answer by *cloning*.
@@ -436,7 +434,7 @@ impl GraphBackend {
     /// through the overlay's own writes.
     ///
     /// `Disk` cannot: it has no petgraph at all — it mutates a CSR + mmap layout
-    /// through generation overlays and arena-staged writes, its slots carry no
+    /// through generation overlays and staged writes, its slots carry no
     /// `NodeIndex` identity for an entry to name, and it has no free list whose
     /// LIFO ordering reverse replay could exploit to restore slot identity. So a
     /// disk graph keeps the clone checkpoint (see `dir_graph/rollback.rs`):
@@ -858,19 +856,6 @@ impl GraphBackend {
         }
     }
 
-    /// Hold the disk materialization arenas for one read-query lifetime.
-    /// Heap/mapped backends do not materialize through shared arenas.
-    pub(crate) fn begin_query(&self) -> Option<DiskQueryGuard> {
-        match self {
-            GraphBackend::Disk(graph) => Some(graph.begin_query()),
-            GraphBackend::Recording(graph) => graph.inner().begin_query(),
-            GraphBackend::Memory(_)
-            | GraphBackend::Mapped(_)
-            | GraphBackend::Frozen(_)
-            | GraphBackend::Forked(_) => None,
-        }
-    }
-
     /// Record that node `idx` was upserted, for the WAL capture wrapper. Used
     /// by mutation paths that write through a side channel (the columnar master
     /// `ColumnStore`) and so bypass the recorded
@@ -1139,13 +1124,13 @@ impl GraphBackend {
     /// doesn't pay for the remaining matches; `properties` is the empty slice
     /// when the edge has no custom ones.
     ///
-    /// Avoids the disk backend's per-edge `Box<EdgeData>` arena push by reading
+    /// Avoids the disk backend's per-edge `EdgeData` build by reading
     /// `edge_endpoints` + `edge_properties` directly, and is O(matching edges)
     /// there when the persisted `conn_type_index_*` inverted index is present
     /// (a graph converted by `enable_disk_mode` has none and falls back to an
     /// O(CSR edges) sweep — still every matching edge, just not indexed). On
     /// Memory/Mapped the petgraph iterator already hands out `&EdgeData` into
-    /// resident storage, so there is no arena cost either way.
+    /// resident storage, so there is no build cost either way.
     #[inline(always)]
     pub fn for_each_edge_of_conn_type<F>(&self, conn_type: InternedKey, mut f: F)
     where

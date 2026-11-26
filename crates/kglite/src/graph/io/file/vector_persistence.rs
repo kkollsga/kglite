@@ -378,9 +378,6 @@ pub fn export_embeddings_to_file(
         Some(_) => Vec::new(),
         None => extract_edge_stores(graph, relationship_keys).map_err(carry_refusal)?,
     };
-    // Arena guard: node_weight materializes on the disk backend
-    // (protocol in disk/graph.rs); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     let mut exported_stores: Vec<ExportedEmbeddingStore> = Vec::new();
     let mut total_embeddings = 0usize;
 

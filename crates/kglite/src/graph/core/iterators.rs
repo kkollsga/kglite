@@ -378,7 +378,7 @@ pub enum GraphEdges<'a> {
 
 /// Iterates CSR edges for a specific node, materializing EdgeData on the fly.
 /// When `conn_type_filter` is set, edges with non-matching connection types
-/// are skipped before materialization (avoids arena alloc + property lookup).
+/// are skipped before materialization (avoids an `EdgeData` build + property lookup).
 pub struct DiskEdges<'a> {
     graph: &'a DiskGraph,
     direction: Direction,
@@ -445,7 +445,7 @@ impl<'a> DiskEdges<'a> {
     fn make_edge_ref(&self, csr: &CsrEdge) -> GraphEdgeRef<'a> {
         // Lazy: carry only the cheap connection type (a bare u64 read from the
         // endpoint table); defer the EdgeData materialisation (heap alloc +
-        // property clone + arena lock) until a caller calls `weight()`.
+        // property clone) until a caller calls `weight()`.
         let conn_type = InternedKey::from_u64(
             self.graph
                 .edge_endpoint(csr.edge_idx as usize)

@@ -198,8 +198,8 @@ impl<'g> CypherExecutor<'g> {
     /// pre-warms, because a `Generic` arm can re-enter the whole interpreter
     /// and no enumeration of what it might touch stays true. Instead:
     ///
-    /// * **Disk is excluded** — its `node_weight` materialises into the shared
-    ///   query arena on every call. A `parallel` request on a disk graph is
+    /// * **Disk is excluded** — its `node_weight` builds a record on every
+    ///   call. A `parallel` request on a disk graph is
     ///   silently served serially, because `parallel` is a hint and refusing
     ///   it would break portable code that runs against all three modes.
     /// * **Spatial graphs are excluded** — a spatial config disables the scan

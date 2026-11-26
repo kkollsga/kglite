@@ -83,7 +83,6 @@ pub(super) fn normalize_complete_snapshot(
 
     let (typed_indexes, global_indexes) = invalidated_indexes(graph, &nodes);
     let invalidated_edge_text_fields = {
-        let _guard = graph.begin_read_pass();
         edges
             .iter()
             .filter_map(|change| {
@@ -265,7 +264,6 @@ fn estimated_path_bytes(path: &PathValue) -> u64 {
 /// when it may hold one, so a graph of typed columns builds no values at all —
 /// the complete-row read this replaced made every load O(property cells).
 fn collect_node_changes(graph: &DirGraph) -> Vec<NodeChanges> {
-    let _guard = graph.begin_read_pass();
     // Scanned lazily, once per type.
     let mut candidates: FxHashMap<InternedKey, FxHashSet<u32>> = FxHashMap::default();
     let mut changes = Vec::new();
@@ -419,7 +417,6 @@ fn collect_edge_changes(graph: &DirGraph) -> io::Result<Vec<EdgeChanges>> {
     {
         return Ok(Vec::new());
     }
-    let _guard = graph.begin_read_pass();
     if let Some(disk) = graph.graph.as_disk() {
         let mut changes = Vec::new();
         for index in disk.edge_indices_iter() {
@@ -551,7 +548,6 @@ mod tests {
     }
 
     fn assert_normalized(graph: &DirGraph) {
-        let _guard = graph.begin_read_pass();
         let node = NodeIndex::new(0);
         assert_eq!(
             graph.graph.get_node_title(node),

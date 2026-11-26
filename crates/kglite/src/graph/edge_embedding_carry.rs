@@ -186,14 +186,12 @@ pub(crate) fn extract_edge_stores(
     src: &DirGraph,
     keys: &RelationshipKeys,
 ) -> Result<Vec<CarriedEdgeStore>, String> {
-    let guard = src.graph.begin_query();
     let mut stores: Vec<_> = src.edge_embeddings.iter().collect();
     stores.sort_unstable_by(|a, b| a.0.cmp(b.0));
     let mut carried = Vec::with_capacity(stores.len());
     for ((relationship_type, name), store) in stores {
         carried.push(extract_one(src, relationship_type, name, store, keys)?);
     }
-    drop(guard);
     Ok(carried)
 }
 
@@ -302,12 +300,10 @@ pub(crate) fn resolve_edge_stores(
         dst.build_id_index(node_type);
     }
     let dst: &DirGraph = dst;
-    let guard = dst.graph.begin_query();
     let resolved = stores
         .into_iter()
         .map(|store| resolve_one(dst, store, keys))
         .collect::<Result<Vec<_>, _>>();
-    drop(guard);
     resolved
 }
 
@@ -558,7 +554,6 @@ pub fn relationship_embeddings(
             )
         })?;
     let key_property = keys.get(relationship_type).map(String::as_str);
-    let guard = graph.graph.begin_query();
     let mut checked: BTreeSet<(usize, usize)> = BTreeSet::new();
     let mut rows: Vec<(usize, RelationshipEmbedding)> = Vec::with_capacity(store.len());
     for edge in store.edges() {
@@ -599,7 +594,6 @@ pub fn relationship_embeddings(
             },
         ));
     }
-    drop(guard);
     rows.sort_by(|(left_slot, left), (right_slot, right)| {
         (
             &left.source_type,

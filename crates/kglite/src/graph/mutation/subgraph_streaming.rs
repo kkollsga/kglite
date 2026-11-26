@@ -597,7 +597,7 @@ pub fn save_subset_streaming_disk(
     let phase_node_walk = Instant::now();
 
     // 4. Single-pass node walk — bypasses `DiskGraph::node_weight`, which
-    //    would allocate every read into the source's `node_arena`.
+    //    would build a record for every read.
     let source_disk_for_nodes: Option<&DiskGraph> = match &source.graph {
         GraphBackend::Disk(dg) => Some(dg.as_ref()),
         _ => None,
@@ -848,9 +848,6 @@ fn stream_subset_edges(
         _ => None,
     };
 
-    // The filter reads relationship bounds, which a disk source materialises
-    // into its query arena (protocol in disk/graph.rs).
-    let _arena_guard = valid_time.and_then(|_| source.graph.begin_query());
     let mut rel_types = std::collections::HashSet::new();
     if let Some(sdg) = source_disk {
         // Disk source: sequential read of edge_endpoints.bin with lockstep
@@ -1173,7 +1170,6 @@ mod tests {
         .unwrap();
         let payload_key = source.interner.get_or_intern("payload");
         let row_id = {
-            let _guard = source.graph.begin_query();
             source
                 .graph
                 .node_weight(NodeIndex::new(0))

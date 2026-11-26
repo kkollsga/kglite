@@ -41,10 +41,7 @@ impl BoundWrites {
         if graph.temporal.is_empty() {
             return;
         }
-        let rel_type = {
-            let _arena_guard = graph.graph.begin_query();
-            graph.graph.edge_weight(edge).map(|e| e.connection_type)
-        };
+        let rel_type = { graph.graph.edge_weight(edge).map(|e| e.connection_type) };
         let named = rel_type
             .and_then(|key| graph.interner.try_resolve(key))
             .is_some_and(|rel_type| edge_property_is_bound(graph, rel_type, property));
@@ -63,7 +60,6 @@ impl BoundWrites {
         if self.nodes.is_empty() && self.edges.is_empty() {
             return Ok(());
         }
-        let _arena_guard = graph.graph.begin_query();
         self.nodes.sort_unstable();
         self.nodes.dedup();
         for idx in self.nodes {

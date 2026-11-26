@@ -72,7 +72,6 @@ impl ConstraintState {
         created: &Created,
     ) -> Self {
         let mut result = Self::default();
-        let _guard = graph.begin_read_pass();
         if !rules.is_empty() {
             for idx in graph.graph.node_indices() {
                 let Some(type_key) = graph.graph.node_type_of(idx) else {

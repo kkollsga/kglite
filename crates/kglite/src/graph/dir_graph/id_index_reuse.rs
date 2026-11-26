@@ -53,8 +53,6 @@ impl DirGraph {
         let type_key = InternedKey::from_str(node_type);
         let mut pairs: Vec<(Value, NodeIndex)> = Vec::with_capacity(created);
         {
-            // Arena guard: `node_view` materializes on the disk backend.
-            let _guard = self.graph.begin_query();
             for node_idx in tail {
                 match self.graph.node_view(node_idx) {
                     Some(node) if node.node_type() == type_key => {

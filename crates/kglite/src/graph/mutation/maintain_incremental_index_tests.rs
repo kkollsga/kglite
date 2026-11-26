@@ -76,7 +76,6 @@ fn appended_ids_resolve_without_a_rebuild() {
             .lookup("Person", &Value::Int64(id))
             .unwrap_or_else(|| panic!("id {id} lost from the index"));
         let stored = {
-            let _guard = graph.graph.begin_query();
             graph
                 .graph
                 .node_view(idx)
@@ -139,7 +138,6 @@ fn deleting_then_recreating_an_id_repoints_the_index() {
         .lookup("Person", &Value::Int64(2))
         .expect("the recreated id must be indexed");
     let stored = {
-        let _guard = graph.graph.begin_query();
         graph
             .graph
             .node_view(reborn)
@@ -167,7 +165,6 @@ fn a_within_batch_duplicate_id_collapses_the_way_a_rebuild_would() {
     // What the pre-fix full rebuild produced: the last member of the bucket
     // carrying that id wins.
     let expected = {
-        let _guard = graph.graph.begin_query();
         let members = graph.type_indices.get("Person").unwrap().to_vec();
         members
             .into_iter()

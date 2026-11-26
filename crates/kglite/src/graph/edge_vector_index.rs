@@ -82,7 +82,6 @@ pub(crate) fn list_edge_vector_indexes(graph: &DirGraph) -> Vec<EdgeVectorIndexS
     if graph.edge_embeddings.is_empty() {
         return Vec::new();
     }
-    let guard = graph.graph.begin_query();
     let mut live_by_type = std::collections::HashMap::<&str, usize>::new();
     for edge in graph.graph.edge_indices() {
         if let Some(weight) = graph.graph.edge_weight(edge) {
@@ -111,7 +110,6 @@ pub(crate) fn list_edge_vector_indexes(graph: &DirGraph) -> Vec<EdgeVectorIndexS
             },
         )
         .collect::<Vec<_>>();
-    drop(guard);
     statuses.sort_by(|left, right| {
         (&left.connection_type, &left.text_property)
             .cmp(&(&right.connection_type, &right.text_property))

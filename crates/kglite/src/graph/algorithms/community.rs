@@ -734,10 +734,6 @@ pub fn louvain_communities(
         scope,
         interrupt: deadline,
     } = *options;
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena, which must run under a DiskQueryGuard (arena protocol in
-    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     // Unscoped disk/mapped: stream level 0 from the CSR (O(nodes) heap) — the
     // bounded-memory path for whole-graph runs. In-memory, or any *scoped* run:
     // materialise the (scope-bounded) adjacency. build_weighted_adjacency reads
@@ -924,10 +920,6 @@ pub fn leiden_communities(
         scope,
         interrupt: deadline,
     } = *options;
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena, which must run under a DiskQueryGuard (arena protocol in
-    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     let (nodes, levels) = if (graph.graph.is_disk() || graph.graph.is_mapped()) && scope.is_none() {
         let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
         if nodes.is_empty() {
@@ -971,10 +963,6 @@ pub fn label_propagation(
         scope,
         interrupt: deadline,
     } = *options;
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena, which must run under a DiskQueryGuard (arena protocol in
-    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     // Unscoped disk/mapped: stream the deduped neighbours (bounded memory);
     // scoped runs take the materialised path below (see `louvain_communities`).
     if (graph.graph.is_disk() || graph.graph.is_mapped()) && scope.is_none() {

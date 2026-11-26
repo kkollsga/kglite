@@ -132,7 +132,6 @@ impl DirGraph {
         let type_key = InternedKey::from_str(rel_type);
         let property_key = InternedKey::from_str(property);
         {
-            let _arena = self.graph.begin_query();
             for edge in self.graph.edge_references() {
                 if edge.connection_type() != type_key {
                     continue;
@@ -210,13 +209,11 @@ impl DirGraph {
 
     /// The type name of `edge`, when it is live.
     fn rel_type_of_edge(&self, edge: EdgeIndex) -> Option<String> {
-        let _arena = self.graph.begin_query();
         let key = self.graph.edge_weight(edge)?.connection_type;
         self.interner.try_resolve(key).map(str::to_string)
     }
 
     pub(crate) fn read_edge_value(&self, edge: EdgeIndex, property: &str) -> Option<Value> {
-        let _arena = self.graph.begin_query();
         self.graph
             .get_edge_property(edge, InternedKey::from_str(property))
     }

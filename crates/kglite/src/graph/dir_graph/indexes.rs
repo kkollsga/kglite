@@ -435,9 +435,6 @@ impl DirGraph {
     ///
     /// Aliases mirror the matcher's cross-type fast path, so `search` and
     /// `MATCH (n {title: ...})` resolve the same candidate set.
-    ///
-    /// The caller holds the read pass ([`Self::begin_read_pass`]); on the disk
-    /// backend the scan reads through it.
     pub fn search_by_property(&self, text: &str, property: &str, limit: usize) -> Vec<NodeIndex> {
         let candidates: Vec<&str> = match property {
             "title" => vec!["title", "label", "name"],

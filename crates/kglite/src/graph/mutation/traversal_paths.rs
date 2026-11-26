@@ -85,9 +85,6 @@ pub(super) fn copy_path_properties(
     spec: &HashMap<String, Vec<String>>,
     path: impl IntoIterator<Item = NodeIndex>,
 ) -> HashMap<String, Value> {
-    // Arena guard: node_view materializes on the disk backend; scoped so the
-    // borrow ends before the caller's `&mut graph` writes.
-    let _arena_guard = graph.graph.begin_query();
     let mut props = HashMap::new();
     for node_idx in path {
         let Some(node) = graph.graph.node_view(node_idx) else {
@@ -111,8 +108,6 @@ pub(super) fn copy_path_properties(
 
 /// The node type of `node_idx`, owned so no storage borrow outlives the call.
 pub(super) fn node_type_name(graph: &DirGraph, node_idx: NodeIndex) -> Option<String> {
-    // Arena guard: node_view materializes on the disk backend.
-    let _arena_guard = graph.graph.begin_query();
     graph
         .node_view(node_idx)
         .map(|node| node.node_type_str(&graph.interner).to_string())

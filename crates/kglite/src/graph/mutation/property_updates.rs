@@ -152,8 +152,8 @@ fn write_node_property(
     let mut node_types = HashMap::new();
     // Cache the validation result for the batch loop below. `node_type_of` is a
     // granular, allocation-free liveness/type lookup on every backend; unlike
-    // `get_node`, it does not materialize one full `NodeData` per row into the
-    // disk query arena. Keeping the result aligned with `nodes` also avoids a
+    // `get_node`, it does not materialize one full `NodeData` per row on the
+    // disk backend. Keeping the result aligned with `nodes` also avoids a
     // second backend lookup when the batch actions are assembled.
     let mut validated_nodes = Vec::with_capacity(nodes.len());
     let mut skipped_count = 0;

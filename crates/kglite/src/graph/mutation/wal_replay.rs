@@ -231,7 +231,6 @@ fn capture_edge_embedding_state(
         return Ok(state);
     }
 
-    let guard = graph.begin_read_pass();
     let mut edges: Vec<_> = graph.graph.edge_indices().collect();
     edges.sort_unstable_by_key(|edge| edge.index());
     for edge in edges {
@@ -302,7 +301,6 @@ fn capture_edge_embedding_state(
                 );
         }
     }
-    drop(guard);
     state.validate_complete()?;
     Ok(state)
 }
@@ -395,14 +393,12 @@ fn reinstall_edge_embedding_group(
     };
     let kind = graph.interner.get_or_intern(&key.conn_type);
     let existing: Vec<EdgeIndex> = {
-        let guard = graph.begin_read_pass();
         let edges = graph
             .graph
             .edges_connecting(source, target)
             .filter(|edge| edge.connection_type() == kind)
             .map(|edge| edge.id())
             .collect();
-        drop(guard);
         edges
     };
     for edge in existing {
@@ -436,7 +432,6 @@ fn reinstall_edge_embedding_group(
 }
 
 fn find_logical_node(graph: &DirGraph, node_type: &str, id: &Value) -> Option<NodeIndex> {
-    let guard = graph.begin_read_pass();
     let found = graph.graph.node_indices().find(|&node| {
         graph.graph.node_type_of(node).is_some_and(|kind| {
             graph.interner.resolve(kind) == node_type
@@ -446,7 +441,6 @@ fn find_logical_node(graph: &DirGraph, node_type: &str, id: &Value) -> Option<No
                 })
         })
     });
-    drop(guard);
     found
 }
 

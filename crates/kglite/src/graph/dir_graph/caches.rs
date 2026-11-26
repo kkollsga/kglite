@@ -201,10 +201,6 @@ impl DirGraph {
                 }
             }
         }
-        // Slow path: count distinct values across the type's nodes (O(type)).
-        // Arena guard: get_node -> node_weight materializes on the disk
-        // backend (protocol in disk/graph.rs); no-op on memory/mapped.
-        let _arena_guard = self.graph.begin_query();
         let field_key = InternedKey::from_str(field);
         // Presized and Fx-hashed: growth rehashes and SipHash dominate the scan.
         let mut seen: rustc_hash::FxHashSet<Value> =

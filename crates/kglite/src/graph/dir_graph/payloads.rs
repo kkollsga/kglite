@@ -44,10 +44,6 @@ impl DirGraph {
     /// The `(node_type, id)` a payload op is keyed by. `None` for a slot that
     /// holds no live node.
     fn logical_key(&self, node_idx: NodeIndex) -> Option<(String, Value)> {
-        // Arena guard: `node_view` on a disk-backed graph materializes into
-        // its query arena (protocol in disk/graph.rs); no-op on memory/mapped,
-        // and re-entrant, so a caller already holding one is fine.
-        let _arena_guard = self.graph.begin_query();
         let node = self.graph.node_view(node_idx)?;
         Some((
             node.node_type_str(&self.interner).to_string(),
@@ -245,7 +241,6 @@ impl DirGraph {
         mode: EmbeddingWrite,
         slots: &[usize],
     ) -> MutationOp {
-        let _arena_guard = self.graph.begin_query();
         let store = self.embeddings.get(&store_key(node_type, text_column));
         let mut entries = Vec::with_capacity(slots.len());
         if let Some(store) = store {

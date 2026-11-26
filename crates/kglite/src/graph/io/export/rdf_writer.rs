@@ -22,8 +22,7 @@
 //! `;<node index>` suffix on all but the node the id index answers for.
 //!
 //! The file is written statement by statement through a buffered writer, so
-//! memory is bounded by the batch whatever the graph's size; the disk arena
-//! guard is renewed per batch.
+//! memory does not grow with the graph's size.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
@@ -36,7 +35,6 @@ use oxrdf::{
 use oxttl::{NQuadsSerializer, TriGSerializer};
 use petgraph::graph::NodeIndex;
 
-use super::csv_tree::{batch_rows, BatchGuard};
 use super::kg_vocab::{
     encode_segment, DUPLICATE_MARK, KG_DURATION, KG_JSON, KG_MANIFEST, META_GRAPH, NODE_PATH,
     PROP_PATH, REL_PATH, TYPE_PATH,
@@ -548,7 +546,6 @@ pub fn to_rdf(
         RdfFormat::TriG => Sink::TriG(Box::new(TriGSerializer::new().for_writer(out))),
     };
     let mut emit = Emitter::new(&options.base, sink);
-    let batch = batch_rows();
 
     let meta = iri(format!("{}{META_GRAPH}", options.base));
     let manifest_literal = Literal::new_typed_literal(manifest.to_json(), emit.kg_json.clone());
@@ -571,7 +568,6 @@ pub fn to_rdf(
         let type_iri = emit.type_iri(node_type);
         let columns: Vec<&String> = info.properties.keys().collect();
         let bounds = node_bounds(&manifest, node_type);
-        let mut guard = BatchGuard::new(graph, batch);
         let mut written = 0usize;
         let Some(nodes) = graph.type_indices.get(node_type) else {
             continue;
@@ -639,7 +635,6 @@ pub fn to_rdf(
                 *summary.connections.entry(rel.to_string()).or_default() += 1;
             }
             written += 1;
-            guard.tick();
         }
         summary.nodes.insert(node_type.clone(), written);
     }

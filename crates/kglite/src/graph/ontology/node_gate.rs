@@ -399,7 +399,6 @@ impl DirGraph {
         touched.dedup();
         {
             let graph: &DirGraph = self;
-            let _arena_guard = graph.graph.begin_query();
             let mut by_type: HashMap<InternedKey, Option<TypeRules>> = HashMap::new();
             for idx in touched {
                 let Some(view) = graph.graph.node_view(idx) else {

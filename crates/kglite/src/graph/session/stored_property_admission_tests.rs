@@ -28,7 +28,6 @@ fn fixture() -> DirGraph {
 }
 
 fn property(graph: &DirGraph, node: usize, key: &str) -> Option<Value> {
-    let _guard = graph.graph.begin_query();
     graph
         .graph
         .get_node_property(NodeIndex::new(node), InternedKey::from_str(key))

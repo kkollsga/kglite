@@ -457,10 +457,6 @@ pub fn to_sqlite_dump(
     graph: &DirGraph,
     selection: Option<&CurrentSelection>,
 ) -> Result<String, String> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
-
     let indices = super::export::selected_node_indices(graph, selection);
     let grouped_nodes = nodes_by_type(graph, &indices);
     let node_tables: BTreeSet<String> = grouped_nodes.keys().cloned().collect();

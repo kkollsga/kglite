@@ -416,10 +416,6 @@ pub fn shortest_path(
     target: NodeIndex,
     options: &PathOptions,
 ) -> Option<PathResult> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena, which must run under a DiskQueryGuard (arena protocol in
-    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     let PathOptions {
         connection_types,
         via_types,
@@ -457,10 +453,6 @@ pub fn all_shortest_paths(
     deadline: Interrupt,
     max_paths: usize,
 ) -> Vec<PathResult> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena, which must run under a DiskQueryGuard (arena protocol in
-    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     all_shortest_paths_impl(
         graph,
         (source, target),
@@ -482,10 +474,6 @@ pub fn all_shortest_paths_directed(
     deadline: Interrupt,
     max_paths: usize,
 ) -> Vec<PathResult> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena, which must run under a DiskQueryGuard (arena protocol in
-    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     all_shortest_paths_impl(
         graph,
         (source, target),
@@ -509,7 +497,6 @@ pub(crate) fn all_shortest_paths_filtered(
     directed: bool,
     filter: &ElementFilter,
 ) -> Vec<PathResult> {
-    let _arena_guard = graph.graph.begin_query();
     all_shortest_paths_impl(
         graph,
         (source, target),
@@ -637,10 +624,6 @@ pub fn shortest_path_cost_with(
     target: NodeIndex,
     options: &PathOptions,
 ) -> Option<usize> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena, which must run under a DiskQueryGuard (arena protocol in
-    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     if source == target {
         return Some(0);
     }
@@ -703,10 +686,6 @@ pub fn shortest_path_cost_batch_with(
     pairs: &[(NodeIndex, NodeIndex)],
     options: &PathOptions,
 ) -> Vec<Option<usize>> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena, which must run under a DiskQueryGuard (arena protocol in
-    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     let PathOptions {
         connection_types,
         via_types,
@@ -951,10 +930,6 @@ pub fn shortest_path_costs_from(
     options: &PathOptions,
     max_hops: Option<usize>,
 ) -> Result<Vec<(NodeIndex, usize)>, String> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena, which must run under a DiskQueryGuard (arena protocol in
-    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     let bound = graph.graph.node_bound();
     if source.index() >= bound {
         return Ok(Vec::new());
@@ -1091,10 +1066,6 @@ pub fn all_paths(
     target: NodeIndex,
     options: &AllPathsOptions,
 ) -> Vec<Vec<NodeIndex>> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena, which must run under a DiskQueryGuard (arena protocol in
-    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     let AllPathsOptions {
         max_hops,
         max_results,
@@ -1202,10 +1173,6 @@ fn find_all_paths_recursive(
 
 /// Find all strongly connected components in the graph.
 pub fn connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena, which must run under a DiskQueryGuard (arena protocol in
-    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     // A forked backend has no single `StableDiGraph` to hand petgraph — its
     // nodes are base⊕overlay — and a frozen one has none at all, so both take
     // the same generic `GraphRead` traversal the disk backend already uses.
@@ -1218,7 +1185,7 @@ pub fn connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
 
 /// Kosaraju's algorithm over the storage abstraction. Disk graphs cannot
 /// implement petgraph's borrowing traversal traits because their CSR reads
-/// materialise through a query arena, so the disk path uses the equivalent
+/// materialise records on demand, so the disk path uses the equivalent
 /// two-pass traversal through [`GraphRead`].
 fn strongly_connected_components(graph: &impl GraphRead) -> Vec<Vec<NodeIndex>> {
     let nodes: Vec<NodeIndex> = graph.node_indices().collect();
@@ -1278,10 +1245,6 @@ pub fn weakly_connected_components(
     graph: &DirGraph,
     deadline: Interrupt,
 ) -> Result<Vec<Vec<NodeIndex>>, String> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena, which must run under a DiskQueryGuard (arena protocol in
-    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     weakly_connected_components_scoped(graph, None, None, deadline)
 }
 
@@ -1307,10 +1270,6 @@ pub fn weakly_connected_components_scoped(
     rel_types: Option<&[InternedKey]>,
     deadline: Interrupt,
 ) -> Result<Vec<Vec<NodeIndex>>, String> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena, which must run under a DiskQueryGuard (arena protocol in
-    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     let edge_matches = |key: InternedKey| -> bool {
         match rel_types {
             Some(keys) => keys.contains(&key),
@@ -1525,10 +1484,6 @@ pub fn coreness_scoped(
     rel_types: Option<&[InternedKey]>,
     deadline: Interrupt,
 ) -> Result<Vec<(NodeIndex, i64)>, String> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena, which must run under a DiskQueryGuard (arena protocol in
-    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     // Disk/mapped: stream the scoped neighbours (bounded memory) instead of
     // materialising the whole adjacency. In-memory keeps the materialised path.
     if graph.graph.is_disk() || graph.graph.is_mapped() {
@@ -1717,10 +1672,6 @@ pub fn ready_set_scoped(
     done: &HashSet<NodeIndex>,
     deadline: Interrupt,
 ) -> Result<Vec<(NodeIndex, i64)>, String> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena, which must run under a DiskQueryGuard (arena protocol in
-    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     // Candidate nodes to emit: union of the requested types, or every node.
     let candidates: Vec<NodeIndex> = match node_types {
         Some(types) => {
@@ -1760,10 +1711,6 @@ pub fn clustering_coefficient_scoped(
     rel_types: Option<&[InternedKey]>,
     deadline: Interrupt,
 ) -> Result<Vec<(NodeIndex, f64)>, String> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena, which must run under a DiskQueryGuard (arena protocol in
-    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     let (nodes, adj) = build_scoped_undirected_adjacency(graph, node_types, rel_types, deadline)?;
     let n = nodes.len();
     let mut out = Vec::with_capacity(n);
@@ -1811,10 +1758,6 @@ pub fn triangle_count_scoped(
     rel_types: Option<&[InternedKey]>,
     deadline: Interrupt,
 ) -> Result<(u64, f64), String> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena, which must run under a DiskQueryGuard (arena protocol in
-    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     let (nodes, adj) = build_scoped_undirected_adjacency(graph, node_types, rel_types, deadline)?;
     let n = nodes.len();
     // `link_sum` = Σ_v (edges among v's neighbours) = 3 × triangles.
@@ -1864,10 +1807,6 @@ pub fn eccentricity_scoped(
     rel_types: Option<&[InternedKey]>,
     deadline: Interrupt,
 ) -> Result<Vec<(NodeIndex, i64)>, String> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena, which must run under a DiskQueryGuard (arena protocol in
-    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     let (nodes, adj) = build_scoped_undirected_adjacency(graph, node_types, rel_types, deadline)?;
     let n = nodes.len();
     if n > MAX_ECCENTRICITY_NODES {
@@ -1916,10 +1855,6 @@ pub fn diameter_scoped(
     rel_types: Option<&[InternedKey]>,
     deadline: Interrupt,
 ) -> Result<i64, String> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena, which must run under a DiskQueryGuard (arena protocol in
-    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     let eccs = eccentricity_scoped(graph, node_types, rel_types, deadline)?;
     Ok(eccs.iter().map(|(_, e)| *e).max().unwrap_or(0))
 }
@@ -1946,10 +1881,6 @@ fn intersection_count_gt(a: &[u32], b: &[u32], gt: u32) -> u64 {
 
 /// Get node info for building Python-friendly path output
 pub fn get_node_info(graph: &DirGraph, node_idx: NodeIndex) -> Option<PathNodeInfo> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena, which must run under a DiskQueryGuard (arena protocol in
-    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     let node = graph.node_view(node_idx)?;
     let node_title = node.title();
     let title_str = match &*node_title {
@@ -1965,10 +1896,6 @@ pub fn get_node_info(graph: &DirGraph, node_idx: NodeIndex) -> Option<PathNodeIn
 
 /// Get information about what connection types link nodes in a path
 pub fn get_path_connections(graph: &DirGraph, path: &[NodeIndex]) -> Vec<Option<String>> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena, which must run under a DiskQueryGuard (arena protocol in
-    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     let mut connections = Vec::with_capacity(path.len().saturating_sub(1));
 
     for window in path.windows(2) {
@@ -2009,12 +1936,10 @@ pub fn are_connected_with(
     target: NodeIndex,
     options: &PathOptions,
 ) -> bool {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     shortest_path_cost_with(graph, source, target, options).is_some()
 }
 
 pub fn node_degree(graph: &DirGraph, node: NodeIndex) -> usize {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     let g = &graph.graph;
     g.edges(node).count()
         + g.neighbors_directed(node, petgraph::Direction::Incoming)
@@ -2064,10 +1989,6 @@ pub fn shortest_path_weighted(
     weight_property: &str,
     options: &PathOptions,
 ) -> Option<WeightedPathResult> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena, which must run under a DiskQueryGuard (arena protocol in
-    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     let PathOptions {
         connection_types,
         via_types,
@@ -2211,10 +2132,6 @@ pub fn shortest_path_cost_weighted(
     weight_property: &str,
     options: &PathOptions,
 ) -> Option<f64> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena, which must run under a DiskQueryGuard (arena protocol in
-    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     shortest_path_weighted(graph, source, target, weight_property, options).map(|r| r.weight)
 }
 

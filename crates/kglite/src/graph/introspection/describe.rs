@@ -251,8 +251,7 @@ fn write_connection_map(
 ///
 /// Never go back to a sweep per statistic: the pre-rewrite path made three
 /// full `edge_references()` passes per topic and materialised an `EdgeData`
-/// per edge into an arena never cleared within the call — unusable on a
-/// multi-billion-edge disk graph.
+/// per edge — unusable on a multi-billion-edge disk graph.
 struct ConnectionTopicAccum {
     /// (src_type, tgt_type) → edge count. Strings, not `InternedKey`s,
     /// because the cache path already resolved them and we need strings
@@ -330,7 +329,7 @@ fn validated_type_connectivity_cache(graph: &DirGraph) -> Option<Vec<Connectivit
 ///
 /// Falls back to a single `for_each_edge_of_conn_type` sweep when the
 /// cache is absent or the connection has properties. That sweep never
-/// calls `materialize_edge`, so the disk arena does not grow.
+/// calls `materialize_edge`.
 fn accumulate_connection_topic(
     graph: &DirGraph,
     conn_key: InternedKey,
@@ -493,7 +492,7 @@ fn write_connections_overview(xml: &mut String, graph: &DirGraph, surface: Descr
 ///
 /// One pass per topic via `GraphBackend::for_each_edge_of_conn_type` — on
 /// disk this walks only matching edges (persisted inverted index) and
-/// avoids the per-edge `Box<EdgeData>` arena that would balloon VSZ on
+/// avoids a per-edge `EdgeData` build that would balloon memory on
 /// multi-billion-edge graphs.
 ///
 /// `max_pairs` caps the emitted `(src_type, tgt_type)` breakdown so wide
@@ -2009,9 +2008,6 @@ pub fn compute_description(
         sample_truncate,
         surface,
     } = *request;
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     // 50 pairs covers the dominant (src_type, tgt_type) relationships while
     // staying well under typical MCP response budgets.
     let max_pairs = max_pairs.unwrap_or(50);

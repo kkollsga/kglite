@@ -264,7 +264,6 @@ fn relationship_texts(
     text_column: &str,
 ) -> Vec<SelectedEdgeText> {
     let type_key = InternedKey::from_str(relationship_type);
-    let _arena_guard = graph.graph.begin_query();
     graph
         .graph
         .edge_indices()
@@ -293,7 +292,6 @@ struct DefaultEndpoints {
 impl DefaultEndpoints {
     fn scan(graph: &DirGraph, relationship_type: &str) -> Self {
         let type_key = InternedKey::from_str(relationship_type);
-        let _arena_guard = graph.graph.begin_query();
         let mut seen: HashMap<InternedKey, String> = HashMap::new();
         let mut type_of = |node: NodeIndex| -> Option<String> {
             let view = graph.graph.node_view(node)?;
@@ -388,7 +386,6 @@ fn resolve_rows(
         graph.build_id_index(node_type);
     }
     let graph: &DirGraph = graph;
-    let _arena_guard = graph.graph.begin_query();
     let mut resolver = Resolver {
         graph,
         relationship_type,
@@ -509,7 +506,6 @@ pub(crate) fn resolve_address(
             address.target_type.as_deref().unwrap_or_default(),
         ),
     };
-    let _arena_guard = graph.graph.begin_query();
     let mut resolver = Resolver {
         graph,
         relationship_type,

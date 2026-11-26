@@ -86,7 +86,6 @@ pub fn calculate_grouped_property_stats(
     group_by: &str,
     level_index: Option<usize>,
 ) -> HashMap<String, GroupedPropertyStats> {
-    let _arena_guard = graph.graph.begin_query();
     let mut grouped_values: HashMap<String, Vec<f64>> = HashMap::new();
     for index in collect_selected_nodes(selection, level_index) {
         let Some(node) = graph.node_view(index) else {
@@ -214,9 +213,6 @@ pub fn calculate_property_stats(
     pairs: &[ParentChildPair],
     property: &str,
 ) -> Vec<PropertyStats> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     pairs
         .iter()
         .map(|pair| {

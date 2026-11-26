@@ -257,7 +257,6 @@ pub fn export(graph: &DirGraph, dir: &Path, opts: &ExportOptions) -> Result<Expo
 /// is decides what a node *without* the property means — a hub node the build
 /// synthesized, or an ordinary node of a graph that simply never had files.
 fn collect(graph: &DirGraph, body_property: &str) -> Collected {
-    let _arena_guard = graph.graph.begin_query();
     let skill_label = crate::graph::skills::SKILL_LABEL;
     let recipe_label = crate::graph::recipes::RECIPE_LABEL;
     let mut attachments = Vec::new();

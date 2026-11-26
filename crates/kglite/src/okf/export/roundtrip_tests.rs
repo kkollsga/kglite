@@ -96,7 +96,6 @@ struct Shape {
 
 impl Shape {
     fn of(graph: &DirGraph) -> Shape {
-        let _arena_guard = graph.graph.begin_query();
         let mut shape = Shape::default();
         for idx in graph.graph.node_indices() {
             let Some(view) = graph.node_view(idx) else {
@@ -397,7 +396,6 @@ const EDGE_TABLES: &[(&str, &str)] = &[
 /// Every edge of one type as `source -> target {props}`, sorted — two
 /// independently built graphs compare by value.
 fn edges_of(graph: &DirGraph, conn_type: &str) -> Vec<String> {
-    let _arena_guard = graph.graph.begin_query();
     let name = |idx| {
         graph
             .node_view(idx)
@@ -944,7 +942,6 @@ fn a_typed_inline_link_round_trips_in_the_prose_alone() {
 /// the same).
 fn property_type(vault: &Path, property: &str) -> String {
     let graph = build_vault(vault);
-    let _arena_guard = graph.graph.begin_query();
     for idx in graph.graph.node_indices() {
         let Some(view) = graph.node_view(idx) else {
             continue;

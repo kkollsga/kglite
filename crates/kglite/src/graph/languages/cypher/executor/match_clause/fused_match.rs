@@ -1801,12 +1801,11 @@ impl<'a> CypherExecutor<'a> {
     ///
     /// This previously iterated per source and called `edges_directed_filtered`
     /// for each; every matching edge went through `DiskEdges::next →
-    /// make_edge_ref → materialize_edge`, which heap-allocated a
-    /// `Box<EdgeData>` and took the `edge_arena` Mutex per edge. On wiki1000m
-    /// (~11 M P27 edges) the per-query arena growth hit an allocator-growth
-    /// cliff (426 ms at 500 M → 5387 ms at 1 B). The callback form reads only
-    /// the (src, tgt) pair we need — no allocation, no arena growth — and
-    /// restores the expected ~2× scaling.
+    /// make_edge_ref → materialize_edge`, which heap-allocated an `EdgeData`
+    /// per edge. On wiki1000m (~11 M P27 edges) that allocation growth hit an
+    /// allocator cliff (426 ms at 500 M → 5387 ms at 1 B). The callback form
+    /// reads only the (src, tgt) pair we need — no allocation — and restores
+    /// the expected ~2× scaling.
     fn sweep_peer_counts_by_typed_source(
         &self,
         ct_str: &str,

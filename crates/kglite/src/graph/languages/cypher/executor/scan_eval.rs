@@ -175,7 +175,7 @@ impl<'g> ScanRuntime<'g> {
     /// `true` when no compiled node in this scan reads a property, so the
     /// caller can skip [`Self::bind`] entirely. On the disk backend that is
     /// always true — nothing compiles there — and it matters, because
-    /// `node_weight` materialises into the query arena.
+    /// `node_weight` builds a record per node.
     pub(super) fn is_empty(&self) -> bool {
         self.names.is_empty()
     }
@@ -430,7 +430,7 @@ impl<'q> ScanCompiler<'q> {
     pub(super) fn new(executor: &CypherExecutor<'_>, node_var: &'q str) -> Self {
         // Two shapes stay entirely on the interpreter:
         //   * the disk backend, which resolves properties through its own
-        //     arena-backed route in `CypherExecutor::resolve_property`, and
+        //     own route in `CypherExecutor::resolve_property`, and
         //   * a graph with any spatial configuration, whose types answer
         //     `location` / `geometry` / configured point and shape names out of
         //     *other* columns — a branch `PropRoute` does not model.

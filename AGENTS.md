@@ -95,9 +95,8 @@ boundaries; otherwise let GitHub CI parallelize them.
 
 - **The installed extension is a debug build during correctness work.** A
   release-built `kglite.abi3.so` silently disables the debug-only assertions
-  (parser stack-depth checks, the disk arena-guard protocol) that are the
-  suite's real detectors; the 2026-07-21 audit found latent bugs they catch
-  immediately. After any release-profile build, rebuild debug
+  (parser stack-depth checks, for one) that are the suite's real detectors;
+  the 2026-07-21 audit found latent bugs they catch immediately. After any release-profile build, rebuild debug
   (`uv run --no-sync maturin develop`) before the next test run.
 - **A harness that loads a built artifact resolves newest-of-profile.** Python
   suites use `tests/conftest.py::workspace_binary`: newest of release and debug,

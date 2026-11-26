@@ -914,7 +914,6 @@ pub fn add_nodes(
     node_title_field: Option<String>,
     conflict_handling: Option<String>,
 ) -> Result<NodeOperationReport, String> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     preflight_add_nodes(
         graph,
         &df_data,
@@ -1389,7 +1388,6 @@ pub(crate) fn add_connections_tracked(
     initial_load: InitialLoad,
     tracker: &mut IdenticalRowTracker,
 ) -> Result<ConnectionOperationReport, String> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     let column_names = df_data.get_column_names();
     let mut interned_names = vec![
         connection_type.as_str(),
@@ -1824,13 +1822,8 @@ pub(crate) fn detach_delete_nodes<S: BuildHasher>(
     // Remove every incident edge — a self-loop is listed twice, so dedup.
     let mut deleted_edges: HashSet<EdgeIndex> = HashSet::new();
     for &node_idx in nodes_to_delete {
-        // Scope the arena guard to the read: edge iteration materializes
-        // into the disk backend's query arena, which must run under a
-        // DiskQueryGuard (arena protocol in disk/graph.rs, enforced by a
-        // debug assert). The guard is dropped before the `&mut`
-        // remove_edge calls below.
+        // Scoped so the read ends before the `&mut` remove_edge calls below.
         let incident: Vec<EdgeIndex> = {
-            let _guard = graph.graph.begin_query();
             graph
                 .graph
                 .edges_directed(node_idx, petgraph::Direction::Outgoing)
@@ -1863,7 +1856,6 @@ pub(crate) fn detach_delete_nodes<S: BuildHasher>(
     // because after `remove_node` below the weights are gone.
     let mut doomed_ids: HashMap<String, Vec<(Value, NodeIndex)>> = HashMap::new();
     {
-        let _guard = graph.graph.begin_query();
         for &node_idx in nodes_to_delete {
             if let Some(node) = graph.graph.node_view(node_idx) {
                 let node_type = node.get_node_type_ref(&graph.interner).to_string();
@@ -2003,7 +1995,6 @@ pub fn replace_connections(
     target_title_field: Option<String>,
     conflict_handling: Option<String>,
 ) -> Result<ConnectionOperationReport, String> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     let column_names = df_data.get_column_names();
     let mut interned_names = vec![
         connection_type.as_str(),
@@ -2173,7 +2164,6 @@ pub fn replace_connections(
 /// an edge but never promoted by a real node row — along with all its
 /// incident edges. Returns `(nodes_purged, edges_removed)`.
 pub fn purge_provisional_nodes(graph: &mut DirGraph) -> (usize, usize) {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     let provisional_key = graph.interner.get_or_intern(PROVISIONAL_KEY);
     let mut to_delete: FxHashSet<NodeIndex> = FxHashSet::default();
     for node_idx in graph.graph.node_indices() {
@@ -2233,7 +2223,6 @@ pub fn create_connections(
     source_type_filter: Option<String>,                    // override source level by node type
     target_type_filter: Option<String>,                    // override target level by node type
 ) -> Result<ConnectionOperationReport, String> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     graph
         .prepare_mutation()
         .map_err(|e| format!("disk mutation lease failed: {e}"))?;

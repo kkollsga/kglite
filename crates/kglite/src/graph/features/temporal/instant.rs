@@ -152,7 +152,6 @@ fn disk_masks(
     let Some(evaluator) = ElementFilter::new(filter, filter.resolve(graph)) else {
         return Ok(None);
     };
-    let _arena_guard = graph.graph.begin_query();
     let mut nodes = FixedBitSet::with_capacity(node_bound);
     nodes.insert_range(..);
     let mut edges = FixedBitSet::with_capacity(edge_bound);

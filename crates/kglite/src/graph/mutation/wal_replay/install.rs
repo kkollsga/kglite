@@ -241,7 +241,6 @@ fn apply_edges(
         };
         let connection_type = graph.interner.get_or_intern(&key.0);
         let mut existing = {
-            let _guard = graph.begin_read_pass();
             let mut edges = graph
                 .graph
                 .edges_connecting(source, target)
@@ -312,7 +311,6 @@ fn apply_edges(
 /// any new incarnation is installed.
 fn exact_identities(graph: &DirGraph, plan: &ReplayPlan) -> Identities {
     let types = plan.node_types();
-    let _guard = graph.begin_read_pass();
     graph
         .graph
         .node_indices()
@@ -373,7 +371,6 @@ fn replace_group(
         Vec<petgraph::graph::EdgeIndex>,
     > = HashMap::new();
     {
-        let _guard = graph.begin_read_pass();
         for edge in graph
             .graph
             .edges_connecting(source, target)

@@ -110,7 +110,7 @@ impl CypherExecutor<'_> {
     ///   whole-pass retry, which cannot take back rows already emitted;
     /// - comma patterns, which join across patterns;
     /// - `shortestPath`, which has its own route;
-    /// - the disk backend, whose query arenas live as long as the matcher.
+    /// - the disk backend, which stays on the eager route.
     pub(super) fn first_match_streams(&self, clause: &MatchClause) -> bool {
         clause.patterns.len() == 1
             && clause.limit_hint.is_none()

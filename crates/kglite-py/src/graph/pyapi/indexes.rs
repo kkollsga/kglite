@@ -150,9 +150,6 @@ impl KnowledgeGraph {
 
         use kglite_core::api::GraphRead;
         let backend = &this.graph().graph;
-        // Direct GraphRead traversal — hold the disk arena guard while
-        // borrowed node weights live (arena protocol; no-op in memory/mapped).
-        let _arena_guard = this.graph().begin_read_pass();
 
         // Index-or-scan lives in the core so every binding resolves the same
         // candidate set the matcher does, and so a declining disk bundle

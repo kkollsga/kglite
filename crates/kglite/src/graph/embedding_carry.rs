@@ -40,10 +40,6 @@ impl DirGraph {
         let mut vectors_copied = 0usize;
         let mut vectors_skipped = 0usize;
 
-        // Arena guard: node_weight on a disk-backed `src` materializes into
-        // its query arena (protocol in disk/graph.rs); no-op on memory/mapped.
-        let _src_arena_guard = src.graph.begin_query();
-
         // Snapshot the store keys + node types first so we can build each
         // type's id index (a `&mut self` op) before the immutable id lookups.
         let store_keys: Vec<(String, String)> = src.embeddings.keys().cloned().collect();
@@ -195,7 +191,6 @@ fn carry_by_chunk_hash(
 /// or more do.
 fn chunk_hash_index(graph: &DirGraph, node_type: &str) -> HashMap<String, Option<NodeIndex>> {
     let mut out: HashMap<String, Option<NodeIndex>> = HashMap::new();
-    let _guard = graph.graph.begin_query();
     let Some(nodes) = graph.type_indices.get(node_type) else {
         return out;
     };

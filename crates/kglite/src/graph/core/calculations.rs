@@ -52,7 +52,6 @@ pub fn process_equation(
     store_as: Option<&str>,
     aggregate_connections: Option<bool>,
 ) -> Result<EvaluationResult, String> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned)
     let start_time = Instant::now();
 
     // Track non-fatal errors that occur during processing
@@ -342,9 +341,6 @@ pub fn evaluate_equation(
     parsed_expr: &Expr,
     level_index: Option<usize>,
 ) -> Vec<StatResult> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     let is_aggregation = has_aggregation(parsed_expr);
 
     if is_aggregation {
@@ -456,9 +452,6 @@ pub fn evaluate_connection_equation(
     parsed_expr: &Expr,
     level_index: Option<usize>,
 ) -> Vec<StatResult> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     // Connection aggregation requires at least 2 levels (parent -> child relationship)
     if selection.get_level_count() < 2 {
         return vec![StatResult {
@@ -610,9 +603,6 @@ pub fn count_nodes_by_parent(
     selection: &CurrentSelection,
     level_index: Option<usize>,
 ) -> Vec<StatResult> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     let pairs = get_parent_child_pairs(selection, level_index);
 
     pairs
@@ -638,7 +628,6 @@ pub fn store_count_results(
     group_by_parent: bool,
     target_property: &str,
 ) -> Result<CalculationOperationReport, String> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned)
     let start_time = std::time::Instant::now();
 
     // Track errors

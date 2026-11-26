@@ -1366,8 +1366,8 @@ fn set_leaves_the_master_uniquely_owned_on_mapped() {
 
 /// The same read-route question on `Disk`.
 ///
-/// `DiskGraph` reaches a type's columns through its own arena rather than a
-/// heap map, so "the backend owns the store" is a different claim there and is
+/// `DiskGraph` reaches a type's columns through its own map rather than a
+/// heap one, so "the backend owns the store" is a different claim there and is
 /// worth asking separately. The write-ownership arm above has no disk
 /// counterpart on purpose: a disk graph takes the whole-graph rollback
 /// checkpoint (`supports_undo_journal() == false`), so nothing about the
@@ -1383,12 +1383,8 @@ fn the_backend_store_is_the_only_read_route_on_disk() {
         crate::graph::storage::mode::StorageMode::Disk,
         Some(dir.path()),
     );
-    // Every direct node read on a disk graph must sit inside an open query
-    // guard (the arena SAFETY protocol in `disk/graph.rs`); the Cypher route
-    // opens its own. Hence the scoping — the guard borrows the graph the
-    // poison needs mutably.
+    // The reads are scoped: they borrow the graph the poison needs mutably.
     let (idx, row_id) = {
-        let _query = graph.graph.begin_query();
         let idx = node_of(&graph, 1);
         let row_id = node_row_id(&graph, idx).expect("columnar node");
         (idx, row_id)
@@ -1401,7 +1397,6 @@ fn the_backend_store_is_the_only_read_route_on_disk() {
         Value::String("TRUTH".into()),
     );
     {
-        let _query = graph.graph.begin_query();
         assert_eq!(
             graph.node_view(idx).unwrap().get_property_value("c0"),
             Some(Value::String("TRUTH".into())),

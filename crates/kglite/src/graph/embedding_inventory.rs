@@ -250,7 +250,6 @@ pub fn embedding_diagnostics(
             ));
         }
     }
-    let _arena_guard = graph.begin_read_pass();
     let mut rows = Vec::new();
     if node_type.is_some() || relationship_type.is_none() {
         rows.extend(finish(

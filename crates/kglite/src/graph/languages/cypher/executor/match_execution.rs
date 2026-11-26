@@ -540,8 +540,7 @@ impl<'a> CypherExecutor<'a> {
                         // pins the pattern to that edge — seed its endpoints
                         // so the executor doesn't enumerate every edge.
                         let seeded = match_clause::seed_prebound_pattern_vars(pat, &existing_row);
-                        // Block-scoped: the PatternExecutor holds the disk
-                        // arena guard (drop glue), so its borrow of
+                        // Block-scoped: the PatternExecutor's borrow of
                         // `existing_row` via `pre_bindings` must end before
                         // the move/merge below.
                         let matches = {
@@ -962,9 +961,8 @@ impl<'a> CypherExecutor<'a> {
         let base = seeded.as_ref().unwrap_or(&cur.node_bindings);
         let anchored = self.seed_row_anchors(clause, base, cur);
         let pre_bindings = anchored.as_ref().unwrap_or(base);
-        // The PatternExecutor holds the disk arena guard (drop glue) and
-        // borrows `seen`; both end within each `run` call, before the caller
-        // extends the set.
+        // The PatternExecutor borrows `seen`; the borrow ends within each `run`
+        // call, before the caller extends the set.
         let run = |distinct: Option<&str>| -> Result<Vec<_>, String> {
             self.materializing_executor(exec_limit, pre_bindings, "MATCH join")
                 .set_distinct_target(distinct.map(str::to_string))

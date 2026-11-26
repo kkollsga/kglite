@@ -66,7 +66,6 @@ pub fn find_code_entities(
     node_type: Option<&str>,
     match_type: CodeEntityMatch,
 ) -> Vec<schema::NodeInfo> {
-    let _arena_guard = dir.graph.begin_query();
     let name_lower = name.to_lowercase();
     let name_value = Value::String(name.to_string());
     let types_to_search: Vec<&str> = match node_type {
@@ -143,7 +142,6 @@ pub fn code_entity_context(
     node_type: Option<&str>,
     hops: usize,
 ) -> CodeContextLookup {
-    let _arena_guard = dir.graph.begin_query();
     let (resolved, matches) = resolve_code_entity(dir, name, node_type);
     let Some(target_idx) = resolved else {
         return if matches.is_empty() {
@@ -283,9 +281,6 @@ pub fn resolve_code_entity(
     name: &str,
     node_type: Option<&str>,
 ) -> (Option<NodeIndex>, Vec<(NodeIndex, schema::NodeInfo)>) {
-    // Arena guard: disk-backed node reads materialize into the query arena
-    // (protocol in disk/graph.rs); no-op on memory/mapped.
-    let _arena_guard = dir.graph.begin_query();
     let name_val = Value::String(name.to_string());
     let types_to_search: Vec<&str> = match node_type {
         Some(nt) => vec![nt],
@@ -366,9 +361,6 @@ pub fn infer_selection_node_type(
     let level_idx = selection.get_level_count().saturating_sub(1);
     let level = selection.get_level(level_idx)?;
     let first_idx = level.iter_node_indices().next()?;
-    // Arena guard: node_weight materializes on the disk backend (protocol
-    // in disk/graph.rs); no-op on memory/mapped.
-    let _arena_guard = dir.graph.begin_query();
     dir.graph
         .node_view(first_idx)
         .map(|n| n.node_type_str(&dir.interner).to_string())
@@ -481,9 +473,6 @@ pub fn discover_property_keys_excluding(
 /// corresponding node fields, and are `None` when the graph's
 /// builder did not populate them.
 pub fn source_location(dir: &Arc<DirGraph>, name: &str, node_type: Option<&str>) -> SourceLookup {
-    // Arena guard: disk-backed node reads materialize into the query arena
-    // (protocol in disk/graph.rs); no-op on memory/mapped.
-    let _arena_guard = dir.graph.begin_query();
     let (resolved, matches) = resolve_code_entity(dir, name, node_type);
 
     if let Some(target_idx) = resolved {

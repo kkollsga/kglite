@@ -22,7 +22,6 @@ pub(crate) mod id_index_shared;
 pub(crate) mod index_freshness;
 mod le_bytes;
 pub mod property_index;
-pub(crate) mod query_arena;
 pub mod segment_summary;
 mod structure;
 /// Test-only drop-order seam for temp dirs backing a live disk/mapped graph.

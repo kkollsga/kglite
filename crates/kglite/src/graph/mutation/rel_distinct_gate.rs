@@ -52,7 +52,6 @@ impl ConnectionBatchGate<'_> {
         let properties = group_properties(graph, self.connection_type, rule.properties());
         let conn_key = crate::graph::schema::InternedKey::from_str(self.connection_type);
         let keys = interned_keys(&properties);
-        let _arena_guard = graph.graph.begin_query();
 
         let mut groups: HashMap<(NodeIndex, NodeIndex, GroupKey), usize> = HashMap::new();
         for (row, source, target) in self.matched {

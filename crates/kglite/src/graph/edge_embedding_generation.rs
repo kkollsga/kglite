@@ -379,7 +379,6 @@ fn validate_selection(
     connection_type: &str,
     selected: &[SelectedEdgeText],
 ) -> Result<(), String> {
-    let guard = graph.graph.begin_query();
     let mut seen = HashSet::with_capacity(selected.len());
     for item in selected {
         if !seen.insert(item.edge.index()) {
@@ -400,7 +399,6 @@ fn validate_selection(
             ));
         }
     }
-    drop(guard);
     Ok(())
 }
 

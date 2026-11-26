@@ -14,7 +14,6 @@ use crate::graph::storage::GraphRead;
 /// labels, relationship endpoints and property keys are unchanged. Missing
 /// nodes and cyclic title references resolve to NULL.
 pub fn resolve_noderefs(graph: &GraphBackend, rows: &mut [Vec<Value>]) {
-    let _arena_guard = graph.begin_query();
     let mut resolver = Resolver {
         graph,
         active: Vec::new(),
@@ -34,7 +33,6 @@ pub fn resolve_noderefs(graph: &GraphBackend, rows: &mut [Vec<Value>]) {
 /// should call this: stored values, predicate identity and grouping are unchanged.
 /// Missing nodes and cyclic title references resolve to NULL.
 pub fn resolve_noderef_value<'v>(graph: &GraphBackend, value: &'v Value) -> Cow<'v, Value> {
-    let _arena_guard = graph.begin_query();
     let mut resolver = Resolver {
         graph,
         active: Vec::new(),
@@ -54,7 +52,6 @@ pub(crate) fn snapshot_property_values<'a>(
     graph: &GraphBackend,
     values: impl IntoIterator<Item = &'a mut Value>,
 ) {
-    let _arena_guard = graph.begin_query();
     let mut resolver = Resolver {
         graph,
         active: Vec::new(),
@@ -101,7 +98,6 @@ pub(crate) fn snapshot_dataframe_properties(
     frame: &mut DataFrame,
     identity_columns: &[&str],
 ) {
-    let _arena_guard = graph.begin_query();
     let mut resolver = Resolver {
         graph,
         active: Vec::new(),

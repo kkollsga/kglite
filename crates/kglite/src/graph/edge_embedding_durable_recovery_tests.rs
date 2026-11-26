@@ -127,7 +127,6 @@ fn store_state(session: &Session, text_property: &str) -> Option<StoreState> {
     let store = snapshot
         .edge_embeddings
         .get(&edge_store_key("CLAIMS", text_property))?;
-    let guard = snapshot.begin_read_pass();
     let mut cells: Vec<_> = snapshot
         .graph
         .edge_indices()
@@ -147,7 +146,6 @@ fn store_state(session: &Session, text_property: &str) -> Option<StoreState> {
             ))
         })
         .collect();
-    drop(guard);
     cells.sort_by_key(|(k, _, _)| *k);
     Some(StoreState {
         dimension: store.dimension(),
@@ -161,7 +159,6 @@ fn store_state(session: &Session, text_property: &str) -> Option<StoreState> {
 /// asserted alongside the vectors it travels with.
 fn edge_property(session: &Session, name: &str) -> Vec<(i64, Option<Value>)> {
     let snapshot = session.snapshot();
-    let guard = snapshot.begin_read_pass();
     let mut out: Vec<_> = snapshot
         .graph
         .edge_indices()
@@ -177,7 +174,6 @@ fn edge_property(session: &Session, name: &str) -> Vec<(i64, Option<Value>)> {
             Some((k, weight.get_property(name).cloned()))
         })
         .collect();
-    drop(guard);
     out.sort_by_key(|(k, _)| *k);
     out
 }

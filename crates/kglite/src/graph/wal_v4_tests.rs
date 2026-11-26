@@ -50,7 +50,6 @@ fn frame(graph: &mut DirGraph, lsn: u64) -> WalFrame {
     }
 }
 fn edges(graph: &DirGraph) -> Vec<(i64, i64, Value)> {
-    let _guard = graph.begin_read_pass();
     let mut out: Vec<_> = graph
         .graph
         .edge_indices()

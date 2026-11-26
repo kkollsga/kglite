@@ -22,9 +22,6 @@ use super::{
 /// Fast path: uses connection_type_metadata + cached edge counts (O(types)).
 /// Fallback: scans all edges (O(edges)) for pre-metadata graphs.
 pub fn compute_connection_type_stats(graph: &DirGraph) -> Vec<ConnectionTypeStats> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     if !graph.connection_type_metadata.is_empty() {
         let counts = graph.get_edge_type_counts();
         let mut result: Vec<ConnectionTypeStats> = graph
@@ -1223,9 +1220,6 @@ pub(crate) fn collect_property_keys(graph: &DirGraph) -> Vec<String> {
 }
 
 pub fn compute_schema(graph: &DirGraph) -> SchemaOverview {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     let mut node_types: Vec<(String, NodeTypeOverview)> = super::visible_types(graph)
         .map(|(nt, count)| {
             let properties = graph
@@ -1685,9 +1679,6 @@ pub fn compute_property_stats(
     max_values: usize,
     sample_size: Option<usize>,
 ) -> Result<Vec<PropertyStatInfo>, String> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     let node_indices = graph
         .type_indices
         .get(node_type)
@@ -1864,8 +1855,8 @@ pub(super) type IncidentCounts = FxHashMap<(InternedKey, InternedKey), usize>;
 ///
 /// Reads only each edge's connection type and the far node's type — never an
 /// edge's properties or a node's row — so on a disk graph it materialises
-/// nothing. Through `node_view` and `weight()` it used to fill the query arena
-/// with every incident node and edge: O(E) memory for one `describe()`.
+/// nothing. Through `node_view` and `weight()` it built a record for every
+/// incident node and edge: O(E) work for one `describe()`.
 pub(super) fn count_incident_edges(
     graph: &DirGraph,
     nodes: impl Iterator<Item = petgraph::graph::NodeIndex>,
@@ -1985,16 +1976,12 @@ pub fn compute_all_neighbors_schemas(graph: &DirGraph) -> HashMap<String, Neighb
 /// Yields [`NodeView`]s, not `&NodeData`: a bare `NodeData` reference hands the
 /// caller one replica of a columnar type's column store, which is how the
 /// sample block in `describe()` came to enumerate zero properties for saved
-/// graphs. The returned views borrow the disk arena, so they must be consumed
-/// inside the caller's read pass.
+/// graphs.
 pub fn compute_sample<'a>(
     graph: &'a DirGraph,
     node_type: &str,
     n: usize,
 ) -> Result<Vec<crate::graph::storage::NodeView<'a>>, String> {
-    // Arena guard: disk-backed node/edge reads materialize into the query
-    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
-    let _arena_guard = graph.graph.begin_query();
     let node_indices = graph
         .type_indices
         .get(node_type)

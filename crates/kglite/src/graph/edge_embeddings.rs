@@ -154,7 +154,6 @@ pub(crate) fn validate_decoded_edge_embedding_stores_with(
         return Err("required payload contains no stores".to_string());
     }
     let mut stores = HashMap::with_capacity(decoded.len());
-    let arena_guard = graph.graph.begin_query();
     for ((relationship_type, property), payload) in decoded {
         let mut store = EdgeEmbeddingStore::from_persisted(payload).map_err(|error| {
             format!("store '{relationship_type}.{property}' is invalid: {error}")
@@ -167,7 +166,6 @@ pub(crate) fn validate_decoded_edge_embedding_stores_with(
             .map_err(|error| format!("store '{}.{}' is invalid: {error}", key.0, key.1))?;
         stores.insert(key, store);
     }
-    drop(arena_guard);
     Ok(stores)
 }
 
@@ -507,10 +505,7 @@ pub(crate) fn remove_edge_with_embeddings(
     graph: &mut DirGraph,
     edge: EdgeIndex,
 ) -> Option<EdgeData> {
-    let is_live = {
-        let _arena_guard = graph.graph.begin_query();
-        graph.graph.edge_weight(edge).is_some()
-    };
+    let is_live = { graph.graph.edge_weight(edge).is_some() };
     if !is_live {
         return None;
     }
@@ -551,7 +546,6 @@ pub(crate) struct GeneratedEdgeEmbeddingWrite {
 
 /// A node as relationship errors name it: `Label id=<id>` (string ids quoted).
 pub(crate) fn describe_endpoint(graph: &DirGraph, node: NodeIndex) -> String {
-    let _arena_guard = graph.graph.begin_query();
     graph.graph.node_view(node).map_or_else(
         || "?".to_string(),
         |view| format!("{} id={}", view.node_type_str(&graph.interner), view.id()),
@@ -561,7 +555,6 @@ pub(crate) fn describe_endpoint(graph: &DirGraph, node: NodeIndex) -> String {
 /// A relationship as its user sees it — `(Doc id=1)-[:CITES]->(Doc id=2)` —
 /// for errors. The physical slot is an engine detail no user can look up.
 pub(crate) fn describe_relationship(graph: &DirGraph, edge: EdgeIndex) -> String {
-    let _arena_guard = graph.graph.begin_query();
     let Some(weight) = graph.graph.edge_weight(edge) else {
         return "a deleted relationship".to_string();
     };
@@ -593,7 +586,6 @@ pub(crate) fn require_carried_text_property(
         return Ok(());
     }
     let type_key = InternedKey::from_str(connection_type);
-    let _arena_guard = graph.graph.begin_query();
     let mut carried = BTreeSet::new();
     for edge in graph.graph.edge_indices() {
         let Some(weight) = graph.graph.edge_weight(edge) else {
@@ -804,7 +796,6 @@ fn validate_manual_entries(
     list: &str,
 ) -> Result<(), String> {
     let mut seen = FxHashSet::with_capacity_and_hasher(entries.len(), Default::default());
-    let _arena_guard = graph.graph.begin_query();
     for (position, (edge, vector)) in entries.iter().enumerate() {
         if !seen.insert(edge.index()) {
             return Err(format!(
@@ -948,7 +939,6 @@ fn capture_wal_edge_embedding_bases(
         return Ok(());
     }
     let changed: HashSet<_> = changed_edges.into_iter().collect();
-    let guard = graph.graph.begin_query();
     let mut endpoint_groups = BTreeMap::new();
     for &edge in &changed {
         let endpoints = graph
@@ -1011,7 +1001,6 @@ fn capture_wal_edge_embedding_bases(
             prior_cells,
         });
     }
-    drop(guard);
     let recording = graph
         .graph
         .recording_mut()
@@ -1033,7 +1022,6 @@ pub(crate) fn remove_edge_embeddings(
         return Ok(0);
     }
     let mut seen = HashSet::with_capacity(edges.len());
-    let _arena_guard = graph.graph.begin_query();
     for &edge in edges {
         if !seen.insert(edge.index()) {
             return Err(format!(
@@ -1043,7 +1031,6 @@ pub(crate) fn remove_edge_embeddings(
         }
         validate_live_edge_type(graph, edge, connection_type)?;
     }
-    drop(_arena_guard);
 
     let key = edge_store_key(connection_type, text_property);
     let Some(store) = graph.edge_embeddings.get(&key) else {
@@ -1238,7 +1225,6 @@ fn validate_generated_write(
     }
     validate_metric(write.metric.as_deref())?;
     let mut affected = HashSet::with_capacity(write.affected.len());
-    let guard = graph.graph.begin_query();
     for &edge in &write.affected {
         if !affected.insert(edge.index()) {
             return Err(format!(
@@ -1266,7 +1252,6 @@ fn validate_generated_write(
             ));
         }
     }
-    drop(guard);
     Ok(())
 }
 
@@ -1325,7 +1310,6 @@ fn generated_change_count(
 }
 
 fn live_edges_of_type(graph: &DirGraph, connection_type: &str) -> Result<Vec<EdgeIndex>, String> {
-    let guard = graph.graph.begin_query();
     let edges = graph
         .graph
         .edge_indices()
@@ -1335,7 +1319,6 @@ fn live_edges_of_type(graph: &DirGraph, connection_type: &str) -> Result<Vec<Edg
             })
         })
         .collect();
-    drop(guard);
     Ok(edges)
 }
 

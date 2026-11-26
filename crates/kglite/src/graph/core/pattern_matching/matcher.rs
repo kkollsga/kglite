@@ -475,13 +475,6 @@ pub struct PatternExecutor<'a> {
     /// *ceiling* the matcher may only satisfy by erroring, so it changes
     /// nothing about how the pattern is executed.
     match_ceiling: Option<MatchCeiling>,
-    /// Holds the disk materialization arenas alive for this executor's
-    /// lifetime (arena protocol in `storage/disk/graph.rs`, enforced by a
-    /// debug assert). Acquired in every constructor so pattern matching is
-    /// guard-covered no matter which surface spawned it (Cypher executor,
-    /// fluent API, MERGE matching). `None` on memory/mapped backends —
-    /// one enum match at construction on the in-memory hot path.
-    _arena_guard: Option<crate::graph::storage::disk::graph::DiskQueryGuard>,
     /// The statement's resolved `FOR VALID_TIME AS OF` filter: every node
     /// candidate and every matched hop is put to it (`matcher_guard.rs`).
     /// `None` outside a context, where each guard site is one `Option` test.
@@ -509,7 +502,6 @@ impl<'a> PatternExecutor<'a> {
             parallel: false,
             cap_truncated: AtomicBool::new(false),
             match_ceiling: None,
-            _arena_guard: graph.graph.begin_query(),
             graph_filter: None,
         }
     }
@@ -532,7 +524,6 @@ impl<'a> PatternExecutor<'a> {
             parallel: false,
             cap_truncated: AtomicBool::new(false),
             match_ceiling: None,
-            _arena_guard: graph.graph.begin_query(),
             graph_filter: None,
         }
     }
@@ -556,7 +547,6 @@ impl<'a> PatternExecutor<'a> {
             parallel: false,
             cap_truncated: AtomicBool::new(false),
             match_ceiling: None,
-            _arena_guard: graph.graph.begin_query(),
             graph_filter: None,
         }
     }
@@ -893,10 +883,9 @@ impl<'a> PatternExecutor<'a> {
     /// pre-warm and no spatial exclusion to make: the per-node spatial cache
     /// belongs to the Cypher executor and is unreachable from here.
     ///
-    /// **Disk stays excluded** even though the arena hazard the rest of the
-    /// engine has on disk is genuinely bypassed here (`owned_node_data`
-    /// materialises into the caller's frame rather than parking a record in the
-    /// shared query arena): disk mode is deferred wholesale, and an exclusion
+    /// **Disk stays excluded** even though `owned_node_data` materialises into
+    /// the caller's frame and shares nothing across threads: disk mode is
+    /// deferred wholesale, and an exclusion
     /// uniform with the Cypher scan operators is one rule to state to users —
     /// disk ignores `parallel`.
     fn may_fan_out_candidate_scan(

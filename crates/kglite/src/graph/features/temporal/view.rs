@@ -150,7 +150,6 @@ impl ValidTimeView {
         let Some(filter) = self.counting_filter() else {
             return Ok(graph.graph.node_count());
         };
-        let _arena_guard = graph.graph.begin_query();
         let count = graph
             .type_indices
             .keys()
@@ -165,7 +164,6 @@ impl ValidTimeView {
         let graph = &self.base;
         let mut types = graph.get_node_types();
         if let Some(filter) = self.counting_filter() {
-            let _arena_guard = graph.graph.begin_query();
             types.retain(|node_type| visible_of_type(graph, &filter, node_type) > 0);
             return counted(&filter, types);
         }

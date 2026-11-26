@@ -65,9 +65,6 @@ fn verify_projected_node_slot(
     node_idx: NodeIndex,
     primary_label: Option<&String>,
 ) -> Result<(), String> {
-    // Arena guard: `node_view` materializes on the disk backend (protocol in
-    // disk/graph.rs); scoped so the borrow ends before the caller's &mut.
-    let _arena_guard = graph.graph.begin_query();
     let Some(node) = graph.graph.node_view(node_idx) else {
         return Err(format!(
             "Node value '{variable}' no longer exists in this graph"

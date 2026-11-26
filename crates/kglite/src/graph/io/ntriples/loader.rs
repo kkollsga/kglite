@@ -360,7 +360,7 @@ fn finalize_disk_graph(
     }
 
     // Build id_indices for all types so WHERE id(n) = X is O(1).
-    // Uses column stores directly — no node materialization, no arena growth.
+    // Uses column stores directly — no node materialization.
     if graph.graph.is_disk() {
         let id_start = Instant::now();
         let type_names: Vec<String> = graph.type_indices.keys().map(|s| s.to_string()).collect();

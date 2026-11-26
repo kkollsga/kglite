@@ -62,9 +62,6 @@ fn allowed_write_set(scope: &HashSet<String>) -> String {
 /// stored type (rather than a pattern label) is what defeats label smuggling:
 /// `MATCH (n:Algorithm) SET n:Task REMOVE n.x` cannot talk its way into scope.
 fn stored_node_type(graph: &DirGraph, node_idx: NodeIndex) -> String {
-    // Arena guard: node_view materializes on the disk backend (protocol in
-    // disk/graph.rs); scoped so the borrow ends before the caller's `&mut`.
-    let _arena_guard = graph.graph.begin_query();
     graph
         .node_view(node_idx)
         .map(|n| n.get_node_type_ref(&graph.interner).to_string())
@@ -175,8 +172,6 @@ pub(super) fn enforce_bound_edge_write_scope(
         return Ok(());
     }
     let rel_type = {
-        // Arena guard: edge_weight materializes on the disk backend.
-        let _arena_guard = graph.graph.begin_query();
         graph
             .graph
             .edge_weight(binding.edge_index)

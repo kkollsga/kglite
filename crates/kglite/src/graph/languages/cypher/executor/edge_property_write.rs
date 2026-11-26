@@ -126,11 +126,8 @@ pub(super) fn set_edge_property(
     );
     graph.note_ontology_edge_touch(edge_index);
 
-    // Arena guard: edge_weight materializes on the disk backend (protocol
-    // in disk/graph.rs); scoped so the borrow ends before the next item's
-    // &mut uses.
+    // Scoped so the read ends before the next item's &mut uses.
     let ct_key = {
-        let _arena_guard = graph.graph.begin_query();
         graph
             .graph
             .edge_weight(edge_index)
@@ -219,10 +216,8 @@ pub(super) fn constrained_edge_type(
     if !graph.has_rel_constraints() {
         return None;
     }
-    // Arena guard: `edge_weight` materializes on the disk backend (protocol in
-    // disk/graph.rs); scoped so the borrow ends before the caller's `&mut`.
+    // Scoped so the read ends before the caller's `&mut`.
     let connection_type = {
-        let _arena_guard = graph.graph.begin_query();
         graph
             .graph
             .edge_weight(edge_index)

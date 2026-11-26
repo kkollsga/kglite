@@ -911,9 +911,6 @@ impl CurrentSelection {
 
     /// Node type of the first selected node, for spatial `SpatialConfig` lookup.
     pub fn first_node_type(&self, graph: &DirGraph) -> Option<String> {
-        // Arena guard: node_weight materializes on the disk backend
-        // (protocol in disk/graph.rs); no-op on memory/mapped.
-        let _arena_guard = graph.graph.begin_query();
         self.current_node_indices()
             .next()
             .and_then(|idx| graph.graph.node_view(idx))
@@ -1329,7 +1326,7 @@ impl NodeData {
     /// 0.16.0 every ingest path is columnar from the first node, so on the
     /// memory and mapped backends the inline field is the `Value::Null`
     /// sentinel and the node's canonical id lives in its type's store. The
-    /// disk backend materialises real values into its arena copy, so the same
+    /// disk backend materialises real values into the record it hands out, so the same
     /// call answers differently there — see [`crate::graph::dir_graph::DirGraph::get_node`].
     ///
     /// **Read an id through [`GraphRead::get_node_id`] or `NodeView::id`**,

@@ -113,7 +113,6 @@ impl KnowledgeGraph {
         let guard = crate::graph::pyapi::borrow::borrow_waiting(slf)?;
         let this: &KnowledgeGraph = &guard;
 
-        let _arena_guard = this.graph().begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         let top_k = top_k.unwrap_or(10);
         let exact = exact.unwrap_or(false);
         let embedding_property = kglite_core::api::embeddings::store_name(text_column);
@@ -564,7 +563,6 @@ impl KnowledgeGraph {
         let guard = crate::graph::pyapi::borrow::borrow_waiting(slf)?;
         let this: &KnowledgeGraph = &guard;
 
-        let _arena_guard = this.graph().begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         let result = PyDict::new(py);
 
         if let Some(col) = text_column {

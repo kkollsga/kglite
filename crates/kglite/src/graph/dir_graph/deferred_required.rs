@@ -76,7 +76,6 @@ impl DirGraph {
         edges.dedup();
         let found = {
             let graph: &DirGraph = self;
-            let _arena_guard = graph.graph.begin_query();
             let mut found = None;
             for idx in nodes {
                 let Some(view) = graph.graph.node_view(idx) else {

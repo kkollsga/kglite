@@ -75,7 +75,6 @@ fn kept(g: &DirGraph) -> Vec<NodeIndex> {
 /// The copy [`copy_nodes`] made before the gather: each node inserted on its
 /// own through [`copy_node`].
 fn per_node_copy(source: &DirGraph, nodes: &[NodeIndex]) -> DirGraph {
-    let _guard = source.graph.begin_query();
     let mut dest = DirGraph::new();
     clone_subset_metadata(&mut dest, source);
     for &node in nodes {
@@ -85,7 +84,6 @@ fn per_node_copy(source: &DirGraph, nodes: &[NodeIndex]) -> DirGraph {
 }
 
 fn node_record(g: &DirGraph, idx: NodeIndex) -> (String, Value, Value, Vec<(String, Value)>) {
-    let _guard = g.graph.begin_query();
     let view = g.graph.node_view(idx).expect("node");
     let mut props: Vec<(String, Value)> = view
         .property_pairs()
@@ -151,7 +149,6 @@ fn the_gathered_copy_reads_back_what_the_per_node_copy_does_in_every_mode() {
         }
         // Every relationship between two kept nodes, with its properties.
         let edges = |g: &DirGraph, map: &dyn Fn(NodeIndex) -> Option<NodeIndex>| {
-            let _guard = g.graph.begin_query();
             let mut out: Vec<EdgeRecord> = g
                 .graph
                 .node_indices()

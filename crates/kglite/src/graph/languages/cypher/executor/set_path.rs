@@ -32,7 +32,6 @@ pub(super) fn read_modify(
     let resolved = resolve_steps(executor, row, steps)?;
     let current = {
         use crate::graph::storage::GraphRead;
-        let _guard = graph.graph.begin_query();
         let key = crate::graph::schema::InternedKey::from_str(property);
         graph
             .graph

@@ -146,7 +146,6 @@ pub fn search_relationship_embeddings(
         Surface::Method,
         None,
     )?;
-    let _guard = graph.graph.begin_query();
     Ok(hits
         .into_iter()
         .filter_map(|hit| {

@@ -833,16 +833,12 @@ pub(crate) struct AuditLine {
 /// gate, which acts on the `severity` this module only reports. One
 /// aggregate line per declared check.
 pub(crate) fn audit_counts(graph: &DirGraph) -> Result<Vec<AuditLine>, String> {
-    // Blueprint calls this outside the executor's read pass. Disk node/edge
-    // views must remain protected until all owned audit lines are collected.
-    let _read_pass = graph.begin_read_pass();
     audit_lines(graph, AuditBreakdown::None)
 }
 
 /// [`audit_counts`] with the property rules fanned out per declared
 /// property, for declaration reports that name the offending field.
 pub(crate) fn audit_counts_by_property(graph: &DirGraph) -> Result<Vec<AuditLine>, String> {
-    let _read_pass = graph.begin_read_pass();
     audit_lines(graph, AuditBreakdown::Property)
 }
 

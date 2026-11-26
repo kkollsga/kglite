@@ -273,10 +273,6 @@ fn verify_nodes_keep_no_edges(
     targets: &DeleteTargets,
     interrupt: &Interrupt,
 ) -> Result<(), String> {
-    // Arena guard: node_weight (and the disk backend's edge iteration)
-    // materialize into the query arena (protocol in disk/graph.rs); scoped so
-    // the borrow ends before the caller's &mut commits.
-    let _arena_guard = graph.graph.begin_query();
     for &node_idx in targets.nodes.iter() {
         check_interrupt_row(interrupt)?;
         let has_edges = graph
@@ -359,7 +355,6 @@ pub(super) fn invalidate_deleted_relationships(
 ) -> Result<(), String> {
     let mut edges: FxHashSet<EdgeIndex> = explicitly_deleted.iter().copied().collect();
     if detach {
-        let _arena_guard = graph.graph.begin_query();
         for &node in nodes {
             edges.extend(
                 graph

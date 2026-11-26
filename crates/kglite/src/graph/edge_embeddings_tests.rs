@@ -280,7 +280,6 @@ fn disk_compaction_remaps_vectors_after_tombstones_and_overflow() {
     assert_eq!(graph.compact_disk().unwrap(), 1);
 
     let surviving_assertion = {
-        let _guard = graph.graph.begin_query();
         graph
             .graph
             .edge_indices()
@@ -313,7 +312,6 @@ fn heap_to_disk_materialization_remaps_vectors_across_sparse_edge_slots() {
     graph.enable_disk_mode().unwrap();
 
     let surviving_assertion = {
-        let _guard = graph.graph.begin_query();
         graph
             .graph
             .edge_indices()

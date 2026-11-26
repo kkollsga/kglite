@@ -1341,7 +1341,7 @@ impl GraphWrite for MappedGraph {
 // Disk-backed GraphRead / GraphWrite impls
 //
 // Every method here delegates to the corresponding inherent on `DiskGraph`
-// (CSR + mmap columns + per-query arenas). Disk-only helpers return
+// (CSR + mmap columns). Disk-only helpers return
 // concrete `Some(...)` values where the trait defaults would return `None`.
 // ──────────────────────────────────────────────────────────────────────────
 
@@ -1743,9 +1743,8 @@ impl GraphWrite for DiskGraph {
     #[inline]
     fn flush_pending_writes(&mut self) {
         // Drains node_mut_cache + edge_mut_cache into column_stores /
-        // edge_properties (the steady-state read sources) and resets
-        // the materialization arenas. Idempotent — safe to call when
-        // the caches are empty.
-        DiskGraph::clear_arenas(self);
+        // edge_properties (the steady-state read sources). Idempotent — safe
+        // to call when the caches are empty.
+        DiskGraph::flush_mut_caches(self);
     }
 }

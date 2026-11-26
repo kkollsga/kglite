@@ -256,7 +256,6 @@ fn push_node_sections(
 ) {
     let mut scans: FxHashMap<InternedKey, TypeScan> = FxHashMap::default();
     {
-        let _guard = graph.graph.begin_query();
         for idx in graph.graph.node_indices() {
             let Some(node) = graph.graph.node_view(idx) else {
                 continue;
@@ -484,10 +483,7 @@ fn push_peer_sections(
     out: &mut Vec<MappableSection<'static>>,
     fallbacks: &mut Vec<MappedFallback>,
 ) {
-    let per_type = {
-        let _guard = graph.graph.begin_query();
-        count_peers_dense(graph).unwrap_or_else(|| count_peers_hashed(graph))
-    };
+    let per_type = { count_peers_dense(graph).unwrap_or_else(|| count_peers_hashed(graph)) };
     if per_type.len() > MAX_TYPES {
         fallbacks.push(MappedFallback::new(
             "indexes:peers",

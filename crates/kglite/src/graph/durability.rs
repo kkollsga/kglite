@@ -197,7 +197,6 @@ pub fn open_log(
 
 pub(crate) fn validate_durable_identities(graph: &DirGraph) -> Result<(), DurableOpenError> {
     use crate::graph::storage::GraphRead;
-    let _guard = graph.begin_read_pass();
     let mut seen = std::collections::HashSet::new();
     for idx in graph.graph.node_indices() {
         let Some(kind) = graph.graph.node_type_of(idx) else {

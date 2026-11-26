@@ -9,12 +9,7 @@
 //! therefore a vacuous assertion: the mutation that restores the wrong order
 //! stays green.
 //!
-//! The disk backend's `debug_assert_arena_guard_active` protocol does not
-//! cover this. It tracks *query* lifetime against arena reclamation inside a
-//! live `DiskGraph`; it says nothing about whether the graph itself still
-//! exists when its backing directory is deleted.
-//!
-//! **What this provides instead.** A graph that maps into the directory is
+//! **What this provides.** A graph that maps into the directory is
 //! wrapped in a [`TrackedOwner`], which carries an `Arc<()>` liveness token;
 //! [`TempGraphDir::watch`] keeps the matching `Weak<()>`. At the moment the
 //! directory is removed — explicitly via [`TempGraphDir::remove_now`], or

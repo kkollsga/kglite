@@ -193,7 +193,6 @@ impl KnowledgeGraph {
         let mut guard = crate::graph::pyapi::borrow::borrow_mut_waiting(slf)?;
         let this: &mut KnowledgeGraph = &mut guard;
 
-        let _arena_guard = this.graph().begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         let mut new_kg = this.clone();
 
         let estimated = if include_secondary {
@@ -487,7 +486,6 @@ impl KnowledgeGraph {
         let mut guard = crate::graph::pyapi::borrow::borrow_mut_waiting(slf)?;
         let this: &mut KnowledgeGraph = &mut guard;
 
-        let _arena_guard = this.graph().begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         let date = match date {
             Some(d) => Some(crate::datatypes::py_in::query_date(d, "date")?.0),
             None => None,
@@ -516,7 +514,6 @@ impl KnowledgeGraph {
         let mut guard = crate::graph::pyapi::borrow::borrow_mut_waiting(slf)?;
         let this: &mut KnowledgeGraph = &mut guard;
 
-        let _arena_guard = this.graph().begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         let (start, _) = crate::datatypes::py_in::query_date(start_date, "start_date")?;
         let (end, precision) = crate::datatypes::py_in::query_date(end_date, "end_date")?;
         let end = kglite_core::api::timeseries::expand_end(end, precision);
@@ -677,7 +674,6 @@ impl KnowledgeGraph {
         let guard = crate::graph::pyapi::borrow::borrow_waiting(slf)?;
         let this: &KnowledgeGraph = &guard;
 
-        let _arena_guard = this.graph().begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         let mut nodes_data: Vec<(&str, kglite_core::api::NodeView<'_>)> = Vec::new();
         for node_idx in this.cursor.selection.current_node_indices() {
             if let Some(node) = this.graph().node_view(node_idx) {
@@ -797,7 +793,6 @@ impl KnowledgeGraph {
         let guard = crate::graph::pyapi::borrow::borrow_waiting(slf)?;
         let this: &KnowledgeGraph = &guard;
 
-        let _arena_guard = this.graph().begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         use crate::datatypes::values::format_value;
 
         let node_indices: Vec<_> = this.cursor.selection.current_node_indices().collect();
@@ -873,7 +868,6 @@ impl KnowledgeGraph {
         let guard = crate::graph::pyapi::borrow::borrow_waiting(slf)?;
         let this: &KnowledgeGraph = &guard;
 
-        let _arena_guard = this.graph().begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         use kglite_core::api::fluent::format_value_compact;
 
         let columns = columns.unwrap_or_else(|| vec!["id".to_string(), "title".to_string()]);
@@ -1062,7 +1056,6 @@ impl KnowledgeGraph {
         let guard = crate::graph::pyapi::borrow::borrow_waiting(slf)?;
         let this: &KnowledgeGraph = &guard;
 
-        let _arena_guard = this.graph().begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         Python::attach(|py| {
             let result = PyList::empty(py);
 
@@ -1086,7 +1079,6 @@ impl KnowledgeGraph {
         let guard = crate::graph::pyapi::borrow::borrow_waiting(slf)?;
         let this: &KnowledgeGraph = &guard;
 
-        let _arena_guard = this.graph().begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         let id_value = py_in::py_value_to_value(node_id)?;
 
         // Read-only typed index lookup — same path as `exists()`.
@@ -1349,7 +1341,6 @@ impl KnowledgeGraph {
         let guard = crate::graph::pyapi::borrow::borrow_waiting(slf)?;
         let this: &KnowledgeGraph = &guard;
 
-        let _arena_guard = this.graph().begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         let file_id = Value::String(file_path.to_string());
 
         let file_idx = if let Some(indices) = this.graph().type_indices.get("File") {

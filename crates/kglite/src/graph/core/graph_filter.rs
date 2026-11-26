@@ -640,7 +640,7 @@ impl ElementFilter {
     fn residual_admits_node(&self, graph: &DirGraph, idx: NodeIndex) -> bool {
         // The heap backends resolve the node's store once for its type and
         // every bound; Disk reads each bound from its column store instead of
-        // materialising the node into the query arena.
+        // materialising the node.
         let view = if graph.graph.is_disk() {
             None
         } else {

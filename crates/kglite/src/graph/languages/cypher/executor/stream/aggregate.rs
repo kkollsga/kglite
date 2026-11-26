@@ -74,7 +74,7 @@ pub(crate) struct AggSpec {
     kind: AggKind,
     /// Argument expression. `None` only for `count(*)`. Held as owned
     /// `Expression` so the caller can hand us folded forms without
-    /// keeping its own arena alive.
+    /// keeping its own copy alive.
     arg: Option<Expression>,
     /// True for `count(DISTINCT …)`, `sum(DISTINCT …)`, etc.
     distinct: bool,

@@ -773,10 +773,9 @@ pub(crate) fn materialize_node_value_with(
     hide: bool,
 ) -> Option<crate::datatypes::values::NodeValue> {
     // The returned value owns everything it needs, so on the disk backend the
-    // record must not be parked in the query arena — a projection over N rows
-    // would retain N records for the rest of the query
-    // (storage/disk/query_arena.rs). Heap backends have no arena and keep the
-    // direct borrow, which measures faster than routing through a closure.
+    // record is built into this frame (`owned_node_data`) rather than boxed
+    // by `node_weight`. Heap backends keep the direct borrow, which measures
+    // faster than routing through a closure.
     if graph.graph.is_disk() {
         let data = graph.graph.owned_node_data(idx)?;
         let store = data.properties.columnar_row_id().and_then(|row_id| {
@@ -807,8 +806,8 @@ pub(crate) fn materialize_node_keys(
     graph: &crate::graph::DirGraph,
     hide: bool,
 ) -> Option<Vec<String>> {
-    // Same arena discipline as `materialize_node_value` (disk records must not
-    // outlive the call).
+    // Same shape as `materialize_node_value`: disk records are built into this
+    // frame.
     if graph.graph.is_disk() {
         let data = graph.graph.owned_node_data(idx)?;
         let store = data.properties.columnar_row_id().and_then(|row_id| {

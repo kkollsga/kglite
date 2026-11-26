@@ -129,7 +129,6 @@ impl KnowledgeGraph {
         let this: &mut KnowledgeGraph = &mut guard;
 
         this.logged_write(|graph| {
-            let _arena_guard = graph.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
             let id_val = py_in::py_value_to_value(node_id)?;
             let node_idx = find_node_by_id(graph, &id_val)?;
 

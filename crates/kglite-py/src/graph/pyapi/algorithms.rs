@@ -492,7 +492,6 @@ impl KnowledgeGraph {
             ));
         }
         let edge_dir = parse_direction(direction)?;
-        let _arena_guard = this.graph().begin_read_pass(); // disk arena guard (no-op on memory/mapped)
 
         let source_value = py_in::py_value_to_value(source_id)?;
         let source_idx = this
@@ -616,7 +615,6 @@ impl KnowledgeGraph {
         let this: &KnowledgeGraph = &guard;
 
         let edge_dir = parse_direction(direction)?;
-        let _arena_guard = this.graph().begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         let source_value = py_in::py_value_to_value(source_id)?;
         let source_idx = this
             .graph()
@@ -892,7 +890,6 @@ impl KnowledgeGraph {
         let guard = crate::graph::pyapi::borrow::borrow_waiting(slf)?;
         let this: &KnowledgeGraph = &guard;
 
-        let _arena_guard = this.graph().begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         let weak = weak.unwrap_or(true);
 
         let components = if weak {

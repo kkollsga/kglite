@@ -56,7 +56,6 @@ fn at(text: &str) -> Instant {
 /// The ids of the visible nodes, and the (source id, target id) of the
 /// visible relationships, under `filter`.
 fn visible(g: &DirGraph, filter: &ElementFilter) -> (BTreeSet<i64>, BTreeSet<(i64, i64)>) {
-    let _arena_guard = g.graph.begin_query();
     let id = |idx: NodeIndex| match g.graph.get_node_id(idx) {
         Some(Value::Int64(id)) => id,
         other => panic!("id {other:?}"),

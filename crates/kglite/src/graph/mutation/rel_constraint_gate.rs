@@ -459,8 +459,7 @@ impl ConnectionBatchGate<'_> {
     /// Built by the same walk the flush uses to find those edges — outgoing
     /// edges of the frame's unique sources, filtered by connection type — so
     /// reading the property values costs nothing extra: the weight is already
-    /// in hand. `add_connections` holds the arena guard for the whole call, so
-    /// the disk backend's materialisation protocol is already satisfied here.
+    /// in hand.
     fn stored_state(
         &self,
         graph: &DirGraph,

@@ -555,7 +555,7 @@ impl DiskGraph {
         // `node_mut_cache` → `self.column_stores`. The caller
         // (`DirGraph::save_disk`) reads those same stores for the column file.
         let mut clock = crate::graph::io::load_timing::StageClock::start();
-        self.clear_arenas();
+        self.flush_mut_caches();
         std::fs::create_dir_all(target_dir)?;
 
         // The orchestration layer uses this exact decision before calling us
@@ -1051,7 +1051,6 @@ impl DiskGraph {
             appended_node_slots: Vec::new(),
             node_count: meta.node_count,
             free_node_slots: meta.free_node_slots,
-            arenas: crate::graph::storage::disk::query_arena::QueryArenas::new(1024),
             #[cfg(test)]
             node_materializations: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]

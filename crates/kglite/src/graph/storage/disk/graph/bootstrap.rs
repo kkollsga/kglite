@@ -257,7 +257,6 @@ impl DiskGraph {
             appended_node_slots: Vec::new(),
             node_count: 0,
             free_node_slots: Vec::new(),
-            arenas: crate::graph::storage::disk::query_arena::QueryArenas::new(256),
             #[cfg(test)]
             node_materializations: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
@@ -466,7 +465,6 @@ impl DiskGraph {
             appended_node_slots: Vec::new(),
             node_count,
             free_node_slots: Vec::new(),
-            arenas: crate::graph::storage::disk::query_arena::QueryArenas::new(1024),
             #[cfg(test)]
             node_materializations: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]

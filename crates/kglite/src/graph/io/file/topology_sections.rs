@@ -168,7 +168,6 @@ fn collect_nodes(graph: &DirGraph) -> Result<NodeSide, &'static str> {
     let mut next_row: FxHashMap<InternedKey, u32> = FxHashMap::default();
     let mut words = vec![0u64; bound.div_ceil(64)];
     let mut live = 0usize;
-    let _guard = graph.graph.begin_query();
     for slot in 0..bound {
         match graph.graph.node_weight(NodeIndex::new(slot)) {
             None => node_record::encode_vacant(&mut records),
@@ -282,7 +281,6 @@ fn build_csr(
 fn collect_edges(graph: &DirGraph) -> Result<EdgeSide, &'static str> {
     let node_bound = graph.graph.node_bound();
     let edge_bound = graph.graph.edge_bound();
-    let _guard = graph.graph.begin_query();
     let mut keys: FxHashSet<InternedKey> = FxHashSet::default();
     let mut edge_count = 0usize;
     let mut property_edges = 0usize;

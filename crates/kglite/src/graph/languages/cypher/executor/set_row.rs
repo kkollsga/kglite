@@ -201,13 +201,8 @@ pub(super) fn apply_node_property_set<'a>(
     graph.note_ontology_touch(node_idx);
 
     // The row's node type, and with it every statement-constant fact about
-    // this write. Arena guard: the type read materializes on the disk backend
-    // (protocol in disk/graph.rs); scoped so the borrow ends before the &mut
-    // mutation below.
-    let Some(type_key) = ({
-        let _arena_guard = graph.graph.begin_query();
-        GraphRead::node_type_of(&graph.graph, node_idx)
-    }) else {
+    // this write. Scoped so the read ends before the &mut mutation below.
+    let Some(type_key) = ({ GraphRead::node_type_of(&graph.graph, node_idx) }) else {
         return Ok(());
     };
     let facts = type_facts_for(&mut memos.types, graph, type_key);
@@ -240,7 +235,6 @@ pub(super) fn apply_node_property_set<'a>(
     // a type carrying no index that move is a provable no-op — so there the
     // read (a columnar cell fetch and a `Value` clone, per row) buys nothing.
     let (old_value, old_title) = if facts.maintains_indexes {
-        let _arena_guard = graph.graph.begin_query();
         let Some(node) = graph.node_view(node_idx) else {
             return Ok(());
         };
@@ -306,11 +300,8 @@ pub(super) fn apply_node_property_set<'a>(
     // `Arc::make_mut` on a node Arc clones the entire store on every write —
     // O(N²) total for batch SETs. The master Arc has refcount=1 inside this
     // batch (after the initial clone, if any), so subsequent writes mutate in
-    // place. Arena guard: node_weight materializes on the disk backend
-    // (protocol in disk/graph.rs); scoped so the borrow ends before the &mut
-    // writes below.
+    // place. Scoped so the read ends before the &mut writes below.
     let columnar_row_id = {
-        let _arena_guard = graph.graph.begin_query();
         graph
             .graph
             .node_weight(node_idx)

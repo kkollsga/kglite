@@ -1584,7 +1584,6 @@ impl KnowledgeGraph {
         let mut guard = crate::graph::pyapi::borrow::borrow_mut_waiting(slf)?;
         let this: &mut KnowledgeGraph = &mut guard;
 
-        let _arena_guard = this.graph().begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         if let Some(property) = group_by {
             let nodes = kglite_core::api::fluent::collect_selected_nodes(
                 &this.cursor.selection,

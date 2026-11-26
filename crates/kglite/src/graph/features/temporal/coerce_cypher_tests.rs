@@ -29,7 +29,6 @@ fn run(graph: &mut DirGraph, query: &str) -> Result<(), String> {
 /// Cypher read would be filtered to rows valid today).
 fn status(graph: &DirGraph, id: i64, property: &str) -> Value {
     use crate::graph::storage::GraphRead;
-    let _guard = graph.begin_read_pass();
     let idx = graph
         .type_indices
         .get("Status")
@@ -48,7 +47,6 @@ fn status(graph: &DirGraph, id: i64, property: &str) -> Value {
 fn operation(graph: &DirGraph, from: &str, property: &str) -> Value {
     use crate::graph::schema::InternedKey;
     use crate::graph::storage::GraphRead;
-    let _guard = graph.begin_read_pass();
     let hits: Vec<Value> = graph
         .graph
         .edge_indices()

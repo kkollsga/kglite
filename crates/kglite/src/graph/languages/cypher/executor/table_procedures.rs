@@ -146,7 +146,6 @@ pub(crate) fn execute_table_procedure(
 
 fn read_rows(graph: &DirGraph, node_idx: NodeIndex, property: &str) -> Result<Vec<Value>, String> {
     use crate::graph::storage::GraphRead;
-    let _guard = graph.graph.begin_query();
     let key = crate::graph::schema::InternedKey::from_str(property);
     match graph.graph.get_node_property(node_idx, key) {
         None | Some(Value::Null) => Ok(Vec::new()),

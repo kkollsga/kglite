@@ -74,10 +74,10 @@ pub(crate) const CURRENT_CSR_LAYOUT_VERSION: u8 = 1;
 ///
 /// - Nodes: `MmapOrVec<DiskNodeSlot>` (16 bytes/node, mmap'd)
 ///   Actual node data (id, title, properties) in ColumnStore columns (mmap'd).
-///   `node_weight()` materializes NodeData into an arena on access.
+///   `node_weight()` materializes a NodeData per call, owned by the returned
+///   handle.
 /// - Edges: CSR arrays (`out_offsets`, `out_edges`, etc.) — mmap'd
 /// - Edge properties: mmap'd columnar base + heap overlay for mutations
-/// - Arenas: query-lifetime parking for materialized NodeData/EdgeData refs
 pub struct DiskGraph {
     // ── Node storage (mmap'd on disk) ──
     pub(crate) node_slots: MmapOrVec<DiskNodeSlot>,
@@ -87,14 +87,6 @@ pub struct DiskGraph {
     pub(super) node_count: usize,
     pub(super) free_node_slots: Vec<u32>,
 
-    // ── Node/edge materialization arenas + their reclamation epochs ──
-    //
-    // Disk reads have nothing in memory to borrow, so `node_weight` /
-    // `materialize_edge` build a record and park it here. Thread-safety and
-    // the epoch protocol governing when a record may be dropped are the
-    // SAFETY block below and [`super::query_arena`] — read both before
-    // touching either materialization path.
-    pub(super) arenas: std::sync::Arc<super::query_arena::QueryArenas>,
     /// Test-only counts of records built by `node_weight` and
     /// `materialize_edge`, for pins that a path never materializes a record.
     #[cfg(test)]
@@ -127,11 +119,11 @@ pub struct DiskGraph {
     pub(super) edge_properties: EdgePropertyStore,
 
     /// Cache for edge_weight_mut: stores materialized EdgeData that may be modified.
-    /// Flushed to edge_properties on next clear_arenas call; until then every
+    /// Flushed to edge_properties on next flush_mut_caches call; until then every
     /// edge-property read consults it first (`staged_edge`).
     pub(super) edge_mut_cache: HashMap<u32, EdgeData>,
     /// Cache for `node_weight_mut`: stages Cypher-SET-style exact-row writes
-    /// as `PropertyStorage::Map` until `clear_arenas` drains it into
+    /// as `PropertyStorage::Map` until `flush_mut_caches` drains it into
     /// `column_stores` (`flush_node_mut_cache`). Node reads do not consult it.
     pub(super) node_mut_cache: HashMap<u32, NodeData>,
     /// Cell undo of the open `DiskCells` statement checkpoint; `None` outside
@@ -292,28 +284,7 @@ pub(super) fn new_lease_cell() -> LeaseCell {
 
 // SAFETY — DiskGraph interior-mutability model:
 //
-// 1. `arenas: Arc<QueryArenas>` — the node/edge materialization arenas,
-//    thread-safe for Rayon parallel queries. Each record is boxed (stable heap
-//    pointer that survives the arena's own growth) and pushed under a Mutex,
-//    because the Cypher executor's projection phase runs
-//    `evaluate_expression` under `par_iter_mut` (return_clause.rs) and any
-//    spatial / non-fast-path `resolve_property` branch reaches `node_weight`
-//    through that parallel context. Pre-0.9.3 this was
-//    `UnsafeCell<Vec<NodeData>>` and races were silent: a sibling Rayon task's
-//    `arena.push` realloc invalidated references already returned to other
-//    tasks, surfacing as either wrong-row reads on disk-mode aggregations
-//    (Bug A in the 0.9.2 disk regression — ~13% NEAREST_HUB edges
-//    silently lost) or use-after-free segfaults with `BUG: InternedKey N not
-//    found in StringInterner` on stderr (Bug B in the same report).
-//
-//    The *lifetime* side lives in `super::query_arena`: every materializing
-//    read runs under a `DiskQueryGuard`, records are stamped with an epoch
-//    above every live query's id, and a record is dropped only once every
-//    query that could hold it has finished. `reset_arenas` reclaims only while
-//    nothing is reading; `clear_arenas` takes `&mut self`, which the borrow
-//    checker already orders after any outstanding materialization borrow.
-//
-// 2. `pending_edges: UnsafeCell<MmapOrVec<…>>` — every *mutation* goes
+// 1. `pending_edges: UnsafeCell<MmapOrVec<…>>` — every *mutation* goes
 //    through `get_mut()` in a `&mut self` context (`try_add_pending_edge`,
 //    `build_csr_from_pending`, `compact`, the bootstrap/builder paths), so
 //    the borrow checker already excludes a concurrent writer. The one
@@ -321,31 +292,6 @@ pub(super) fn new_lease_cell() -> LeaseCell {
 //    buffer; its own SAFETY note carries that argument.
 unsafe impl Send for DiskGraph {}
 unsafe impl Sync for DiskGraph {}
-
-pub use super::query_arena::DiskQueryGuard;
-
-/// Debug-only check that a materializing read is running under an
-/// active [`DiskQueryGuard`]. The arena SAFETY argument (see the block
-/// comment above and `super::query_arena`) rests on a live guard keeping the
-/// record reachable — a materialization with no guard at all is a protocol
-/// violation that could become a use-after-free the moment any query starts or
-/// ends. Compiles to nothing in release builds.
-#[inline(always)]
-fn debug_assert_arena_guard_active(graph: &DiskGraph, who: &str) {
-    #[cfg(debug_assertions)]
-    {
-        debug_assert!(
-            graph.arenas.active_count() > 0,
-            "DiskGraph::{who} materialized into the arena without an active \
-             DiskQueryGuard (no query is open); wrap the read in begin_query() \
-             — see the arena SAFETY protocol comment in disk/graph.rs"
-        );
-    }
-    #[cfg(not(debug_assertions))]
-    {
-        let _ = (graph, who);
-    }
-}
 
 impl std::fmt::Debug for DiskGraph {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -687,7 +633,7 @@ impl DiskGraph {
     }
 
     pub fn add_node(&mut self, data: NodeData) -> NodeIndex {
-        self.clear_arenas();
+        self.flush_mut_caches();
 
         let row_id = match &data.properties {
             crate::graph::schema::PropertyStorage::Columnar(row) => row.row_id(),
@@ -714,7 +660,7 @@ impl DiskGraph {
     }
 
     pub fn remove_node(&mut self, idx: NodeIndex) -> Option<NodeData> {
-        self.clear_arenas();
+        self.flush_mut_caches();
         let i = idx.index();
         if i >= self.node_slot_len() {
             return None;
@@ -1149,8 +1095,7 @@ impl DiskGraph {
     }
 
     /// Iterate only the edges matching `conn_type`, yielding `(src, tgt, edge_idx)`
-    /// per match. Never calls `materialize_edge` — nothing is parked in the
-    /// query arenas.
+    /// per match. Never calls `materialize_edge`.
     ///
     /// Path: the persisted inverted index (`conn_type_index_*`) gives the sources
     /// with at least one outgoing edge of that type; each source's outgoing CSR
@@ -1301,7 +1246,7 @@ impl DiskGraph {
 
     /// Borrow an edge's property slice without materializing `EdgeData`.
     /// Returns `None` when the edge has no custom properties (common case).
-    /// Safe to call in hot loops — nothing is parked in the query arenas.
+    /// Safe to call in hot loops — builds no record.
     ///
     /// The returned `Cow` is `Borrowed` for overlay hits (zero copy) and
     /// `Owned` for columnar-base hits (one binary payload decode). Callers
@@ -1415,9 +1360,11 @@ impl DiskGraph {
         // If not empty, queries may miss some edges (but won't crash).
     }
 
-    /// Clear all materialization arenas. Called before any &mut self operation.
+    /// Flush the staged edge and node writes into `edge_properties` and
+    /// `column_stores`. Called before any `&mut self` operation that reads
+    /// them back.
     #[inline]
-    pub(crate) fn clear_arenas(&mut self) {
+    pub(crate) fn flush_mut_caches(&mut self) {
         for (edge_idx, edge_data) in self.edge_mut_cache.drain() {
             if edge_data.properties.is_empty() {
                 self.edge_properties.remove(edge_idx);
@@ -1427,7 +1374,6 @@ impl DiskGraph {
             }
         }
         self.flush_node_mut_cache();
-        self.arenas.clear_all();
     }
 
     /// Drain `node_mut_cache` and apply the staged writes to
@@ -1506,31 +1452,6 @@ impl DiskGraph {
         }
     }
 
-    /// Enter a read query that may materialize disk-backed nodes or edges.
-    ///
-    /// Overlapping and nested queries each take their own guard; a query's
-    /// materializations are released when *its* guard drops, unless an older
-    /// query is still running (epoch protocol in [`super::query_arena`]). No
-    /// query can invalidate references held by another.
-    pub(crate) fn begin_query(&self) -> DiskQueryGuard {
-        self.arenas.begin()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn node_arena_len(&self) -> usize {
-        self.arenas.node_len()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn edge_arena_len(&self) -> usize {
-        self.arenas.edge_len()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn active_query_count(&self) -> usize {
-        self.arenas.active_count()
-    }
-
     pub fn edges_directed_iter(&self, a: NodeIndex, dir: Direction) -> DiskEdges<'_> {
         self.edges_directed_filtered_iter(a, dir, None)
     }
@@ -1599,8 +1520,8 @@ impl DiskGraph {
         Some(RecordRef::Owned(Box::new(self.materialize_edge(ei as u32))))
     }
 
-    /// One edge property, read from the edge-property store without going
-    /// through the query arena; a write staged in `edge_mut_cache` wins.
+    /// One edge property, read from the edge-property store without
+    /// materializing an `EdgeData`; a write staged in `edge_mut_cache` wins.
     pub fn get_edge_property(&self, idx: EdgeIndex, key: InternedKey) -> Option<Value> {
         let ei = idx.index();
         if ei >= self.next_edge_idx as usize || self.edge_endpoint(ei).source == TOMBSTONE_EDGE {
@@ -1644,9 +1565,8 @@ impl DiskGraph {
         if ep.source == TOMBSTONE_EDGE {
             return None;
         }
-        // Store in a dedicated cache, not the arena: the arena is append-only
-        // and shared with the read-only `edge_weight`, so flushing writes back
-        // out of it would need fragile offset tracking.
+        // Staged in a dedicated cache: reads hand out their own records, so
+        // there is nothing to flush back out of them.
         let ct = InternedKey::from_u64(ep.connection_type);
         let props = self
             .edge_properties
@@ -1682,7 +1602,7 @@ impl DiskGraph {
                 .try_add_pending_edge(a, b, data)
                 .expect("deferred bulk callers must use try_add_pending_edge");
         }
-        self.clear_arenas();
+        self.flush_mut_caches();
         let edge_idx = self.next_edge_idx;
         self.next_edge_idx += 1;
 
@@ -1743,7 +1663,7 @@ impl DiskGraph {
     }
 
     pub fn remove_edge(&mut self, idx: EdgeIndex) -> Option<EdgeData> {
-        self.clear_arenas();
+        self.flush_mut_caches();
         let ei = idx.index();
         if ei >= self.next_edge_idx as usize {
             return None;
@@ -2271,7 +2191,6 @@ impl DiskGraph {
             appended_node_slots: self.appended_node_slots.clone(),
             node_count: self.node_count,
             free_node_slots: self.free_node_slots.clone(),
-            arenas: super::query_arena::QueryArenas::new(0),
             #[cfg(test)]
             node_materializations: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]

@@ -525,7 +525,7 @@ pub trait GraphWrite: GraphRead {
     /// `Arc<ColumnStore>` share-clone storm; the cache is drained
     /// into `column_stores` by the next call to
     /// [`GraphWrite::flush_pending_writes`] (or any subsequent
-    /// `&mut self` op via `clear_arenas`).
+    /// `&mut self` op via `flush_mut_caches`).
     ///
     /// **Callers MUST call `flush_pending_writes()` before any
     /// subsequent `&self` read of the same node**, or the read will
@@ -638,7 +638,7 @@ pub trait GraphWrite: GraphRead {
     /// `&mut self` op, so without an explicit flush the next read goes to
     /// `column_stores` and misses the staged writes — a Cypher SET appears to
     /// silently no-op until the next `add_node`/`save`. The disk override
-    /// routes through `clear_arenas` (in-place store flush + arena reset).
+    /// routes through `flush_mut_caches` (in-place store flush).
     fn flush_pending_writes(&mut self) {}
 }
 

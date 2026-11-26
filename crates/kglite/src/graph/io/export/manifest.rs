@@ -62,9 +62,6 @@ use crate::graph::storage::{GraphRead, GraphWrite};
 /// The `format` value of this manifest version.
 pub const MANIFEST_FORMAT: &str = "kglite-export/1";
 
-/// Rows between arena-guard renewals while scanning disk-backed storage.
-const GUARD_BATCH: usize = 8192;
-
 /// The kglite type of one property column, id or title.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ColumnKind {
@@ -232,30 +229,15 @@ impl Scope {
         self.selected.as_ref().is_none_or(|s| s.contains(&idx))
     }
 
-    /// Visit every covered node in node order; the arena guard is renewed
-    /// every [`GUARD_BATCH`] nodes so a disk-backed scan holds a bounded
-    /// number of materialised nodes.
+    /// Visit every covered node in node order.
     pub(crate) fn for_each_node(
         &self,
         graph: &DirGraph,
         mut visit: impl FnMut(NodeIndex) -> Result<(), String>,
     ) -> Result<(), String> {
-        let mut guard = graph.graph.begin_query();
-        let mut n = 0usize;
-        let mut step = |idx: NodeIndex, guard: &mut _| -> Result<(), String> {
-            visit(idx)?;
-            n += 1;
-            if n.is_multiple_of(GUARD_BATCH) {
-                *guard = graph.graph.begin_query();
-            }
-            Ok(())
-        };
         match &self.ordered {
-            Some(list) => list.iter().try_for_each(|&i| step(i, &mut guard)),
-            None => graph
-                .graph
-                .node_indices()
-                .try_for_each(|i| step(i, &mut guard)),
+            Some(list) => list.iter().try_for_each(|&i| visit(i)),
+            None => graph.graph.node_indices().try_for_each(visit),
         }
     }
 }
@@ -485,7 +467,6 @@ impl ExportManifest {
             let indices: Vec<NodeIndex> = nodes.iter().collect();
             let mut decoded: Vec<(NodeIndex, Value)> = Vec::new();
             {
-                let _guard = graph.graph.begin_query();
                 for idx in indices {
                     let Some(node) = graph.graph.node_view(idx) else {
                         continue;

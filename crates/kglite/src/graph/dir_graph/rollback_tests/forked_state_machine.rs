@@ -39,8 +39,6 @@ impl Rng {
 
 fn content(graph: &DirGraph) -> Fingerprint {
     let mut copy = graph.clone();
-    // A disk backend materialises node weights into a per-query arena.
-    let _query = copy.graph.begin_query();
     let mut print = fingerprint(&mut copy);
     print.version = 0;
     print
@@ -58,7 +56,6 @@ fn count(graph: &DirGraph, query: &str) -> usize {
 }
 
 fn assert_indexes_resolve(graph: &DirGraph, context: &str) {
-    let _query = graph.graph.begin_query();
     let mut indexed = 0;
     for (name, members) in graph.type_indices.iter() {
         for idx in members.to_vec() {

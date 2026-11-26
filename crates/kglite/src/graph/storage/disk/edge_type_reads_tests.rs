@@ -2,14 +2,11 @@
 //! edge on a disk graph.
 //!
 //! `GraphEdgeRef::weight()` on the disk backend builds the edge's `EdgeData`
-//! (properties included) into the query arena; `connection_type()` reads the
-//! CSR endpoint table. Every case below filters, groups or counts by type
-//! alone, and used to call `weight()` to do it: a two-hop count on a large
-//! disk graph grew the arena by hundreds of MB, and `describe()`'s neighbor
-//! schema by one record per incident edge and node.
-//!
-//! Each case holds an outer query guard, so the arena keeps whatever the
-//! inner query materialised and the count can be read after it returns.
+//! (properties included); `connection_type()` reads the CSR endpoint table.
+//! Every case below filters, groups or counts by type alone, and used to call
+//! `weight()` to do it: a two-hop count on a large disk graph built a record
+//! per edge, and `describe()`'s neighbor schema one per incident edge and
+//! node. The test-only materialization counter pins that none is built.
 
 use crate::datatypes::Value;
 use crate::graph::introspection::schema_overview::{
