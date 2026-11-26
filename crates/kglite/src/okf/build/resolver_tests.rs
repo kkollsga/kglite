@@ -24,7 +24,11 @@ fn vault_path_links_resolve_by_path_not_by_last_segment() {
     let targets: Vec<String> = g
         .graph
         .edge_indices()
-        .filter(|&e| g.graph[e].connection_type_str(&g.interner) == "LINKS_TO")
+        .filter(|&e| {
+            g.graph
+                .edge_weight(e)
+                .is_some_and(|w| w.connection_type_str(&g.interner) == "LINKS_TO")
+        })
         .filter_map(|e| g.graph.edge_endpoints(e))
         .filter_map(|(_, t)| {
             g.node_view(t)

@@ -300,11 +300,10 @@ pub(crate) fn resolve_edge_stores(
         dst.build_id_index(node_type);
     }
     let dst: &DirGraph = dst;
-    let resolved = stores
+    stores
         .into_iter()
         .map(|store| resolve_one(dst, store, keys))
-        .collect::<Result<Vec<_>, _>>();
-    resolved
+        .collect::<Result<Vec<_>, _>>()
 }
 
 fn resolve_one(

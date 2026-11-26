@@ -81,7 +81,7 @@ pub(crate) fn edges_of(g: &DirGraph) -> Vec<EdgeFacts> {
         .edge_indices()
         .filter_map(|e| {
             let (src, tgt) = g.graph.edge_endpoints(e)?;
-            let data = &g.graph[e];
+            let data = g.graph.edge_weight(e)?;
             let mut props: Vec<(String, String)> = data
                 .property_keys(&g.interner)
                 .map(|k| {

@@ -926,6 +926,71 @@ fn slot(node_type: u64, row_id: u32) -> DiskNodeSlot {
     }
 }
 
+/// A node record taken from a disk graph stays valid while the graph answers
+/// other reads. The record is owned by its handle, so no later read, query or
+/// pass over the graph can free it from under the holder.
+#[test]
+fn a_disk_node_record_survives_later_reads_and_queries() {
+    use crate::graph::session::execute::{execute_read, ExecuteOptions};
+
+    let mut graph = DirGraph::new();
+    let params = HashMap::new();
+    let opts = ExecuteOptions::eager(&params);
+    crate::graph::session::execute::execute_mut(
+        &mut graph,
+        "UNWIND range(1, 50) AS i CREATE (:Doc {id: i, title: 'doc-' + toString(i)})",
+        &opts,
+    )
+    .unwrap();
+    graph.enable_disk_mode().unwrap();
+    assert!(graph.graph.is_disk());
+
+    let idx = graph
+        .lookup_by_id_readonly("Doc", &Value::Int64(7))
+        .expect("seeded node");
+    let expected_id = graph.graph.get_node_id(idx).expect("id");
+    let record = graph.get_node(idx).expect("record");
+    let (id, title) = (record.id_ref().clone(), record.title_ref().clone());
+    assert_eq!(id, expected_id, "the record carries the node's real id");
+    assert!(
+        !matches!(title, Value::Null),
+        "the record carries the node's real title"
+    );
+
+    for round in 0..3 {
+        let out = execute_read(&graph, "MATCH (n:Doc) RETURN count(n)", &opts)
+            .unwrap_or_else(|e| panic!("round {round}: {e}"));
+        assert_eq!(out.result.rows[0][0], Value::Int64(50));
+        execute_read(&graph, "MATCH (n:Doc) RETURN n.id, n.title", &opts).unwrap();
+        for other in graph.graph.node_indices() {
+            let _ = graph.get_node(other);
+            let _ = graph
+                .graph
+                .node_view(other)
+                .map(|view| view.title().into_owned());
+        }
+        assert_eq!(*record.id_ref(), id, "round {round}");
+        assert_eq!(*record.title_ref(), title, "round {round}");
+    }
+}
+
+/// Disk record reads go through `RecordRef`, never a pointer into shared
+/// storage. The only `unsafe` left in `disk/graph.rs` is the `Send`/`Sync`
+/// impls and the `pending_edges` copy in `Clone`.
+#[test]
+fn disk_graph_source_returns_no_record_through_unsafe() {
+    let source = include_str!("graph.rs");
+    assert!(
+        !source.contains("&*ptr"),
+        "a record must not be returned through a raw pointer"
+    );
+    assert_eq!(
+        source.matches("unsafe {").count(),
+        1,
+        "`unsafe {{` blocks in disk/graph.rs: only the `pending_edges` copy in `Clone` is expected"
+    );
+}
+
 // ------------- segment_subdir + enumerate -------------
 
 #[test]

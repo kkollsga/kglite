@@ -78,7 +78,11 @@ fn edge_endpoints(out: &BuildOutput, conn_type: &str) -> Vec<(String, String)> {
         .edge_indices()
         .filter_map(|e| {
             let (src, tgt) = graph.graph.edge_endpoints(e)?;
-            (graph.graph[e].connection_type_str(&graph.interner) == conn_type)
+            (graph
+                .graph
+                .edge_weight(e)?
+                .connection_type_str(&graph.interner)
+                == conn_type)
                 .then(|| Some((id_of(src)?, id_of(tgt)?)))?
         })
         .collect();
