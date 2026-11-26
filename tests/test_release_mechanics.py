@@ -430,6 +430,14 @@ def test_semver_clean_summary_exits_zero(monkeypatch, capsys):
     assert code == 0
 
 
+def test_semver_checks_every_feature_but_fastembed():
+    # fastembed in the checked set made the published-baseline build fail on a
+    # fresh fastembed 7.8.0 resolve, so the check reported DID NOT RUN.
+    features = semver_check.checked_features()
+    assert "fastembed" not in features and "test-seam" not in features
+    assert {"iana-zones", "rdf", "okf", "xlsx"} <= set(features)
+
+
 def test_semver_tool_error_without_summary_did_not_run(monkeypatch, capsys):
     code, out = _run_main(monkeypatch, capsys, tool=(101, "error: failed to build rustdoc\n"))
     assert code != 0

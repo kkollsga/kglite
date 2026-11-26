@@ -54,9 +54,41 @@ def ran(output: str) -> bool:
     return SUMMARY_RE.search(output) is not None
 
 
+#: Left out of the checked feature set. `fastembed`: cargo-semver-checks builds
+#: the published baseline without our lockfile, so it gets the newest fastembed;
+#: fastembed 7.8.0 broke that build for kglite <= 0.21.7 (its tokenizers regex
+#: backend became opt-in), and the feature also downloads the ONNX runtime. Its
+#: surface is the one `FastEmbedAdapter` type. `test-seam`: test builds only.
+EXCLUDED_FEATURES = {"default", "fastembed", "test-seam"}
+
+
+def checked_features() -> list[str]:
+    meta = subprocess.run(
+        ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    package = next(p for p in json.loads(meta.stdout)["packages"] if p["name"] == "kglite")
+    return sorted(set(package["features"]) - EXCLUDED_FEATURES)
+
+
 def run_tool(baseline: str) -> tuple[int, str]:
+    features = ",".join(checked_features())
     proc = subprocess.run(
-        ["cargo", "semver-checks", "check-release", "-p", "kglite", "--baseline-version", baseline],
+        [
+            "cargo",
+            "semver-checks",
+            "check-release",
+            "-p",
+            "kglite",
+            "--baseline-version",
+            baseline,
+            "--only-explicit-features",
+            "--features",
+            features,
+        ],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
