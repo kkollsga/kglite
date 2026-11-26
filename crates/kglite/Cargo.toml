@@ -13,7 +13,6 @@ license = "MIT"
 description = "Pure-Rust embedded Cypher knowledge graph engine with in-memory, mmap, and disk storage, and agent-facing schema introspection"
 readme = "README.md"
 repository = "https://github.com/kkollsga/kglite"
-homepage = "https://github.com/kkollsga/kglite"
 documentation = "https://docs.rs/kglite"
 keywords = ["cypher", "knowledge-graph", "graph-database", "embedded-database", "rust"]
 categories = ["database", "data-structures"]

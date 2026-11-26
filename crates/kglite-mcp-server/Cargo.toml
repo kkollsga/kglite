@@ -8,7 +8,6 @@ license = "MIT"
 description = "MCP server for kglite knowledge graphs — pure-Rust single-binary frontend for cypher_query / graph_overview / save_graph / read_code_source plus the generic source / GitHub surface from mcp-methods. No libpython link."
 readme = "README.md"
 repository = "https://github.com/kkollsga/kglite"
-homepage = "https://github.com/kkollsga/kglite"
 documentation = "https://kglite.readthedocs.io/en/latest/python/guides/mcp-servers.html"
 keywords = ["mcp", "knowledge-graph", "cypher", "kglite", "graph"]
 categories = ["database", "command-line-utilities"]
