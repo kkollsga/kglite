@@ -9,6 +9,12 @@ before upgrading.
 
 ## [Unreleased]
 
+### Changed
+
+- **Named time zones use the 2026f IANA time-zone database.** The previous database (via chrono-tz) stopped at 2025b and will get no more updates. Zone names, case sensitivity and the stored form of a zoned value are unchanged.
+  - A zone whose rules changed after 2025b shows its new offset. A stored value keeps its instant and recomputes the offset from its zone name.
+  - A reading past year 9999 (or before -9999) takes the zone's offset at the nearest end of the database's range.
+
 ### Fixed
 
 - **Rust builds with the `fastembed` feature work again.** fastembed 7.8.0 made tokenizers' regex backend an opt-in feature, so a build without our lockfile (`cargo install kglite-mcp-server --features fastembed`, or any crate depending on `kglite` or `kglite-c` with `fastembed`) failed with "One of the onig, or fancy-regex features must be enabled". kglite now requires fastembed 7.8 and enables its `onig` backend. Embeddings are unchanged: the same texts give bit-identical vectors under 7.5.0 and 7.8.0. The PyPI, npm and Maven packages were not affected.

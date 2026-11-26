@@ -69,14 +69,8 @@
     },
     {
       "id": "RUSTSEC-2026-0543",
-      "reason": "chrono is a direct dependency of the kglite engine for date and datetime values; the notice reports maintenance status, not a vulnerability. Replacing it (jiff or time) is a planned migration, not a lockfile change.",
-      "reviewed": "2026-11-25",
-      "expires": "2027-02-23"
-    },
-    {
-      "id": "RUSTSEC-2026-0555",
-      "reason": "chrono-tz is an optional kglite dependency behind the iana-zones feature for named time zones; the notice reports maintenance status, not a vulnerability. It is replaced together with chrono.",
-      "reviewed": "2026-11-25",
+      "reason": "chrono is a direct dependency of the kglite engine and its bindings for date and datetime values, and also arrives through rmcp 3.10/3.11 (non-optional), pyo3's chrono conversions, calamine's dates feature and schemars; the notice reports maintenance status, not a vulnerability. Our own migration alone cannot retire it: rmcp must first ship chrono as an optional default feature (modelcontextprotocol/rust-sdk#1474), with default features off in kglite-mcp-server and mcp-methods (done), and the pyo3 conversions need a jiff-capable pyo3.",
+      "reviewed": "2026-11-26",
       "expires": "2027-02-23"
     }
   ]
