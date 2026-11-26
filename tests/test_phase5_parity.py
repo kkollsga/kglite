@@ -97,11 +97,11 @@ def test_graph_copy_cow_correctness_mapped():
 #: Linux from the `kglite/kglite.abi3.so` member of the newest manylinux2014
 #: x86_64 wheel already on PyPI, whose file name and SHA-256 follow the table.
 BINARY_SIZE_BASELINES = {
-    "darwin": (32_541_024, "0.21.6"),  # host release build
-    "linux": (39_837_752, "0.21.5"),  # published manylinux2014 x86_64 wheel member
+    "darwin": (32_557_552, "0.21.7"),  # host release build
+    "linux": (40_242_616, "0.21.6"),  # published manylinux2014 x86_64 wheel member
 }
-LINUX_SIZE_WHEEL = "kglite-0.21.5-cp312-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"
-LINUX_SIZE_WHEEL_SHA256 = "46558932d514f7a6bb3162844b4cfadecb167f26eaa06f3b51aa292a9c3c4b51"
+LINUX_SIZE_WHEEL = "kglite-0.21.6-cp312-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"
+LINUX_SIZE_WHEEL_SHA256 = "dbf198139f771303efd886b415f1ff24e97cb6d5619c1ca8bf9cf2bbc8882653"
 
 
 @pytest.mark.binary_size
@@ -700,6 +700,11 @@ def test_binary_size_regression():
         and planner pass, `text_match`, `text_hits`, `db.text.search`
         and `db.text.rank` with scoped BM25; plus the structure checks
         of the mapped reader (`structure_checks.rs`).
+
+
+      - 0.21.7:       32,557,552 bytes (≈31.0 MB). +16,528 bytes over 0.21.6: the
+        value-nesting ceiling (runtime checks, the decode depth guard, the YAML
+        frontmatter pre-scan) and the disk-graph structure check.
 
     Raising the baseline is a deliberate act — every bump should
     be accompanied by an updated growth note above. For a precise

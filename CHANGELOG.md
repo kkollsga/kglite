@@ -9,6 +9,8 @@ before upgrading.
 
 ## [Unreleased]
 
+## [0.21.7] - 2026-11-26
+
 ### Changed
 
 - **Lists and maps nest at most 256 levels.** A deeper value now fails with "value nesting exceeds 256 levels" instead of being built:
