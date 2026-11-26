@@ -366,7 +366,6 @@ fn str_at<'c>(
     Some(unsafe { std::str::from_utf8_unchecked(bytes) })
 }
 
-/// Number of days from the Unix epoch to chrono's internal epoch.
 /// Column data smaller than this threshold is loaded into heap Vec instead of
 /// being written to a temp file and mmap'd. Avoids file I/O overhead for small columns.
 pub(super) const MMAP_THRESHOLD: usize = 262_144; // 256 KB
